@@ -1,0 +1,11 @@
+[package]
+name = "integration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rr-core = { path = "../../crates/rr-core" }
+rr-server = { path = "../../crates/rr-server" }
+rr-raft = { path = "../../crates/rr-raft" }
+tokio.workspace = true
+anyhow.workspace = true

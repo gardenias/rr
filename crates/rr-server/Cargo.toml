@@ -1,0 +1,19 @@
+[package]
+name = "rr-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rr-core = { path = "../rr-core" }
+rr-storage = { path = "../rr-storage" }
+rr-config = { path = "../rr-config" }
+rr-raft = { path = "../rr-raft" }
+rr-network = { path = "../rr-network" }
+rr-router = { path = "../rr-router" }
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "rr-server"
+path = "src/main.rs"

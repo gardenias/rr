@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package rr.client;
+
+/// Client-facing RPC service for submitting requests and reading cluster state.
+service ClientService {
+    /// Submit a client request to a partition. Framework routes to correct Raft group.
+    rpc Request(ClientRequest) returns (ClientResponse);
+    /// Get cluster topology information.
+    rpc GetClusterInfo(Empty) returns (ClusterInfo);
+}
+
+message Empty {}
+
+/// Client request. partition_id is used by framework to route to correct Raft group.
+message ClientRequest {
+    uint64 partition_id = 1;
+    bytes payload = 2;
+}
+
+/// Client response. Contains optional leader redirect info.
+message ClientResponse {
+    bool success = 1;
+    bytes payload = 2;
+    LeaderInfo leader_info = 3;
+}
+
+/// Leader redirect information for client-side caching.
+message LeaderInfo {
+    uint64 node_id = 1;
+    string addr = 2;
+}
+
+/// Cluster information for topology discovery.
+message ClusterInfo {
+    repeated GroupInfo groups = 1;
+}
+
+message GroupInfo {
+    uint64 group_id = 1;
+    uint64 leader_node_id = 2;
+    repeated uint64 replica_node_ids = 3;
+}

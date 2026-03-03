@@ -1,0 +1,11 @@
+[package]
+name = "rr-raft"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rr-core = { path = "../rr-core" }
+rr-storage = { path = "../rr-storage" }
+openraft.workspace = true
+tokio.workspace = true
+async-trait.workspace = true

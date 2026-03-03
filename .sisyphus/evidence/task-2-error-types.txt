@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/rr_core-4ecf139060062d9a)
+
+running 8 tests
+test error::tests::test_raft_error_not_leader ... ok
+test error::tests::test_rr_error_display ... ok
+test error::tests::test_storage_error_from_io ... ok
+test types::tests::test_partition_config_single_id ... ok
+test error::tests::test_rr_error_from_storage ... ok
+test types::tests::test_group_meta ... ok
+test types::tests::test_partition_config_range ... ok
+test types::tests::test_routing_table_construction ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rr_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s

@@ -1,0 +1,10 @@
+[package]
+name = "rr-router"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rr-core = { path = "../rr-core" }
+rr-config = { path = "../rr-config" }
+tokio.workspace = true
+async-trait.workspace = true

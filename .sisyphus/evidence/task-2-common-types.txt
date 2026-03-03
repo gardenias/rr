@@ -1,0 +1,38 @@
+# Task 2: Common Types Evidence
+
+## Types Defined
+
+### Type Aliases
+- NodeId = u64
+- GroupId = u64
+- PartitionId = u64
+- LogIndex = u64
+
+### Structs
+1. NodeAddr
+   - Fields: addr: String
+   - Derives: Debug, Clone, PartialEq, Serialize, Deserialize
+
+2. PartitionConfig (enum)
+   - SingleId(u64)
+   - Range { start: u64, end: u64 }
+   - Derives: Debug, Clone, PartialEq, Serialize, Deserialize
+
+3. GroupMeta
+   - Fields: group_id: GroupId, leader: Option<NodeId>, replicas: Vec<NodeId>
+   - Derives: Debug, Clone, PartialEq, Serialize, Deserialize
+
+4. RoutingTable
+   - Fields:
+     - partitions: HashMap<PartitionId, (PartitionConfig, GroupId)>
+     - nodes: HashMap<NodeId, NodeAddr>
+     - groups: HashMap<GroupId, GroupMeta>
+   - Derives: Debug, Clone, Default, Serialize, Deserialize
+
+## Tests Implemented
+✓ test_partition_config_single_id - verifies Clone and PartialEq for SingleId variant
+✓ test_partition_config_range - verifies Clone and PartialEq for Range variant
+✓ test_routing_table_construction - verifies HashMap operations and insertion
+✓ test_group_meta - verifies GroupMeta struct and replicas field
+
+All tests pass without clippy warnings.

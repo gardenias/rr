@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/rr-core",
+    "crates/rr-storage",
+    "crates/rr-config",
+    "crates/rr-raft",
+    "crates/rr-network",
+    "crates/rr-router",
+    "crates/rr-server",
+    "examples/kv-store",
+    "tests/integration",
+]
+resolver = "2"
+
+[workspace.dependencies]
+openraft = "0.9.21"
+tokio = { version = "1", features = ["full"] }
+tonic = "0.14.5"
+prost = "0.14.3"
+serde = { version = "1", features = ["derive"] }
+bincode = "2.0.0"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+anyhow = "1"
