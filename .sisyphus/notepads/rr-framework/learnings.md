@@ -174,3 +174,25 @@ All pinned via `[workspace.dependencies]` for consistency:
 - **BincodeCodec is the only concrete implementation**: All other traits are pure trait definitions — no implementations in rr-core.
 - **18 tests total** in rr-core after this task (was 7 before, added 11).
 - **Pattern**: Use `PartitionConfig::SingleId(1)` for test data when constructing `RoutingTableChange` variants.
+
+## Task 5 Complete: MemStorage — In-memory StorageEngine (2026-03-03)
+
+### Implementation
+- `crates/rr-storage/src/mem.rs`: Full `StorageEngine` impl using `Arc<RwLock<HashMap<String, BTreeMap<Vec<u8>, Vec<u8>>>>>`
+- Pre-populates 3 default column families: `raft_log`, `state_machine`, `metadata`
+- `create_cf()` uses `entry().or_insert_with()` — idempotent, no error on duplicate
+- Unknown CF operations return `StorageError::NotFound { key: "cf:{name}" }`
+- `flush()` is a no-op for in-memory storage
+- `scan()` uses `BTreeMap::range()` with `Bound::Included(start)..Bound::Excluded(end)`
+- `write_batch()` holds single write lock for atomicity across all ops
+
+### Testing
+- 10 tests covering: CRUD, scan range, batch puts, batch mixed put/delete, flush noop, create_cf, unknown CF error, concurrent reads/writes
+- Concurrency test: 10 concurrent tokio tasks writing to same CF, all visible after join
+- All tests pass; zero clippy warnings
+
+### Key Learnings
+- Cargo.toml already had correct deps from T1 scaffolding — no changes needed
+- `tokio::sync::RwLock` (not `std::sync::RwLock`) required for async context
+- `#[derive(Clone, Default)]` on MemStorage works because `Arc<RwLock<_>>` impls both
+- `Default::default()` creates empty HashMap (no default CFs) vs `new()` which pre-populates
