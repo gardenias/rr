@@ -377,3 +377,30 @@ All pinned via `[workspace.dependencies]` for consistency:
 ### Testing
 - 6 new tests (17 total in rr-raft): channel_pool_new, channel_pool_clone, factory_new, network_with_group_id, connection_error, vote_connection_error
 - All 17 tests pass; zero clippy warnings; workspace builds clean
+
+## Task 11 Complete: ClientService gRPC Implementation + Leader Forwarding (2026-03-03)
+
+### What was built
+- `crates/rr-network/src/client_service.rs` — gRPC `ClientService` implementation for client-facing RPCs
+- `ClientDispatch` trait — bytes-oriented dispatch interface (same pattern as `RaftGroupLookup` from T10)
+- `ClientWriteResult` — local struct mapping to `ClientResponse` proto with optional `LeaderInfo`
+- `ClientServiceImpl` — implements `proto::client::client_service_server::ClientService`, delegates to `ClientDispatch`
+- `lib.rs` updated with `pub mod client_service;` and re-exports of `ClientDispatch`, `ClientServiceImpl`, `ClientWriteResult`
+
+### Design: Bytes-oriented `ClientDispatch` trait
+- **2 methods**: `submit_write(partition_id, payload) → ClientWriteResult` and `get_cluster_info() → Vec<GroupInfo>`
+- Returns `Result<..., tonic::Status>` (NOT `RrError`) — same as `RaftGroupLookup`
+- `GroupInfo` is reused directly from proto (`crate::proto::client::GroupInfo`) — no need for local redefinition
+- `ClientWriteResult` has `leader_node_id: Option<u64>` + `leader_addr: Option<String>` for leader forwarding
+- Leader info mapping: `(Some(node_id), Some(addr))` → `Some(LeaderInfo { node_id, addr })`, otherwise `None`
+
+### Testing
+- 6 new tests (25 total in rr-network): construction, dispatch error (Unavailable), cluster_info success, cluster_info error, request success (no leader), request with leader redirect
+- MockDispatch with 3 variants: `success()`, `with_leader_info()`, `failing()`
+- All tests assert real behavior — no `assert!(true)` placeholders
+
+### Key learnings
+1. **Proto `GroupInfo` can be used directly in trait return types** — no need to create a local wrapper since the proto type is generated in the same crate.
+2. **`#[derive(Clone)]` on MockDispatch results** — `tonic::Status` implements `Clone`, so mock dispatch can store `Result<T, tonic::Status>` and clone on each call.
+3. **Pattern is identical to T10**: `#[async_trait::async_trait]` on trait definition, `#[tonic::async_trait]` on tonic service impl, `Arc<dyn Trait>` in struct.
+4. **No new dependencies needed** — all deps (`async-trait`, `tonic`, `tracing`) were already present from T8/T10.

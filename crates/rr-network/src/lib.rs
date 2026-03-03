@@ -16,9 +16,11 @@ pub mod proto {
 }
 pub mod server;
 pub mod raft_service;
+pub mod client_service;
 
 pub use channel_pool::ChannelPool;
 pub use client::RrGrpcClient;
 pub use server::RrGrpcServer;
 pub use error_convert::IntoStatus;
 pub use raft_service::{RaftGroupLookup, RaftServiceImpl};
+pub use client_service::{ClientDispatch, ClientServiceImpl, ClientWriteResult};
