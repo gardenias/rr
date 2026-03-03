@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 rr-core = { path = "../rr-core" }
 rr-storage = { path = "../rr-storage" }
-openraft.workspace = true
-tokio.workspace = true
-async-trait.workspace = true
+openraft = { workspace = true, features = ["storage-v2", "serde"] }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }

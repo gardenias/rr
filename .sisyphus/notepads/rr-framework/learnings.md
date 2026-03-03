@@ -244,3 +244,29 @@ All pinned via `[workspace.dependencies]` for consistency:
 - Channel pool tests: new/default empty, remove nonexistent, clone shares state
 - Error convert tests: every error variant → correct gRPC code mapping (Unavailable, NotFound, DeadlineExceeded, InvalidArgument, DataLoss, Internal)
 - All tests pass; zero clippy warnings
+
+## Task 7 Complete: rr-raft — TypeConfig + Single Raft Group (2026-03-03)
+
+### Implementation
+- `crates/rr-raft/src/type_config.rs`: `declare_raft_types!` macro defining `RrTypeConfig` with `D=Vec<u8>`, `R=Vec<u8>`, `NodeId=u64`, `Node=BasicNode`, `Entry=openraft::Entry<RrTypeConfig>`, `SnapshotData=Cursor<Vec<u8>>`, `AsyncRuntime=TokioRuntime`
+- `crates/rr-raft/src/log_storage.rs`: `RrLogStorage` implementing `RaftLogReader` + `RaftLogStorage` traits with in-memory BTreeMap storage (4 tests)
+- `crates/rr-raft/src/sm_adapter.rs`: `RrStateMachine` implementing `RaftStateMachine` trait, bridging to `rr_core::state_machine::StateMachine`. Also `RrSnapshotBuilder` implementing `RaftSnapshotBuilder`.
+- `crates/rr-raft/src/raft_node.rs`: `RaftNode` struct wrapping `Raft<RrTypeConfig>`, `NoopNetworkFactory`/`NoopNetwork` for single-node testing, `init_single_node()` helper (1 integration test)
+- `crates/rr-raft/src/lib.rs`: Exports all 4 modules and re-exports key types
+
+### Key Learnings
+1. **`LogFlushed::new()` is `pub(crate)` in openraft 0.9.21** — cannot construct it from outside the crate. Use `RaftLogStorageExt::blocking_append()` instead for tests.
+2. **openraft 0.9.21 `RaftNetwork` trait** requires `RPCOption` parameter on all methods (`append_entries`, `install_snapshot`, `vote`) — different from older docs.
+3. **`std::io::Error::new(ErrorKind::Other, ...)` triggers clippy `io_other_error` lint** — must use `std::io::Error::other(...)` instead.
+4. **`CommittedLeaderId::new(term, node_id)` is needed** to construct `LogId` values in tests.
+5. **Single-node Raft test needs ~1s sleep** after `initialize()` for leader election before `client_write()` succeeds.
+6. **`StoredMembership::default()` works** for initial empty membership state.
+7. **Error bridging from `RrError` to openraft**: Use `StorageIOError::write_state_machine(AnyError::new(&e))` wrapped in `StorageError::IO { source: ... }`.
+8. **Do NOT add `tokio-runtime` feature to openraft** — it does NOT exist in 0.9.21. Use `storage-v2` and `serde` features only.
+9. **Do NOT use the old `RaftStorage` single-trait API** — use `RaftLogStorage` + `RaftStateMachine` (storage-v2).
+10. **Do NOT import from `openraft::storage::adapter`** — not available in 0.9.21.
+
+### Testing
+- 6 tests total: 1 type_config smoke, 4 log_storage (append/read, vote save/read, truncate, get_log_state), 1 single-node raft propose
+- All tests pass; zero clippy warnings
+- `cargo build --workspace` succeeds

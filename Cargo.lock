@@ -973,6 +973,7 @@ dependencies = [
  "maplit",
  "openraft-macros",
  "rand",
+ "serde",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -1386,7 +1387,9 @@ dependencies = [
  "openraft",
  "rr-core",
  "rr-storage",
+ "serde",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

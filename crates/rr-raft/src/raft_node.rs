@@ -1,0 +1,207 @@
+//! `RaftNode` — wraps `openraft::Raft<RrTypeConfig>` for a single Raft group.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use openraft::error::Fatal;
+use openraft::error::RPCError;
+use openraft::error::RaftError;
+use openraft::error::Unreachable;
+use openraft::network::RPCOption;
+use openraft::network::RaftNetwork;
+use openraft::network::RaftNetworkFactory;
+use openraft::raft::AppendEntriesRequest;
+use openraft::raft::AppendEntriesResponse;
+use openraft::raft::InstallSnapshotRequest;
+use openraft::raft::InstallSnapshotResponse;
+use openraft::raft::VoteRequest;
+use openraft::raft::VoteResponse;
+use openraft::BasicNode;
+use openraft::Config;
+use openraft::Raft;
+
+use rr_core::state_machine::StateMachine;
+use rr_core::types::GroupId;
+
+use crate::log_storage::RrLogStorage;
+use crate::sm_adapter::RrStateMachine;
+use crate::type_config::RrTypeConfig;
+
+/// A single Raft group node.
+pub struct RaftNode {
+    /// The group this node belongs to.
+    pub group_id: GroupId,
+    /// The underlying openraft instance.
+    pub raft: Raft<RrTypeConfig>,
+}
+
+impl RaftNode {
+    /// Create a new `RaftNode` with in-memory storage and a no-op network.
+    pub async fn new(
+        group_id: GroupId,
+        node_id: u64,
+        state_machine: Box<dyn StateMachine>,
+    ) -> Result<Self, Fatal<u64>> {
+        let config = Arc::new(
+            Config {
+                heartbeat_interval: 250,
+                election_timeout_min: 299,
+                election_timeout_max: 500,
+                ..Default::default()
+            }
+            .validate()
+            .expect("invalid raft config"),
+        );
+
+        let log_storage = RrLogStorage::default();
+        let sm = RrStateMachine::new(state_machine);
+        let network = NoopNetworkFactory;
+
+        let raft = Raft::new(node_id, config, network, log_storage, sm).await?;
+
+        Ok(Self { group_id, raft })
+    }
+
+    /// Initialize this node as a single-node cluster.
+    pub async fn init_single_node(
+        &self,
+        node_id: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut nodes = BTreeMap::new();
+        nodes.insert(
+            node_id,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        self.raft.initialize(nodes).await?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// No-op network for single-node / test scenarios
+// ---------------------------------------------------------------------------
+
+struct NoopNetworkFactory;
+
+impl RaftNetworkFactory<RrTypeConfig> for NoopNetworkFactory {
+    type Network = NoopNetwork;
+
+    async fn new_client(&mut self, _target: u64, _node: &BasicNode) -> Self::Network {
+        NoopNetwork
+    }
+}
+
+struct NoopNetwork;
+
+impl RaftNetwork<RrTypeConfig> for NoopNetwork {
+    async fn append_entries(
+        &mut self,
+        _rpc: AppendEntriesRequest<RrTypeConfig>,
+        _option: RPCOption,
+    ) -> Result<
+        AppendEntriesResponse<u64>,
+        RPCError<u64, BasicNode, RaftError<u64>>,
+    > {
+        Err(RPCError::Unreachable(Unreachable::new(
+            &std::io::Error::other("noop network"),
+        )))
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        _rpc: InstallSnapshotRequest<RrTypeConfig>,
+        _option: RPCOption,
+    ) -> Result<
+        InstallSnapshotResponse<u64>,
+        RPCError<
+            u64,
+            BasicNode,
+            RaftError<u64, openraft::error::InstallSnapshotError>,
+        >,
+    > {
+        Err(RPCError::Unreachable(Unreachable::new(
+            &std::io::Error::other("noop network"),
+        )))
+    }
+
+    async fn vote(
+        &mut self,
+        _rpc: VoteRequest<u64>,
+        _option: RPCOption,
+    ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+        Err(RPCError::Unreachable(Unreachable::new(
+            &std::io::Error::other("noop network"),
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use rr_core::error::RrError;
+    use rr_core::types::LogIndex;
+    use std::sync::{Arc, Mutex};
+
+    struct TestSM {
+        applied: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl TestSM {
+        fn new() -> (Self, Arc<Mutex<Vec<Vec<u8>>>>) {
+            let applied = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    applied: applied.clone(),
+                },
+                applied,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl StateMachine for TestSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+            self.applied.lock().unwrap().push(entry.to_vec());
+            Ok(entry.to_vec())
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+
+        async fn restore(&mut self, _snapshot: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn test_single_node_raft_propose() {
+        let (sm, applied) = TestSM::new();
+        let node = RaftNode::new(1, 1, Box::new(sm)).await.unwrap();
+
+        // Initialize as single-node cluster
+        node.init_single_node(1).await.unwrap();
+
+        // Wait briefly for the leader to be elected
+        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+        // Propose an entry
+        let result = node.raft.client_write(vec![1u8, 2, 3]).await;
+        assert!(result.is_ok(), "client_write failed: {:?}", result.err());
+
+        // Verify the state machine received the entry
+        let entries = applied.lock().unwrap();
+        assert!(
+            entries.contains(&vec![1u8, 2, 3]),
+            "state machine should have applied the entry, got: {:?}",
+            *entries,
+        );
+    }
+}
