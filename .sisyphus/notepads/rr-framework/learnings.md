@@ -165,3 +165,12 @@ All pinned via `[workspace.dependencies]` for consistency:
   - Updated build.rs to use `tonic_prost_build::configure()` API (same as old tonic-build 0.12)
 - **Result**: cargo build -p rr-network now succeeds, cargo clippy passes with no warnings
 - **Key learning**: In tonic 0.14+, prost compilation was split from tonic-build → use tonic-prost-build for build script, tonic-prost for runtime codec
+
+## Task 3: Core Trait Definitions (2026-03-03)
+
+- **bincode 2.x `serde` feature**: The workspace had `bincode = "2.0.0"` without the `serde` feature. Bincode 2 requires `features = ["serde"]` to enable `bincode::serde::{encode_to_vec, decode_from_slice}`. Had to update workspace Cargo.toml.
+- **All 5 core traits are object-safe**: Verified via `Box<dyn Trait>` compile-time checks in tests.
+- **Codec trait is NOT async**: Unlike StorageEngine/ConfigProvider/StateMachine/Service, Codec is sync (just `Send + Sync`). Serialization should be fast enough to be sync.
+- **BincodeCodec is the only concrete implementation**: All other traits are pure trait definitions — no implementations in rr-core.
+- **18 tests total** in rr-core after this task (was 7 before, added 11).
+- **Pattern**: Use `PartitionConfig::SingleId(1)` for test data when constructing `RoutingTableChange` variants.

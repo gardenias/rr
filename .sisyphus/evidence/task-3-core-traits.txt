@@ -1,0 +1,35 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/rr_core-f47349db89f45843)
+
+running 18 tests
+test config::tests::test_routing_table_change_removed ... ok
+test error::tests::test_raft_error_not_leader ... ok
+test error::tests::test_storage_error_from_io ... ok
+test codec::tests::test_bincode_codec_invalid_bytes ... ok
+test config::tests::test_config_provider_is_object_safe ... ok
+test config::tests::test_routing_table_change_debug ... ok
+test codec::tests::test_bincode_codec_roundtrip ... ok
+test service::tests::test_service_is_object_safe ... ok
+test error::tests::test_rr_error_display ... ok
+test state_machine::tests::test_state_machine_is_object_safe ... ok
+test error::tests::test_rr_error_from_storage ... ok
+test storage::tests::test_batch_op_delete_construction ... ok
+test storage::tests::test_batch_op_put_construction ... ok
+test storage::tests::test_storage_engine_is_object_safe ... ok
+test types::tests::test_group_meta ... ok
+test types::tests::test_partition_config_range ... ok
+test types::tests::test_partition_config_single_id ... ok
+test types::tests::test_routing_table_construction ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rr_core
+
+running 2 tests
+test crates/rr-core/src/service.rs - service::Service (line 14) ... ignored
+test crates/rr-core/src/state_machine.rs - state_machine::StateMachine (line 15) ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+---
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
