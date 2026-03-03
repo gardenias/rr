@@ -404,3 +404,30 @@ All pinned via `[workspace.dependencies]` for consistency:
 2. **`#[derive(Clone)]` on MockDispatch results** — `tonic::Status` implements `Clone`, so mock dispatch can store `Result<T, tonic::Status>` and clone on each call.
 3. **Pattern is identical to T10**: `#[async_trait::async_trait]` on trait definition, `#[tonic::async_trait]` on tonic service impl, `Arc<dyn Trait>` in struct.
 4. **No new dependencies needed** — all deps (`async-trait`, `tonic`, `tracing`) were already present from T8/T10.
+
+## Task 16 Complete: ServiceStateMachineAdapter (Service → StateMachine Bridge) (2026-03-03)
+
+### What was built
+- `crates/rr-raft/src/service_adapter.rs` — `ServiceStateMachineAdapter<S: Service>` generic struct
+- Implements `StateMachine` for any `S: Service` — thin pass-through, no byte interpretation
+- `applied_count: u64` counter: `last_applied()` returns `None` when 0, `Some(count)` when > 0
+- `apply()` increments counter ONLY on success (error → no increment)
+- `snapshot()` and `restore()` delegate directly to `Service::snapshot()` / `Service::restore()`
+- `lib.rs` updated with `pub mod service_adapter;` + `pub use service_adapter::ServiceStateMachineAdapter;`
+
+### Testing
+- 6 tests total (exceeds required 5):
+  1. `apply_passes_bytes_unchanged` — verifies bytes flow through unchanged, records calls
+  2. `snapshot_delegates_to_service` — verifies snapshot delegation
+  3. `restore_delegates_to_service` — verifies restore delegation via shared Arc<Mutex<Vec<u8>>>
+  4. `error_propagation_from_handle` — Service error → StateMachine::apply error
+  5. `last_applied_tracking` — None→Some(1)→Some(2)→Some(3) progression
+  6. `failed_apply_does_not_increment_counter` — error case doesn't change counter
+- All 23 tests pass in rr-raft; zero clippy warnings
+
+### Key patterns
+1. **MockService uses `Arc<Mutex<Vec<Vec<u8>>>>` for call recording** — shared between test and adapter
+2. **`tokio::sync::Mutex`** (not std) for async test context
+3. **`entry.to_vec()` in `apply()`** — `Service::handle()` takes owned `Vec<u8>`, `StateMachine::apply()` takes `&[u8]`
+4. **No new dependencies** — `async-trait` and `rr-core` already in Cargo.toml
+5. **Generic adapter vs boxed trait object**: `ServiceStateMachineAdapter<S>` is generic; concrete instances like `ServiceStateMachineAdapter<KvService>` impl `StateMachine` and can be `Box<dyn StateMachine>`

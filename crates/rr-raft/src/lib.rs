@@ -8,6 +8,7 @@ pub mod sm_adapter;
 pub mod raft_node;
 pub mod group_manager;
 pub mod network_factory;
+pub mod service_adapter;
 
 pub use type_config::RrTypeConfig;
 pub use log_storage::RrLogStorage;
@@ -16,3 +17,4 @@ pub use raft_node::RaftNode;
 pub use group_manager::RaftGroupManager;
 pub use network_factory::GrpcNetworkFactory;
 pub use network_factory::GrpcRaftNetwork;
+pub use service_adapter::ServiceStateMachineAdapter;
