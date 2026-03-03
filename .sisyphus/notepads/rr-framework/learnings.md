@@ -196,3 +196,28 @@ All pinned via `[workspace.dependencies]` for consistency:
 - `tokio::sync::RwLock` (not `std::sync::RwLock`) required for async context
 - `#[derive(Clone, Default)]` on MemStorage works because `Arc<RwLock<_>>` impls both
 - `Default::default()` creates empty HashMap (no default CFs) vs `new()` which pre-populates
+
+## Task 6 Complete: MemConfigProvider — In-memory ConfigProvider (2026-03-03)
+
+### Implementation
+- `crates/rr-config/src/mem.rs`: Full `ConfigProvider` impl using `Arc<RwLock<RoutingTable>>` + `broadcast::Sender<RoutingTableChange>`
+- `broadcast::channel(64)` for multi-subscriber watch semantics
+- `BroadcastStream` from `tokio-stream` (with `sync` feature) wraps `broadcast::Receiver` into `futures::Stream`
+- `filter_map(|r| r.ok())` on BroadcastStream silently drops lagged errors
+- `add_partition()` creates GroupMeta entry if not present, with first replica as leader
+- `remove_partition()` removes from partitions map but leaves group intact (intentional)
+- `add_node()` inserts NodeAddr into routing table
+- `get_node_addr()` returns `ConfigError::InvalidConfig` for missing nodes
+
+### Dependencies Added
+- `tokio-stream = { version = "0.1", features = ["sync"] }` — NOT a workspace dep, only needed by rr-config
+
+### Testing
+- 9 tests: empty table, add/remove partition, node addr CRUD, watch stream (added + removed), default impl, multiple partitions
+- Watch tests use `tokio::spawn` + `tokio::time::timeout(100ms)` pattern for async stream assertions
+- All tests pass; zero clippy warnings
+
+### Key Learnings
+- **StreamExt ambiguity**: `tokio_stream::StreamExt` and `futures::StreamExt` both provide `.next()`. When both are in scope (prod code uses tokio_stream, tests import super::*), Rust can't disambiguate. Fix: don't re-import futures::StreamExt in tests when super::* already brings tokio_stream::StreamExt.
+- **broadcast send errors are OK**: `let _ = self.change_tx.send(...)` — no subscribers = no error needed
+- **tokio-stream sync feature**: Required for `BroadcastStream` wrapper. Without it, the type isn't available.
