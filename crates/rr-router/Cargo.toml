@@ -9,6 +9,7 @@ rr-config = { path = "../rr-config" }
 tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

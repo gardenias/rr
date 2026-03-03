@@ -8,6 +8,9 @@ use std::sync::Arc;
 use rr_core::config::ConfigProvider;
 use rr_core::error::{RouterError, RrError};
 use rr_core::types::{GroupId, NodeAddr, NodeId, PartitionId, RoutingTable};
+use tracing::instrument;
+use metrics::counter;
+
 
 /// Routes a partition ID to a Raft group ID using a [`ConfigProvider`]-backed routing table.
 ///
@@ -28,21 +31,26 @@ impl ShardRouter {
     ///
     /// Returns [`RouterError::PartitionNotFound`] if the partition is not in
     /// the routing table.
+    #[instrument(skip(self))]
     pub async fn route(&self, partition_id: PartitionId) -> Result<GroupId, RrError> {
         let table = self.config.get_routing_table().await?;
 
-        table
+        let result = table
             .partitions
             .get(&partition_id)
             .map(|(_, group_id)| *group_id)
-            .ok_or(RrError::Router(RouterError::PartitionNotFound { partition_id }))
+            .ok_or(RrError::Router(RouterError::PartitionNotFound { partition_id }));
+        if result.is_err() {
+            counter!("router.route.not_found").increment(1);
+        }
+        result
     }
-
     /// Get the current leader node for a group.
     ///
     /// Returns [`RouterError::GroupNotFound`] if the group is not in the
     /// routing table.
     /// Returns [`RouterError::NoLeader`] if the group has no leader.
+    #[instrument(skip(self))]
     pub async fn get_leader(&self, group_id: GroupId) -> Result<NodeId, RrError> {
         let table = self.config.get_routing_table().await?;
 
@@ -59,14 +67,17 @@ impl ShardRouter {
     ///
     /// Combines [`route()`](Self::route) + [`get_leader()`](Self::get_leader) +
     /// node address lookup.
+    #[instrument(skip(self))]
     pub async fn get_leader_addr(&self, partition_id: PartitionId) -> Result<NodeAddr, RrError> {
         let group_id = self.route(partition_id).await?;
         let leader_id = self.get_leader(group_id).await?;
 
         let addr = self.config.get_node_addr(leader_id).await?;
+        counter!("router.get_leader_addr.success").increment(1);
         Ok(addr)
     }
 
+    #[instrument(skip(self))]
     /// Get the full routing table.
     pub async fn routing_table(&self) -> Result<RoutingTable, RrError> {
         self.config

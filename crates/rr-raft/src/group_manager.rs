@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
+use metrics::counter;
+
 
 use rr_core::error::{RaftError, RrError};
 use rr_core::state_machine::StateMachine;
@@ -40,6 +42,7 @@ impl RaftGroupManager {
     /// Start a new Raft group on this node.
     ///
     /// Creates a `RaftNode` and stores it. Returns error if group already exists.
+    #[instrument(skip(self))]
     pub async fn start_group(&self, group_id: GroupId) -> Result<(), RrError> {
         let mut guard = self.groups.write().await;
 
@@ -55,6 +58,8 @@ impl RaftGroupManager {
             .map_err(|e| RrError::Application(e.to_string()))?;
 
         debug!(group_id, node_id = self.node_id, "started raft group");
+        let node_id = self.node_id;
+        counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
         guard.insert(group_id, node);
         Ok(())
     }
@@ -62,6 +67,7 @@ impl RaftGroupManager {
     /// Stop and remove a Raft group from this node.
     ///
     /// Calls `raft.shutdown()` and removes from the map.
+    #[instrument(skip(self))]
     pub async fn stop_group(&self, group_id: GroupId) -> Result<(), RrError> {
         let mut guard = self.groups.write().await;
 
@@ -75,12 +81,15 @@ impl RaftGroupManager {
             .map_err(|e| RrError::Application(e.to_string()))?;
 
         info!(group_id, node_id = self.node_id, "stopped raft group");
+        let node_id = self.node_id;
+        counter!("raft.group.stop", "node_id" => node_id.to_string()).increment(1);
         Ok(())
     }
 
     /// Get a reference to a Raft group's `openraft::Raft` instance.
     ///
     /// Returns `None` if the group does not exist.
+    #[instrument(skip(self))]
     pub async fn get_raft(
         &self,
         group_id: GroupId,
@@ -89,12 +98,14 @@ impl RaftGroupManager {
         guard.get(&group_id).map(|node| node.raft.clone())
     }
 
+    #[instrument(skip(self))]
     /// Returns the list of active group IDs.
     pub async fn group_ids(&self) -> Vec<GroupId> {
         let guard = self.groups.read().await;
         guard.keys().copied().collect()
     }
 
+    #[instrument(skip(self))]
     /// Returns the number of active groups.
     pub async fn group_count(&self) -> usize {
         let guard = self.groups.read().await;

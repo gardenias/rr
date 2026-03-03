@@ -17,3 +17,4 @@ tokio-stream = "0.1"
 tonic = { workspace = true }
 dashmap = { workspace = true }
 tonic-prost = "0.14.5"
+metrics.workspace = true

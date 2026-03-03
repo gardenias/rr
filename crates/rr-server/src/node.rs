@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use tokio::sync::{watch, Mutex};
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
+use metrics::counter;
+
 
 use rr_core::error::{ConfigError, RrError};
 use rr_core::types::NodeId;
@@ -88,6 +90,7 @@ impl RrNode {
     /// 2. Starts Raft groups assigned to this node.
     /// 3. Spawns a gRPC server if both `raft_lookup` and `client_dispatch`
     ///    are present.
+    #[instrument(skip(self))]
     pub async fn start(&self) -> Result<(), RrError> {
         // ── 1. Load routing table and start assigned groups ─────────────────
         let table = self.router.routing_table().await?;
@@ -100,6 +103,7 @@ impl RrNode {
                     group_id,
                     "started Raft group"
                 );
+                counter!("node.group.started").increment(1);
             }
         }
 
@@ -146,6 +150,7 @@ impl RrNode {
         }
 
         info!(node_id = self.node_id, "RrNode started");
+        counter!("node.started").increment(1);
         Ok(())
     }
 
@@ -153,6 +158,7 @@ impl RrNode {
     ///
     /// 1. Signals the gRPC server to stop (5 s timeout).
     /// 2. Stops all active Raft groups.
+    #[instrument(skip(self))]
     pub async fn shutdown(&self) -> Result<(), RrError> {
         info!(node_id = self.node_id, "RrNode shutting down");
 
@@ -176,6 +182,7 @@ impl RrNode {
         }
 
         info!(node_id = self.node_id, "RrNode shutdown complete");
+        counter!("node.shutdown").increment(1);
         Ok(())
     }
 
