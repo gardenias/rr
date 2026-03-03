@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 rr-core = { path = "../../crates/rr-core" }
 rr-server = { path = "../../crates/rr-server" }
+rr-raft = { path = "../../crates/rr-raft" }
+rr-config = { path = "../../crates/rr-config" }
+rr-storage = { path = "../../crates/rr-storage" }
 tokio.workspace = true
 serde.workspace = true
 bincode.workspace = true
@@ -13,6 +16,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
+openraft = { version = "0.9", features = ["serde"] }
 
 [[bin]]
 name = "kv-store"
