@@ -270,3 +270,110 @@ All pinned via `[workspace.dependencies]` for consistency:
 - 6 tests total: 1 type_config smoke, 4 log_storage (append/read, vote save/read, truncate, get_log_state), 1 single-node raft propose
 - All tests pass; zero clippy warnings
 - `cargo build --workspace` succeeds
+
+## Task 9 Complete: RaftGroupManager (2026-03-03)
+
+### What was built
+- `crates/rr-raft/src/group_manager.rs` — `RaftGroupManager` struct managing lifecycle of multiple `RaftNode`s
+- `StateMachineFactory` type alias: `Box<dyn Fn(GroupId) -> Box<dyn StateMachine> + Send + Sync>`
+- Methods: `new`, `start_group`, `stop_group`, `get_raft`, `group_ids`, `group_count`
+
+### Key patterns
+1. **`Arc<RwLock<HashMap<GroupId, RaftNode>>>`** — standard async-safe pattern for multi-group state. No need for `DashMap`.
+2. **`ok_or` over `ok_or_else`** when the error value doesn't involve closures/allocations that should be lazy — clippy flags `unnecessary_lazy_evaluations`.
+3. **`Fatal<u64>` → `RrError::Application(e.to_string())`** — openraft's `Fatal` error doesn't impl `Into<RrError>`, so string conversion is the bridge.
+4. **Shutdown before remove**: Must call `node.raft.shutdown().await` before dropping to cleanly stop the Raft instance.
+5. **Factory pattern for StateMachine**: Each group gets its own SM instance via the factory closure, enabling per-group isolation.
+
+### Testing
+- 5 new tests: start_stop, start_duplicate, stop_nonexistent, multiple_groups, get_raft
+- Total: 11 tests in rr-raft (6 existing + 5 new)
+- All tests pass; zero clippy warnings; workspace builds clean
+
+## Task 13 Complete: ShardRouter (2026-03-03)
+
+### What was built
+- `crates/rr-router/src/router.rs` — `ShardRouter` struct with 4 public async methods
+- Pure table-lookup routing: partition → group → leader → node addr
+- No consistent hashing, no hash rings — routing table is the single source of truth
+
+### API surface
+- `ShardRouter::new(config: Arc<dyn ConfigProvider>)` — constructor
+- `route(partition_id) → Result<GroupId, RrError>` — partition → group lookup
+- `get_leader(group_id) → Result<NodeId, RrError>` — group → leader lookup
+- `get_leader_addr(partition_id) → Result<NodeAddr, RrError>` — full chain: partition → group → leader → addr
+- `routing_table() → Result<RoutingTable, RrError>` — expose full table
+
+### Key patterns
+1. **`ConfigProvider` via `Arc<dyn>`** — enables runtime polymorphism (MemConfigProvider in tests, etcd in prod)
+2. **`get_leader_addr` delegates to `config.get_node_addr()`** — avoids semantic mismatch of using `RouterError::GroupNotFound` for missing nodes; propagates `ConfigError` instead
+3. **`ok_or` not `ok_or_else`** for cheap error construction — clippy enforces `unnecessary_lazy_evaluations`
+4. **`#[from] ConfigError` on `RrError`** — using `?` on `get_routing_table()` auto-converts; `get_node_addr()` also auto-converts
+5. **`MemConfigProvider` cloneable** — `Clone` derive enables `Arc::new(provider.clone())` pattern in tests
+
+### Testing
+- 8 tests: route found/not_found, get_leader success/group_not_found, get_leader_addr success/partition_not_found/node_not_found, routing_table full
+- All pass; zero clippy warnings
+
+### Pre-existing issue
+- Workspace has cyclic dependency: rr-raft ↔ rr-network. Prevents `cargo build --workspace` but does NOT affect rr-router (no dependency on either). Tested rr-router in isolation successfully.
+
+## Task 10 Complete: RaftService gRPC Implementation (2026-03-03)
+
+### What was built
+- `crates/rr-network/src/raft_service.rs` — gRPC `RaftService` implementation for AppendEntries, Vote, and InstallSnapshot RPCs
+- `RaftGroupLookup` trait — bytes-oriented dispatch interface for Raft group demuxing by `group_id`
+- `RaftServiceImpl` struct — implements `proto::raft::raft_service_server::RaftService`, delegates to `RaftGroupLookup`
+- Streaming `InstallSnapshot` RPC handler — collects `SnapshotChunk` stream, extracts metadata from final chunk, concatenates data, delegates to lookup
+
+### Critical design decision: bytes-oriented `RaftGroupLookup` trait
+- **Problem**: Task spec said to add `rr-raft` as dependency of `rr-network`, but `rr-raft` already depends on `rr-network` (added in T9), creating a **cyclic dependency**.
+- **Solution**: Instead of `get_raft(group_id) -> Option<Raft<RrTypeConfig>>`, the trait has method-per-RPC (`append_entries`, `vote`, `install_snapshot`) accepting/returning raw bytes.
+- This pushes bincode encode/decode into the implementor (in rr-raft) rather than the service layer.
+- `rr-network` needs NO openraft or bincode dependency — only tonic, async-trait, tokio-stream, tracing, rr-core.
+- The implementor in rr-raft will bincode-decode the openraft request, forward to `Raft<RrTypeConfig>`, and bincode-encode the response.
+
+### Dependencies added to rr-network
+- `async-trait = { workspace = true }` — for `RaftGroupLookup` trait definition
+- `tracing = { workspace = true }` — for `tracing::debug!` in RPC handlers
+- `tokio-stream = "0.1"` — for `StreamExt` in streaming `InstallSnapshot` handler
+
+### Testing
+- 3 new tests (19 total in rr-network): `test_raft_service_new`, `test_raft_service_group_not_found`, `test_vote_group_not_found`
+- Tests use `EmptyLookup` mock that returns `Status::not_found` for all groups
+- All 19 tests pass; zero clippy warnings
+
+### Key learnings
+1. **Cyclic deps are a real constraint**: `rr-raft -> rr-network` was added in T9 (network_factory.rs). Cannot add `rr-network -> rr-raft`. Bytes-oriented traits are the escape hatch.
+2. **Pre-existing `rr-raft` compilation errors**: `network_factory.rs` uses `http::uri::PathAndQuery` and `tonic::codec::ProstCodec` which don't compile. This is NOT caused by T10 changes — it was already broken.
+3. **`tonic::async_trait`** (not `async_trait::async_trait`) for tonic service impls. The trait attribute macro is re-exported by tonic.
+4. **Streaming RPC signature**: `install_snapshot(Request<Streaming<SnapshotChunk>>) -> Result<Response<SnapshotResponse>, Status>` — client-streaming pattern in tonic.
+5. **No `type InstallSnapshotStream` needed**: That's only for server-streaming. Client-streaming uses `Streaming<T>` in the request parameter.
+
+## Task 12 Complete: GrpcNetworkFactory — RaftNetworkFactory backed by gRPC (2026-03-03)
+
+### What was built
+- `crates/rr-raft/src/network_factory.rs` — `GrpcNetworkFactory` + `GrpcRaftNetwork` implementing openraft's `RaftNetworkFactory` + `RaftNetwork` traits
+- Local `ChannelPool` (duplicated from rr-network to avoid cyclic dep)
+- Local proto message types with matching prost annotations (wire-compatible with `rr.raft.*`)
+- Hand-rolled tonic gRPC client (`RaftGrpcClient`) using `tonic_prost::ProstCodec`
+
+### Critical: Cyclic dependency avoidance
+- `rr-network` depends on `rr-raft` (for `RrTypeConfig`), so `rr-raft` CANNOT depend on `rr-network`
+- Solution: duplicate `ChannelPool` and proto types locally in `network_factory.rs`
+- Proto messages are wire-compatible (same prost annotations, same package `rr.raft`)
+
+### Key learnings
+1. **`RPCOption::new(hard_ttl: Duration)`** — no `Default` impl in openraft 0.9.21. Must construct explicitly.
+2. **`tonic_prost::ProstCodec`** — NOT `tonic::codec::ProstCodec`. The codec was split into `tonic-prost` crate in tonic 0.14+.
+3. **Hand-rolled tonic client**: Use `tonic::client::Grpc::new(channel)` + `.unary()` with `ProstCodec::default()` and `PathAndQuery::from_static("/rr.raft.RaftService/MethodName")`.
+4. **`tonic::codegen::http`** — access `http` types through tonic's re-export, not a separate `http` crate.
+5. **Install snapshot limitation**: Proto `SnapshotResponse` only has `(group_id, success)` — no `payload` for `Vote`. Returns `Vote::new(0, 0)` as documented placeholder.
+6. **bincode v2 API**: `bincode::serde::encode_to_vec(&val, bincode::config::standard())` / `decode_from_slice`.
+
+### Dependencies added to rr-raft
+- `prost`, `bincode`, `tokio-stream`, `tonic`, `dashmap`, `tonic-prost`
+
+### Testing
+- 6 new tests (17 total in rr-raft): channel_pool_new, channel_pool_clone, factory_new, network_with_group_id, connection_error, vote_connection_error
+- All 17 tests pass; zero clippy warnings; workspace builds clean

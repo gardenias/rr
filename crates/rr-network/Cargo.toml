@@ -11,6 +11,9 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 tonic-prost = "0.14.5"
 dashmap = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-prost-build = "0.14.5"

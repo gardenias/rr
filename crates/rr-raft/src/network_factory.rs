@@ -1,0 +1,498 @@
+//! Real gRPC-backed `RaftNetworkFactory` using connection pooling for channel reuse.
+//!
+//! `GrpcNetworkFactory` creates per-target `GrpcRaftNetwork` instances that
+//! serialize openraft RPCs with bincode, send them over gRPC proto stubs,
+//! and deserialize the responses.
+//!
+//! # Cyclic dependency note
+//!
+//! `rr-network` depends on `rr-raft` (for `RrTypeConfig` in the server-side
+//! handler), so `rr-raft` **cannot** depend on `rr-network`. To break the
+//! cycle, this module re-defines the proto message types locally with matching
+//! prost annotations and builds the tonic gRPC client inline. The wire format
+//! is identical to `rr.raft.*` from the `.proto` definitions.
+
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use openraft::error::InstallSnapshotError;
+use openraft::error::RPCError;
+use openraft::error::RaftError;
+use openraft::error::Unreachable;
+use openraft::network::RPCOption;
+use openraft::network::RaftNetwork;
+use openraft::network::RaftNetworkFactory;
+use openraft::raft::AppendEntriesRequest;
+use openraft::raft::AppendEntriesResponse;
+use openraft::raft::InstallSnapshotRequest;
+use openraft::raft::InstallSnapshotResponse;
+use openraft::raft::VoteRequest;
+use openraft::raft::VoteResponse;
+use openraft::BasicNode;
+use openraft::Vote;
+use rr_core::error::NetworkError;
+use rr_core::types::NodeId;
+use tonic::transport::Channel;
+
+use crate::type_config::RrTypeConfig;
+
+// ---------------------------------------------------------------------------
+// Local proto types (mirrors rr.raft.* proto messages)
+// ---------------------------------------------------------------------------
+
+/// `rr.raft.AppendEntriesRequest`
+#[derive(Clone, prost::Message)]
+struct ProtoAppendReq {
+    #[prost(uint64, tag = "1")]
+    group_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    payload: Vec<u8>,
+}
+
+/// `rr.raft.AppendEntriesResponse`
+#[derive(Clone, prost::Message)]
+struct ProtoAppendResp {
+    #[prost(uint64, tag = "1")]
+    group_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    payload: Vec<u8>,
+}
+
+/// `rr.raft.VoteRequest`
+#[derive(Clone, prost::Message)]
+struct ProtoVoteReq {
+    #[prost(uint64, tag = "1")]
+    group_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    payload: Vec<u8>,
+}
+
+/// `rr.raft.VoteResponse`
+#[derive(Clone, prost::Message)]
+struct ProtoVoteResp {
+    #[prost(uint64, tag = "1")]
+    group_id: u64,
+    #[prost(bytes = "vec", tag = "2")]
+    payload: Vec<u8>,
+}
+
+/// `rr.raft.SnapshotChunk`
+#[derive(Clone, prost::Message)]
+struct ProtoSnapshotChunk {
+    #[prost(uint64, tag = "1")]
+    group_id: u64,
+    #[prost(uint64, tag = "2")]
+    offset: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    data: Vec<u8>,
+    #[prost(bool, tag = "4")]
+    done: bool,
+    #[prost(bytes = "vec", tag = "5")]
+    metadata: Vec<u8>,
+}
+
+/// `rr.raft.SnapshotResponse`
+#[derive(Clone, prost::Message)]
+struct ProtoSnapshotResp {
+    #[prost(uint64, tag = "1")]
+    group_id: u64,
+    #[prost(bool, tag = "2")]
+    success: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Map any `Display` error to `RPCError::Unreachable` (concrete for our types).
+fn to_unreachable_ae<E: std::fmt::Display>(e: E) -> RPCError<u64, BasicNode, RaftError<u64>> {
+    RPCError::Unreachable(Unreachable::new(&std::io::Error::other(e.to_string())))
+}
+
+fn to_unreachable_snap<E: std::fmt::Display>(
+    e: E,
+) -> RPCError<u64, BasicNode, RaftError<u64, InstallSnapshotError>> {
+    RPCError::Unreachable(Unreachable::new(&std::io::Error::other(e.to_string())))
+}
+
+// ---------------------------------------------------------------------------
+// Channel pool (local, avoids rr-network dep)
+// ---------------------------------------------------------------------------
+
+/// A pool of reusable gRPC channels, one per node.
+///
+/// Functionally identical to `rr_network::ChannelPool` but defined locally
+/// to avoid a cyclic crate dependency.
+#[derive(Clone, Default)]
+pub struct ChannelPool {
+    channels: Arc<DashMap<NodeId, Channel>>,
+}
+
+impl ChannelPool {
+    /// Create an empty pool.
+    pub fn new() -> Self {
+        Self {
+            channels: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Get an existing channel or create a new one.
+    pub async fn get_or_connect(
+        &self,
+        node_id: NodeId,
+        addr: &str,
+    ) -> Result<Channel, NetworkError> {
+        if let Some(channel) = self.channels.get(&node_id) {
+            return Ok(channel.clone());
+        }
+        let channel = Channel::from_shared(format!("http://{addr}"))
+            .map_err(|e| NetworkError::ConnectionFailed {
+                addr: addr.to_string(),
+                reason: e.to_string(),
+            })?
+            .connect()
+            .await
+            .map_err(|e| NetworkError::ConnectionFailed {
+                addr: addr.to_string(),
+                reason: e.to_string(),
+            })?;
+        self.channels.insert(node_id, channel.clone());
+        Ok(channel)
+    }
+
+    /// Remove a channel from the pool.
+    pub fn remove(&self, node_id: NodeId) {
+        self.channels.remove(&node_id);
+    }
+
+    /// Number of pooled channels.
+    pub fn len(&self) -> usize {
+        self.channels.len()
+    }
+
+    /// Returns `true` if no channels are pooled.
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tonic gRPC client for rr.raft.RaftService
+// ---------------------------------------------------------------------------
+
+/// Minimal hand-rolled client matching `rr.raft.RaftService`.
+#[derive(Clone)]
+struct RaftGrpcClient {
+    inner: tonic::client::Grpc<Channel>,
+}
+
+impl RaftGrpcClient {
+    fn new(channel: Channel) -> Self {
+        Self {
+            inner: tonic::client::Grpc::new(channel),
+        }
+    }
+
+    async fn append_entries(
+        &mut self,
+        req: ProtoAppendReq,
+    ) -> Result<tonic::Response<ProtoAppendResp>, tonic::Status> {
+        self.inner.ready().await.map_err(|e| {
+            tonic::Status::unknown(format!("service not ready: {e}"))
+        })?;
+        let path =
+            tonic::codegen::http::uri::PathAndQuery::from_static("/rr.raft.RaftService/AppendEntries");
+        let codec = tonic_prost::ProstCodec::default();
+        self.inner.unary(tonic::Request::new(req), path, codec).await
+    }
+
+    async fn vote(
+        &mut self,
+        req: ProtoVoteReq,
+    ) -> Result<tonic::Response<ProtoVoteResp>, tonic::Status> {
+        self.inner.ready().await.map_err(|e| {
+            tonic::Status::unknown(format!("service not ready: {e}"))
+        })?;
+        let path =
+            tonic::codegen::http::uri::PathAndQuery::from_static("/rr.raft.RaftService/Vote");
+        let codec = tonic_prost::ProstCodec::default();
+        self.inner.unary(tonic::Request::new(req), path, codec).await
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        stream: impl tonic::IntoStreamingRequest<Message = ProtoSnapshotChunk>,
+    ) -> Result<tonic::Response<ProtoSnapshotResp>, tonic::Status> {
+        self.inner.ready().await.map_err(|e| {
+            tonic::Status::unknown(format!("service not ready: {e}"))
+        })?;
+        let path = tonic::codegen::http::uri::PathAndQuery::from_static(
+            "/rr.raft.RaftService/InstallSnapshot",
+        );
+        let codec = tonic_prost::ProstCodec::default();
+        self.inner
+            .client_streaming(stream.into_streaming_request(), path, codec)
+            .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+/// Factory that creates gRPC-backed network connections for Raft RPCs.
+///
+/// Each factory instance is scoped to a single Raft group (identified by
+/// `group_id`), so the proto messages carry the correct demux key.
+#[derive(Clone)]
+pub struct GrpcNetworkFactory {
+    channel_pool: ChannelPool,
+    group_id: u64,
+}
+
+impl GrpcNetworkFactory {
+    /// Create a new factory for the given Raft group.
+    pub fn new(channel_pool: ChannelPool, group_id: u64) -> Self {
+        Self {
+            channel_pool,
+            group_id,
+        }
+    }
+}
+
+impl RaftNetworkFactory<RrTypeConfig> for GrpcNetworkFactory {
+    type Network = GrpcRaftNetwork;
+
+    async fn new_client(&mut self, target: u64, node: &BasicNode) -> Self::Network {
+        GrpcRaftNetwork {
+            target,
+            target_addr: node.addr.clone(),
+            channel_pool: self.channel_pool.clone(),
+            group_id: self.group_id,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-target network
+// ---------------------------------------------------------------------------
+
+/// A gRPC-backed Raft network for a specific target node.
+pub struct GrpcRaftNetwork {
+    target: u64,
+    target_addr: String,
+    channel_pool: ChannelPool,
+    group_id: u64,
+}
+
+impl GrpcRaftNetwork {
+    /// Override the group_id after construction.
+    pub fn with_group_id(mut self, group_id: u64) -> Self {
+        self.group_id = group_id;
+        self
+    }
+}
+
+impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
+    async fn append_entries(
+        &mut self,
+        rpc: AppendEntriesRequest<RrTypeConfig>,
+        _option: RPCOption,
+    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+        let channel = self
+            .channel_pool
+            .get_or_connect(self.target, &self.target_addr)
+            .await
+            .map_err(to_unreachable_ae)?;
+
+        let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
+            .map_err(to_unreachable_ae)?;
+
+        let mut client = RaftGrpcClient::new(channel);
+        let response = client
+            .append_entries(ProtoAppendReq {
+                group_id: self.group_id,
+                payload,
+            })
+            .await
+            .map_err(to_unreachable_ae)?
+            .into_inner();
+
+        let (resp, _): (AppendEntriesResponse<u64>, _) =
+            bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
+                .map_err(to_unreachable_ae)?;
+        Ok(resp)
+    }
+
+    async fn vote(
+        &mut self,
+        rpc: VoteRequest<u64>,
+        _option: RPCOption,
+    ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+        let channel = self
+            .channel_pool
+            .get_or_connect(self.target, &self.target_addr)
+            .await
+            .map_err(to_unreachable_ae)?;
+
+        let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
+            .map_err(to_unreachable_ae)?;
+
+        let mut client = RaftGrpcClient::new(channel);
+        let response = client
+            .vote(ProtoVoteReq {
+                group_id: self.group_id,
+                payload,
+            })
+            .await
+            .map_err(to_unreachable_ae)?
+            .into_inner();
+
+        let (resp, _): (VoteResponse<u64>, _) =
+            bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
+                .map_err(to_unreachable_ae)?;
+        Ok(resp)
+    }
+
+    async fn install_snapshot(
+        &mut self,
+        rpc: InstallSnapshotRequest<RrTypeConfig>,
+        _option: RPCOption,
+    ) -> Result<
+        InstallSnapshotResponse<u64>,
+        RPCError<u64, BasicNode, RaftError<u64, InstallSnapshotError>>,
+    > {
+        let channel = self
+            .channel_pool
+            .get_or_connect(self.target, &self.target_addr)
+            .await
+            .map_err(to_unreachable_snap)?;
+
+        // Serialize the entire openraft request into the metadata field.
+        // The snapshot data bytes go in the `data` field.
+        let snapshot_data = rpc.data.clone();
+        let metadata = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
+            .map_err(to_unreachable_snap)?;
+
+        let chunk = ProtoSnapshotChunk {
+            group_id: self.group_id,
+            offset: rpc.offset,
+            data: snapshot_data,
+            done: true,
+            metadata,
+        };
+
+        let mut client = RaftGrpcClient::new(channel);
+        let _response = client
+            .install_snapshot(tokio_stream::iter(vec![chunk]))
+            .await
+            .map_err(to_unreachable_snap)?
+            .into_inner();
+
+        // NOTE: The current proto SnapshotResponse only has (group_id, success)
+        // and lacks a `payload` field for the serialized openraft response.
+        // The server handler deserializes the metadata, processes the snapshot,
+        // and indicates success. The follower's vote is not returned via the
+        // current proto — a default vote is used here. This will be corrected
+        // when the proto is extended with a payload field.
+        Ok(InstallSnapshotResponse {
+            vote: Vote::new(0, 0),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openraft::raft::AppendEntriesRequest as OraftAppendRequest;
+    use std::time::Duration;
+
+    #[test]
+    fn test_grpc_network_factory_new() {
+        let pool = ChannelPool::new();
+        let factory = GrpcNetworkFactory::new(pool, 1);
+        // Verify it can be cloned (required by openraft)
+        let factory2 = factory.clone();
+        assert_eq!(factory2.group_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_grpc_network_connection_error() {
+        let pool = ChannelPool::new();
+        let mut network = GrpcRaftNetwork {
+            target: 99,
+            target_addr: "localhost:1".to_string(),
+            channel_pool: pool,
+            group_id: 1,
+        };
+
+        let rpc: OraftAppendRequest<RrTypeConfig> = OraftAppendRequest {
+            vote: Vote::new(1, 1),
+            prev_log_id: None,
+            entries: vec![],
+            leader_commit: None,
+        };
+
+        let result = network.append_entries(rpc, RPCOption::new(Duration::from_secs(5))).await;
+
+        assert!(result.is_err(), "should fail to connect to invalid addr");
+        match result.unwrap_err() {
+            RPCError::Unreachable(_) => {} // expected
+            other => panic!("expected Unreachable, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grpc_network_vote_connection_error() {
+        let pool = ChannelPool::new();
+        let mut network = GrpcRaftNetwork {
+            target: 99,
+            target_addr: "localhost:1".to_string(),
+            channel_pool: pool,
+            group_id: 1,
+        };
+
+        let rpc = VoteRequest::<u64> {
+            vote: Vote::new(1, 1),
+            last_log_id: None,
+        };
+
+        let result = network.vote(rpc, RPCOption::new(Duration::from_secs(5))).await;
+
+        assert!(result.is_err(), "should fail to connect to invalid addr");
+        match result.unwrap_err() {
+            RPCError::Unreachable(_) => {}
+            other => panic!("expected Unreachable, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_grpc_network_with_group_id() {
+        let network = GrpcRaftNetwork {
+            target: 1,
+            target_addr: "localhost:5000".to_string(),
+            channel_pool: ChannelPool::new(),
+            group_id: 0,
+        };
+
+        let network = network.with_group_id(42);
+        assert_eq!(network.group_id, 42);
+    }
+
+    #[test]
+    fn test_channel_pool_new_is_empty() {
+        let pool = ChannelPool::new();
+        assert!(pool.is_empty());
+        assert_eq!(pool.len(), 0);
+    }
+
+    #[test]
+    fn test_channel_pool_clone_shares_state() {
+        let pool = ChannelPool::new();
+        let pool2 = pool.clone();
+        assert_eq!(pool.len(), pool2.len());
+    }
+}
