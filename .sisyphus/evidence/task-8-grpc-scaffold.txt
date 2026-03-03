@@ -1,0 +1,48 @@
+=== Task 8: gRPC Server/Client Scaffolding with ChannelPool and Error Conversion ===
+Date: 2026-03-03T02:03:20Z
+
+=== cargo build -p rr-network ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.26s
+
+=== cargo test -p rr-network ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running unittests src/lib.rs (target/debug/deps/rr_network-a9b26262c8a887dc)
+
+running 16 tests
+test error_convert::tests::test_application_error_maps_to_internal ... ok
+test error_convert::tests::test_config_invalid_maps_to_invalid_argument ... ok
+test channel_pool::tests::test_channel_pool_default_is_empty ... ok
+test error_convert::tests::test_network_timeout_maps_to_deadline_exceeded ... ok
+test error_convert::tests::test_network_connection_failed_maps_to_unavailable ... ok
+test channel_pool::tests::test_channel_pool_clone_shares_state ... ok
+test error_convert::tests::test_not_leader_maps_to_unavailable ... ok
+test error_convert::tests::test_codec_error_maps_to_internal ... ok
+test error_convert::tests::test_not_leader_no_leader_maps_to_unavailable ... ok
+test channel_pool::tests::test_channel_pool_new_is_empty ... ok
+test channel_pool::tests::test_channel_pool_remove_nonexistent ... ok
+test error_convert::tests::test_raft_group_not_found_maps_to_not_found ... ok
+test error_convert::tests::test_raft_timeout_maps_to_deadline_exceeded ... ok
+test error_convert::tests::test_router_no_leader_maps_to_unavailable ... ok
+test error_convert::tests::test_storage_corruption_maps_to_data_loss ... ok
+test error_convert::tests::test_storage_not_found_maps_to_not_found ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rr_network
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+=== cargo clippy -p rr-network -- -D warnings ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
+
+=== Files Created/Modified ===
+- crates/rr-network/Cargo.toml (added dashmap dep)
+- crates/rr-network/src/lib.rs (added module exports)
+- crates/rr-network/src/channel_pool.rs (NEW)
+- crates/rr-network/src/error_convert.rs (NEW)
+- crates/rr-network/src/server.rs (NEW)
+- crates/rr-network/src/client.rs (NEW)
+- Cargo.toml (added dashmap to workspace deps)

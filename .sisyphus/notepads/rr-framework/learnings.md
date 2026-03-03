@@ -221,3 +221,26 @@ All pinned via `[workspace.dependencies]` for consistency:
 - **StreamExt ambiguity**: `tokio_stream::StreamExt` and `futures::StreamExt` both provide `.next()`. When both are in scope (prod code uses tokio_stream, tests import super::*), Rust can't disambiguate. Fix: don't re-import futures::StreamExt in tests when super::* already brings tokio_stream::StreamExt.
 - **broadcast send errors are OK**: `let _ = self.change_tx.send(...)` — no subscribers = no error needed
 - **tokio-stream sync feature**: Required for `BroadcastStream` wrapper. Without it, the type isn't available.
+
+## Task 8 Complete: gRPC Server/Client Scaffolding with ChannelPool (2026-03-03)
+
+### Implementation
+- `crates/rr-network/src/channel_pool.rs`: `ChannelPool` using `Arc<DashMap<NodeId, Channel>>` for lock-free concurrent connection pooling
+- `crates/rr-network/src/error_convert.rs`: `IntoStatus` trait + impls for all 7 error types → `tonic::Status`
+- `crates/rr-network/src/server.rs`: `RrGrpcServer` stub (addr + builder, service handlers deferred to T10/T11)
+- `crates/rr-network/src/client.rs`: `RrGrpcClient` wrapping `RaftServiceClient<Channel>` + `ClientServiceClient<Channel>`
+- `crates/rr-network/src/lib.rs`: Updated with all module exports + re-exports (`ChannelPool`, `RrGrpcClient`, `RrGrpcServer`, `IntoStatus`)
+- `Cargo.toml` (workspace): Added `dashmap = "6"` to workspace deps
+- `crates/rr-network/Cargo.toml`: Added `dashmap = { workspace = true }`
+
+### Key Learnings
+- **Orphan rule**: Cannot impl `From<RrError> for tonic::Status` in rr-network because neither type is local. Solution: define local `IntoStatus` trait with `fn into_status(self) -> Status` method.
+- **dashmap 6.x**: Current major version, API compatible with prior expectations. `DashMap::get()` returns `Ref<K,V>` which derefs to `V`; `.clone()` on `Ref` clones the value.
+- **tonic 0.14.5 Channel API**: `Channel::from_shared(uri_string)` returns `Result<Endpoint, _>`, then `.connect().await` → `Result<Channel, _>`. Channel implements Clone cheaply (inner Arc).
+- **RrGrpcServer::builder()**: Returns `tonic::transport::Server` (not a builder in the traditional sense). Service registration happens via `.add_service()` on the router returned by `Server::builder()`.
+
+### Testing
+- 16 tests total: 4 channel_pool + 12 error_convert
+- Channel pool tests: new/default empty, remove nonexistent, clone shares state
+- Error convert tests: every error variant → correct gRPC code mapping (Unavailable, NotFound, DeadlineExceeded, InvalidArgument, DataLoss, Internal)
+- All tests pass; zero clippy warnings
