@@ -7,5 +7,9 @@ edition = "2021"
 rr-core = { path = "../../crates/rr-core" }
 rr-server = { path = "../../crates/rr-server" }
 rr-raft = { path = "../../crates/rr-raft" }
+rr-config = { path = "../../crates/rr-config" }
+rr-storage = { path = "../../crates/rr-storage" }
 tokio.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
+openraft = { version = "0.9", features = ["serde"] }
