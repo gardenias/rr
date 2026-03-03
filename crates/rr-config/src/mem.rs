@@ -65,10 +65,40 @@ impl MemConfigProvider {
         let _ = self.change_tx.send(RoutingTableChange::PartitionRemoved { partition_id });
     }
 
-    /// Add a node address to the routing table.
+    /// Add a node address to the routing table and notify watchers.
     pub async fn add_node(&self, node_id: NodeId, addr: NodeAddr) {
         let mut table = self.routing_table.write().await;
-        table.nodes.insert(node_id, addr);
+        table.nodes.insert(node_id, addr.clone());
+        let _ = self.change_tx.send(RoutingTableChange::NodeAdded {
+            node_id,
+            addr,
+        });
+    }
+
+    /// Remove a node from the routing table and notify watchers.
+    pub async fn remove_node(&self, node_id: NodeId) {
+        let mut table = self.routing_table.write().await;
+        table.nodes.remove(&node_id);
+        let _ = self.change_tx.send(RoutingTableChange::NodeRemoved { node_id });
+    }
+
+    /// Update group membership and notify watchers.
+    pub async fn update_group_membership(&self, group_id: GroupId, replicas: Vec<NodeId>) {
+        let mut table = self.routing_table.write().await;
+        if let Some(group) = table.groups.get_mut(&group_id) {
+            group.replicas = replicas.clone();
+            group.leader = replicas.first().copied();
+        } else {
+            table.groups.insert(group_id, GroupMeta {
+                group_id,
+                leader: replicas.first().copied(),
+                replicas: replicas.clone(),
+            });
+        }
+        let _ = self.change_tx.send(RoutingTableChange::GroupMembershipChanged {
+            group_id,
+            replicas,
+        });
     }
 }
 
@@ -231,5 +261,124 @@ mod tests {
         let table = provider.get_routing_table().await.unwrap();
         assert_eq!(table.partitions.len(), 2);
         assert_eq!(table.groups.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_watch_receives_node_added() {
+        let provider = MemConfigProvider::new();
+        let mut stream = provider.watch_changes().await.unwrap();
+
+        let p2 = provider.clone();
+        tokio::spawn(async move {
+            let addr = NodeAddr {
+                addr: "127.0.0.1:9001".to_string(),
+            };
+            p2.add_node(99, addr).await;
+        });
+
+        let change = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended");
+
+        match change {
+            RoutingTableChange::NodeAdded { node_id, addr } => {
+                assert_eq!(node_id, 99);
+                assert_eq!(addr.addr, "127.0.0.1:9001");
+            }
+            _ => panic!("expected NodeAdded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_watch_receives_node_removed() {
+        let provider = MemConfigProvider::new();
+        let addr = NodeAddr {
+            addr: "127.0.0.1:9002".to_string(),
+        };
+        provider.add_node(88, addr).await;
+        let mut stream = provider.watch_changes().await.unwrap();
+
+        let p2 = provider.clone();
+        tokio::spawn(async move {
+            p2.remove_node(88).await;
+        });
+
+        let change = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended");
+
+        match change {
+            RoutingTableChange::NodeRemoved { node_id } => {
+                assert_eq!(node_id, 88);
+            }
+            _ => panic!("expected NodeRemoved"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_watch_receives_group_membership_changed() {
+        let provider = MemConfigProvider::new();
+        provider
+            .add_partition(10, PartitionConfig::SingleId(10), 50, vec![1, 2])
+            .await;
+        let mut stream = provider.watch_changes().await.unwrap();
+
+        let p2 = provider.clone();
+        tokio::spawn(async move {
+            p2.update_group_membership(50, vec![1, 2, 3]).await;
+        });
+
+        let change = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .expect("timeout")
+            .expect("stream ended");
+
+        match change {
+            RoutingTableChange::GroupMembershipChanged { group_id, replicas } => {
+                assert_eq!(group_id, 50);
+                assert_eq!(replicas, vec![1, 2, 3]);
+            }
+            _ => panic!("expected GroupMembershipChanged"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_add_node_visible_in_routing_table() {
+        let provider = MemConfigProvider::new();
+        let addr = NodeAddr {
+            addr: "127.0.0.1:9003".to_string(),
+        };
+        provider.add_node(77, addr.clone()).await;
+        let table = provider.get_routing_table().await.unwrap();
+        assert_eq!(table.nodes.len(), 1);
+        let node = table.nodes.get(&77).unwrap();
+        assert_eq!(node.addr, "127.0.0.1:9003");
+    }
+
+    #[tokio::test]
+    async fn test_remove_node_visible_in_routing_table() {
+        let provider = MemConfigProvider::new();
+        let addr = NodeAddr {
+            addr: "127.0.0.1:9004".to_string(),
+        };
+        provider.add_node(66, addr).await;
+        provider.remove_node(66).await;
+        let table = provider.get_routing_table().await.unwrap();
+        assert!(table.nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_group_membership_visible_in_routing_table() {
+        let provider = MemConfigProvider::new();
+        provider
+            .add_partition(11, PartitionConfig::SingleId(11), 51, vec![1])
+            .await;
+        provider.update_group_membership(51, vec![1, 2, 3, 4]).await;
+        let table = provider.get_routing_table().await.unwrap();
+        let group = table.groups.get(&51).unwrap();
+        assert_eq!(group.replicas, vec![1, 2, 3, 4]);
+        assert_eq!(group.leader, Some(1));
     }
 }

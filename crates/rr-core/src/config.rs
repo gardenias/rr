@@ -19,11 +19,24 @@ pub enum RoutingTableChange {
     },
     /// A partition was removed from the routing table.
     PartitionRemoved { partition_id: PartitionId },
+
     /// An existing partition's configuration was updated.
     PartitionUpdated {
         partition_id: PartitionId,
         config: PartitionConfig,
         group_id: GroupId,
+    },
+    /// A new node was added.
+    NodeAdded {
+        node_id: NodeId,
+        addr: NodeAddr,
+    },
+    /// A node was removed.
+    NodeRemoved { node_id: NodeId },
+    /// Group membership was changed.
+    GroupMembershipChanged {
+        group_id: GroupId,
+        replicas: Vec<NodeId>,
     },
 }
 
@@ -74,4 +87,53 @@ mod tests {
     fn test_config_provider_is_object_safe() {
         let _: Option<Box<dyn ConfigProvider>> = None;
     }
+
+    #[test]
+    fn test_routing_table_change_node_added() {
+        let addr = NodeAddr {
+            addr: "127.0.0.1:9001".to_string(),
+        };
+        let change = RoutingTableChange::NodeAdded {
+            node_id: 42,
+            addr: addr.clone(),
+        };
+        let cloned = change.clone();
+        match cloned {
+            RoutingTableChange::NodeAdded { node_id, addr: cloned_addr } => {
+                assert_eq!(node_id, 42);
+                assert_eq!(cloned_addr.addr, "127.0.0.1:9001");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_routing_table_change_node_removed() {
+        let change = RoutingTableChange::NodeRemoved { node_id: 55 };
+        let cloned = change.clone();
+        match cloned {
+            RoutingTableChange::NodeRemoved { node_id } => {
+                assert_eq!(node_id, 55);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_routing_table_change_group_membership_changed() {
+        let change = RoutingTableChange::GroupMembershipChanged {
+            group_id: 100,
+            replicas: vec![1, 2, 3],
+        };
+        let cloned = change.clone();
+        match cloned {
+            RoutingTableChange::GroupMembershipChanged { group_id, replicas } => {
+                assert_eq!(group_id, 100);
+                assert_eq!(replicas, vec![1, 2, 3]);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+    }
 }
+
