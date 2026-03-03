@@ -28,3 +28,4 @@ bytes = "1"
 anyhow = "1"
 dashmap = "6"
 metrics = "0.24"
+rocksdb = { version = "0.24.0", features = ["multi-threaded-cf"] }

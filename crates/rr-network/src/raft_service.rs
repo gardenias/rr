@@ -53,13 +53,13 @@ pub trait RaftGroupLookup: Send + Sync {
     /// `metadata` is the bincode-serialized snapshot metadata from the final
     /// chunk, and `data` is the concatenated raw snapshot bytes.
     ///
-    /// Returns `true` on success.
+    /// Returns the bincode-serialized `InstallSnapshotResponse`.
     async fn install_snapshot(
         &self,
         group_id: GroupId,
         metadata: Vec<u8>,
         data: Vec<u8>,
-    ) -> Result<bool, tonic::Status>;
+    ) -> Result<Vec<u8>, tonic::Status>;
 }
 
 /// gRPC service implementation that receives Raft RPCs and forwards them
@@ -147,18 +147,19 @@ impl raft_service_server::RaftService for RaftServiceImpl {
             data.extend_from_slice(&chunk.data);
         }
 
-        let success = self
+        let payload = self
             .groups
             .install_snapshot(group_id, metadata, data)
             .await?;
 
         Ok(tonic::Response::new(SnapshotResponse {
             group_id,
-            success,
+            success: true,
+            payload,
         }))
     }
-}
 
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,7 +194,7 @@ mod tests {
             group_id: GroupId,
             _metadata: Vec<u8>,
             _data: Vec<u8>,
-        ) -> Result<bool, tonic::Status> {
+        ) -> Result<Vec<u8>, tonic::Status> {
             Err(tonic::Status::not_found(format!(
                 "group {group_id} not found"
             )))
@@ -243,5 +244,23 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
         assert!(err.message().contains("group 42 not found"));
+    }
+    
+    #[test]
+    fn test_snapshot_response_has_payload_field() {
+        // Test that SnapshotResponse can hold a payload field
+        // This verifies the proto has been updated correctly
+        let test_payload = vec![1, 2, 3, 4, 5];
+        
+        let proto_resp = SnapshotResponse {
+            group_id: 42,
+            success: true,
+            payload: test_payload.clone(),
+        };
+        
+        // Verify the payload field is present and correctly stored
+        assert_eq!(proto_resp.group_id, 42);
+        assert_eq!(proto_resp.success, true);
+        assert_eq!(proto_resp.payload, test_payload);
     }
 }

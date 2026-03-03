@@ -2,3 +2,6 @@
 
 pub mod mem;
 pub use mem::MemStorage;
+
+#[cfg(feature = "rocks")]
+pub mod rocks;

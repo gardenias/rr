@@ -7,3 +7,10 @@ edition = "2021"
 rr-core = { path = "../rr-core" }
 async-trait.workspace = true
 tokio.workspace = true
+rocksdb = { workspace = true, optional = true }
+
+[features]
+rocks = ["dep:rocksdb"]
+
+[dev-dependencies]
+tempfile = "3"

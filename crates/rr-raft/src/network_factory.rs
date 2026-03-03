@@ -98,6 +98,8 @@ struct ProtoSnapshotResp {
     group_id: u64,
     #[prost(bool, tag = "2")]
     success: bool,
+    #[prost(bytes = "vec", tag = "3")]
+    payload: Vec<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,21 +385,25 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
         };
 
         let mut client = RaftGrpcClient::new(channel);
-        let _response = client
+        let response = client
             .install_snapshot(tokio_stream::iter(vec![chunk]))
             .await
             .map_err(to_unreachable_snap)?
             .into_inner();
 
-        // NOTE: The current proto SnapshotResponse only has (group_id, success)
-        // and lacks a `payload` field for the serialized openraft response.
-        // The server handler deserializes the metadata, processes the snapshot,
-        // and indicates success. The follower's vote is not returned via the
-        // current proto — a default vote is used here. This will be corrected
-        // when the proto is extended with a payload field.
-        Ok(InstallSnapshotResponse {
-            vote: Vote::new(0, 0),
-        })
+        // Deserialize the payload to get the InstallSnapshotResponse.
+        // For backward compatibility, if payload is empty, use a default vote.
+        let vote = if response.payload.is_empty() {
+            tracing::warn!("snapshot response payload is empty, using default vote");
+            Vote::new(0, 0)
+        } else {
+            let (resp, _): (InstallSnapshotResponse<u64>, _) =
+                bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
+                    .map_err(to_unreachable_snap)?;
+            resp.vote
+        };
+
+        Ok(InstallSnapshotResponse { vote })
     }
 }
 

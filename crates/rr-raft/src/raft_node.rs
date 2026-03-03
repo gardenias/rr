@@ -36,12 +36,19 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
-    /// Create a new `RaftNode` with in-memory storage and a no-op network.
-    pub async fn new(
+    /// Create a new `RaftNode` with in-memory storage and a provided network factory.
+    ///
+    /// The network factory is generic over the actual implementation, allowing
+    /// different network transports (gRPC, mocked, etc.) to be injected.
+    pub async fn new_with_factory<NF>(
         group_id: GroupId,
         node_id: u64,
         state_machine: Box<dyn StateMachine>,
-    ) -> Result<Self, Fatal<u64>> {
+        network_factory: NF,
+    ) -> Result<Self, Fatal<u64>>
+    where
+        NF: RaftNetworkFactory<RrTypeConfig> + 'static,
+    {
         let config = Arc::new(
             Config {
                 heartbeat_interval: 250,
@@ -55,11 +62,29 @@ impl RaftNode {
 
         let log_storage = RrLogStorage::default();
         let sm = RrStateMachine::new(state_machine);
-        let network = NoopNetworkFactory;
+        let network = network_factory;
 
         let raft = Raft::new(node_id, config, network, log_storage, sm).await?;
 
         Ok(Self { group_id, raft })
+    }
+
+    /// Create a new `RaftNode` for single-node clusters using `NoopNetworkFactory`.
+    ///
+    /// This is a convenience constructor for scenarios where no inter-node networking
+    /// is needed (e.g., single-node clusters or tests).
+    pub async fn new_single_node(
+        group_id: GroupId,
+        node_id: u64,
+        state_machine: Box<dyn StateMachine>,
+    ) -> Result<Self, Fatal<u64>> {
+        Self::new_with_factory(
+            group_id,
+            node_id,
+            state_machine,
+            NoopNetworkFactory,
+        )
+        .await
     }
 
     /// Initialize this node as a single-node cluster.
@@ -83,7 +108,7 @@ impl RaftNode {
 // No-op network for single-node / test scenarios
 // ---------------------------------------------------------------------------
 
-struct NoopNetworkFactory;
+pub struct NoopNetworkFactory;
 
 impl RaftNetworkFactory<RrTypeConfig> for NoopNetworkFactory {
     type Network = NoopNetwork;
@@ -93,7 +118,7 @@ impl RaftNetworkFactory<RrTypeConfig> for NoopNetworkFactory {
     }
 }
 
-struct NoopNetwork;
+pub struct NoopNetwork;
 
 impl RaftNetwork<RrTypeConfig> for NoopNetwork {
     async fn append_entries(
@@ -184,7 +209,9 @@ mod tests {
     #[tokio::test]
     async fn test_single_node_raft_propose() {
         let (sm, applied) = TestSM::new();
-        let node = RaftNode::new(1, 1, Box::new(sm)).await.unwrap();
+        let node = RaftNode::new_single_node(1, 1, Box::new(sm))
+            .await
+            .unwrap();
 
         // Initialize as single-node cluster
         node.init_single_node(1).await.unwrap();
@@ -203,5 +230,35 @@ mod tests {
             "state machine should have applied the entry, got: {:?}",
             *entries,
         );
+    }
+
+    #[tokio::test]
+    async fn test_raft_node_accepts_noop_factory() {
+        let (sm, _applied) = TestSM::new();
+        let node = RaftNode::new_with_factory(
+            1,
+            1,
+            Box::new(sm),
+            NoopNetworkFactory,
+        )
+        .await
+        .unwrap();
+        assert_eq!(node.group_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_raft_node_accepts_injected_factory() {
+        let (sm, _applied) = TestSM::new();
+        // Verify we can pass a custom factory implementation
+        // For now, we reuse NoopNetworkFactory as both the injected and expected factory
+        let node = RaftNode::new_with_factory(
+            2,
+            2,
+            Box::new(sm),
+            NoopNetworkFactory,
+        )
+        .await
+        .unwrap();
+        assert_eq!(node.group_id, 2);
     }
 }

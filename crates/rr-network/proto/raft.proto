@@ -46,4 +46,5 @@ message SnapshotChunk {
 message SnapshotResponse {
     uint64 group_id = 1;
     bool success = 2;
+    bytes payload = 3;
 }
