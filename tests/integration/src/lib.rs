@@ -1065,4 +1065,74 @@ mod tests {
 
         shutdown_all(&nodes).await;
     }
+
+    // ── T28: End-to-End Smoke Test (Full Cluster Lifecycle) ─────────────────────
+
+    /// T28 — End-to-end smoke test: build cluster, elect leader, write entries,
+    /// replicate, kill a follower, write more, trigger snapshot, shutdown.
+    #[cfg(feature = "rocks")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_e2e_smoke() {
+        use std::time::Duration;
+
+        // 1. Build 3-node in-process cluster with real gRPC networking
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        // 2. Verify leader election
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        assert!(leader_id >= 1 && leader_id <= 3, "leader must be one of the 3 nodes");
+
+        // 3. Write 20 entries through the leader
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        for i in 0u8..20 {
+            raft.client_write(vec![i]).await.unwrap();
+        }
+
+        // 4. Wait for all nodes to replicate
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        for node in &nodes {
+            if let Some(r) = node.group_manager().get_raft(1).await {
+                let metrics = r.metrics().borrow().clone();
+                assert!(
+                    metrics.last_applied.is_some(),
+                    "node {} must have applied entries",
+                    node.node_id()
+                );
+            }
+        }
+
+        // 5. Kill a follower
+        let kill_id = nodes
+            .iter()
+            .find(|n| n.node_id() != leader_id)
+            .map(|n| n.node_id())
+            .unwrap();
+        let killed = nodes.iter().find(|n| n.node_id() == kill_id).unwrap();
+        killed.shutdown().await.unwrap();
+
+        // 6. Write more data — cluster must survive with 2/3 nodes
+        let active: Vec<_> = nodes.iter().filter(|n| n.node_id() != kill_id).cloned().collect();
+        let new_leader_id = wait_for_cluster_ready(&active, 1, 8_000).await.unwrap();
+        let new_leader = active.iter().find(|n| n.node_id() == new_leader_id).unwrap();
+        let raft2 = new_leader.group_manager().get_raft(1).await.unwrap();
+        for i in 20u8..30 {
+            raft2.client_write(vec![i]).await.unwrap();
+        }
+
+        // 7. Trigger snapshot and verify cluster is still healthy
+        let _ = raft2.trigger().snapshot().await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let final_leader = wait_for_cluster_ready(&active, 1, 5_000).await.unwrap();
+        assert!(final_leader >= 1 && final_leader <= 3);
+
+        // 8. Graceful shutdown of remaining nodes
+        for node in &active {
+            let _ = node.shutdown().await;
+        }
+    }
 }
