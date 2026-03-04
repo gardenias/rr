@@ -83,14 +83,14 @@
 - tracing + metrics 集成
 
 ### Definition of Done
-- [ ] `cargo build --workspace` — exit 0
-- [ ] `cargo test --workspace` — exit 0, all tests pass
-- [ ] `cargo clippy --workspace -- -D warnings` — exit 0
-- [ ] `cargo fmt --all -- --check` — exit 0
-- [ ] KV Store 示例可启动 3 节点集群
-- [ ] 可通过 gRPC 写入和读取 KV 数据
-- [ ] Leader 切换后数据仍然可访问
-- [ ] 多 Raft Group 正确路由请求到对应分片
+- [x] `cargo build --workspace` — exit 0
+- [x] `cargo test --workspace` — exit 0, all tests pass
+- [x] `cargo clippy --workspace -- -D warnings` — exit 0
+- [x] `cargo fmt --all -- --check` — exit 0
+- [x] KV Store 示例可启动 3 节点集群
+- [x] 可通过 gRPC 写入和读取 KV 数据
+- [x] Leader 切换后数据仍然可访问
+- [x] 多 Raft Group 正确路由请求到对应分片
 
 ### Must Have
 - openraft 集成 (固定版本)
@@ -282,7 +282,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(workspace): scaffold cargo workspace with 7 crates`
 
-- [ ] 2. rr-core — Error Types + Common Types
+- [x] 2. rr-core — Error Types + Common Types
 
   **What to do**:
   - Define common types in `rr-core/src/types.rs`: `NodeId=u64`, `GroupId=u64`, `PartitionId=u64`, `LogIndex=u64`, `RoutingTable` struct (partition configs → GroupId → replicas), `PartitionConfig` enum (`SingleId(u64)` | `Range{start,end}`), `NodeAddr{addr:String}`, `GroupMeta{group_id, leader, replicas}`
@@ -328,7 +328,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(core): define error types and common types`
 
-- [ ] 3. rr-core — Core Trait Definitions (Service, StateMachine, StorageEngine, ConfigProvider, Codec)
+- [x] 3. rr-core — Core Trait Definitions (Service, StateMachine, StorageEngine, ConfigProvider, Codec)
 
   **What to do**:
   - Define `Codec` trait in `rr-core/src/codec.rs`: `fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CodecError>` + `fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, CodecError>`. Provide `BincodeCodec` as default impl (this IS allowed in rr-core since it's a standalone utility).
@@ -388,7 +388,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(core): define Service, StateMachine, StorageEngine, ConfigProvider, Codec traits`
 
-- [ ] 4. Proto Definitions (rr-network/proto/)
+- [x] 4. Proto Definitions (rr-network/proto/)
 
   **What to do**:
   - Create `crates/rr-network/proto/raft.proto`:
@@ -438,7 +438,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(network): define gRPC proto for RaftService and ClientService`
 
-- [ ] 5. rr-storage — In-Memory StorageEngine Implementation + Tests
+- [x] 5. rr-storage — In-Memory StorageEngine Implementation + Tests
 
   **What to do**:
   - Implement `MemStorage` in `crates/rr-storage/src/mem.rs` that implements `StorageEngine` trait from rr-core
@@ -494,7 +494,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(storage): in-memory StorageEngine implementation`
 
-- [ ] 6. rr-config — In-Memory ConfigProvider Implementation + Tests
+- [x] 6. rr-config — In-Memory ConfigProvider Implementation + Tests
 
   **What to do**:
   - Implement `MemConfigProvider` in `crates/rr-config/src/mem.rs` that implements `ConfigProvider` trait
@@ -545,7 +545,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(config): in-memory ConfigProvider implementation`
 
-- [ ] 7. rr-raft — TypeConfig + Single Raft Group Integration with openraft
+- [x] 7. rr-raft — TypeConfig + Single Raft Group Integration with openraft
 
   **What to do**:
   - Define framework `TypeConfig` in `crates/rr-raft/src/type_config.rs`: implements `openraft::RaftTypeConfig` with `D=Vec<u8>`, `R=Vec<u8>`, `NodeId=u64`, `Node=BasicNode`, `Entry=openraft::Entry<TypeConfig>`, `SnapshotData=Cursor<Vec<u8>>`, `AsyncRuntime=TokioRuntime`
@@ -606,7 +606,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(raft): TypeConfig and single Raft group integration with openraft`
 
-- [ ] 8. rr-network — Tonic gRPC Server/Client Scaffolding + build.rs
+- [x] 8. rr-network — Tonic gRPC Server/Client Scaffolding + build.rs
 
   **What to do**:
   - Setup `crates/rr-network/build.rs` with tonic-build to compile `raft.proto` and `client.proto`
@@ -656,7 +656,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(network): gRPC server/client scaffolding with channel pool`
 
-- [ ] 9. rr-raft — RaftGroupManager (Multi-Group Lifecycle) + Tests
+- [x] 9. rr-raft — RaftGroupManager (Multi-Group Lifecycle) + Tests
 
   **What to do**:
   - Implement `RaftGroupManager` in `crates/rr-raft/src/group_manager.rs`:
@@ -714,7 +714,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(raft): multi-raft RaftGroupManager`
 
-- [ ] 10. rr-network — RaftService gRPC Implementation (with group_id demux)
+- [x] 10. rr-network — RaftService gRPC Implementation (with group_id demux)
 
   **What to do**:
   - Implement `RaftServiceImpl` in `crates/rr-network/src/raft_service.rs` that implements the generated `RaftService` trait from proto:
@@ -759,7 +759,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(network): RaftService gRPC implementation with group_id demux`
 
-- [ ] 11. rr-network — ClientService gRPC Implementation + Leader Forwarding
+- [x] 11. rr-network — ClientService gRPC Implementation + Leader Forwarding
 
   **What to do**:
   - Implement `ClientServiceImpl` in `crates/rr-network/src/client_service.rs`:
@@ -812,7 +812,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(network): ClientService with leader forwarding`
 
-- [ ] 12. rr-network — RaftNetworkFactory + Connection Pooling
+- [x] 12. rr-network — RaftNetworkFactory + Connection Pooling
 
   **What to do**:
   - Implement `GrpcNetworkFactory` in `crates/rr-network/src/network_factory.rs`:
@@ -859,7 +859,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(network): RaftNetworkFactory with gRPC connection pooling`
 
-- [ ] 13. rr-router — ShardRouter (ConfigProvider → RoutingTable → GroupId) + Tests
+- [x] 13. rr-router — ShardRouter (ConfigProvider → RoutingTable → GroupId) + Tests
 
   **What to do**:
   - Implement `ShardRouter` in `crates/rr-router/src/router.rs`:
@@ -915,7 +915,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(router): ShardRouter with ConfigProvider-backed routing table`
 
-- [ ] 14. rr-server — RrNode (Node Lifecycle: startup → config load → create groups → serve) + Tests
+- [x] 14. rr-server — RrNode (Node Lifecycle: startup → config load → create groups → serve) + Tests
 
   **What to do**:
   - Create `crates/rr-server/src/node.rs` — `RrNode` struct:
@@ -1027,7 +1027,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(server): RrNode lifecycle manager with startup/shutdown`
 
-- [ ] 15. Observability — tracing instrumentation + metrics across all crates + Tests
+- [x] 15. Observability — tracing instrumentation + metrics across all crates + Tests
 
   **What to do**:
   - Add `tracing` dependency to all library crates (rr-core re-exports, others use)
@@ -1124,7 +1124,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(observability): add tracing spans and metrics counters across all crates`
 
-- [ ] 16. rr-raft — Service Trait Adapter (高层 Service → StateMachine Bridge) + Tests
+- [x] 16. rr-raft — Service Trait Adapter (高层 Service → StateMachine Bridge) + Tests
 
   **What to do**:
   - Create `crates/rr-raft/src/service_adapter.rs` — `ServiceStateMachineAdapter<S: Service>`:
@@ -1234,7 +1234,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(raft): ServiceStateMachineAdapter bridging high-level Service to StateMachine`
 
-- [ ] 17. examples/kv-store — KV Store Service + StateMachine Implementation + Tests
+- [x] 17. examples/kv-store — KV Store Service + StateMachine Implementation + Tests
 
   **What to do**:
   - Create `examples/kv-store/` as a Cargo binary crate within the workspace:
@@ -1342,7 +1342,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(example): KV Store Service and StateMachine implementations`
 
-- [ ] 18. examples/kv-store — KV Store gRPC Client + Demo Runner + Tests
+- [x] 18. examples/kv-store — KV Store gRPC Client + Demo Runner + Tests
 
   **What to do**:
   - Create `examples/kv-store/src/client.rs` — `KvClient`:
@@ -1427,7 +1427,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `feat(example): KV Store client CLI and demo runner`
 
-- [ ] 19. Integration Tests — Multi-Node Cluster Test Harness + Basic Tests
+- [x] 19. Integration Tests — Multi-Node Cluster Test Harness + Basic Tests
 
   **What to do**:
   - Create `tests/integration/` directory structure:
@@ -1529,7 +1529,7 @@ Max Concurrent: 5 (Wave 3)
 
   **Commit**: YES — `test(integration): multi-node cluster test harness with basic tests`
 
-- [ ] 20. Integration Tests — Leader Election, Failover, Multi-Group Routing Tests
+- [x] 20. Integration Tests — Leader Election, Failover, Multi-Group Routing Tests
 
   **What to do**:
   - Add advanced integration tests in `tests/integration/tests/advanced.rs`:
@@ -1643,19 +1643,19 @@ Max Concurrent: 5 (Wave 3)
 
 >
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read the plan end-to-end. For each "Must Have": verify implementation exists (read file, run `cargo test`, check output). For each "Must NOT Have": search codebase for forbidden patterns (`anyhow` in lib crates, `assert!(true)`, circular deps, RocksDB/etcd impls). Check evidence files exist in `.sisyphus/evidence/`. Compare deliverables against plan.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | VERDICT: APPROVE/REJECT`
 
-- [ ] F2. **Code Quality Review** — `unspecified-high`
+- [x] F2. **Code Quality Review** — `unspecified-high`
   Run `cargo clippy --workspace -- -D warnings` + `cargo fmt --all -- --check` + `cargo test --workspace`. Review all source files for: `as any` casting, empty catches/unwrap chains, `println!` in lib code, commented-out code, unused imports. Check AI slop: excessive comments, over-abstraction, generic names. Verify crate dependency DAG is acyclic.
   Output: `Build [PASS/FAIL] | Clippy [PASS/FAIL] | Fmt [PASS/FAIL] | Tests [N pass/N fail] | Files [N clean/N issues] | VERDICT`
 
-- [ ] F3. **Real Manual QA** — `unspecified-high`
+- [x] F3. **Real Manual QA** — `unspecified-high`
   Start from clean state (`cargo clean && cargo build --workspace`). Launch KV Store example with 3 nodes. Execute EVERY QA scenario from EVERY task — follow exact steps, capture evidence. Test cross-task integration: write via node 1, read via node 2; kill leader, write via new leader; route to different shard groups. Save to `.sisyphus/evidence/final-qa/`.
   Output: `Scenarios [N/N pass] | Integration [N/N] | Edge Cases [N tested] | VERDICT`
 
-- [ ] F4. **Scope Fidelity Check** — `deep`
+- [x] F4. **Scope Fidelity Check** — `deep`
   For each task: read "What to do", read actual source files. Verify 1:1 — everything in spec was built, nothing beyond spec was built. Check "Must NOT do" compliance: search for forbidden patterns (consistent hashing, auth, Docker, web UI, RocksDB impl, etcd impl). Flag unaccounted files. Verify no crate exceeds its defined responsibility.
   Output: `Tasks [N/N compliant] | Contamination [CLEAN/N issues] | Unaccounted [CLEAN/N files] | VERDICT`
 
@@ -1694,13 +1694,13 @@ cargo build --example kv-store  # Expected: Compiling ... Finished
 ```
 
 ### Final Checklist
-- [ ] All "Must Have" present and working
-- [ ] All "Must NOT Have" absent (verified by codebase search)
-- [ ] All tests pass (`cargo test --workspace`)
-- [ ] Clippy + fmt clean
-- [ ] KV Store example: 3-node cluster start, write, read, leader failover
-- [ ] Crate dependency DAG is acyclic
-- [ ] No `anyhow` in library crates
-- [ ] No placeholder assertions
-- [ ] tracing spans on all public trait implementations
-- [ ] metrics counters/histograms for key operations
+- [x] All "Must Have" present and working
+- [x] All "Must NOT Have" absent (verified by codebase search)
+- [x] All tests pass (`cargo test --workspace`)
+- [x] Clippy + fmt clean
+- [x] KV Store example: 3-node cluster start, write, read, leader failover
+- [x] Crate dependency DAG is acyclic
+- [x] No `anyhow` in library crates
+- [x] No placeholder assertions
+- [x] tracing spans on all public trait implementations
+- [x] metrics counters/histograms for key operations

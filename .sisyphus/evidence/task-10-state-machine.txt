@@ -1,0 +1,1 @@
+Docs build successful (with existing broken link warnings). File docs/docs/guide/state-machine-trait.md created.

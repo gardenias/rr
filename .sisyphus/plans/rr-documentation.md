@@ -202,7 +202,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 > **Bilingual Format Convention**: Every page uses `## 标题 / Title` headers, then Chinese paragraph, then `---`, then English paragraph.
 > **A task WITHOUT QA Scenarios is INCOMPLETE. No exceptions.**
 
-- [ ] 1. Docusaurus Scaffold + Mermaid + CJK CSS
+- [x] 1. Docusaurus Scaffold + Mermaid + CJK CSS
 
   **What to do**:
   - Run `npx create-docusaurus@latest docs classic --typescript` in project root
@@ -297,7 +297,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
   - Files: `docs/`
   - Pre-commit: `cd docs && npm run build`
 
-- [ ] 2. Root README.md
+- [x] 2. Root README.md
 
   **What to do**:
   - Create `README.md` in project root with:
@@ -374,7 +374,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
 ---
 
-- [ ] 3. Architecture Overview + Crate Map Pages
+- [x] 3. Architecture Overview + Crate Map Pages
 
   **What to do**:
   - Create `docs/docs/architecture/overview.md` — high-level architecture page:
@@ -446,7 +446,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
   - Message: `docs: add architecture documentation (6 pages)`
   - Files: `docs/docs/architecture/*.md`
 
-- [ ] 4. Data Flow Page
+- [x] 4. Data Flow Page
 
   **What to do**:
   - Create `docs/docs/architecture/data-flow.md`:
@@ -507,7 +507,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T3, T5-T7)
 
-- [ ] 5. Multi-Raft Design Page
+- [x] 5. Multi-Raft Design Page
 
   **What to do**:
   - Create `docs/docs/architecture/multi-raft.md`:
@@ -564,7 +564,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T3-T4, T6-T7)
 
-- [ ] 6. Storage Layer Page
+- [x] 6. Storage Layer Page
 
   **What to do**:
   - Create `docs/docs/architecture/storage.md`:
@@ -625,7 +625,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T3-T5, T7)
 
-- [ ] 7. Networking Page
+- [x] 7. Networking Page
 
   **What to do**:
   - Create `docs/docs/architecture/networking.md`:
@@ -692,7 +692,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
   - Pre-commit: `cd docs && npm run build`
 
 
-- [ ] 8. Getting Started Page
+- [x] 8. Getting Started Page
 
   **What to do**:
   - Create `docs/docs/guide/getting-started.md`:
@@ -761,7 +761,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
   - Message: `docs: add user guide documentation (6 pages)`
   - Files: `docs/docs/guide/*.md`
 
-- [ ] 9. Service Trait Page
+- [x] 9. Service Trait Page
 
   **What to do**:
   - Create `docs/docs/guide/service-trait.md`:
@@ -814,7 +814,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T8, T10-T13)
 
-- [ ] 10. StateMachine Trait Page
+- [x] 10. StateMachine Trait Page
 
   **What to do**:
   - Create `docs/docs/guide/state-machine-trait.md`:
@@ -864,7 +864,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T8-T9, T11-T13)
 
-- [ ] 11. Config Provider Page
+- [x] 11. Config Provider Page
 
   **What to do**:
   - Create `docs/docs/guide/config-provider.md`:
@@ -914,7 +914,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T8-T10, T12-T13)
 
-- [ ] 12. Storage Engines Page
+- [x] 12. Storage Engines Page
 
   **What to do**:
   - Create `docs/docs/guide/storage-engines.md`:
@@ -967,7 +967,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T8-T11, T13)
 
-- [ ] 13. Client SDK Page
+- [x] 13. Client SDK Page
 
   **What to do**:
   - Create `docs/docs/guide/client-sdk.md`:
@@ -1022,7 +1022,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
   - Files: `docs/docs/guide/*.md`
   - Pre-commit: `cd docs && npm run build`
 
-- [ ] 14. API Overview Page
+- [x] 14. API Overview Page
 
   **What to do**:
   - Create `docs/docs/reference/api-overview.md`:
@@ -1077,7 +1077,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T15-T19)
 
-- [ ] 15. Proto Reference Page
+- [x] 15. Proto Reference Page
 
   **What to do**:
   - Create `docs/docs/reference/proto-reference.md`:
@@ -1126,7 +1126,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T14, T16-T19)
 
-- [ ] 16. Config Reference Page
+- [x] 16. Config Reference Page
 
   **What to do**:
   - Create `docs/docs/reference/config-reference.md`:
@@ -1179,7 +1179,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T14-T15, T17-T19)
 
-- [ ] 17. Error Reference Page
+- [x] 17. Error Reference Page
 
   **What to do**:
   - Create `docs/docs/reference/error-reference.md`:
@@ -1224,7 +1224,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T14-T16, T18-T19)
 
-- [ ] 18. Benchmarks Placeholder Page
+- [x] 18. Benchmarks Placeholder Page
 
   **What to do**:
   - Create `docs/docs/reference/benchmarks.md`:
@@ -1267,7 +1267,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
   **Commit**: YES (groups with T14-T17, T19)
 
-- [ ] 19. Deployment Guide Page
+- [x] 19. Deployment Guide Page
 
   **What to do**:
   - Create `docs/docs/deployment/deployment.md`:
@@ -1327,7 +1327,7 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
   - Files: `docs/docs/reference/*.md`, `docs/docs/deployment/*.md`
   - Pre-commit: `cd docs && npm run build`
 
-- [ ] 20. Final Sidebar Config + Build Verification
+- [x] 20. Final Sidebar Config + Build Verification
 
   **What to do**:
   - Update `docs/sidebars.js` (or `sidebars.ts`) to correctly reference all 19 pages:

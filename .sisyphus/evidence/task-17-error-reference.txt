@@ -1,0 +1,10 @@
+Reference: docs/docs/reference/error-reference.md
+Status: File created and build passed (with existing broken link warnings).
+Verified Error Variants in crates/rr-core/src/error.rs:
+- Raft (RaftError)
+- Storage (StorageError)
+- Config (ConfigError)
+- Router (RouterError)
+- Network (NetworkError)
+- Codec (CodecError)
+- Application (String)
