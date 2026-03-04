@@ -135,3 +135,59 @@ Added `RocksConfig` struct to `crates/rr-storage/src/rocks.rs` with production-r
 - `rocksdb::DBCompressionType` can be used directly in public API since the entire module is `#[cfg(feature = "rocks")]`
 - `Cache::new_lru_cache` takes bytes not MB — multiply by 1024*1024
 - Adding `tracing` dependency was needed for config logging (workspace already had it)
+
+## [T14] RrNode Config Watch Loop — COMPLETED (2026-03-04)
+
+### Summary
+Added config-change watch loop to `RrNode` that subscribes to `config_provider.watch_changes()` and reacts to `RoutingTableChange` events.
+
+### Implementation Details
+
+#### 1. New fields on RrNode
+```rust
+config_provider: Arc<dyn ConfigProvider>,   // stored directly for watch loop
+watch_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+```
+
+#### 2. start() changes
+- Clone `config_provider` Arc before passing to `ShardRouter::new()` so both RrNode and router share it
+- Call `config_provider.watch_changes().await` to get stream
+- Move `Arc<RaftGroupManager>`, `Arc<dyn ConfigProvider>`, and `node_id` (copy) into the spawned task (NOT `&self`)
+- Use `futures::StreamExt` (`.next().await`) to consume the stream
+
+#### 3. PartitionAdded handling
+- `PartitionAdded` variant does NOT include replicas — must call `cp.get_routing_table().await` and look up `table.groups.get(&group_id).replicas`
+
+#### 4. shutdown() changes
+- Abort watch task before stopping Raft groups
+- Pattern: `handle.abort(); tokio::time::timeout(2s, handle).await`
+
+#### 5. Test pattern
+- Polling loop with `tokio::time::Instant` deadline (max 500ms), not sleep-based sync
+- Use `provider.clone() as Arc<dyn ConfigProvider>` to cast Arc<MemConfigProvider> to trait object
+
+### Key Gotchas
+- `NodeAddr` does NOT implement `Display` — use `?addr` (Debug) not `%addr` in tracing macros
+- `futures` must be added to `rr-server/Cargo.toml` (was not present)
+
+### Test Results
+- **rr-server**: 16 tests passed (5 existing + 3 new watch loop tests)
+- **workspace**: 146 tests, 0 failures
+
+## [T15] Expose openraft Membership APIs — COMPLETED (2026-03-04)
+
+### Summary
+Added `add_learner` and `change_membership` methods to `RaftGroupManager`.
+
+### Implementation Details
+- `add_learner(group_id, node_id, addr: String)` → `raft.add_learner(node_id, BasicNode { addr }, true)`
+- `change_membership(group_id, members: BTreeSet<NodeId>)` → `raft.change_membership(members, true)` 
+- `BTreeSet<NodeId>` implements `Into<ChangeMembers<NID, N>>` in openraft 0.9 — passes directly
+- `retain: true` keeps removed nodes as learners rather than fully evicting them
+
+### Key Learnings
+- New tests must be placed INSIDE `mod tests { ... }` block, not outside (appending after `}` breaks scoping)
+- `use std::collections::BTreeSet` needed at top of file
+
+### Test Results
+- **rr-raft**: 32 tests passed (29 existing + 3 new)

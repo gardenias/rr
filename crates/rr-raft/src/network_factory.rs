@@ -371,22 +371,43 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
             .map_err(to_unreachable_snap)?;
 
         // Serialize the entire openraft request into the metadata field.
-        // The snapshot data bytes go in the `data` field.
+        // Only the final chunk carries metadata; earlier chunks carry data only.
         let snapshot_data = rpc.data.clone();
         let metadata = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
             .map_err(to_unreachable_snap)?;
 
-        let chunk = ProtoSnapshotChunk {
-            group_id: self.group_id,
-            offset: rpc.offset,
-            data: snapshot_data,
-            done: true,
-            metadata,
+        // Split snapshot data into 64 KB chunks.
+        const CHUNK_SIZE: usize = 65_536;
+        let chunks_data: Vec<&[u8]> = if snapshot_data.is_empty() {
+            vec![&[]]
+        } else {
+            snapshot_data.chunks(CHUNK_SIZE).collect()
         };
+        let total = chunks_data.len();
+
+        let mut proto_chunks: Vec<ProtoSnapshotChunk> = Vec::with_capacity(total);
+        for (i, chunk_data) in chunks_data.iter().enumerate() {
+            let is_last = i == total - 1;
+            proto_chunks.push(ProtoSnapshotChunk {
+                group_id: self.group_id,
+                offset: (i * CHUNK_SIZE) as u64,
+                data: chunk_data.to_vec(),
+                done: is_last,
+                // metadata only on the last chunk — server ignores it on earlier ones
+                metadata: if is_last { metadata.clone() } else { vec![] },
+            });
+        }
+
+        tracing::debug!(
+            group_id = self.group_id,
+            snapshot_bytes = snapshot_data.len(),
+            num_chunks = total,
+            "install_snapshot: sending chunked stream"
+        );
 
         let mut client = RaftGrpcClient::new(channel);
         let response = client
-            .install_snapshot(tokio_stream::iter(vec![chunk]))
+            .install_snapshot(tokio_stream::iter(proto_chunks))
             .await
             .map_err(to_unreachable_snap)?
             .into_inner();
@@ -500,5 +521,86 @@ mod tests {
         let pool = ChannelPool::new();
         let pool2 = pool.clone();
         assert_eq!(pool.len(), pool2.len());
+    }
+
+    /// Verify that snapshot data > CHUNK_SIZE is split into multiple chunks.
+    /// The last chunk has done=true and carries metadata; earlier chunks have done=false.
+    #[test]
+    fn test_snapshot_chunking_splits_large_data() {
+        const CHUNK_SIZE: usize = 65_536;
+
+        // Create data larger than one chunk
+        let snapshot_data: Vec<u8> = (0u8..=255).cycle().take(CHUNK_SIZE * 2 + 1_000).collect();
+        let metadata: Vec<u8> = b"test-metadata".to_vec();
+        let group_id: u64 = 7;
+
+        // Replicate the chunking logic from install_snapshot
+        let chunks_data: Vec<&[u8]> = snapshot_data.chunks(CHUNK_SIZE).collect();
+        let total = chunks_data.len();
+        assert_eq!(total, 3, "should produce 3 chunks for 2*CHUNK_SIZE+1000 bytes");
+
+        let mut proto_chunks: Vec<ProtoSnapshotChunk> = Vec::with_capacity(total);
+        for (i, chunk_data) in chunks_data.iter().enumerate() {
+            let is_last = i == total - 1;
+            proto_chunks.push(ProtoSnapshotChunk {
+                group_id,
+                offset: (i * CHUNK_SIZE) as u64,
+                data: chunk_data.to_vec(),
+                done: is_last,
+                metadata: if is_last { metadata.clone() } else { vec![] },
+            });
+        }
+
+        // First two chunks: not done, no metadata
+        assert!(!proto_chunks[0].done);
+        assert!(proto_chunks[0].metadata.is_empty());
+        assert_eq!(proto_chunks[0].data.len(), CHUNK_SIZE);
+        assert_eq!(proto_chunks[0].offset, 0);
+
+        assert!(!proto_chunks[1].done);
+        assert!(proto_chunks[1].metadata.is_empty());
+        assert_eq!(proto_chunks[1].data.len(), CHUNK_SIZE);
+        assert_eq!(proto_chunks[1].offset, CHUNK_SIZE as u64);
+
+        // Last chunk: done=true, carries metadata, has remaining bytes
+        assert!(proto_chunks[2].done);
+        assert_eq!(proto_chunks[2].metadata, metadata);
+        assert_eq!(proto_chunks[2].data.len(), 1_000);
+        assert_eq!(proto_chunks[2].offset, (2 * CHUNK_SIZE) as u64);
+
+        // Reassemble and verify data integrity
+        let mut reassembled = Vec::new();
+        for chunk in &proto_chunks {
+            reassembled.extend_from_slice(&chunk.data);
+        }
+        assert_eq!(reassembled, snapshot_data, "reassembled data must match original");
+    }
+
+    /// Single-chunk path: data <= CHUNK_SIZE produces exactly one chunk with done=true.
+    #[test]
+    fn test_snapshot_chunking_small_data_single_chunk() {
+        const CHUNK_SIZE: usize = 65_536;
+
+        let snapshot_data: Vec<u8> = b"small-snapshot".to_vec();
+        let chunks_data: Vec<&[u8]> = snapshot_data.chunks(CHUNK_SIZE).collect();
+        assert_eq!(chunks_data.len(), 1);
+
+        let total = chunks_data.len();
+        let is_last = 0 == total - 1;
+        assert!(is_last, "single chunk must be the last");
+    }
+
+    /// Empty snapshot: chunks slice produces one empty-data chunk.
+    #[test]
+    fn test_snapshot_chunking_empty_data() {
+        let snapshot_data: Vec<u8> = vec![];
+        // The install_snapshot impl special-cases empty data to [&[]]
+        let chunks_data: Vec<&[u8]> = if snapshot_data.is_empty() {
+            vec![&[]]
+        } else {
+            snapshot_data.chunks(65_536).collect()
+        };
+        assert_eq!(chunks_data.len(), 1, "empty snapshot must produce one empty chunk");
+        assert!(chunks_data[0].is_empty());
     }
 }

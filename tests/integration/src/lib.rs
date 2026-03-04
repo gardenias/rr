@@ -61,18 +61,33 @@ pub struct ClusterBuilder {
     pub group_count: usize,
     /// If true, use real gRPC networking instead of in-process NoopNetworkFactory.
     real_network: bool,
+    /// Shared config provider — pre-allocated so callers can reference it before build().
+    config_provider: Arc<MemConfigProvider>,
 }
 
 impl ClusterBuilder {
     /// Create a builder for a cluster with `node_count` nodes and `group_count` groups.
     pub fn new(node_count: usize, group_count: usize) -> Self {
-        Self { node_count, group_count, real_network: false }
+        Self {
+            node_count,
+            group_count,
+            real_network: false,
+            config_provider: Arc::new(MemConfigProvider::new()),
+        }
     }
 
     /// Enable real gRPC networking between nodes.
     pub fn with_real_network(mut self) -> Self {
         self.real_network = true;
         self
+    }
+
+    /// Return a clone of the shared config provider Arc.
+    ///
+    /// Call this *before* [`build()`](Self::build) to get a handle that remains
+    /// valid after the builder is consumed.
+    pub fn config_provider(&self) -> Arc<MemConfigProvider> {
+        Arc::clone(&self.config_provider)
     }
 
     /// Build and start all nodes.
@@ -93,7 +108,7 @@ impl ClusterBuilder {
         //
         // Partitions and groups are added before nodes start so that each node
         // can load the routing table and start the correct groups on startup.
-        let config_provider = Arc::new(MemConfigProvider::new());
+        let config_provider = Arc::clone(&self.config_provider);
 
         let node_ids: Vec<NodeId> = (1..=(self.node_count as NodeId)).collect();
 
@@ -152,7 +167,7 @@ impl ClusterBuilder {
 
     /// Build using real gRPC networking (multi-node mode).
     async fn build_real_network(self) -> Result<Vec<Arc<RrNode>>> {
-        let config_provider = Arc::new(MemConfigProvider::new());
+        let config_provider = Arc::clone(&self.config_provider);
         let node_ids: Vec<NodeId> = (1..=(self.node_count as NodeId)).collect();
 
         // 1. Pre-allocate OS-assigned ports
@@ -173,6 +188,14 @@ impl ClusterBuilder {
                     group_id,
                     node_ids.clone(),
                 )
+                .await;
+        }
+
+        // 2b. Register node addresses in config provider so dynamic tests can
+        //     look up peer addresses from the routing table.
+        for (node_id, addr) in &node_addrs {
+            config_provider
+                .add_node(*node_id, rr_core::types::NodeAddr { addr: addr.clone() })
                 .await;
         }
 
@@ -232,6 +255,16 @@ impl ClusterBuilder {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         Ok(nodes)
+    }
+
+    /// Build and start all nodes, returning both nodes and the shared config provider.
+    ///
+    /// Convenience wrapper for tests that need to manipulate the routing table
+    /// after the cluster is running (e.g. dynamic partition add tests).
+    pub async fn build_with_provider(self) -> Result<(Vec<Arc<RrNode>>, Arc<MemConfigProvider>)> {
+        let provider = self.config_provider();
+        let nodes = self.build().await?;
+        Ok((nodes, provider))
     }
 }
 
@@ -549,5 +582,70 @@ mod tests {
         for node in survivors.iter() {
             let _ = node.shutdown().await;
         }
+    }
+
+    /// Dynamic partition add: start a 3-node cluster with 1 group, then add a 2nd
+    /// partition at runtime via ConfigProvider and verify all 3 nodes start group 2,
+    /// the group elects a leader, and writes replicate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_dynamic_partition_add() {
+        let builder = ClusterBuilder::new(3, 1).with_real_network();
+        let provider = builder.config_provider();
+        let nodes = builder.build().await.unwrap();
+
+        // Wait for group 1 to elect a leader
+        wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Node IDs are 1..=3
+        let node_ids: Vec<NodeId> = nodes.iter().map(|n| n.node_id()).collect();
+
+        // Add partition 2 → group 2 with all 3 nodes as replicas at runtime
+        provider
+            .add_partition(2, rr_core::types::PartitionConfig::SingleId(2), 2, node_ids.clone())
+            .await;
+
+        // Wait for all 3 nodes to have started group 2 (watch loop picks up PartitionAdded)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            let mut count = 0usize;
+            for node in &nodes {
+                if node.group_manager().get_raft(2).await.is_some() {
+                    count += 1;
+                }
+            }
+            if count == nodes.len() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("group 2 not started on all nodes within 8s; only {count}/{} nodes have it", nodes.len());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Initialize group 2 with real addresses from the routing table
+        let table = provider.get_routing_table().await.unwrap();
+        let mut members = BTreeMap::new();
+        for node_id in &node_ids {
+            if let Some(node_addr) = table.nodes.get(node_id) {
+                members.insert(*node_id, openraft::BasicNode { addr: node_addr.addr.clone() });
+            }
+        }
+        assert_eq!(members.len(), 3, "must have addresses for all 3 nodes");
+
+        // Bootstrap group 2: node[0] calls initialize
+        let raft2 = nodes[0].group_manager().get_raft(2).await.unwrap();
+        let _ = raft2.initialize(members).await; // idempotent
+
+        // Wait for group 2 leader election
+        let leader2 = wait_for_cluster_ready(&nodes, 2, 8_000).await.unwrap();
+        assert!(leader2 >= 1 && leader2 <= 3, "group 2 leader must be one of the 3 nodes");
+
+        // Write to group 2 and verify
+        let leader2_node = nodes.iter().find(|n| n.node_id() == leader2).unwrap();
+        let raft2 = leader2_node.group_manager().get_raft(2).await.unwrap();
+        let resp = raft2.client_write(b"group2-write".to_vec()).await.unwrap();
+        assert_eq!(resp.data, b"group2-write", "group 2 EchoSM must echo writes");
+
+        shutdown_all(&nodes).await;
     }
 }
