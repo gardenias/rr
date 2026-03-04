@@ -19,3 +19,4 @@ anyhow.workspace = true
 async-trait.workspace = true
 openraft = { version = "0.9", features = ["serde"] }
 tempfile.workspace = true
+rr-client = { path = "../../crates/rr-client" }

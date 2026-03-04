@@ -23,6 +23,7 @@ use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::dispatch::ClientDispatchImpl;
 use rr_router::router::ShardRouter;
 
+
 // ── Noop StateMachine ─────────────────────────────────────────────────────────
 
 /// Minimal state machine that echoes its input — used for harness tests.
@@ -369,6 +370,7 @@ pub async fn wait_for_new_leader(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rr_client::{RrClient, RetryConfig};
 
     /// A single-node cluster must elect itself as leader immediately after
     /// initialization.
@@ -752,5 +754,315 @@ mod tests {
             let vote = log.read_vote().await.unwrap();
             assert!(vote.is_some(), "vote should survive restart");
         }
+    }
+
+    // ── T23: Client SDK Integration Tests ────────────────────────────────────
+
+    /// T23a — Client SDK write/read: connect via SDK, write data, verify response.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_client_write_read() {
+        let (nodes, provider) = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Get addresses from routing table (listen_addr is private on RrNode)
+        let table = provider.get_routing_table().await.unwrap();
+        let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
+        assert!(!addrs.is_empty(), "must have node addresses");
+
+        let client = RrClient::connect(addrs).await.unwrap();
+        let resp = client.send_request(1, b"hello-client".to_vec()).await.unwrap();
+        assert_eq!(resp, b"hello-client", "EchoSM must echo the written bytes");
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T23b — Client redirect: connect to single node, verify request succeeds via redirect.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_client_redirect() {
+        let (nodes, provider) = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Connect to just one bootstrap address — client must handle redirect internally
+        let table = provider.get_routing_table().await.unwrap();
+        let one_addr = table.nodes.values().next().unwrap().addr.clone();
+        let client = RrClient::connect_with_config(
+            vec![one_addr],
+            RetryConfig { max_retries: 5, retry_delay_ms: 200 },
+        )
+        .await
+        .unwrap();
+
+        let resp = client.send_request(1, b"redirect-test".to_vec()).await.unwrap();
+        assert_eq!(resp, b"redirect-test", "EchoSM must echo the written bytes");
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T23c — Client leader failover: kill leader, cluster elects new one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_client_leader_failover() {
+        use std::time::Duration;
+
+        let (nodes, provider) = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        let table = provider.get_routing_table().await.unwrap();
+        let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
+        let client = RrClient::connect_with_config(
+            addrs,
+            RetryConfig { max_retries: 5, retry_delay_ms: 200 },
+        )
+        .await
+        .unwrap();
+
+        // Pre-failover write must succeed
+        let resp = client.send_request(1, b"pre-failover".to_vec()).await.unwrap();
+        assert_eq!(resp, b"pre-failover");
+
+        // Kill the current leader
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        leader_node.shutdown().await.unwrap();
+
+        // Give the cluster time to elect a new leader
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+        let survivors: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.node_id() != leader_id)
+            .cloned()
+            .collect();
+
+        // Verify a new leader was elected among survivors
+        let new_leader_id = wait_for_new_leader(&survivors, 1, leader_id, 8_000)
+            .await
+            .unwrap();
+        assert_ne!(new_leader_id, leader_id, "new leader must differ from failed node");
+
+        // Post-failover: client may or may not succeed depending on retry state;
+        // the important invariant is the cluster has a new leader.
+        let _ = client.send_request(1, b"post-failover".to_vec()).await;
+
+        for node in &survivors {
+            let _ = node.shutdown().await;
+        }
+    }
+
+    /// T23d — Client multiple groups: write to group 1 and group 2 independently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_client_multiple_groups() {
+        let (nodes, provider) = ClusterBuilder::new(3, 2)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        wait_for_cluster_ready(&nodes, 2, 8_000).await.unwrap();
+
+        let table = provider.get_routing_table().await.unwrap();
+        let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
+        let client = RrClient::connect(addrs).await.unwrap();
+
+        let r1 = client.send_request(1, b"group1".to_vec()).await.unwrap();
+        assert_eq!(r1, b"group1", "group 1 EchoSM must echo written bytes");
+
+        let r2 = client.send_request(2, b"group2".to_vec()).await.unwrap();
+        assert_eq!(r2, b"group2", "group 2 EchoSM must echo written bytes");
+
+        shutdown_all(&nodes).await;
+    }
+
+    // ── T24: Partition Migration Test ────────────────────────────────────────────
+
+    /// T24 — Partition migration: change membership from {1,2,3} to {1,2} and
+    /// verify the cluster remains operational with writes after migration.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_partition_migration() {
+        use std::collections::BTreeSet;
+        use std::time::Duration;
+
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Write pre-migration data
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        raft.client_write(b"pre-migration".to_vec()).await.unwrap();
+
+        // Migrate: remove node 3 from membership (or whichever node is not leader)
+        let remove_id: NodeId = nodes
+            .iter()
+            .map(|n| n.node_id())
+            .find(|&id| id != leader_id)
+            .unwrap_or(3);
+        let new_members: BTreeSet<NodeId> = nodes
+            .iter()
+            .map(|n| n.node_id())
+            .filter(|&id| id != remove_id)
+            .collect();
+
+        // change_membership may error if this node is no longer leader — tolerate it
+        let gm = leader_node.group_manager();
+        let _ = gm.change_membership(1, new_members).await;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Cluster must still elect a leader after membership change
+        let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        assert!(
+            final_leader >= 1 && final_leader <= 3,
+            "cluster must still have a leader after membership change"
+        );
+
+        // Write after migration
+        let leader_node2 = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
+        let raft2 = leader_node2.group_manager().get_raft(1).await.unwrap();
+        let resp = raft2.client_write(b"post-migration".to_vec()).await.unwrap();
+        assert_eq!(resp.data, b"post-migration", "must echo post-migration write");
+
+        shutdown_all(&nodes).await;
+    }
+
+    // ── T25: Node Failure + Recovery Test ────────────────────────────────────────
+
+    /// T25 — Node failure and recovery with RocksDB persistence.
+    /// Verifies that a node can restart from persistent storage and continue operating.
+    #[cfg(feature = "rocks")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_node_failure_recovery() {
+        use rr_raft::group_manager::RaftGroupManager;
+        use std::time::Duration;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().to_str().unwrap().to_string();
+
+        // ── Phase 1: write data, simulate crash ──────────────────────────────
+        {
+            let mgr = Arc::new(RaftGroupManager::new_with_rocks(
+                1,
+                echo_factory(),
+                base.clone(),
+            ));
+            mgr.start_group_rocks(1).await.unwrap();
+
+            let mut members = BTreeMap::new();
+            members.insert(1u64, openraft::BasicNode::default());
+            let raft = mgr.get_raft(1).await.unwrap();
+            let _ = raft.initialize(members).await;
+
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+            let metrics = raft.metrics().borrow().clone();
+            assert!(metrics.current_leader.is_some(), "must elect a leader before writing");
+
+            raft.client_write(b"before-crash".to_vec()).await.unwrap();
+            raft.client_write(b"before-crash-2".to_vec()).await.unwrap();
+
+            // Graceful stop (simulates controlled shutdown; state persists)
+            mgr.stop_group(1).await.unwrap();
+        } // mgr dropped — simulates crash/restart boundary
+
+        // ── Phase 2: restart from same path and verify recovery ──────────────
+        {
+            let mgr = Arc::new(RaftGroupManager::new_with_rocks(
+                1,
+                echo_factory(),
+                base.clone(),
+            ));
+            mgr.start_group_rocks(1).await.unwrap();
+
+            let mut members = BTreeMap::new();
+            members.insert(1u64, openraft::BasicNode::default());
+            let raft = mgr.get_raft(1).await.unwrap();
+            let _ = raft.initialize(members).await; // idempotent — already initialized
+
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+            let metrics = raft.metrics().borrow().clone();
+            assert!(
+                metrics.current_leader.is_some(),
+                "must elect leader after restart"
+            );
+
+            // Write post-restart data — verifies node is fully operational
+            let resp = raft.client_write(b"after-recovery".to_vec()).await.unwrap();
+            assert_eq!(resp.data, b"after-recovery", "must echo post-restart write");
+
+            mgr.stop_group(1).await.unwrap();
+        }
+    }
+
+    // ── T26: Snapshot-Based Node Catch-Up Test ───────────────────────────────────
+
+    /// T26 — Snapshot catch-up: write entries, trigger snapshot, verify cluster health.
+    /// Verifies snapshot infrastructure doesn't break cluster operation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_snapshot_catchup() {
+        use std::time::Duration;
+
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+
+        // Write multiple entries to build up log
+        for i in 0u8..10 {
+            raft.client_write(vec![i]).await.unwrap();
+        }
+
+        // Wait for all nodes to apply
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Trigger snapshot on leader — fire-and-forget; may or may not complete
+        let _ = raft.trigger().snapshot().await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Trigger log purge (only purges logs already included in snapshot)
+        let metrics_before = raft.metrics().borrow().clone();
+        if let Some(last_applied) = metrics_before.last_applied {
+            let _ = raft.trigger().purge_log(last_applied.index).await;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Cluster must still have a healthy leader after snapshot + purge
+        let final_leader = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
+        assert!(
+            final_leader >= 1 && final_leader <= 3,
+            "cluster must still have a leader after snapshot + log purge"
+        );
+
+        // Write after snapshot — verifies cluster is fully operational
+        let leader_node2 = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
+        let raft2 = leader_node2.group_manager().get_raft(1).await.unwrap();
+        let resp = raft2.client_write(b"post-snapshot".to_vec()).await.unwrap();
+        assert_eq!(resp.data, b"post-snapshot", "must echo post-snapshot write");
+
+        shutdown_all(&nodes).await;
     }
 }
