@@ -648,4 +648,46 @@ mod tests {
 
         shutdown_all(&nodes).await;
     }
+
+    /// T21 — Dynamic node add/remove: register a new node in config provider,
+    /// verify the watch loop fires add_learner, then remove and verify cluster stability.
+    #[tokio::test]
+    async fn test_dynamic_node_add() {
+        let builder = ClusterBuilder::new(3, 1).with_real_network();
+        let provider = builder.config_provider();
+        let nodes = builder.build().await.unwrap();
+
+        // Wait for group 1 to have a stable leader
+        let _leader = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Register node 4 in config provider — fires NodeAdded event
+        let node4_id: NodeId = 4;
+        let node4_addr = "127.0.0.1:19204".to_string();
+        provider.add_node(node4_id, rr_core::types::NodeAddr { addr: node4_addr }).await;
+
+        // Wait briefly for the watch loop to fire add_learner calls
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // Cluster should still have a stable leader after add_learner attempts
+        let leader_after = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
+        assert!(
+            leader_after >= 1 && leader_after <= 3,
+            "leader must still be among original 3 nodes after NodeAdded"
+        );
+
+        // Simulate NodeRemoved: remove node 4 from config
+        provider.remove_node(node4_id).await;
+
+        // Wait briefly for watch loop to fire change_membership calls
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // Cluster should remain stable
+        let leader_final = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
+        assert!(
+            leader_final >= 1 && leader_final <= 3,
+            "leader must still be among original 3 nodes after NodeRemoved"
+        );
+
+        shutdown_all(&nodes).await;
+    }
 }

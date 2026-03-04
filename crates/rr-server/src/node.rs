@@ -175,10 +175,41 @@ impl RrNode {
                         info!(partition_id, group_id, "watch: partition updated");
                     }
                     RoutingTableChange::NodeAdded { node_id: nid, addr } => {
-                        info!(node_id = nid, ?addr, "watch: node added");
+                        info!(node_id = nid, ?addr, "watch: node added, adding as learner to all groups");
+                        for group_id in gm.group_ids().await {
+                            if let Err(e) = gm.add_learner(group_id, nid, addr.addr.clone()).await {
+                                warn!(
+                                    group_id,
+                                    node_id = nid,
+                                    "watch: add_learner failed (may not be leader): {e}"
+                                );
+                            } else {
+                                info!(group_id, node_id = nid, "watch: added learner on NodeAdded");
+                            }
+                        }
                     }
                     RoutingTableChange::NodeRemoved { node_id: nid } => {
-                        info!(node_id = nid, "watch: node removed");
+                        info!(node_id = nid, "watch: node removed, updating membership for all groups");
+                        match cp.get_routing_table().await {
+                            Ok(table) => {
+                                for group_id in gm.group_ids().await {
+                                    if let Some(meta) = table.groups.get(&group_id) {
+                                        let new_members: std::collections::BTreeSet<NodeId> =
+                                            meta.replicas.iter().copied().filter(|&id| id != nid).collect();
+                                        if let Err(e) = gm.change_membership(group_id, new_members).await {
+                                            warn!(
+                                                group_id,
+                                                node_id = nid,
+                                                "watch: change_membership failed (may not be leader): {e}"
+                                            );
+                                        } else {
+                                            info!(group_id, node_id = nid, "watch: removed node from membership on NodeRemoved");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => warn!("watch: failed to get routing table on NodeRemoved: {e}"),
+                        }
                     }
                     RoutingTableChange::GroupMembershipChanged { group_id, replicas } => {
                         info!(group_id, ?replicas, "watch: group membership changed");
