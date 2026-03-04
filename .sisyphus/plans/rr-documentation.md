@@ -1393,19 +1393,19 @@ Max Concurrent: 17 (Waves 2+3+4 all parallel after T1)
 
 > 4 review agents run in PARALLEL. ALL must APPROVE. Rejection → fix → re-run.
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read the plan end-to-end. For each "Must Have": verify implementation exists (check file exists, check content). For each "Must NOT Have": search docs for forbidden patterns (line numbers, invented APIs, Docker manifests). Check evidence files exist in `.sisyphus/evidence/`. Compare deliverables against plan.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | VERDICT: APPROVE/REJECT`
 
-- [ ] F2. **Content Quality Review** — `unspecified-high`
+- [x] F2. **Content Quality Review** — `unspecified-high`
   Read every `.md` file in `docs/docs/`. Verify: both Chinese and English present per page, Mermaid diagrams render (syntax check), no broken internal links (build output), no placeholder text ("TODO", "TBD", "Lorem"), no machine-translation artifacts. Check bilingual format consistency.
   Output: `Pages [N/N bilingual] | Mermaid [N diagrams valid] | Links [N/N] | VERDICT`
 
-- [ ] F3. **Build + Link Verification QA** — `unspecified-high`
+- [x] F3. **Build + Link Verification QA** — `unspecified-high`
   Run `cd docs && npm run build`. Verify exit code 0. Check build output for warnings. Run `npm run serve` and use Playwright to navigate every page. Verify sidebar matches all 19 pages. Take screenshots of key pages.
   Output: `Build [PASS/FAIL] | Pages [N/N accessible] | Sidebar [PASS/FAIL] | VERDICT`
 
-- [ ] F4. **Scope Fidelity Check** — `deep`
+- [x] F4. **Scope Fidelity Check** — `deep`
   For each task: read "What to do", verify the file was created with correct content. Check every page matches the planned topic. Verify no pages were skipped. Check no scope creep (extra unplanned pages). Verify README.md links to docs.
   Output: `Tasks [N/N compliant] | Extra Pages [CLEAN/N] | README [PASS/FAIL] | VERDICT`
 

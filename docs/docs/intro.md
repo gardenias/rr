@@ -19,7 +19,7 @@ slug: /
 - **rr-client**: 客户端库和 API 绑定
 - **rr-server**: 服务器实现和部署工具
 
-开始探索我们的 [架构文档](/architecture) 以了解系统设计，或查看 [入门指南](/guide)。
+开始探索我们的 [架构文档](/architecture/overview) 以了解系统设计，或查看 [入门指南](/guide/getting-started)。
 
 ---
 
@@ -36,4 +36,4 @@ slug: /
 - **rr-client**: Client library and API bindings
 - **rr-server**: Server implementation and deployment tools
 
-Start exploring our [architecture documentation](/architecture) to understand the system design, or check out our [getting-started guide](/guide).
+Start exploring our [architecture documentation](/architecture/overview) to understand the system design, or check out our [getting-started guide](/guide/getting-started).
