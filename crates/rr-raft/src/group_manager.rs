@@ -1,6 +1,6 @@
 //! Manages the lifecycle of multiple Raft groups on a single node.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use openraft::BasicNode;
@@ -124,6 +124,56 @@ impl RaftGroupManager {
             .map_err(|e| RrError::Application(e.to_string()))?;
 
         info!(group_id, node_id = self.node_id, "initialized raft cluster");
+        Ok(())
+    }
+
+    /// Add a learner node to a Raft group.
+    ///
+    /// Calls `openraft::Raft::add_learner`. The learner replicates logs but
+    /// does not vote. Call `change_membership` afterwards to promote it to voter.
+    ///
+    /// `addr` is the gRPC address of the new node (e.g. `"10.0.0.2:50051"`).
+    #[instrument(skip(self))]
+    pub async fn add_learner(
+        &self,
+        group_id: GroupId,
+        node_id: NodeId,
+        addr: String,
+    ) -> Result<(), RrError> {
+        let raft = self
+            .get_raft(group_id)
+            .await
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+
+        raft.add_learner(node_id, BasicNode { addr }, true)
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+
+        info!(group_id, node_id, self.node_id, "added learner to raft group");
+        Ok(())
+    }
+
+    /// Change the voting membership of a Raft group.
+    ///
+    /// Calls `openraft::Raft::change_membership` with `retain = true` so that
+    /// nodes removed from `members` are kept as learners rather than removed
+    /// entirely.
+    #[instrument(skip(self))]
+    pub async fn change_membership(
+        &self,
+        group_id: GroupId,
+        members: BTreeSet<NodeId>,
+    ) -> Result<(), RrError> {
+        let raft = self
+            .get_raft(group_id)
+            .await
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+
+        raft.change_membership(members, true)
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+
+        info!(group_id, node_id = self.node_id, "changed membership of raft group");
         Ok(())
     }
 
@@ -334,5 +384,51 @@ mod tests {
             "expected a leader after init_cluster, got: {:?}",
             metrics.current_leader
         );
+    }
+    #[tokio::test]
+    async fn test_add_learner_unknown_group() {
+        let mgr = RaftGroupManager::new(1, noop_factory());
+        let err = mgr.add_learner(99, 2, "127.0.0.1:5001".to_string()).await.unwrap_err();
+        assert!(
+            err.to_string().contains("group not found"),
+            "expected 'group not found' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_unknown_group() {
+        let mgr = RaftGroupManager::new(1, noop_factory());
+        let mut members = BTreeSet::new();
+        members.insert(1u64);
+        let err = mgr.change_membership(99, members).await.unwrap_err();
+        assert!(
+            err.to_string().contains("group not found"),
+            "expected 'group not found' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_single_node() {
+        // Start group, init as single-node cluster, wait for leader,
+        // then call change_membership({1}) — a no-op that should succeed.
+        let mgr = RaftGroupManager::new(1, noop_factory());
+        mgr.start_group(1).await.unwrap();
+
+        let mut members = BTreeMap::new();
+        members.insert(1u64, BasicNode { addr: String::new() });
+        mgr.init_cluster(1, members).await.unwrap();
+
+        // Wait for leader election
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        let raft = mgr.get_raft(1).await.unwrap();
+        assert!(
+            raft.metrics().borrow().current_leader.is_some(),
+            "expected a leader before change_membership"
+        );
+
+        // Change membership to {1} (no-op — already sole voter)
+        let mut new_members = BTreeSet::new();
+        new_members.insert(1u64);
+        mgr.change_membership(1, new_members).await.unwrap();
     }
 }
