@@ -102,6 +102,42 @@ impl RaftNode {
         self.raft.initialize(nodes).await?;
         Ok(())
     }
+
+    /// Create a new `RaftNode` with RocksDB-backed log storage and a provided network factory.
+    ///
+    /// This is feature-gated behind `#[cfg(feature = "rocks")]`. The log storage
+    /// is opened from `rocks_path` (a directory path for the RocksDB database).
+    #[cfg(feature = "rocks")]
+    pub async fn new_with_rocks_factory<NF>(
+        group_id: GroupId,
+        node_id: u64,
+        state_machine: Box<dyn StateMachine>,
+        network_factory: NF,
+        rocks_path: &str,
+    ) -> Result<Self, Fatal<u64>>
+    where
+        NF: RaftNetworkFactory<RrTypeConfig> + 'static,
+    {
+        let config = Arc::new(
+            Config {
+                heartbeat_interval: 250,
+                election_timeout_min: 299,
+                election_timeout_max: 500,
+                ..Default::default()
+            }
+            .validate()
+            .expect("invalid raft config"),
+        );
+
+        let log_storage = crate::rocks_log_storage::RocksLogStorage::open(rocks_path)
+            .expect("failed to open RocksLogStorage");
+        let sm = RrStateMachine::new(state_machine);
+        let network = network_factory;
+
+        let raft = Raft::new(node_id, config, network, log_storage, sm).await?;
+
+        Ok(Self { group_id, raft })
+    }
 }
 
 // ---------------------------------------------------------------------------

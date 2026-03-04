@@ -3,6 +3,9 @@ name = "integration"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+rocks = ["rr-raft/rocks", "rr-storage/rocks"]
+
 [dependencies]
 rr-core = { path = "../../crates/rr-core" }
 rr-server = { path = "../../crates/rr-server" }
@@ -15,3 +18,4 @@ tokio.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 openraft = { version = "0.9", features = ["serde"] }
+tempfile.workspace = true

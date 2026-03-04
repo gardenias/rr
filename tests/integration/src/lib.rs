@@ -690,4 +690,67 @@ mod tests {
 
         shutdown_all(&nodes).await;
     }
+
+    /// T22 — RocksDB persistence: write data, restart node, verify log survives.
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_restart_persistence() {
+        use rr_raft::group_manager::RaftGroupManager;
+        use rr_raft::rocks_log_storage::RocksLogStorage;
+        use openraft::storage::RaftLogStorage;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().to_str().unwrap().to_string();
+
+        // ── Phase 1: start a single-node group with RocksDB, write data ───────
+        {
+            let mgr = Arc::new(RaftGroupManager::new_with_rocks(
+                1,
+                echo_factory(),
+                base.clone(),
+            ));
+            mgr.start_group_rocks(1).await.unwrap();
+
+            // Initialize as single-node cluster
+            let mut members = BTreeMap::new();
+            members.insert(1u64, openraft::BasicNode::default());
+            let raft = mgr.get_raft(1).await.unwrap();
+            let _ = raft.initialize(members).await;
+
+            // Wait for leader election
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+            let metrics = raft.metrics().borrow().clone();
+            assert!(metrics.current_leader.is_some(), "must elect a leader before writing");
+
+            // Write some data
+            let resp = raft.client_write(b"hello-rocks".to_vec()).await.unwrap();
+            assert_eq!(resp.data, b"hello-rocks", "EchoSM must echo written bytes");
+
+            // Gracefully stop the group
+            mgr.stop_group(1).await.unwrap();
+        } // mgr dropped here — simulates restart
+
+        // ── Phase 2: reopen RocksDB from same path, verify persistence ─────────
+        {
+            let rocks_path = format!("{base}/1");
+            let mut log = RocksLogStorage::open(&rocks_path).unwrap();
+
+            // The log state must reflect that entries were written
+            let state = log.get_log_state().await.unwrap();
+            assert!(
+                state.last_log_id.is_some(),
+                "log entries should survive restart"
+            );
+            assert!(
+                state.last_log_id.unwrap().index >= 1,
+                "at least one log entry should be persisted"
+            );
+
+            // Vote must also be persisted (crucial for no split-brain)
+            let vote = log.read_vote().await.unwrap();
+            assert!(vote.is_some(), "vote should survive restart");
+        }
+    }
 }

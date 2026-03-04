@@ -31,6 +31,9 @@ pub struct RaftGroupManager {
     /// multi-node networking.  When `None`, `NoopNetworkFactory` is used
     /// (single-node / test mode).
     channel_pool: Option<ChannelPool>,
+    /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
+    #[cfg(feature = "rocks")]
+    rocks_base_path: Option<String>,
 }
 
 impl RaftGroupManager {
@@ -44,6 +47,8 @@ impl RaftGroupManager {
             groups: Arc::new(RwLock::new(HashMap::new())),
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
+            #[cfg(feature = "rocks")]
+            rocks_base_path: None,
         }
     }
 
@@ -62,6 +67,8 @@ impl RaftGroupManager {
             groups: Arc::new(RwLock::new(HashMap::new())),
             sm_factory: Arc::new(sm_factory),
             channel_pool: Some(channel_pool),
+            #[cfg(feature = "rocks")]
+            rocks_base_path: None,
         }
     }
 
@@ -224,6 +231,52 @@ impl RaftGroupManager {
         let guard = self.groups.read().await;
         guard.len()
     }
+    /// Create a `RaftGroupManager` that uses RocksDB-backed log storage.
+    ///
+    /// Groups started via `start_group_rocks` will persist their Raft log to
+    /// `{base_path}/{group_id}/` on disk.
+    #[cfg(feature = "rocks")]
+    pub fn new_with_rocks(
+        node_id: NodeId,
+        sm_factory: StateMachineFactory,
+        base_path: String,
+    ) -> Self {
+        info!(node_id, %base_path, "creating RaftGroupManager (rocks mode)");
+        Self {
+            node_id,
+            groups: Arc::new(RwLock::new(HashMap::new())),
+            sm_factory: Arc::new(sm_factory),
+            channel_pool: None,
+            rocks_base_path: Some(base_path),
+        }
+    }
+
+    /// Start a Raft group backed by RocksDB log storage.
+    ///
+    /// The database is opened at `{rocks_base_path}/{group_id}`.
+    #[cfg(feature = "rocks")]
+    #[instrument(skip(self))]
+    pub async fn start_group_rocks(&self, group_id: GroupId) -> Result<(), RrError> {
+        let base = self.rocks_base_path.as_ref()
+            .ok_or_else(|| RrError::Application("rocks_base_path not set".to_string()))?;
+        let path = format!("{base}/{group_id}");
+
+        let mut guard = self.groups.write().await;
+        if guard.contains_key(&group_id) {
+            return Err(RrError::Application(format!("group {group_id} already exists")));
+        }
+        let sm = (self.sm_factory)(group_id);
+        let node = RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+
+        debug!(group_id, node_id = self.node_id, "started raft group (rocks)");
+        let node_id = self.node_id;
+        counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
+        guard.insert(group_id, node);
+        Ok(())
+    }
+
 }
 
 #[cfg(test)]
