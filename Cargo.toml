@@ -7,6 +7,7 @@ members = [
     "crates/rr-network",
     "crates/rr-router",
     "crates/rr-server",
+    "crates/rr-client",
     "examples/kv-store",
     "tests/integration",
 ]

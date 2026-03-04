@@ -1548,6 +1548,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rr-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rr-core",
+ "rr-network",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "rr-config"
 version = "0.1.0"
 dependencies = [

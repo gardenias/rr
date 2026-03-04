@@ -1,0 +1,12 @@
+[package]
+name = "rr-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rr-core = { path = "../rr-core" }
+rr-network = { path = "../rr-network" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
