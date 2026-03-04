@@ -57,10 +57,14 @@ impl RrNode {
             )));
         }
 
-        let group_manager = Arc::new(RaftGroupManager::new(
-            config.node_id,
-            config.state_machine_factory,
-        ));
+        let group_manager = if let Some(mgr) = config.group_manager {
+            mgr
+        } else {
+            Arc::new(RaftGroupManager::new(
+                config.node_id,
+                config.state_machine_factory,
+            ))
+        };
 
         let router = Arc::new(ShardRouter::new(config.config_provider));
 

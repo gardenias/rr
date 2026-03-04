@@ -1,0 +1,42 @@
+TASK 6: Add RocksDB as an optional feature-gated dependency
+=================================================================
+
+STATUS: COMPLETED ✓
+
+DELIVERABLES VERIFIED:
+
+1. Workspace Cargo.toml [workspace.dependencies]
+   ✓ rocksdb = "0.24.0" added at line 31
+
+2. crates/rr-storage/Cargo.toml
+   ✓ [features] section with rocks = ["dep:rocksdb"] (line 12-13)
+   ✓ rocksdb = { workspace = true, optional = true } in [dependencies] (line 10)
+   ✓ [dev-dependencies] with tempfile = "3" (line 15-16)
+
+3. crates/rr-storage/src/rocks.rs
+   ✓ Created with #![cfg(feature = "rocks")] gate
+   ✓ RocksStorage struct with Arc<DB> field
+   ✓ open(path: &str, cfs: Vec<&str>) constructor
+   ✓ open_default(path: &str) constructor with standard CFs: raft_log, state_machine, metadata
+   ✓ Proper error handling: RocksDB errors mapped to StorageError::Io
+   ✓ Block cache configuration (256MB LRU)
+   ✓ Column family descriptor creation
+   ✓ Unit test: test_open_default_creates_db (passes)
+
+4. crates/rr-storage/src/lib.rs
+   ✓ Added #[cfg(feature = "rocks")] pub mod rocks; at lines 6-7
+
+BUILD VERIFICATION:
+   ✓ cargo build -p rr-storage (without rocks) — 1m 54s, SUCCESS
+   ✓ cargo build -p rr-storage --features rr-storage/rocks (with rocks) — 1m 53s, SUCCESS
+   ✓ cargo test -p rr-storage --lib (without rocks) — 10 tests passed
+   ✓ cargo test -p rr-storage --lib --features rr-storage/rocks — 11 tests passed (includes new rocks test)
+
+NOTES:
+   - Warning about unused `db` field is expected (will be used when StorageEngine trait implemented in T7)
+   - All 113 existing tests remain passing
+   - Feature gate is properly gated with #[cfg(feature = "rocks")]
+   - RocksDB dependency is optional and only compiled with explicit feature flag
+   - MemStorage tests unaffected; rocks tests properly isolated
+
+NEXT STEP: T7 — Implement StorageEngine trait for RocksStorage

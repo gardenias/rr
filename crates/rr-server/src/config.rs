@@ -8,6 +8,7 @@ use rr_core::types::NodeId;
 use rr_network::client_service::ClientDispatch;
 use rr_network::raft_service::RaftGroupLookup;
 use rr_raft::group_manager::StateMachineFactory;
+use rr_raft::group_manager::RaftGroupManager;
 
 /// Configuration for creating an [`RrNode`](super::node::RrNode).
 pub struct NodeConfig {
@@ -36,6 +37,10 @@ pub struct NodeConfig {
     ///
     /// If `None`, the gRPC server is not started.
     pub client_dispatch: Option<Arc<dyn ClientDispatch>>,
+    /// Pre-built group manager. When `Some`, `RrNode::new()` uses it directly
+    /// instead of creating a fresh one. Required for real-network mode where
+    /// `GrpcNetworkFactory` must be pre-wired.
+    pub group_manager: Option<Arc<RaftGroupManager>>,
 }
 
 impl NodeConfig {
@@ -58,6 +63,7 @@ impl NodeConfig {
             state_machine_factory,
             raft_lookup: None,
             client_dispatch: None,
+            group_manager: None,
         }
     }
 
@@ -70,6 +76,12 @@ impl NodeConfig {
     /// Attach a [`ClientDispatch`] for client-facing RPCs.
     pub fn with_client_dispatch(mut self, dispatch: Arc<dyn ClientDispatch>) -> Self {
         self.client_dispatch = Some(dispatch);
+        self
+    }
+
+    /// Attach a pre-built [`RaftGroupManager`].
+    pub fn with_group_manager(mut self, mgr: Arc<RaftGroupManager>) -> Self {
+        self.group_manager = Some(mgr);
         self
     }
 }

@@ -17,6 +17,11 @@ use rr_raft::group_manager::StateMachineFactory;
 use rr_server::config::NodeConfig;
 use rr_server::node::RrNode;
 use rr_storage::mem::MemStorage;
+use rr_raft::network_factory::ChannelPool;
+use rr_raft::group_manager::RaftGroupManager;
+use rr_server::lookup::RaftGroupLookupImpl;
+use rr_server::dispatch::ClientDispatchImpl;
+use rr_router::router::ShardRouter;
 
 // ── Noop StateMachine ─────────────────────────────────────────────────────────
 
@@ -54,12 +59,20 @@ pub struct ClusterBuilder {
     pub node_count: usize,
     /// Number of Raft groups to create. Each group spans all nodes.
     pub group_count: usize,
+    /// If true, use real gRPC networking instead of in-process NoopNetworkFactory.
+    real_network: bool,
 }
 
 impl ClusterBuilder {
     /// Create a builder for a cluster with `node_count` nodes and `group_count` groups.
     pub fn new(node_count: usize, group_count: usize) -> Self {
-        Self { node_count, group_count }
+        Self { node_count, group_count, real_network: false }
+    }
+
+    /// Enable real gRPC networking between nodes.
+    pub fn with_real_network(mut self) -> Self {
+        self.real_network = true;
+        self
     }
 
     /// Build and start all nodes.
@@ -67,6 +80,15 @@ impl ClusterBuilder {
     /// Returns the list of [`RrNode`]s. Each node has been started; Raft groups
     /// have been initialized with the full member set.
     pub async fn build(self) -> Result<Vec<Arc<RrNode>>> {
+        if self.real_network {
+            self.build_real_network().await
+        } else {
+            self.build_in_process().await
+        }
+    }
+
+    /// Build using in-process NoopNetworkFactory (original behaviour).
+    async fn build_in_process(self) -> Result<Vec<Arc<RrNode>>> {
         // ── 1. Build shared config provider ───────────────────────────────────
         //
         // Partitions and groups are added before nodes start so that each node
@@ -127,6 +149,90 @@ impl ClusterBuilder {
 
         Ok(nodes)
     }
+
+    /// Build using real gRPC networking (multi-node mode).
+    async fn build_real_network(self) -> Result<Vec<Arc<RrNode>>> {
+        let config_provider = Arc::new(MemConfigProvider::new());
+        let node_ids: Vec<NodeId> = (1..=(self.node_count as NodeId)).collect();
+
+        // 1. Pre-allocate OS-assigned ports
+        let mut node_addrs: Vec<(NodeId, String)> = Vec::new();
+        for &node_id in &node_ids {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let port = listener.local_addr()?.port();
+            drop(listener); // release port; small TOCTOU window is acceptable in tests
+            node_addrs.push((node_id, format!("127.0.0.1:{port}")));
+        }
+
+        // 2. Register partitions/groups in config provider
+        for group_id in 1..=(self.group_count as GroupId) {
+            config_provider
+                .add_partition(
+                    group_id,
+                    PartitionConfig::SingleId(group_id),
+                    group_id,
+                    node_ids.clone(),
+                )
+                .await;
+        }
+
+        // 3. Build nodes with real network
+        let shared_pool = ChannelPool::new();
+        let mut nodes: Vec<Arc<RrNode>> = Vec::with_capacity(self.node_count);
+
+        for (node_id, addr) in &node_addrs {
+            let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
+            let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
+
+            // Build RaftGroupManager with real gRPC networking
+            let mgr = Arc::new(RaftGroupManager::new_with_network(
+                *node_id,
+                echo_factory(),
+                shared_pool.clone(),
+            ));
+
+            // Wire lookup and dispatch using the pre-built manager
+            let router = Arc::new(ShardRouter::new(Arc::clone(&provider)));
+            let lookup = Arc::new(RaftGroupLookupImpl::new(Arc::clone(&mgr)));
+            let dispatch = Arc::new(ClientDispatchImpl::new(Arc::clone(&mgr), router));
+
+            let config = NodeConfig::new(
+                *node_id,
+                addr.clone(),
+                storage,
+                provider,
+                echo_factory(), // factory in config is ignored when group_manager is pre-built
+            )
+            .with_group_manager(Arc::clone(&mgr))
+            .with_raft_lookup(lookup)
+            .with_client_dispatch(dispatch);
+
+            let node = Arc::new(RrNode::new(config)?);
+            node.start().await?;
+            nodes.push(node);
+        }
+
+        // 4. Initialize Raft groups — each member's BasicNode.addr must be the
+        //    actual gRPC address so GrpcRaftNetwork can connect to peers.
+        let mut members = BTreeMap::new();
+        for (node_id, addr) in &node_addrs {
+            members.insert(*node_id, BasicNode { addr: addr.clone() });
+        }
+
+        for group_id in 1..=(self.group_count as GroupId) {
+            let raft = nodes[0]
+                .group_manager()
+                .get_raft(group_id)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("node 1 missing group {group_id}"))?;
+            let _ = raft.initialize(members.clone()).await;
+        }
+
+        // 5. Brief pause to allow gRPC servers to fully start
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Ok(nodes)
+    }
 }
 
 /// Shut down all nodes in a cluster.
@@ -161,6 +267,67 @@ pub async fn wait_for_leader(
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Wait up to `timeout_ms` for a leader to be elected in the given group,
+/// checking all nodes (not just node[0]).
+pub async fn wait_for_cluster_ready(
+    nodes: &[Arc<RrNode>],
+    group_id: GroupId,
+    timeout_ms: u64,
+) -> Result<NodeId> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+    loop {
+        for node in nodes {
+            if let Some(raft) = node.group_manager().get_raft(group_id).await {
+                let metrics = raft.metrics().borrow().clone();
+                if let Some(leader_id) = metrics.current_leader {
+                    return Ok(leader_id);
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("cluster not ready (no leader) after {timeout_ms}ms");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Wait up to `timeout_ms` for a NEW leader (different from `old_leader_id`) to be
+/// elected in the given group, checking all nodes.
+///
+/// Returns `Ok(new_leader_id)` or `Err` if the timeout expires.
+pub async fn wait_for_new_leader(
+    nodes: &[Arc<RrNode>],
+    group_id: GroupId,
+    old_leader_id: NodeId,
+    timeout_ms: u64,
+) -> Result<NodeId> {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+    loop {
+        for node in nodes {
+            if let Some(raft) = node.group_manager().get_raft(group_id).await {
+                let metrics = raft.metrics().borrow().clone();
+                if let Some(leader_id) = metrics.current_leader {
+                    if leader_id != old_leader_id {
+                        return Ok(leader_id);
+                    }
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "no new leader (different from {old_leader_id}) elected after {timeout_ms}ms"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -234,5 +401,153 @@ mod tests {
         assert_eq!(nodes[0].group_manager().group_count().await, 1);
         nodes[0].shutdown().await.unwrap();
         assert_eq!(nodes[0].group_manager().group_count().await, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_3node_leader_election() {
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        assert!(leader_id >= 1 && leader_id <= 3, "leader must be one of the 3 nodes");
+
+        // All nodes agree on the same leader
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut seen_leaders = std::collections::HashSet::new();
+        for node in &nodes {
+            if let Some(raft) = node.group_manager().get_raft(1).await {
+                let metrics = raft.metrics().borrow().clone();
+                if let Some(lid) = metrics.current_leader {
+                    seen_leaders.insert(lid);
+                }
+            }
+        }
+        assert_eq!(seen_leaders.len(), 1, "all nodes must agree on one leader, saw: {seen_leaders:?}");
+
+        shutdown_all(&nodes).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_3node_write_replication() {
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        let payload = b"replicate-me".to_vec();
+        let resp = raft.client_write(payload.clone()).await.unwrap();
+        assert_eq!(resp.data, payload, "EchoSM must return the written bytes");
+
+        // Wait for all nodes to apply the entry (polling with timeout)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            let mut all_applied = true;
+            for node in &nodes {
+                if let Some(raft) = node.group_manager().get_raft(1).await {
+                    let metrics = raft.metrics().borrow().clone();
+                    if metrics.last_applied.is_none() {
+                        all_applied = false;
+                        break;
+                    }
+                }
+            }
+            if all_applied {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                // Check once more with detailed error
+                for node in &nodes {
+                    if let Some(raft) = node.group_manager().get_raft(1).await {
+                        let metrics = raft.metrics().borrow().clone();
+                        assert!(
+                            metrics.last_applied.is_some(),
+                            "node {} must have applied at least one log entry",
+                            node.node_id()
+                        );
+                    }
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        shutdown_all(&nodes).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_3node_write_to_follower_returns_forward() {
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Find a follower
+        let follower = nodes.iter().find(|n| n.node_id() != leader_id).unwrap();
+        let raft = follower.group_manager().get_raft(1).await.unwrap();
+
+        let result = raft.client_write(b"to-follower".to_vec()).await;
+        match result {
+            Ok(_) => {
+                // openraft may internally redirect — that's fine
+            }
+            Err(e) => {
+                let fwd = e.forward_to_leader::<BasicNode>();
+                assert!(fwd.is_some(), "expected ForwardToLeader error, got: {e:?}");
+                let fwd = fwd.unwrap();
+                assert_eq!(fwd.leader_id, Some(leader_id), "forward must point to current leader");
+            }
+        }
+
+        shutdown_all(&nodes).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_3node_leader_failover() {
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        let original_leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Write something before failover
+        let leader_node = nodes.iter().find(|n| n.node_id() == original_leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        raft.client_write(b"pre-failover".to_vec()).await.unwrap();
+
+        // Shutdown the leader
+        leader_node.shutdown().await.unwrap();
+
+        // A surviving node should elect a new leader (different from the failed one)
+        let survivors: Vec<_> = nodes.iter().filter(|n| n.node_id() != original_leader_id).cloned().collect();
+        let new_leader_id = wait_for_new_leader(
+            &survivors,
+            1,
+            original_leader_id,
+            12_000,
+        ).await.unwrap();
+        assert_ne!(new_leader_id, original_leader_id, "new leader must differ from failed node");
+
+        // Write after failover should succeed
+        let new_leader = nodes.iter().find(|n| n.node_id() == new_leader_id).unwrap();
+        let raft = new_leader.group_manager().get_raft(1).await.unwrap();
+        raft.client_write(b"post-failover".to_vec()).await.unwrap();
+
+        // Shutdown remaining nodes
+        for node in survivors.iter() {
+            let _ = node.shutdown().await;
+        }
     }
 }

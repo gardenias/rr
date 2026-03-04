@@ -1,10 +1,9 @@
 {
-  "active_plan": "/Users/louis/Code/Rust/rr/.sisyphus/plans/rr-framework.md",
-  "started_at": "2026-02-26T08:14:03.248Z",
+  "active_plan": "/Users/louis/Code/Rust/rr/.sisyphus/plans/rr-phase2-production.md",
+  "started_at": "2026-03-03T12:59:20.541Z",
   "session_ids": [
-    "ses_367563ddaffeaTqD93zm1RA6iM",
     "ses_34d98b0c0ffeZX1wooWKNlNsTk"
   ],
-  "plan_name": "rr-framework",
+  "plan_name": "rr-phase2-production",
   "agent": "atlas"
 }

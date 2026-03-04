@@ -1,0 +1,64 @@
+   Compiling rr-core v0.1.0 (/Users/louis/Code/Rust/rr/crates/rr-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src/lib.rs (target/debug/deps/rr_config-46b9fee76b26d6f8)
+
+running 15 tests
+test mem::tests::test_multiple_partitions ... ok
+test mem::tests::test_remove_partition ... ok
+test mem::tests::test_add_node_visible_in_routing_table ... ok
+test mem::tests::test_remove_node_visible_in_routing_table ... ok
+test mem::tests::test_get_routing_table_empty ... ok
+test mem::tests::test_get_node_addr_success ... ok
+test mem::tests::test_update_group_membership_visible_in_routing_table ... ok
+test mem::tests::test_get_node_addr_missing_returns_error ... ok
+test mem::tests::test_add_partition_visible_in_routing_table ... ok
+test mem::tests::test_default_impl ... ok
+test mem::tests::test_watch_receives_group_membership_changed ... ok
+test mem::tests::test_watch_receives_node_added ... ok
+test mem::tests::test_watch_receives_node_removed ... ok
+test mem::tests::test_watch_receives_partition_added ... ok
+test mem::tests::test_watch_receives_partition_removed ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/rr_core-d9ad354cc7db9766)
+
+running 21 tests
+test codec::tests::test_bincode_codec_roundtrip ... ok
+test config::tests::test_config_provider_is_object_safe ... ok
+test codec::tests::test_bincode_codec_invalid_bytes ... ok
+test config::tests::test_routing_table_change_debug ... ok
+test config::tests::test_routing_table_change_group_membership_changed ... ok
+test config::tests::test_routing_table_change_node_added ... ok
+test config::tests::test_routing_table_change_node_removed ... ok
+test config::tests::test_routing_table_change_removed ... ok
+test error::tests::test_raft_error_not_leader ... ok
+test error::tests::test_rr_error_display ... ok
+test error::tests::test_rr_error_from_storage ... ok
+test error::tests::test_storage_error_from_io ... ok
+test service::tests::test_service_is_object_safe ... ok
+test state_machine::tests::test_state_machine_is_object_safe ... ok
+test storage::tests::test_batch_op_delete_construction ... ok
+test storage::tests::test_batch_op_put_construction ... ok
+test storage::tests::test_storage_engine_is_object_safe ... ok
+test types::tests::test_group_meta ... ok
+test types::tests::test_partition_config_single_id ... ok
+test types::tests::test_routing_table_construction ... ok
+test types::tests::test_partition_config_range ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rr_config
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rr_core
+
+running 2 tests
+test crates/rr-core/src/service.rs - service::Service (line 14) ... ignored
+test crates/rr-core/src/state_machine.rs - state_machine::StateMachine (line 15) ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

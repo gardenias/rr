@@ -1,8 +1,14 @@
 //! In-memory log storage for a single Raft group.
+//!
+//! Uses `Arc<RwLock<Inner>>` so that the log reader returned from
+//! `get_log_reader()` shares state with the writer — critical for Raft
+//! replication, which calls `get_log_reader()` and then reads entries
+//! written after the reader was obtained.
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::ops::RangeBounds;
+use std::sync::{Arc, RwLock};
 
 use openraft::storage::LogFlushed;
 use openraft::storage::RaftLogStorage;
@@ -15,9 +21,9 @@ use openraft::Vote;
 
 use crate::type_config::RrTypeConfig;
 
-/// In-memory log storage for a single Raft group.
-#[derive(Clone, Default)]
-pub struct RrLogStorage {
+/// Inner state of [`RrLogStorage`], protected by a shared `RwLock`.
+#[derive(Default)]
+struct Inner {
     /// Log entries indexed by log index.
     entries: BTreeMap<u64, Entry<RrTypeConfig>>,
     /// Current persisted vote.
@@ -26,12 +32,24 @@ pub struct RrLogStorage {
     last_purged_log_id: Option<LogId<u64>>,
 }
 
+/// In-memory log storage for a single Raft group.
+///
+/// Cloning this value is cheap (`Arc` clone) and produces a handle that
+/// shares the same underlying storage — which is required so that the
+/// `LogReader` returned by [`RaftLogStorage::get_log_reader`] sees entries
+/// appended after the reader was obtained.
+#[derive(Clone, Default)]
+pub struct RrLogStorage {
+    inner: Arc<RwLock<Inner>>,
+}
+
 impl RaftLogReader<RrTypeConfig> for RrLogStorage {
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry<RrTypeConfig>>, StorageError<u64>> {
-        let entries: Vec<Entry<RrTypeConfig>> = self
+        let inner = self.inner.read().expect("RrLogStorage lock poisoned");
+        let entries: Vec<Entry<RrTypeConfig>> = inner
             .entries
             .range(range)
             .map(|(_, entry)| entry.clone())
@@ -44,29 +62,34 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
     type LogReader = Self;
 
     async fn get_log_state(&mut self) -> Result<LogState<RrTypeConfig>, StorageError<u64>> {
-        let last_log_id = self
+        let inner = self.inner.read().expect("RrLogStorage lock poisoned");
+        let last_log_id = inner
             .entries
             .last_key_value()
             .map(|(_, entry)| entry.log_id)
-            .or(self.last_purged_log_id);
+            .or(inner.last_purged_log_id);
 
         Ok(LogState {
-            last_purged_log_id: self.last_purged_log_id,
+            last_purged_log_id: inner.last_purged_log_id,
             last_log_id,
         })
     }
 
+    /// Returns a reader that **shares** the same underlying data.
+    ///
+    /// Because `RrLogStorage` wraps `Arc<RwLock<Inner>>`, cloning it is an
+    /// `Arc` clone — both the reader and the writer see the same entries.
     async fn get_log_reader(&mut self) -> Self::LogReader {
         self.clone()
     }
 
     async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
-        self.vote = Some(*vote);
+        self.inner.write().expect("RrLogStorage lock poisoned").vote = Some(*vote);
         Ok(())
     }
 
     async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
-        Ok(self.vote)
+        Ok(self.inner.read().expect("RrLogStorage lock poisoned").vote)
     }
 
     async fn append<I>(
@@ -78,35 +101,40 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
         I: IntoIterator<Item = Entry<RrTypeConfig>> + Send,
         I::IntoIter: Send,
     {
-        for entry in entries {
-            self.entries.insert(entry.log_id.index, entry);
-        }
+        {
+            let mut inner = self.inner.write().expect("RrLogStorage lock poisoned");
+            for entry in entries {
+                inner.entries.insert(entry.log_id.index, entry);
+            }
+        } // lock released before callback
         callback.log_io_completed(Ok(()));
         Ok(())
     }
 
     async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        let to_remove: Vec<u64> = self
+        let mut inner = self.inner.write().expect("RrLogStorage lock poisoned");
+        let to_remove: Vec<u64> = inner
             .entries
             .range(log_id.index..)
             .map(|(k, _)| *k)
             .collect();
         for key in to_remove {
-            self.entries.remove(&key);
+            inner.entries.remove(&key);
         }
         Ok(())
     }
 
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        let to_remove: Vec<u64> = self
+        let mut inner = self.inner.write().expect("RrLogStorage lock poisoned");
+        let to_remove: Vec<u64> = inner
             .entries
             .range(..=log_id.index)
             .map(|(k, _)| *k)
             .collect();
         for key in to_remove {
-            self.entries.remove(&key);
+            inner.entries.remove(&key);
         }
-        self.last_purged_log_id = Some(log_id);
+        inner.last_purged_log_id = Some(log_id);
         Ok(())
     }
 }
@@ -206,5 +234,22 @@ mod tests {
         let state = storage.get_log_state().await.unwrap();
         assert_eq!(state.last_purged_log_id, None);
         assert_eq!(state.last_log_id.unwrap().index, 2);
+    }
+
+    #[tokio::test]
+    async fn test_log_reader_shares_state_with_writer() {
+        // This is the critical regression test: reader obtained before writes
+        // must see entries written after it was obtained.
+        let mut storage = RrLogStorage::default();
+        let mut reader = storage.get_log_reader().await;
+
+        // Write entries AFTER obtaining the reader
+        let entries = vec![make_normal_entry(1, 1, b"hello".to_vec())];
+        storage.blocking_append(entries).await.unwrap();
+
+        // Reader must see the new entry
+        let result = reader.try_get_log_entries(1..2).await.unwrap();
+        assert_eq!(result.len(), 1, "reader must see entries written after it was obtained");
+        assert_eq!(result[0].log_id.index, 1);
     }
 }
