@@ -59,10 +59,8 @@ impl StateMachine for KvStateMachine {
         let (index_bytes, payload) = entry.split_at(8);
         let index = u64::from_le_bytes(index_bytes.try_into().unwrap());
 
-        let (req, _): (KvRequest, _) =
-            bincode::serde::decode_from_slice(payload, standard()).map_err(|e| {
-                RrError::Codec(CodecError::DeserializeFailed(e.to_string()))
-            })?;
+        let (req, _): (KvRequest, _) = bincode::serde::decode_from_slice(payload, standard())
+            .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
 
         let response = match req {
             KvRequest::Put { key, value } => {
@@ -72,7 +70,9 @@ impl StateMachine for KvStateMachine {
             }
             KvRequest::Get { key } => {
                 debug!(%key, "KvStateMachine Get");
-                KvResponse { value: self.store.get(&key).cloned() }
+                KvResponse {
+                    value: self.store.get(&key).cloned(),
+                }
             }
             KvRequest::Delete { key } => {
                 debug!(%key, "KvStateMachine Delete");
@@ -94,9 +94,8 @@ impl StateMachine for KvStateMachine {
 
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError> {
         let (restored, _): (HashMap<String, Vec<u8>>, _) =
-            bincode::serde::decode_from_slice(snapshot, standard()).map_err(|e| {
-                RrError::Codec(CodecError::DeserializeFailed(e.to_string()))
-            })?;
+            bincode::serde::decode_from_slice(snapshot, standard())
+                .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
         self.store = restored;
         Ok(())
     }
@@ -118,8 +117,7 @@ pub fn encode_entry(index: LogIndex, req: &KvRequest) -> Vec<u8> {
 
 /// Decode the `KvResponse` returned by `apply`.
 pub fn decode_response(bytes: &[u8]) -> KvResponse {
-    let (r, _): (KvResponse, _) =
-        bincode::serde::decode_from_slice(bytes, standard()).unwrap();
+    let (r, _): (KvResponse, _) = bincode::serde::decode_from_slice(bytes, standard()).unwrap();
     r
 }
 
@@ -135,7 +133,10 @@ mod tests {
 
         let entry = encode_entry(
             1,
-            &KvRequest::Put { key: "foo".into(), value: b"bar".to_vec() },
+            &KvRequest::Put {
+                key: "foo".into(),
+                value: b"bar".to_vec(),
+            },
         );
         let resp_bytes = sm.apply(&entry).await.unwrap();
         let resp = decode_response(&resp_bytes);
@@ -151,9 +152,15 @@ mod tests {
     async fn test_apply_delete_removes_key() {
         let mut sm = KvStateMachine::new();
 
-        sm.apply(&encode_entry(1, &KvRequest::Put { key: "x".into(), value: vec![9] }))
-            .await
-            .unwrap();
+        sm.apply(&encode_entry(
+            1,
+            &KvRequest::Put {
+                key: "x".into(),
+                value: vec![9],
+            },
+        ))
+        .await
+        .unwrap();
         sm.apply(&encode_entry(2, &KvRequest::Delete { key: "x".into() }))
             .await
             .unwrap();
@@ -181,7 +188,10 @@ mod tests {
         let mut sm = KvStateMachine::new();
         sm.apply(&encode_entry(
             1,
-            &KvRequest::Put { key: "snap".into(), value: b"shot".to_vec() },
+            &KvRequest::Put {
+                key: "snap".into(),
+                value: b"shot".to_vec(),
+            },
         ))
         .await
         .unwrap();
@@ -205,18 +215,18 @@ mod tests {
 
         sm.apply(&encode_entry(
             42,
-            &KvRequest::Put { key: "a".into(), value: b"b".to_vec() },
+            &KvRequest::Put {
+                key: "a".into(),
+                value: b"b".to_vec(),
+            },
         ))
         .await
         .unwrap();
         assert_eq!(sm.last_applied().await, Some(42));
 
-        sm.apply(&encode_entry(
-            99,
-            &KvRequest::Delete { key: "a".into() },
-        ))
-        .await
-        .unwrap();
+        sm.apply(&encode_entry(99, &KvRequest::Delete { key: "a".into() }))
+            .await
+            .unwrap();
         assert_eq!(sm.last_applied().await, Some(99));
     }
 }

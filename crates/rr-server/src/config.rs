@@ -7,8 +7,8 @@ use rr_core::storage::StorageEngine;
 use rr_core::types::NodeId;
 use rr_network::client_service::ClientDispatch;
 use rr_network::raft_service::RaftGroupLookup;
-use rr_raft::group_manager::StateMachineFactory;
 use rr_raft::group_manager::RaftGroupManager;
+use rr_raft::group_manager::StateMachineFactory;
 
 /// Configuration for creating an [`RrNode`](super::node::RrNode).
 pub struct NodeConfig {

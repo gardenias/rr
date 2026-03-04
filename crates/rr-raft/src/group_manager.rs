@@ -3,11 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+use metrics::counter;
 use openraft::BasicNode;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
-use metrics::counter;
-
 
 use rr_core::error::{RaftError, RrError};
 use rr_core::state_machine::StateMachine;
@@ -156,7 +155,10 @@ impl RaftGroupManager {
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
 
-        info!(group_id, node_id, self.node_id, "added learner to raft group");
+        info!(
+            group_id,
+            node_id, self.node_id, "added learner to raft group"
+        );
         Ok(())
     }
 
@@ -180,7 +182,11 @@ impl RaftGroupManager {
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
 
-        info!(group_id, node_id = self.node_id, "changed membership of raft group");
+        info!(
+            group_id,
+            node_id = self.node_id,
+            "changed membership of raft group"
+        );
         Ok(())
     }
 
@@ -210,10 +216,7 @@ impl RaftGroupManager {
     ///
     /// Returns `None` if the group does not exist.
     #[instrument(skip(self))]
-    pub async fn get_raft(
-        &self,
-        group_id: GroupId,
-    ) -> Option<openraft::Raft<RrTypeConfig>> {
+    pub async fn get_raft(&self, group_id: GroupId) -> Option<openraft::Raft<RrTypeConfig>> {
         let guard = self.groups.read().await;
         guard.get(&group_id).map(|node| node.raft.clone())
     }
@@ -257,26 +260,34 @@ impl RaftGroupManager {
     #[cfg(feature = "rocks")]
     #[instrument(skip(self))]
     pub async fn start_group_rocks(&self, group_id: GroupId) -> Result<(), RrError> {
-        let base = self.rocks_base_path.as_ref()
+        let base = self
+            .rocks_base_path
+            .as_ref()
             .ok_or_else(|| RrError::Application("rocks_base_path not set".to_string()))?;
         let path = format!("{base}/{group_id}");
 
         let mut guard = self.groups.write().await;
         if guard.contains_key(&group_id) {
-            return Err(RrError::Application(format!("group {group_id} already exists")));
+            return Err(RrError::Application(format!(
+                "group {group_id} already exists"
+            )));
         }
         let sm = (self.sm_factory)(group_id);
-        let node = RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
-            .await
-            .map_err(|e| RrError::Application(e.to_string()))?;
+        let node =
+            RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
+                .await
+                .map_err(|e| RrError::Application(e.to_string()))?;
 
-        debug!(group_id, node_id = self.node_id, "started raft group (rocks)");
+        debug!(
+            group_id,
+            node_id = self.node_id,
+            "started raft group (rocks)"
+        );
         let node_id = self.node_id;
         counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
         guard.insert(group_id, node);
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -404,7 +415,12 @@ mod tests {
         let mgr = RaftGroupManager::new(1, noop_factory());
 
         let mut members = BTreeMap::new();
-        members.insert(1u64, BasicNode { addr: "127.0.0.1:5000".to_string() });
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: "127.0.0.1:5000".to_string(),
+            },
+        );
 
         let err = mgr.init_cluster(99, members).await.unwrap_err();
         assert!(
@@ -421,7 +437,12 @@ mod tests {
         mgr.start_group(1).await.unwrap();
 
         let mut members = BTreeMap::new();
-        members.insert(1u64, BasicNode { addr: String::new() });
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
 
         // init_cluster must succeed
         mgr.init_cluster(1, members).await.unwrap();
@@ -441,7 +462,10 @@ mod tests {
     #[tokio::test]
     async fn test_add_learner_unknown_group() {
         let mgr = RaftGroupManager::new(1, noop_factory());
-        let err = mgr.add_learner(99, 2, "127.0.0.1:5001".to_string()).await.unwrap_err();
+        let err = mgr
+            .add_learner(99, 2, "127.0.0.1:5001".to_string())
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("group not found"),
             "expected 'group not found' error, got: {err}"
@@ -468,7 +492,12 @@ mod tests {
         mgr.start_group(1).await.unwrap();
 
         let mut members = BTreeMap::new();
-        members.insert(1u64, BasicNode { addr: String::new() });
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
         mgr.init_cluster(1, members).await.unwrap();
 
         // Wait for leader election

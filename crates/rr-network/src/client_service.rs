@@ -183,11 +183,9 @@ mod tests {
             payload: vec![10, 20],
         };
 
-        let result = client_service_server::ClientService::request(
-            &svc,
-            tonic::Request::new(proto_req),
-        )
-        .await;
+        let result =
+            client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
+                .await;
 
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
@@ -235,11 +233,9 @@ mod tests {
             payload: vec![42],
         };
 
-        let result = client_service_server::ClientService::request(
-            &svc,
-            tonic::Request::new(proto_req),
-        )
-        .await;
+        let result =
+            client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
+                .await;
 
         let resp = result.unwrap().into_inner();
         assert!(resp.success);
@@ -256,11 +252,9 @@ mod tests {
             payload: vec![],
         };
 
-        let result = client_service_server::ClientService::request(
-            &svc,
-            tonic::Request::new(proto_req),
-        )
-        .await;
+        let result =
+            client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
+                .await;
 
         let resp = result.unwrap().into_inner();
         assert!(!resp.success);

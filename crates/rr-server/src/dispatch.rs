@@ -37,11 +37,9 @@ impl ClientDispatch for ClientDispatchImpl {
         partition_id: u64,
         payload: Vec<u8>,
     ) -> Result<ClientWriteResult, tonic::Status> {
-        let group_id: GroupId = self
-            .shard_router
-            .route(partition_id)
-            .await
-            .map_err(|e| tonic::Status::not_found(format!("partition {partition_id} not found: {e}")))?;
+        let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
+            tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
+        })?;
 
         let raft = self
             .group_manager

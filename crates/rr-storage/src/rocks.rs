@@ -4,7 +4,10 @@
 
 #![cfg(feature = "rocks")]
 
-use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction, IteratorMode, Options, ReadOptions, WriteBatch, DB};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction, IteratorMode,
+    Options, ReadOptions, WriteBatch, DB,
+};
 use std::sync::Arc;
 
 use rr_core::error::StorageError;
@@ -133,7 +136,11 @@ impl RocksStorage {
     /// - `Ok(RocksStorage)` on success
     /// - `Err(StorageError::Io)` if RocksDB operations fail
     pub fn open_default(path: &str) -> Result<Self, StorageError> {
-        Self::open(path, vec!["raft_log", "state_machine", "metadata"], RocksConfig::default())
+        Self::open(
+            path,
+            vec!["raft_log", "state_machine", "metadata"],
+            RocksConfig::default(),
+        )
     }
 
     /// Open a RocksDB instance with standard column families and minimal-resource
@@ -155,15 +162,23 @@ impl StorageEngine for RocksStorage {
         let key = key.to_vec();
         let value = value.to_vec();
         tokio::task::spawn_blocking(move || {
-            let handle = db
-                .cf_handle(&cf)
-                .ok_or_else(|| StorageError::NotFound { key: format!("cf:{cf}") })?;
+            let handle = db.cf_handle(&cf).ok_or_else(|| StorageError::NotFound {
+                key: format!("cf:{cf}"),
+            })?;
             db.put_cf(&handle, &key, &value).map_err(|e| {
-                StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
             })
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?
     }
 
     async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
@@ -171,15 +186,23 @@ impl StorageEngine for RocksStorage {
         let cf = cf.to_string();
         let key = key.to_vec();
         tokio::task::spawn_blocking(move || {
-            let handle = db
-                .cf_handle(&cf)
-                .ok_or_else(|| StorageError::NotFound { key: format!("cf:{cf}") })?;
+            let handle = db.cf_handle(&cf).ok_or_else(|| StorageError::NotFound {
+                key: format!("cf:{cf}"),
+            })?;
             db.get_cf(&handle, &key).map_err(|e| {
-                StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
             })
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?
     }
 
     async fn delete(&self, cf: &str, key: &[u8]) -> Result<(), StorageError> {
@@ -187,15 +210,23 @@ impl StorageEngine for RocksStorage {
         let cf = cf.to_string();
         let key = key.to_vec();
         tokio::task::spawn_blocking(move || {
-            let handle = db
-                .cf_handle(&cf)
-                .ok_or_else(|| StorageError::NotFound { key: format!("cf:{cf}") })?;
+            let handle = db.cf_handle(&cf).ok_or_else(|| StorageError::NotFound {
+                key: format!("cf:{cf}"),
+            })?;
             db.delete_cf(&handle, &key).map_err(|e| {
-                StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
             })
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?
     }
 
     async fn scan(
@@ -209,9 +240,9 @@ impl StorageEngine for RocksStorage {
         let start = start.to_vec();
         let end = end.to_vec();
         tokio::task::spawn_blocking(move || {
-            let handle = db
-                .cf_handle(&cf)
-                .ok_or_else(|| StorageError::NotFound { key: format!("cf:{cf}") })?;
+            let handle = db.cf_handle(&cf).ok_or_else(|| StorageError::NotFound {
+                key: format!("cf:{cf}"),
+            })?;
             let mut read_opts = ReadOptions::default();
             read_opts.set_iterate_upper_bound(end.clone());
             let iter = db.iterator_cf_opt(
@@ -222,14 +253,22 @@ impl StorageEngine for RocksStorage {
             let mut results = Vec::new();
             for item in iter {
                 let (k, v) = item.map_err(|e| {
-                    StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                    StorageError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    ))
                 })?;
                 results.push((k.to_vec(), v.to_vec()));
             }
             Ok(results)
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?
     }
 
     async fn write_batch(&self, ops: Vec<BatchOp>) -> Result<(), StorageError> {
@@ -253,22 +292,38 @@ impl StorageEngine for RocksStorage {
                 }
             }
             db.write(batch).map_err(|e| {
-                StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
             })
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?
     }
 
     async fn flush(&self) -> Result<(), StorageError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
             db.flush().map_err(|e| {
-                StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
             })
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?
     }
 
     async fn create_cf(&self, name: &str) -> Result<(), StorageError> {
@@ -277,11 +332,19 @@ impl StorageEngine for RocksStorage {
         tokio::task::spawn_blocking(move || {
             let opts = Options::default();
             db.create_cf(&name, &opts).map_err(|e| {
-                StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
             })
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?
     }
 }
 
@@ -293,8 +356,8 @@ mod tests {
 
     fn open_test_db() -> (RocksStorage, TempDir) {
         let tmp = TempDir::new().unwrap();
-        let storage = RocksStorage::open_for_testing(tmp.path().to_str().unwrap())
-            .expect("should open");
+        let storage =
+            RocksStorage::open_for_testing(tmp.path().to_str().unwrap()).expect("should open");
         (storage, tmp)
     }
 
@@ -309,7 +372,10 @@ mod tests {
     #[tokio::test]
     async fn test_put_and_get_roundtrip() {
         let (storage, _tmp) = open_test_db();
-        storage.put("state_machine", b"key1", b"value1").await.unwrap();
+        storage
+            .put("state_machine", b"key1", b"value1")
+            .await
+            .unwrap();
         let val = storage.get("state_machine", b"key1").await.unwrap();
         assert_eq!(val, Some(b"value1".to_vec()));
     }
@@ -324,7 +390,10 @@ mod tests {
     #[tokio::test]
     async fn test_delete_removes_key() {
         let (storage, _tmp) = open_test_db();
-        storage.put("state_machine", b"key1", b"value1").await.unwrap();
+        storage
+            .put("state_machine", b"key1", b"value1")
+            .await
+            .unwrap();
         storage.delete("state_machine", b"key1").await.unwrap();
         let val = storage.get("state_machine", b"key1").await.unwrap();
         assert_eq!(val, None);
@@ -370,15 +439,27 @@ mod tests {
             },
         ];
         storage.write_batch(ops).await.unwrap();
-        assert_eq!(storage.get("state_machine", b"k1").await.unwrap(), Some(b"v1".to_vec()));
-        assert_eq!(storage.get("state_machine", b"k2").await.unwrap(), Some(b"v2".to_vec()));
-        assert_eq!(storage.get("state_machine", b"k3").await.unwrap(), Some(b"v3".to_vec()));
+        assert_eq!(
+            storage.get("state_machine", b"k1").await.unwrap(),
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(
+            storage.get("state_machine", b"k2").await.unwrap(),
+            Some(b"v2".to_vec())
+        );
+        assert_eq!(
+            storage.get("state_machine", b"k3").await.unwrap(),
+            Some(b"v3".to_vec())
+        );
     }
 
     #[tokio::test]
     async fn test_write_batch_mixed_put_delete() {
         let (storage, _tmp) = open_test_db();
-        storage.put("state_machine", b"existing", b"val").await.unwrap();
+        storage
+            .put("state_machine", b"existing", b"val")
+            .await
+            .unwrap();
         let ops = vec![
             BatchOp::Put {
                 cf: "state_machine".into(),
@@ -395,7 +476,10 @@ mod tests {
             storage.get("state_machine", b"new_key").await.unwrap(),
             Some(b"new_val".to_vec())
         );
-        assert_eq!(storage.get("state_machine", b"existing").await.unwrap(), None);
+        assert_eq!(
+            storage.get("state_machine", b"existing").await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -404,7 +488,10 @@ mod tests {
         storage.put("metadata", b"key", b"val").await.unwrap();
         storage.flush().await.unwrap();
         // After flush, data should still be readable
-        assert_eq!(storage.get("metadata", b"key").await.unwrap(), Some(b"val".to_vec()));
+        assert_eq!(
+            storage.get("metadata", b"key").await.unwrap(),
+            Some(b"val".to_vec())
+        );
     }
 
     #[tokio::test]
@@ -417,9 +504,12 @@ mod tests {
     #[tokio::test]
     async fn test_open_custom_cfs() {
         let tmp = TempDir::new().unwrap();
-        let storage =
-            RocksStorage::open(tmp.path().to_str().unwrap(), vec!["custom_cf"], RocksConfig::for_testing())
-                .expect("should open with custom cfs");
+        let storage = RocksStorage::open(
+            tmp.path().to_str().unwrap(),
+            vec!["custom_cf"],
+            RocksConfig::for_testing(),
+        )
+        .expect("should open with custom cfs");
         storage.put("custom_cf", b"key", b"val").await.unwrap();
         let val = storage.get("custom_cf", b"key").await.unwrap();
         assert_eq!(val, Some(b"val".to_vec()));
@@ -468,7 +558,10 @@ mod tests {
         assert_eq!(config.level_zero_slowdown_trigger, 20);
         assert_eq!(config.level_zero_stop_trigger, 36);
         // Lz4 compression for production
-        assert!(matches!(config.compression, rocksdb::DBCompressionType::Lz4));
+        assert!(matches!(
+            config.compression,
+            rocksdb::DBCompressionType::Lz4
+        ));
     }
 
     #[test]
@@ -478,7 +571,10 @@ mod tests {
         assert_eq!(config.write_buffer_size_mb, 4);
         assert_eq!(config.max_write_buffer_number, 2);
         assert_eq!(config.max_background_jobs, 1);
-        assert!(matches!(config.compression, rocksdb::DBCompressionType::None));
+        assert!(matches!(
+            config.compression,
+            rocksdb::DBCompressionType::None
+        ));
         // Smaller than default
         let default = RocksConfig::default();
         assert!(config.block_cache_size_mb < default.block_cache_size_mb);
@@ -504,9 +600,11 @@ mod tests {
             config,
         )
         .expect("should open with custom config");
-        storage.put("state_machine", b"key1", b"value1").await.unwrap();
+        storage
+            .put("state_machine", b"key1", b"value1")
+            .await
+            .unwrap();
         let val = storage.get("state_machine", b"key1").await.unwrap();
         assert_eq!(val, Some(b"value1".to_vec()));
     }
-
 }

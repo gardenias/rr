@@ -78,20 +78,11 @@ impl RaftNode {
         node_id: u64,
         state_machine: Box<dyn StateMachine>,
     ) -> Result<Self, Fatal<u64>> {
-        Self::new_with_factory(
-            group_id,
-            node_id,
-            state_machine,
-            NoopNetworkFactory,
-        )
-        .await
+        Self::new_with_factory(group_id, node_id, state_machine, NoopNetworkFactory).await
     }
 
     /// Initialize this node as a single-node cluster.
-    pub async fn init_single_node(
-        &self,
-        node_id: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn init_single_node(&self, node_id: u64) -> Result<(), Box<dyn std::error::Error>> {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             node_id,
@@ -161,10 +152,7 @@ impl RaftNetwork<RrTypeConfig> for NoopNetwork {
         &mut self,
         _rpc: AppendEntriesRequest<RrTypeConfig>,
         _option: RPCOption,
-    ) -> Result<
-        AppendEntriesResponse<u64>,
-        RPCError<u64, BasicNode, RaftError<u64>>,
-    > {
+    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
         Err(RPCError::Unreachable(Unreachable::new(
             &std::io::Error::other("noop network"),
         )))
@@ -176,11 +164,7 @@ impl RaftNetwork<RrTypeConfig> for NoopNetwork {
         _option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<u64>,
-        RPCError<
-            u64,
-            BasicNode,
-            RaftError<u64, openraft::error::InstallSnapshotError>,
-        >,
+        RPCError<u64, BasicNode, RaftError<u64, openraft::error::InstallSnapshotError>>,
     > {
         Err(RPCError::Unreachable(Unreachable::new(
             &std::io::Error::other("noop network"),
@@ -245,9 +229,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_node_raft_propose() {
         let (sm, applied) = TestSM::new();
-        let node = RaftNode::new_single_node(1, 1, Box::new(sm))
-            .await
-            .unwrap();
+        let node = RaftNode::new_single_node(1, 1, Box::new(sm)).await.unwrap();
 
         // Initialize as single-node cluster
         node.init_single_node(1).await.unwrap();
@@ -271,14 +253,9 @@ mod tests {
     #[tokio::test]
     async fn test_raft_node_accepts_noop_factory() {
         let (sm, _applied) = TestSM::new();
-        let node = RaftNode::new_with_factory(
-            1,
-            1,
-            Box::new(sm),
-            NoopNetworkFactory,
-        )
-        .await
-        .unwrap();
+        let node = RaftNode::new_with_factory(1, 1, Box::new(sm), NoopNetworkFactory)
+            .await
+            .unwrap();
         assert_eq!(node.group_id, 1);
     }
 
@@ -287,14 +264,9 @@ mod tests {
         let (sm, _applied) = TestSM::new();
         // Verify we can pass a custom factory implementation
         // For now, we reuse NoopNetworkFactory as both the injected and expected factory
-        let node = RaftNode::new_with_factory(
-            2,
-            2,
-            Box::new(sm),
-            NoopNetworkFactory,
-        )
-        .await
-        .unwrap();
+        let node = RaftNode::new_with_factory(2, 2, Box::new(sm), NoopNetworkFactory)
+            .await
+            .unwrap();
         assert_eq!(node.group_id, 2);
     }
 }

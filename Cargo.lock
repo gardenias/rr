@@ -870,6 +870,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "openraft",
+ "rr-client",
  "rr-config",
  "rr-core",
  "rr-network",
@@ -877,6 +878,7 @@ dependencies = [
  "rr-router",
  "rr-server",
  "rr-storage",
+ "tempfile",
  "tokio",
 ]
 
@@ -938,9 +940,12 @@ dependencies = [
  "async-trait",
  "bincode",
  "openraft",
+ "rr-client",
  "rr-config",
  "rr-core",
+ "rr-network",
  "rr-raft",
+ "rr-router",
  "rr-server",
  "rr-storage",
  "serde",

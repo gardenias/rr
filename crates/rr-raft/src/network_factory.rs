@@ -199,35 +199,43 @@ impl RaftGrpcClient {
         &mut self,
         req: ProtoAppendReq,
     ) -> Result<tonic::Response<ProtoAppendResp>, tonic::Status> {
-        self.inner.ready().await.map_err(|e| {
-            tonic::Status::unknown(format!("service not ready: {e}"))
-        })?;
-        let path =
-            tonic::codegen::http::uri::PathAndQuery::from_static("/rr.raft.RaftService/AppendEntries");
+        self.inner
+            .ready()
+            .await
+            .map_err(|e| tonic::Status::unknown(format!("service not ready: {e}")))?;
+        let path = tonic::codegen::http::uri::PathAndQuery::from_static(
+            "/rr.raft.RaftService/AppendEntries",
+        );
         let codec = tonic_prost::ProstCodec::default();
-        self.inner.unary(tonic::Request::new(req), path, codec).await
+        self.inner
+            .unary(tonic::Request::new(req), path, codec)
+            .await
     }
 
     async fn vote(
         &mut self,
         req: ProtoVoteReq,
     ) -> Result<tonic::Response<ProtoVoteResp>, tonic::Status> {
-        self.inner.ready().await.map_err(|e| {
-            tonic::Status::unknown(format!("service not ready: {e}"))
-        })?;
+        self.inner
+            .ready()
+            .await
+            .map_err(|e| tonic::Status::unknown(format!("service not ready: {e}")))?;
         let path =
             tonic::codegen::http::uri::PathAndQuery::from_static("/rr.raft.RaftService/Vote");
         let codec = tonic_prost::ProstCodec::default();
-        self.inner.unary(tonic::Request::new(req), path, codec).await
+        self.inner
+            .unary(tonic::Request::new(req), path, codec)
+            .await
     }
 
     async fn install_snapshot(
         &mut self,
         stream: impl tonic::IntoStreamingRequest<Message = ProtoSnapshotChunk>,
     ) -> Result<tonic::Response<ProtoSnapshotResp>, tonic::Status> {
-        self.inner.ready().await.map_err(|e| {
-            tonic::Status::unknown(format!("service not ready: {e}"))
-        })?;
+        self.inner
+            .ready()
+            .await
+            .map_err(|e| tonic::Status::unknown(format!("service not ready: {e}")))?;
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/rr.raft.RaftService/InstallSnapshot",
         );
@@ -463,7 +471,9 @@ mod tests {
             leader_commit: None,
         };
 
-        let result = network.append_entries(rpc, RPCOption::new(Duration::from_secs(5))).await;
+        let result = network
+            .append_entries(rpc, RPCOption::new(Duration::from_secs(5)))
+            .await;
 
         assert!(result.is_err(), "should fail to connect to invalid addr");
         match result.unwrap_err() {
@@ -487,7 +497,9 @@ mod tests {
             last_log_id: None,
         };
 
-        let result = network.vote(rpc, RPCOption::new(Duration::from_secs(5))).await;
+        let result = network
+            .vote(rpc, RPCOption::new(Duration::from_secs(5)))
+            .await;
 
         assert!(result.is_err(), "should fail to connect to invalid addr");
         match result.unwrap_err() {
@@ -537,7 +549,10 @@ mod tests {
         // Replicate the chunking logic from install_snapshot
         let chunks_data: Vec<&[u8]> = snapshot_data.chunks(CHUNK_SIZE).collect();
         let total = chunks_data.len();
-        assert_eq!(total, 3, "should produce 3 chunks for 2*CHUNK_SIZE+1000 bytes");
+        assert_eq!(
+            total, 3,
+            "should produce 3 chunks for 2*CHUNK_SIZE+1000 bytes"
+        );
 
         let mut proto_chunks: Vec<ProtoSnapshotChunk> = Vec::with_capacity(total);
         for (i, chunk_data) in chunks_data.iter().enumerate() {
@@ -573,7 +588,10 @@ mod tests {
         for chunk in &proto_chunks {
             reassembled.extend_from_slice(&chunk.data);
         }
-        assert_eq!(reassembled, snapshot_data, "reassembled data must match original");
+        assert_eq!(
+            reassembled, snapshot_data,
+            "reassembled data must match original"
+        );
     }
 
     /// Single-chunk path: data <= CHUNK_SIZE produces exactly one chunk with done=true.
@@ -600,7 +618,11 @@ mod tests {
         } else {
             snapshot_data.chunks(65_536).collect()
         };
-        assert_eq!(chunks_data.len(), 1, "empty snapshot must produce one empty chunk");
+        assert_eq!(
+            chunks_data.len(),
+            1,
+            "empty snapshot must produce one empty chunk"
+        );
         assert!(chunks_data[0].is_empty());
     }
 }

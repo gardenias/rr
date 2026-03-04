@@ -45,10 +45,8 @@ impl Default for KvService {
 impl Service for KvService {
     #[instrument(skip(self, request))]
     async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        let (req, _): (KvRequest, _) =
-            bincode::serde::decode_from_slice(&request, standard()).map_err(|e| {
-                RrError::Codec(CodecError::DeserializeFailed(e.to_string()))
-            })?;
+        let (req, _): (KvRequest, _) = bincode::serde::decode_from_slice(&request, standard())
+            .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
 
         let response = match req {
             KvRequest::Put { key, value } => {
@@ -59,7 +57,9 @@ impl Service for KvService {
             KvRequest::Get { key } => {
                 debug!(%key, "KV Get");
                 let guard = self.store.read().await;
-                KvResponse { value: guard.get(&key).cloned() }
+                KvResponse {
+                    value: guard.get(&key).cloned(),
+                }
             }
             KvRequest::Delete { key } => {
                 debug!(%key, "KV Delete");
@@ -85,9 +85,8 @@ impl Service for KvService {
 
     async fn restore(&mut self, data: &[u8]) -> Result<(), RrError> {
         let (restored, _): (HashMap<String, Vec<u8>>, _) =
-            bincode::serde::decode_from_slice(data, standard()).map_err(|e| {
-                RrError::Codec(CodecError::DeserializeFailed(e.to_string()))
-            })?;
+            bincode::serde::decode_from_slice(data, standard())
+                .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
         *self.store.write().await = restored;
         Ok(())
     }
@@ -117,7 +116,9 @@ mod tests {
         });
         svc.handle(put).await.unwrap();
 
-        let get = encode_req(KvRequest::Get { key: "hello".into() });
+        let get = encode_req(KvRequest::Get {
+            key: "hello".into(),
+        });
         let resp = decode_resp(svc.handle(get).await.unwrap());
         assert_eq!(resp.value, Some(b"world".to_vec()));
     }
@@ -125,7 +126,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_missing_key_returns_none() {
         let svc = KvService::new();
-        let get = encode_req(KvRequest::Get { key: "missing".into() });
+        let get = encode_req(KvRequest::Get {
+            key: "missing".into(),
+        });
         let resp = decode_resp(svc.handle(get).await.unwrap());
         assert_eq!(resp.value, None);
     }
@@ -161,7 +164,9 @@ mod tests {
         let mut svc2 = KvService::new();
         svc2.restore(&snapshot).await.unwrap();
 
-        let get = encode_req(KvRequest::Get { key: "snap_key".into() });
+        let get = encode_req(KvRequest::Get {
+            key: "snap_key".into(),
+        });
         let resp = decode_resp(svc2.handle(get).await.unwrap());
         assert_eq!(resp.value, Some(b"snap_val".to_vec()));
     }

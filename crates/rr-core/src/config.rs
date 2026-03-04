@@ -27,10 +27,7 @@ pub enum RoutingTableChange {
         group_id: GroupId,
     },
     /// A new node was added.
-    NodeAdded {
-        node_id: NodeId,
-        addr: NodeAddr,
-    },
+    NodeAdded { node_id: NodeId, addr: NodeAddr },
     /// A node was removed.
     NodeRemoved { node_id: NodeId },
     /// Group membership was changed.
@@ -99,7 +96,10 @@ mod tests {
         };
         let cloned = change.clone();
         match cloned {
-            RoutingTableChange::NodeAdded { node_id, addr: cloned_addr } => {
+            RoutingTableChange::NodeAdded {
+                node_id,
+                addr: cloned_addr,
+            } => {
                 assert_eq!(node_id, 42);
                 assert_eq!(cloned_addr.addr, "127.0.0.1:9001");
             }
@@ -133,7 +133,5 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
-
     }
 }
-

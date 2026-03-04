@@ -47,13 +47,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
     async fn applied_state(
         &mut self,
-    ) -> Result<
-        (
-            Option<LogId<u64>>,
-            StoredMembership<u64, BasicNode>,
-        ),
-        StorageError<u64>,
-    > {
+    ) -> Result<(Option<LogId<u64>>, StoredMembership<u64, BasicNode>), StorageError<u64>> {
         Ok((self.last_applied, self.last_membership.clone()))
     }
 
@@ -72,18 +66,13 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
                     results.push(Vec::new());
                 }
                 EntryPayload::Normal(ref data) => {
-                    let res = self.inner.apply(data).await.map_err(|e| {
-                        StorageError::IO {
-                            source: StorageIOError::write_state_machine(
-                                openraft::AnyError::new(&e),
-                            ),
-                        }
+                    let res = self.inner.apply(data).await.map_err(|e| StorageError::IO {
+                        source: StorageIOError::write_state_machine(openraft::AnyError::new(&e)),
                     })?;
                     results.push(res);
                 }
                 EntryPayload::Membership(ref mem) => {
-                    self.last_membership =
-                        StoredMembership::new(Some(entry.log_id), mem.clone());
+                    self.last_membership = StoredMembership::new(Some(entry.log_id), mem.clone());
                     results.push(Vec::new());
                 }
             }
@@ -115,9 +104,12 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<u64>> {
         let data = snapshot.into_inner();
-        self.inner.restore(&data).await.map_err(|e| StorageError::IO {
-            source: StorageIOError::write_state_machine(openraft::AnyError::new(&e)),
-        })?;
+        self.inner
+            .restore(&data)
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::write_state_machine(openraft::AnyError::new(&e)),
+            })?;
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
         self.snapshot_bytes = data;
@@ -176,15 +168,15 @@ impl RaftSnapshotBuilder<RrTypeConfig> for RrSnapshotBuilder {
 mod tests {
     use std::io::Cursor;
 
-    use openraft::{Entry, EntryPayload, LogId};
     use openraft::SnapshotMeta;
     use openraft::StoredMembership;
+    use openraft::{Entry, EntryPayload, LogId};
 
     use rr_core::error::RrError;
     use rr_core::state_machine::StateMachine;
     use rr_core::types::LogIndex;
 
-    use super::{RrStateMachine};
+    use super::RrStateMachine;
     use crate::type_config::RrTypeConfig;
     use openraft::storage::RaftStateMachine;
     use openraft::RaftSnapshotBuilder;
@@ -217,7 +209,6 @@ mod tests {
         RrStateMachine::new(Box::new(VecSM { state: vec![] }))
     }
 
-
     fn data_entry(index: u64, data: Vec<u8>) -> Entry<RrTypeConfig> {
         Entry {
             log_id: LogId::new(openraft::CommittedLeaderId::new(1, 1), index),
@@ -233,8 +224,12 @@ mod tests {
         let mut sm = make_sm();
 
         // Apply some entries
-        sm.apply(vec![data_entry(1, b"hello".to_vec())]).await.unwrap();
-        sm.apply(vec![data_entry(2, b" world".to_vec())]).await.unwrap();
+        sm.apply(vec![data_entry(1, b"hello".to_vec())])
+            .await
+            .unwrap();
+        sm.apply(vec![data_entry(2, b" world".to_vec())])
+            .await
+            .unwrap();
 
         // Build snapshot
         let mut builder = sm.get_snapshot_builder().await;
@@ -242,9 +237,15 @@ mod tests {
 
         // Snapshot data equals accumulated state
         let data = snap.snapshot.into_inner();
-        assert_eq!(data, b"hello world", "snapshot must contain accumulated state");
+        assert_eq!(
+            data, b"hello world",
+            "snapshot must contain accumulated state"
+        );
         assert_eq!(snap.meta.snapshot_id, "snap-0");
-        assert_eq!(snap.meta.last_log_id, Some(LogId::new(openraft::CommittedLeaderId::new(1, 1), 2)));
+        assert_eq!(
+            snap.meta.last_log_id,
+            Some(LogId::new(openraft::CommittedLeaderId::new(1, 1), 2))
+        );
     }
 
     /// begin_receiving_snapshot returns an empty cursor.
@@ -252,7 +253,10 @@ mod tests {
     async fn test_begin_receiving_snapshot_empty() {
         let mut sm = make_sm();
         let cursor = sm.begin_receiving_snapshot().await.unwrap();
-        assert!(cursor.into_inner().is_empty(), "fresh snapshot buffer must be empty");
+        assert!(
+            cursor.into_inner().is_empty(),
+            "fresh snapshot buffer must be empty"
+        );
     }
 
     /// install_snapshot restores state machine from snapshot bytes.
@@ -268,7 +272,9 @@ mod tests {
             snapshot_id: "snap-42".to_string(),
         };
 
-        sm.install_snapshot(&meta, Box::new(Cursor::new(snap_data.clone()))).await.unwrap();
+        sm.install_snapshot(&meta, Box::new(Cursor::new(snap_data.clone())))
+            .await
+            .unwrap();
 
         // Verify state was restored
         let current = sm.get_current_snapshot().await.unwrap().unwrap();
@@ -282,8 +288,14 @@ mod tests {
     async fn test_snapshot_round_trip() {
         // Source SM: apply data
         let mut source = make_sm();
-        source.apply(vec![data_entry(1, b"foo".to_vec())]).await.unwrap();
-        source.apply(vec![data_entry(2, b"bar".to_vec())]).await.unwrap();
+        source
+            .apply(vec![data_entry(1, b"foo".to_vec())])
+            .await
+            .unwrap();
+        source
+            .apply(vec![data_entry(2, b"bar".to_vec())])
+            .await
+            .unwrap();
 
         // Build snapshot from source
         let mut builder = source.get_snapshot_builder().await;
@@ -300,7 +312,11 @@ mod tests {
 
         // Target must now have the same state as source
         let target_snap = target.get_current_snapshot().await.unwrap().unwrap();
-        assert_eq!(target_snap.snapshot.into_inner(), snap_data, "target state must match source");
+        assert_eq!(
+            target_snap.snapshot.into_inner(),
+            snap_data,
+            "target state must match source"
+        );
         assert_eq!(target_snap.meta.last_log_id, snap_meta.last_log_id);
     }
 

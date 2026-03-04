@@ -42,11 +42,9 @@ fn ser<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, StorageError<u64>> {
 }
 
 fn de<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StorageError<u64>> {
-    let (val, _): (T, _) =
-        bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map_err(|e| {
-            StorageError::IO {
-                source: StorageIOError::read_logs(AnyError::error(e.to_string())),
-            }
+    let (val, _): (T, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+        .map_err(|e| StorageError::IO {
+            source: StorageIOError::read_logs(AnyError::error(e.to_string())),
         })?;
     Ok(val)
 }
@@ -198,14 +196,11 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
             })?
             .map(|b| {
                 // Vote is serialized as (leader_id, committed) — use `de` for consistency
-                bincode::serde::decode_from_slice::<Vote<u64>, _>(
-                    &b,
-                    bincode::config::standard(),
-                )
-                .map(|(v, _)| v)
-                .map_err(|e| StorageError::IO {
-                    source: StorageIOError::read_vote(AnyError::error(e.to_string())),
-                })
+                bincode::serde::decode_from_slice::<Vote<u64>, _>(&b, bincode::config::standard())
+                    .map(|(v, _)| v)
+                    .map_err(|e| StorageError::IO {
+                        source: StorageIOError::read_vote(AnyError::error(e.to_string())),
+                    })
             })
             .transpose()
     }
@@ -230,10 +225,7 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
             });
         }
         if !ops.is_empty() {
-            self.storage
-                .write_batch(ops)
-                .await
-                .map_err(to_write_err)?;
+            self.storage.write_batch(ops).await.map_err(to_write_err)?;
         }
         callback.log_io_completed(Ok(()));
         Ok(())

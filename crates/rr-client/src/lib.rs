@@ -94,12 +94,7 @@ impl RrClient {
     }
 
     /// Update the leader cache for a given group.
-    pub async fn update_leader_cache(
-        &self,
-        group_id: GroupId,
-        node_id: NodeId,
-        addr: String,
-    ) {
+    pub async fn update_leader_cache(&self, group_id: GroupId, node_id: NodeId, addr: String) {
         let mut cache = self.leader_cache.write().await;
         cache.insert(group_id, (node_id, addr));
     }
@@ -117,10 +112,7 @@ impl RrClient {
     }
 
     /// Create a gRPC client stub connected to the given address.
-    async fn connect_to_addr(
-        &self,
-        addr: &str,
-    ) -> Result<ClientServiceClient<Channel>, RrError> {
+    async fn connect_to_addr(&self, addr: &str) -> Result<ClientServiceClient<Channel>, RrError> {
         let channel = Channel::from_shared(format!("http://{addr}"))
             .expect("valid uri")
             .connect()
@@ -153,14 +145,13 @@ impl RrClient {
 
         for attempt in 0..max_attempts {
             // Determine which address to try
-            let addr = if let Some((_node_id, cached_addr)) =
-                self.get_cached_leader(group_id).await
+            let addr = if let Some((_node_id, cached_addr)) = self.get_cached_leader(group_id).await
             {
                 cached_addr
             } else {
                 // Round-robin through bootstrap addresses
-                let addr = self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()]
-                    .clone();
+                let addr =
+                    self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
                 bootstrap_index += 1;
                 addr
             };
@@ -187,10 +178,8 @@ impl RrClient {
 
                     // Exponential backoff before retry
                     if attempt + 1 < max_attempts {
-                        let delay_ms =
-                            self.retry_config.retry_delay_ms * 2u64.pow(attempt);
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
-                            .await;
+                        let delay_ms = self.retry_config.retry_delay_ms * 2u64.pow(attempt);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                     continue;
                 }
@@ -213,21 +202,13 @@ impl RrClient {
                             leader_addr = %leader_info.addr,
                             "leader redirect received, updating cache"
                         );
-                        self.update_leader_cache(
-                            group_id,
-                            leader_info.node_id,
-                            leader_info.addr,
-                        )
-                        .await;
+                        self.update_leader_cache(group_id, leader_info.node_id, leader_info.addr)
+                            .await;
 
                         // If the response was not successful, retry with the new leader
                         if !resp.success && attempt + 1 < max_attempts {
-                            let delay_ms =
-                                self.retry_config.retry_delay_ms * 2u64.pow(attempt);
-                            tokio::time::sleep(
-                                std::time::Duration::from_millis(delay_ms),
-                            )
-                            .await;
+                            let delay_ms = self.retry_config.retry_delay_ms * 2u64.pow(attempt);
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             continue;
                         }
                     }
@@ -249,19 +230,15 @@ impl RrClient {
 
                     // Exponential backoff before retry
                     if attempt + 1 < max_attempts {
-                        let delay_ms =
-                            self.retry_config.retry_delay_ms * 2u64.pow(attempt);
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
-                            .await;
+                        let delay_ms = self.retry_config.retry_delay_ms * 2u64.pow(attempt);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                 }
             }
         }
 
         Err(last_error.unwrap_or_else(|| {
-            RrError::Network(NetworkError::RpcFailed(
-                "max retries exhausted".to_string(),
-            ))
+            RrError::Network(NetworkError::RpcFailed("max retries exhausted".to_string()))
         }))
     }
 
@@ -437,12 +414,9 @@ mod tests {
             max_retries: 5,
             retry_delay_ms: 200,
         };
-        let client = RrClient::connect_with_config(
-            vec!["127.0.0.1:9000".to_string()],
-            config,
-        )
-        .await
-        .expect("connect should succeed");
+        let client = RrClient::connect_with_config(vec!["127.0.0.1:9000".to_string()], config)
+            .await
+            .expect("connect should succeed");
 
         assert_eq!(client.retry_config().max_retries, 5);
         assert_eq!(client.retry_config().retry_delay_ms, 200);

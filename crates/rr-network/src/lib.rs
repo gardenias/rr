@@ -14,13 +14,13 @@ pub mod proto {
         tonic::include_proto!("rr.client");
     }
 }
-pub mod server;
-pub mod raft_service;
 pub mod client_service;
+pub mod raft_service;
+pub mod server;
 
 pub use channel_pool::ChannelPool;
 pub use client::RrGrpcClient;
-pub use server::RrGrpcServer;
+pub use client_service::{ClientDispatch, ClientServiceImpl, ClientWriteResult};
 pub use error_convert::IntoStatus;
 pub use raft_service::{RaftGroupLookup, RaftServiceImpl};
-pub use client_service::{ClientDispatch, ClientServiceImpl, ClientWriteResult};
+pub use server::RrGrpcServer;

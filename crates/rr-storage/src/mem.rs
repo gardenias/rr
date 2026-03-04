@@ -39,11 +39,9 @@ impl MemStorage {
 impl StorageEngine for MemStorage {
     async fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
-        let cf_map = guard
-            .get_mut(cf)
-            .ok_or_else(|| StorageError::NotFound {
-                key: format!("cf:{cf}"),
-            })?;
+        let cf_map = guard.get_mut(cf).ok_or_else(|| StorageError::NotFound {
+            key: format!("cf:{cf}"),
+        })?;
         cf_map.insert(key.to_vec(), value.to_vec());
         Ok(())
     }
@@ -58,11 +56,9 @@ impl StorageEngine for MemStorage {
 
     async fn delete(&self, cf: &str, key: &[u8]) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
-        let cf_map = guard
-            .get_mut(cf)
-            .ok_or_else(|| StorageError::NotFound {
-                key: format!("cf:{cf}"),
-            })?;
+        let cf_map = guard.get_mut(cf).ok_or_else(|| StorageError::NotFound {
+            key: format!("cf:{cf}"),
+        })?;
         cf_map.remove(key);
         Ok(())
     }
@@ -92,21 +88,15 @@ impl StorageEngine for MemStorage {
         for op in ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    let cf_map =
-                        guard
-                            .get_mut(&cf)
-                            .ok_or_else(|| StorageError::NotFound {
-                                key: format!("cf:{cf}"),
-                            })?;
+                    let cf_map = guard.get_mut(&cf).ok_or_else(|| StorageError::NotFound {
+                        key: format!("cf:{cf}"),
+                    })?;
                     cf_map.insert(key, value);
                 }
                 BatchOp::Delete { cf, key } => {
-                    let cf_map =
-                        guard
-                            .get_mut(&cf)
-                            .ok_or_else(|| StorageError::NotFound {
-                                key: format!("cf:{cf}"),
-                            })?;
+                    let cf_map = guard.get_mut(&cf).ok_or_else(|| StorageError::NotFound {
+                        key: format!("cf:{cf}"),
+                    })?;
                     cf_map.remove(&key);
                 }
             }

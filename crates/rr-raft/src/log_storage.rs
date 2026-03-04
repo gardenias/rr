@@ -249,7 +249,11 @@ mod tests {
 
         // Reader must see the new entry
         let result = reader.try_get_log_entries(1..2).await.unwrap();
-        assert_eq!(result.len(), 1, "reader must see entries written after it was obtained");
+        assert_eq!(
+            result.len(),
+            1,
+            "reader must see entries written after it was obtained"
+        );
         assert_eq!(result[0].log_id.index, 1);
     }
 }

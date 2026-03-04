@@ -13,16 +13,15 @@ use rr_core::config::ConfigProvider;
 use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{GroupId, LogIndex, NodeId, PartitionConfig};
+use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::group_manager::StateMachineFactory;
+use rr_raft::network_factory::ChannelPool;
+use rr_router::router::ShardRouter;
 use rr_server::config::NodeConfig;
+use rr_server::dispatch::ClientDispatchImpl;
+use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::node::RrNode;
 use rr_storage::mem::MemStorage;
-use rr_raft::network_factory::ChannelPool;
-use rr_raft::group_manager::RaftGroupManager;
-use rr_server::lookup::RaftGroupLookupImpl;
-use rr_server::dispatch::ClientDispatchImpl;
-use rr_router::router::ShardRouter;
-
 
 // ── Noop StateMachine ─────────────────────────────────────────────────────────
 
@@ -280,11 +279,7 @@ pub async fn shutdown_all(nodes: &[Arc<RrNode>]) {
 /// as seen from `node`.
 ///
 /// Returns `Ok(leader_id)` or `Err` if the timeout expires.
-pub async fn wait_for_leader(
-    node: &RrNode,
-    group_id: GroupId,
-    timeout_ms: u64,
-) -> Result<NodeId> {
+pub async fn wait_for_leader(node: &RrNode, group_id: GroupId, timeout_ms: u64) -> Result<NodeId> {
     use std::time::{Duration, Instant};
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
 
@@ -370,7 +365,7 @@ pub async fn wait_for_new_leader(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rr_client::{RrClient, RetryConfig};
+    use rr_client::{RetryConfig, RrClient};
 
     /// A single-node cluster must elect itself as leader immediately after
     /// initialization.
@@ -447,7 +442,10 @@ mod tests {
             .unwrap();
 
         let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
-        assert!(leader_id >= 1 && leader_id <= 3, "leader must be one of the 3 nodes");
+        assert!(
+            leader_id >= 1 && leader_id <= 3,
+            "leader must be one of the 3 nodes"
+        );
 
         // All nodes agree on the same leader
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -460,7 +458,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen_leaders.len(), 1, "all nodes must agree on one leader, saw: {seen_leaders:?}");
+        assert_eq!(
+            seen_leaders.len(),
+            1,
+            "all nodes must agree on one leader, saw: {seen_leaders:?}"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -540,7 +542,11 @@ mod tests {
                 let fwd = e.forward_to_leader::<BasicNode>();
                 assert!(fwd.is_some(), "expected ForwardToLeader error, got: {e:?}");
                 let fwd = fwd.unwrap();
-                assert_eq!(fwd.leader_id, Some(leader_id), "forward must point to current leader");
+                assert_eq!(
+                    fwd.leader_id,
+                    Some(leader_id),
+                    "forward must point to current leader"
+                );
             }
         }
 
@@ -558,7 +564,10 @@ mod tests {
         let original_leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
 
         // Write something before failover
-        let leader_node = nodes.iter().find(|n| n.node_id() == original_leader_id).unwrap();
+        let leader_node = nodes
+            .iter()
+            .find(|n| n.node_id() == original_leader_id)
+            .unwrap();
         let raft = leader_node.group_manager().get_raft(1).await.unwrap();
         raft.client_write(b"pre-failover".to_vec()).await.unwrap();
 
@@ -566,14 +575,18 @@ mod tests {
         leader_node.shutdown().await.unwrap();
 
         // A surviving node should elect a new leader (different from the failed one)
-        let survivors: Vec<_> = nodes.iter().filter(|n| n.node_id() != original_leader_id).cloned().collect();
-        let new_leader_id = wait_for_new_leader(
-            &survivors,
-            1,
-            original_leader_id,
-            12_000,
-        ).await.unwrap();
-        assert_ne!(new_leader_id, original_leader_id, "new leader must differ from failed node");
+        let survivors: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.node_id() != original_leader_id)
+            .cloned()
+            .collect();
+        let new_leader_id = wait_for_new_leader(&survivors, 1, original_leader_id, 12_000)
+            .await
+            .unwrap();
+        assert_ne!(
+            new_leader_id, original_leader_id,
+            "new leader must differ from failed node"
+        );
 
         // Write after failover should succeed
         let new_leader = nodes.iter().find(|n| n.node_id() == new_leader_id).unwrap();
@@ -603,7 +616,12 @@ mod tests {
 
         // Add partition 2 → group 2 with all 3 nodes as replicas at runtime
         provider
-            .add_partition(2, rr_core::types::PartitionConfig::SingleId(2), 2, node_ids.clone())
+            .add_partition(
+                2,
+                rr_core::types::PartitionConfig::SingleId(2),
+                2,
+                node_ids.clone(),
+            )
             .await;
 
         // Wait for all 3 nodes to have started group 2 (watch loop picks up PartitionAdded)
@@ -619,7 +637,10 @@ mod tests {
                 break;
             }
             if std::time::Instant::now() >= deadline {
-                panic!("group 2 not started on all nodes within 8s; only {count}/{} nodes have it", nodes.len());
+                panic!(
+                    "group 2 not started on all nodes within 8s; only {count}/{} nodes have it",
+                    nodes.len()
+                );
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
@@ -629,7 +650,12 @@ mod tests {
         let mut members = BTreeMap::new();
         for node_id in &node_ids {
             if let Some(node_addr) = table.nodes.get(node_id) {
-                members.insert(*node_id, openraft::BasicNode { addr: node_addr.addr.clone() });
+                members.insert(
+                    *node_id,
+                    openraft::BasicNode {
+                        addr: node_addr.addr.clone(),
+                    },
+                );
             }
         }
         assert_eq!(members.len(), 3, "must have addresses for all 3 nodes");
@@ -640,13 +666,19 @@ mod tests {
 
         // Wait for group 2 leader election
         let leader2 = wait_for_cluster_ready(&nodes, 2, 8_000).await.unwrap();
-        assert!(leader2 >= 1 && leader2 <= 3, "group 2 leader must be one of the 3 nodes");
+        assert!(
+            leader2 >= 1 && leader2 <= 3,
+            "group 2 leader must be one of the 3 nodes"
+        );
 
         // Write to group 2 and verify
         let leader2_node = nodes.iter().find(|n| n.node_id() == leader2).unwrap();
         let raft2 = leader2_node.group_manager().get_raft(2).await.unwrap();
         let resp = raft2.client_write(b"group2-write".to_vec()).await.unwrap();
-        assert_eq!(resp.data, b"group2-write", "group 2 EchoSM must echo writes");
+        assert_eq!(
+            resp.data, b"group2-write",
+            "group 2 EchoSM must echo writes"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -665,7 +697,9 @@ mod tests {
         // Register node 4 in config provider — fires NodeAdded event
         let node4_id: NodeId = 4;
         let node4_addr = "127.0.0.1:19204".to_string();
-        provider.add_node(node4_id, rr_core::types::NodeAddr { addr: node4_addr }).await;
+        provider
+            .add_node(node4_id, rr_core::types::NodeAddr { addr: node4_addr })
+            .await;
 
         // Wait briefly for the watch loop to fire add_learner calls
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -697,9 +731,9 @@ mod tests {
     #[cfg(feature = "rocks")]
     #[tokio::test]
     async fn test_restart_persistence() {
+        use openraft::storage::RaftLogStorage;
         use rr_raft::group_manager::RaftGroupManager;
         use rr_raft::rocks_log_storage::RocksLogStorage;
-        use openraft::storage::RaftLogStorage;
         use tempfile::TempDir;
 
         let tmp = TempDir::new().unwrap();
@@ -724,7 +758,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
             let metrics = raft.metrics().borrow().clone();
-            assert!(metrics.current_leader.is_some(), "must elect a leader before writing");
+            assert!(
+                metrics.current_leader.is_some(),
+                "must elect a leader before writing"
+            );
 
             // Write some data
             let resp = raft.client_write(b"hello-rocks".to_vec()).await.unwrap();
@@ -775,7 +812,10 @@ mod tests {
         assert!(!addrs.is_empty(), "must have node addresses");
 
         let client = RrClient::connect(addrs).await.unwrap();
-        let resp = client.send_request(1, b"hello-client".to_vec()).await.unwrap();
+        let resp = client
+            .send_request(1, b"hello-client".to_vec())
+            .await
+            .unwrap();
         assert_eq!(resp, b"hello-client", "EchoSM must echo the written bytes");
 
         shutdown_all(&nodes).await;
@@ -797,12 +837,18 @@ mod tests {
         let one_addr = table.nodes.values().next().unwrap().addr.clone();
         let client = RrClient::connect_with_config(
             vec![one_addr],
-            RetryConfig { max_retries: 5, retry_delay_ms: 200 },
+            RetryConfig {
+                max_retries: 5,
+                retry_delay_ms: 200,
+            },
         )
         .await
         .unwrap();
 
-        let resp = client.send_request(1, b"redirect-test".to_vec()).await.unwrap();
+        let resp = client
+            .send_request(1, b"redirect-test".to_vec())
+            .await
+            .unwrap();
         assert_eq!(resp, b"redirect-test", "EchoSM must echo the written bytes");
 
         shutdown_all(&nodes).await;
@@ -825,13 +871,19 @@ mod tests {
         let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
         let client = RrClient::connect_with_config(
             addrs,
-            RetryConfig { max_retries: 5, retry_delay_ms: 200 },
+            RetryConfig {
+                max_retries: 5,
+                retry_delay_ms: 200,
+            },
         )
         .await
         .unwrap();
 
         // Pre-failover write must succeed
-        let resp = client.send_request(1, b"pre-failover".to_vec()).await.unwrap();
+        let resp = client
+            .send_request(1, b"pre-failover".to_vec())
+            .await
+            .unwrap();
         assert_eq!(resp, b"pre-failover");
 
         // Kill the current leader
@@ -851,7 +903,10 @@ mod tests {
         let new_leader_id = wait_for_new_leader(&survivors, 1, leader_id, 8_000)
             .await
             .unwrap();
-        assert_ne!(new_leader_id, leader_id, "new leader must differ from failed node");
+        assert_ne!(
+            new_leader_id, leader_id,
+            "new leader must differ from failed node"
+        );
 
         // Post-failover: client may or may not succeed depending on retry state;
         // the important invariant is the cluster has a new leader.
@@ -937,8 +992,14 @@ mod tests {
         // Write after migration
         let leader_node2 = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
         let raft2 = leader_node2.group_manager().get_raft(1).await.unwrap();
-        let resp = raft2.client_write(b"post-migration".to_vec()).await.unwrap();
-        assert_eq!(resp.data, b"post-migration", "must echo post-migration write");
+        let resp = raft2
+            .client_write(b"post-migration".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.data, b"post-migration",
+            "must echo post-migration write"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -974,7 +1035,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(1_500)).await;
 
             let metrics = raft.metrics().borrow().clone();
-            assert!(metrics.current_leader.is_some(), "must elect a leader before writing");
+            assert!(
+                metrics.current_leader.is_some(),
+                "must elect a leader before writing"
+            );
 
             raft.client_write(b"before-crash".to_vec()).await.unwrap();
             raft.client_write(b"before-crash-2".to_vec()).await.unwrap();
@@ -1084,7 +1148,10 @@ mod tests {
 
         // 2. Verify leader election
         let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
-        assert!(leader_id >= 1 && leader_id <= 3, "leader must be one of the 3 nodes");
+        assert!(
+            leader_id >= 1 && leader_id <= 3,
+            "leader must be one of the 3 nodes"
+        );
 
         // 3. Write 20 entries through the leader
         let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
@@ -1116,9 +1183,16 @@ mod tests {
         killed.shutdown().await.unwrap();
 
         // 6. Write more data — cluster must survive with 2/3 nodes
-        let active: Vec<_> = nodes.iter().filter(|n| n.node_id() != kill_id).cloned().collect();
+        let active: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.node_id() != kill_id)
+            .cloned()
+            .collect();
         let new_leader_id = wait_for_cluster_ready(&active, 1, 8_000).await.unwrap();
-        let new_leader = active.iter().find(|n| n.node_id() == new_leader_id).unwrap();
+        let new_leader = active
+            .iter()
+            .find(|n| n.node_id() == new_leader_id)
+            .unwrap();
         let raft2 = new_leader.group_manager().get_raft(1).await.unwrap();
         for i in 20u8..30 {
             raft2.client_write(vec![i]).await.unwrap();

@@ -11,7 +11,9 @@ use tokio_stream::StreamExt;
 
 use rr_core::config::{ConfigProvider, RoutingTableChange};
 use rr_core::error::ConfigError;
-use rr_core::types::{GroupId, GroupMeta, NodeAddr, NodeId, PartitionConfig, PartitionId, RoutingTable};
+use rr_core::types::{
+    GroupId, GroupMeta, NodeAddr, NodeId, PartitionConfig, PartitionId, RoutingTable,
+};
 
 const BROADCAST_CAPACITY: usize = 64;
 
@@ -44,7 +46,9 @@ impl MemConfigProvider {
         replicas: Vec<NodeId>,
     ) {
         let mut table = self.routing_table.write().await;
-        table.partitions.insert(partition_id, (config.clone(), group_id));
+        table
+            .partitions
+            .insert(partition_id, (config.clone(), group_id));
         table.groups.entry(group_id).or_insert_with(|| GroupMeta {
             group_id,
             leader: replicas.first().copied(),
@@ -62,24 +66,27 @@ impl MemConfigProvider {
     pub async fn remove_partition(&self, partition_id: PartitionId) {
         let mut table = self.routing_table.write().await;
         table.partitions.remove(&partition_id);
-        let _ = self.change_tx.send(RoutingTableChange::PartitionRemoved { partition_id });
+        let _ = self
+            .change_tx
+            .send(RoutingTableChange::PartitionRemoved { partition_id });
     }
 
     /// Add a node address to the routing table and notify watchers.
     pub async fn add_node(&self, node_id: NodeId, addr: NodeAddr) {
         let mut table = self.routing_table.write().await;
         table.nodes.insert(node_id, addr.clone());
-        let _ = self.change_tx.send(RoutingTableChange::NodeAdded {
-            node_id,
-            addr,
-        });
+        let _ = self
+            .change_tx
+            .send(RoutingTableChange::NodeAdded { node_id, addr });
     }
 
     /// Remove a node from the routing table and notify watchers.
     pub async fn remove_node(&self, node_id: NodeId) {
         let mut table = self.routing_table.write().await;
         table.nodes.remove(&node_id);
-        let _ = self.change_tx.send(RoutingTableChange::NodeRemoved { node_id });
+        let _ = self
+            .change_tx
+            .send(RoutingTableChange::NodeRemoved { node_id });
     }
 
     /// Update group membership and notify watchers.
@@ -89,16 +96,18 @@ impl MemConfigProvider {
             group.replicas = replicas.clone();
             group.leader = replicas.first().copied();
         } else {
-            table.groups.insert(group_id, GroupMeta {
+            table.groups.insert(
                 group_id,
-                leader: replicas.first().copied(),
-                replicas: replicas.clone(),
-            });
+                GroupMeta {
+                    group_id,
+                    leader: replicas.first().copied(),
+                    replicas: replicas.clone(),
+                },
+            );
         }
-        let _ = self.change_tx.send(RoutingTableChange::GroupMembershipChanged {
-            group_id,
-            replicas,
-        });
+        let _ = self
+            .change_tx
+            .send(RoutingTableChange::GroupMembershipChanged { group_id, replicas });
     }
 }
 
@@ -255,7 +264,12 @@ mod tests {
             .add_partition(1, PartitionConfig::SingleId(1), 100, vec![1, 2])
             .await;
         provider
-            .add_partition(2, PartitionConfig::Range { start: 10, end: 20 }, 200, vec![3, 4])
+            .add_partition(
+                2,
+                PartitionConfig::Range { start: 10, end: 20 },
+                200,
+                vec![3, 4],
+            )
             .await;
 
         let table = provider.get_routing_table().await.unwrap();

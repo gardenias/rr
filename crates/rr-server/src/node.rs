@@ -9,10 +9,9 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use metrics::counter;
 use tokio::sync::{watch, Mutex};
 use tracing::{info, instrument, warn};
-use metrics::counter;
-
 
 use rr_core::config::{ConfigProvider, RoutingTableChange};
 use rr_core::error::{ConfigError, RrError};
@@ -113,11 +112,7 @@ impl RrNode {
         for (group_id, meta) in &table.groups {
             if meta.replicas.contains(&self.node_id) {
                 self.group_manager.start_group(*group_id).await?;
-                info!(
-                    node_id = self.node_id,
-                    group_id,
-                    "started Raft group"
-                );
+                info!(node_id = self.node_id, group_id, "started Raft group");
                 counter!("node.group.started").increment(1);
             }
         }
@@ -159,9 +154,9 @@ impl RrNode {
                                     }
                                 }
                             }
-                            Err(e) => warn!(
-                                "watch: failed to get routing table on PartitionAdded: {e}"
-                            ),
+                            Err(e) => {
+                                warn!("watch: failed to get routing table on PartitionAdded: {e}")
+                            }
                         }
                     }
                     RoutingTableChange::PartitionRemoved { partition_id } => {
@@ -175,7 +170,11 @@ impl RrNode {
                         info!(partition_id, group_id, "watch: partition updated");
                     }
                     RoutingTableChange::NodeAdded { node_id: nid, addr } => {
-                        info!(node_id = nid, ?addr, "watch: node added, adding as learner to all groups");
+                        info!(
+                            node_id = nid,
+                            ?addr,
+                            "watch: node added, adding as learner to all groups"
+                        );
                         for group_id in gm.group_ids().await {
                             if let Err(e) = gm.add_learner(group_id, nid, addr.addr.clone()).await {
                                 warn!(
@@ -189,14 +188,23 @@ impl RrNode {
                         }
                     }
                     RoutingTableChange::NodeRemoved { node_id: nid } => {
-                        info!(node_id = nid, "watch: node removed, updating membership for all groups");
+                        info!(
+                            node_id = nid,
+                            "watch: node removed, updating membership for all groups"
+                        );
                         match cp.get_routing_table().await {
                             Ok(table) => {
                                 for group_id in gm.group_ids().await {
                                     if let Some(meta) = table.groups.get(&group_id) {
-                                        let new_members: std::collections::BTreeSet<NodeId> =
-                                            meta.replicas.iter().copied().filter(|&id| id != nid).collect();
-                                        if let Err(e) = gm.change_membership(group_id, new_members).await {
+                                        let new_members: std::collections::BTreeSet<NodeId> = meta
+                                            .replicas
+                                            .iter()
+                                            .copied()
+                                            .filter(|&id| id != nid)
+                                            .collect();
+                                        if let Err(e) =
+                                            gm.change_membership(group_id, new_members).await
+                                        {
                                             warn!(
                                                 group_id,
                                                 node_id = nid,
@@ -208,7 +216,9 @@ impl RrNode {
                                     }
                                 }
                             }
-                            Err(e) => warn!("watch: failed to get routing table on NodeRemoved: {e}"),
+                            Err(e) => {
+                                warn!("watch: failed to get routing table on NodeRemoved: {e}")
+                            }
                         }
                     }
                     RoutingTableChange::GroupMembershipChanged { group_id, replicas } => {
@@ -255,13 +265,13 @@ impl RrNode {
             (&self.raft_lookup, &self.client_dispatch)
         {
             let addr = self.listen_addr.parse().map_err(|e| {
-                RrError::Config(ConfigError::InvalidConfig(
-                    format!("invalid listen_addr '{}': {e}", self.listen_addr),
-                ))
+                RrError::Config(ConfigError::InvalidConfig(format!(
+                    "invalid listen_addr '{}': {e}",
+                    self.listen_addr
+                )))
             })?;
 
-            let raft_svc =
-                RaftServiceServer::new(RaftServiceImpl::new(raft_lookup.clone()));
+            let raft_svc = RaftServiceServer::new(RaftServiceImpl::new(raft_lookup.clone()));
             let client_svc =
                 ClientServiceServer::new(ClientServiceImpl::new(client_dispatch.clone()));
 
@@ -488,7 +498,7 @@ mod tests {
         let provider: Arc<dyn ConfigProvider> = Arc::new(provider);
 
         let config = NodeConfig::new(
-            1,                              // we are node 1
+            1, // we are node 1
             "127.0.0.1:50053".to_string(),
             storage,
             provider,
@@ -538,8 +548,7 @@ mod tests {
             .await;
 
         // Poll with timeout (max 500 ms)
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
         loop {
             if node.group_manager().group_count().await == 1 {
                 break;
@@ -613,8 +622,7 @@ mod tests {
         provider.update_group_membership(30, vec![1, 2]).await;
 
         // Poll with timeout (max 500 ms)
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
         loop {
             if node.group_manager().group_count().await == 1 {
                 break;

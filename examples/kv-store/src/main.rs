@@ -44,13 +44,13 @@ use rr_core::config::ConfigProvider;
 use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{NodeId, PartitionConfig};
-use rr_server::lookup::RaftGroupLookupImpl;
-use rr_server::dispatch::ClientDispatchImpl;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::network_factory::ChannelPool;
 use rr_raft::service_adapter::ServiceStateMachineAdapter;
 use rr_router::router::ShardRouter;
 use rr_server::config::NodeConfig;
+use rr_server::dispatch::ClientDispatchImpl;
+use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::node::RrNode;
 use rr_storage::mem::MemStorage;
 use tracing::{info, Level};
@@ -115,7 +115,13 @@ impl CliConfig {
             i += 1;
         }
 
-        Self { node_id, port, peers, bootstrap, demo }
+        Self {
+            node_id,
+            port,
+            peers,
+            bootstrap,
+            demo,
+        }
     }
 }
 
@@ -158,7 +164,7 @@ async fn run_demo() -> Result<()> {
     });
 
     let config = NodeConfig::new(
-        1,                          // node_id
+        1,                         // node_id
         "127.0.0.1:0".to_string(), // port 0 = OS picks one (no gRPC in this demo)
         storage_engine,
         config_provider,
@@ -167,7 +173,10 @@ async fn run_demo() -> Result<()> {
 
     let node = RrNode::new(config)?;
     node.start().await?;
-    info!("Node started — group count: {}", node.group_manager().group_count().await);
+    info!(
+        "Node started — group count: {}",
+        node.group_manager().group_count().await
+    );
 
     // Initialize the single-member Raft group
     let raft = node
@@ -178,7 +187,9 @@ async fn run_demo() -> Result<()> {
 
     let mut members = BTreeMap::new();
     members.insert(1u64, BasicNode::default());
-    raft.initialize(members).await.map_err(|e| anyhow!("Raft init failed: {e}"))?;
+    raft.initialize(members)
+        .await
+        .map_err(|e| anyhow!("Raft init failed: {e}"))?;
     info!("Raft group 1 initialized");
 
     // Wait for leader election (single-node, should be instant)
@@ -216,7 +227,9 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     config_provider
         .add_node(
             cli.node_id,
-            rr_core::types::NodeAddr { addr: listen_addr.clone() },
+            rr_core::types::NodeAddr {
+                addr: listen_addr.clone(),
+            },
         )
         .await;
 
@@ -294,14 +307,16 @@ async fn run_node(cli: CliConfig) -> Result<()> {
             .ok_or_else(|| anyhow!("group 1 not started"))?;
 
         let mut members = BTreeMap::new();
-        members.insert(cli.node_id, BasicNode { addr: listen_addr.clone() });
+        members.insert(
+            cli.node_id,
+            BasicNode {
+                addr: listen_addr.clone(),
+            },
+        );
         let _ = raft.initialize(members).await; // idempotent
         info!("Cluster bootstrapped on node {}", cli.node_id);
     } else if !cli.peers.is_empty() {
-        info!(
-            "Joining existing cluster via peers: {:?}",
-            cli.peers
-        );
+        info!("Joining existing cluster via peers: {:?}", cli.peers);
         // In a full implementation this would call the leader's add_learner API.
         // For this demo we just note the peers — the watch loop handles dynamic adds.
     }
@@ -333,22 +348,26 @@ async fn propose(raft: &RaftInstance, req: &KvRequest) -> Result<KvResponse> {
         .await
         .map_err(|e| anyhow!("client_write failed: {e}"))?;
 
-    let (resp, _): (KvResponse, _) =
-        bincode::serde::decode_from_slice(&response.data, standard())
-            .map_err(|e| anyhow!("decode failed: {e}"))?;
+    let (resp, _): (KvResponse, _) = bincode::serde::decode_from_slice(&response.data, standard())
+        .map_err(|e| anyhow!("decode failed: {e}"))?;
 
     Ok(resp)
 }
 
 async fn demo_put(raft: &RaftInstance, key: &str, value: &[u8]) -> Result<()> {
-    let req = KvRequest::Put { key: key.to_string(), value: value.to_vec() };
+    let req = KvRequest::Put {
+        key: key.to_string(),
+        value: value.to_vec(),
+    };
     propose(raft, &req).await?;
     info!("PUT {key} = {:?}", String::from_utf8_lossy(value));
     Ok(())
 }
 
 async fn demo_get(raft: &RaftInstance, key: &str) -> Result<()> {
-    let req = KvRequest::Get { key: key.to_string() };
+    let req = KvRequest::Get {
+        key: key.to_string(),
+    };
     let resp = propose(raft, &req).await?;
     match &resp.value {
         Some(v) => info!("GET {key} = {:?}", String::from_utf8_lossy(v)),
@@ -358,7 +377,9 @@ async fn demo_get(raft: &RaftInstance, key: &str) -> Result<()> {
 }
 
 async fn demo_delete(raft: &RaftInstance, key: &str) -> Result<()> {
-    let req = KvRequest::Delete { key: key.to_string() };
+    let req = KvRequest::Delete {
+        key: key.to_string(),
+    };
     propose(raft, &req).await?;
     info!("DEL {key}");
     Ok(())

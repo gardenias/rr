@@ -191,3 +191,22 @@ Added `add_learner` and `change_membership` methods to `RaftGroupManager`.
 
 ### Test Results
 - **rr-raft**: 32 tests passed (29 existing + 3 new)
+
+## [T22] Node Restart Persistence — COMPLETED (2026-03-04)
+
+### Summary
+Fixed partial/broken implementation: moved `new_with_rocks_factory` inside `impl RaftNode {}`,
+fixed missing closing braces in `new()` and `new_with_network()` in `RaftGroupManager`,
+added `new_with_rocks()` and `start_group_rocks()` methods, added `[features]` section to
+integration Cargo.toml, added `test_restart_persistence` integration test.
+
+### Key Learnings
+- Subagents that time out (600s) leave files in broken/partial state — orchestrator must fix directly
+- `RaftLogStorage` trait must be in scope (`use openraft::storage::RaftLogStorage`) to call `get_log_state()` and `read_vote()`
+- `tempfile` not in workspace deps — must add to both `Cargo.toml` workspace.dependencies AND integration Cargo.toml
+- The `rocks_base_path` field must be `Option<String>` (not `String`) so the same struct works for non-rocks builds with `#[cfg(feature = "rocks")]`
+- Path for rocks group is `{base_path}/{group_id}` (numeric group_id suffix)
+
+### Test Results
+- `cargo test -p integration --features rocks -- restart_persistence`: PASS (1.55s)
+- `cargo test --workspace`: 165 tests, 0 failures

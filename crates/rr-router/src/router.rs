@@ -5,12 +5,11 @@
 
 use std::sync::Arc;
 
+use metrics::counter;
 use rr_core::config::ConfigProvider;
 use rr_core::error::{RouterError, RrError};
 use rr_core::types::{GroupId, NodeAddr, NodeId, PartitionId, RoutingTable};
 use tracing::instrument;
-use metrics::counter;
-
 
 /// Routes a partition ID to a Raft group ID using a [`ConfigProvider`]-backed routing table.
 ///
@@ -39,7 +38,9 @@ impl ShardRouter {
             .partitions
             .get(&partition_id)
             .map(|(_, group_id)| *group_id)
-            .ok_or(RrError::Router(RouterError::PartitionNotFound { partition_id }));
+            .ok_or(RrError::Router(RouterError::PartitionNotFound {
+                partition_id,
+            }));
         if result.is_err() {
             counter!("router.route.not_found").increment(1);
         }
@@ -196,10 +197,7 @@ mod tests {
         provider
             .add_partition(
                 2,
-                PartitionConfig::Range {
-                    start: 10,
-                    end: 20,
-                },
+                PartitionConfig::Range { start: 10, end: 20 },
                 200,
                 vec![3, 4],
             )

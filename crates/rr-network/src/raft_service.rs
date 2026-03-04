@@ -42,11 +42,7 @@ pub trait RaftGroupLookup: Send + Sync {
     /// Forward a `Vote` request payload to the given group.
     ///
     /// Returns the bincode-serialized `VoteResponse`.
-    async fn vote(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-    ) -> Result<Vec<u8>, tonic::Status>;
+    async fn vote(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, tonic::Status>;
 
     /// Install a snapshot on the given group.
     ///
@@ -103,10 +99,7 @@ impl raft_service_server::RaftService for RaftServiceImpl {
 
         let payload = self.groups.vote(group_id, req.payload).await?;
 
-        Ok(tonic::Response::new(VoteResponse {
-            group_id,
-            payload,
-        }))
+        Ok(tonic::Response::new(VoteResponse { group_id, payload }))
     }
 
     async fn install_snapshot(
@@ -117,9 +110,7 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         let mut chunks: Vec<SnapshotChunk> = Vec::new();
 
         while let Some(chunk) = stream.next().await {
-            chunks.push(
-                chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?,
-            );
+            chunks.push(chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?);
         }
 
         if chunks.is_empty() {
@@ -158,7 +149,6 @@ impl raft_service_server::RaftService for RaftServiceImpl {
             payload,
         }))
     }
-
 }
 #[cfg(test)]
 mod tests {
@@ -218,11 +208,9 @@ mod tests {
             payload: vec![],
         };
 
-        let result = raft_service_server::RaftService::append_entries(
-            &svc,
-            tonic::Request::new(proto_req),
-        )
-        .await;
+        let result =
+            raft_service_server::RaftService::append_entries(&svc, tonic::Request::new(proto_req))
+                .await;
 
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
@@ -245,19 +233,19 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::NotFound);
         assert!(err.message().contains("group 42 not found"));
     }
-    
+
     #[test]
     fn test_snapshot_response_has_payload_field() {
         // Test that SnapshotResponse can hold a payload field
         // This verifies the proto has been updated correctly
         let test_payload = vec![1, 2, 3, 4, 5];
-        
+
         let proto_resp = SnapshotResponse {
             group_id: 42,
             success: true,
             payload: test_payload.clone(),
         };
-        
+
         // Verify the payload field is present and correctly stored
         assert_eq!(proto_resp.group_id, 42);
         assert_eq!(proto_resp.success, true);

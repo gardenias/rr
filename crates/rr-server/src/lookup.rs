@@ -38,9 +38,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .group_manager
             .get_raft(group_id)
             .await
-            .ok_or_else(|| {
-                tonic::Status::not_found(format!("group {group_id} not found"))
-            })?;
+            .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
         let req: openraft::raft::AppendEntriesRequest<RrTypeConfig> =
             bincode::serde::decode_from_slice(&payload, bincode::config::standard())
@@ -56,18 +54,12 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .map_err(|e| tonic::Status::internal(format!("encode error: {e}")))
     }
 
-    async fn vote(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-    ) -> Result<Vec<u8>, tonic::Status> {
+    async fn vote(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
         let raft = self
             .group_manager
             .get_raft(group_id)
             .await
-            .ok_or_else(|| {
-                tonic::Status::not_found(format!("group {group_id} not found"))
-            })?;
+            .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
         let req: openraft::raft::VoteRequest<u64> =
             bincode::serde::decode_from_slice(&payload, bincode::config::standard())
@@ -93,15 +85,15 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .group_manager
             .get_raft(group_id)
             .await
-            .ok_or_else(|| {
-                tonic::Status::not_found(format!("group {group_id} not found"))
-            })?;
+            .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
         // Decode the InstallSnapshotRequest from metadata bytes; data is the raw snapshot.
         let mut req: openraft::raft::InstallSnapshotRequest<RrTypeConfig> =
             bincode::serde::decode_from_slice(&metadata, bincode::config::standard())
                 .map(|(v, _)| v)
-                .map_err(|e| tonic::Status::invalid_argument(format!("decode metadata error: {e}")))?;
+                .map_err(|e| {
+                    tonic::Status::invalid_argument(format!("decode metadata error: {e}"))
+                })?;
 
         // Inject the snapshot data into the request.
         req.data = data;
