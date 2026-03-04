@@ -18,3 +18,9 @@ tonic = { workspace = true }
 dashmap = { workspace = true }
 tonic-prost = "0.14.5"
 metrics.workspace = true
+
+[features]
+rocks = ["rr-storage/rocks"]
+
+[dev-dependencies]
+tempfile = "3"

@@ -10,6 +10,11 @@ pub mod group_manager;
 pub mod network_factory;
 pub mod service_adapter;
 
+#[cfg(feature = "rocks")]
+pub mod rocks_log_storage;
+#[cfg(feature = "rocks")]
+pub use rocks_log_storage::RocksLogStorage;
+
 pub use type_config::RrTypeConfig;
 pub use log_storage::RrLogStorage;
 pub use sm_adapter::RrStateMachine;
