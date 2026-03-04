@@ -67,12 +67,12 @@ Transform rr from a single-node demo into a production-ready distributed framewo
 - `.github/workflows/ci.yml` — CI pipeline
 
 ### Definition of Done
-- [ ] 3-node cluster can elect leaders, replicate writes, and survive node restarts
-- [ ] Data persists across process restarts via RocksDB
-- [ ] Partitions can be added/removed at runtime
-- [ ] Client SDK can write to cluster with automatic leader discovery
-- [ ] Snapshots transfer between nodes
-- [ ] CI pipeline passes on every PR
+- [x] 3-node cluster can elect leaders, replicate writes, and survive node restarts
+- [x] Data persists across process restarts via RocksDB
+- [x] Partitions can be added/removed at runtime
+- [x] Client SDK can write to cluster with automatic leader discovery
+- [x] Snapshots transfer between nodes
+- [x] CI pipeline passes on every PR
 
 ### Must Have
 - All existing 113 tests continue to pass
@@ -222,7 +222,7 @@ Max Concurrent: 8 (Wave 1)
 
 ### Wave 1 — Foundation (unblock all other work)
 
-- [ ] 1. Refactor RaftNode to Accept NetworkFactory Parameter
+- [x] 1. Refactor RaftNode to Accept NetworkFactory Parameter
 
   **What to do**:
   - Modify `RaftNode::new()` to accept a `Box<dyn RaftNetworkFactory<RrTypeConfig>>` parameter instead of hardcoding `NoopNetworkFactory`
@@ -262,10 +262,10 @@ Max Concurrent: 8 (Wave 1)
   - `tests/integration/src/lib.rs:92` — ClusterBuilder creates RaftNodes
 
   **Acceptance Criteria**:
-  - [ ] `RaftNode::new(group_id, node_id, network_factory)` accepts any `RaftNetworkFactory`
-  - [ ] `RaftNode::new_single_node(group_id, node_id)` uses NoopNetworkFactory
-  - [ ] `cargo test -p rr-raft` — all existing tests pass
-  - [ ] `cargo test -p integration` — all 4 integration tests pass
+  - [x] `RaftNode::new(group_id, node_id, network_factory)` accepts any `RaftNetworkFactory`
+  - [x] `RaftNode::new_single_node(group_id, node_id)` uses NoopNetworkFactory
+  - [x] `cargo test -p rr-raft` — all existing tests pass
+  - [x] `cargo test -p integration` — all 4 integration tests pass
 
   **QA Scenarios:**
   ```
@@ -287,7 +287,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-raft/src/raft_node.rs`, `crates/rr-raft/src/group_manager.rs`
   - Pre-commit: `cargo test -p rr-raft`
 
-- [ ] 2. Implement Production RaftGroupLookupImpl
+- [x] 2. Implement Production RaftGroupLookupImpl
 
   **What to do**:
   - Create `RaftGroupLookupImpl` struct in `crates/rr-server/src/` (new file `lookup.rs`)
@@ -331,10 +331,10 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-server/src/node.rs:245-359` — Existing RrNode tests (for wiring pattern)
 
   **Acceptance Criteria**:
-  - [ ] `RaftGroupLookupImpl` implements all 3 methods of `RaftGroupLookup`
-  - [ ] Incoming RPCs are dispatched to correct Raft group by group_id
-  - [ ] Unknown group_id returns appropriate error
-  - [ ] `cargo test -p rr-server` — all tests pass including new ones
+  - [x] `RaftGroupLookupImpl` implements all 3 methods of `RaftGroupLookup`
+  - [x] Incoming RPCs are dispatched to correct Raft group by group_id
+  - [x] Unknown group_id returns appropriate error
+  - [x] `cargo test -p rr-server` — all tests pass including new ones
 
   **QA Scenarios:**
   ```
@@ -364,7 +364,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-server/src/lookup.rs`, `crates/rr-server/src/lib.rs`
   - Pre-commit: `cargo test -p rr-server`
 
-- [ ] 3. Implement Production ClientDispatchImpl
+- [x] 3. Implement Production ClientDispatchImpl
 
   **What to do**:
   - Create `ClientDispatchImpl` struct in `crates/rr-server/src/` (new file `dispatch.rs`)
@@ -408,9 +408,9 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-network/src/client_service.rs:113-168` — MockDispatch pattern to follow
 
   **Acceptance Criteria**:
-  - [ ] `ClientDispatchImpl` implements `submit_write` and `get_cluster_info`
-  - [ ] Leader redirect info correctly extracted from openraft errors
-  - [ ] `cargo test -p rr-server` — all tests pass including new ones
+  - [x] `ClientDispatchImpl` implements `submit_write` and `get_cluster_info`
+  - [x] Leader redirect info correctly extracted from openraft errors
+  - [x] `cargo test -p rr-server` — all tests pass including new ones
 
   **QA Scenarios:**
   ```
@@ -440,7 +440,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-server/src/dispatch.rs`, `crates/rr-server/src/lib.rs`
   - Pre-commit: `cargo test -p rr-server`
 
-- [ ] 4. Fix SnapshotResponse Proto Payload Field
+- [x] 4. Fix SnapshotResponse Proto Payload Field
 
   **What to do**:
   - Add `bytes payload = 2;` field to `SnapshotResponse` message in `raft.proto`
@@ -475,10 +475,10 @@ Max Concurrent: 8 (Wave 1)
   - openraft `InstallSnapshotResponse` — the type that should be serialized into payload
 
   **Acceptance Criteria**:
-  - [ ] `SnapshotResponse` proto has `bytes payload` field
-  - [ ] `install_snapshot()` correctly deserializes openraft response from payload
-  - [ ] `cargo build -p rr-network` compiles with updated proto
-  - [ ] Round-trip test passes for InstallSnapshotResponse
+  - [x] `SnapshotResponse` proto has `bytes payload` field
+  - [x] `install_snapshot()` correctly deserializes openraft response from payload
+  - [x] `cargo build -p rr-network` compiles with updated proto
+  - [x] Round-trip test passes for InstallSnapshotResponse
 
   **QA Scenarios:**
   ```
@@ -500,7 +500,7 @@ Max Concurrent: 8 (Wave 1)
 
 ---
 
-- [ ] 5. Wire GrpcNetworkFactory into RaftGroupManager
+- [x] 5. Wire GrpcNetworkFactory into RaftGroupManager
 
   **What to do**:
   - Modify `RaftGroupManager::new()` to accept a `ChannelPool` (or `Arc<ChannelPool>`)
@@ -538,9 +538,9 @@ Max Concurrent: 8 (Wave 1)
   - `BasicNode { addr: String }` — node address for network factory
 
   **Acceptance Criteria**:
-  - [ ] `RaftGroupManager` creates groups with `GrpcNetworkFactory`
-  - [ ] `init_cluster(group_id, members)` bootstraps multi-node Raft cluster
-  - [ ] `cargo test -p rr-raft` — all tests pass
+  - [x] `RaftGroupManager` creates groups with `GrpcNetworkFactory`
+  - [x] `init_cluster(group_id, members)` bootstraps multi-node Raft cluster
+  - [x] `cargo test -p rr-raft` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -560,7 +560,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-raft/src/group_manager.rs`
   - Pre-commit: `cargo test -p rr-raft`
 
-- [ ] 6. RocksDB Crate Setup + Feature Gate
+- [x] 6. RocksDB Crate Setup + Feature Gate
 
   **What to do**:
   - Add `rocksdb = "0.24.0"` to workspace Cargo.toml under `[workspace.dependencies]`
@@ -602,10 +602,10 @@ Max Concurrent: 8 (Wave 1)
   - TiKV pattern: shared block cache, `create_if_missing`, `create_missing_column_families`
 
   **Acceptance Criteria**:
-  - [ ] `cargo build -p rr-storage` compiles without rocks
-  - [ ] `cargo build -p rr-storage --features rocks` compiles with rocks
-  - [ ] `RocksStorage::open_default("/tmp/test-db")` creates DB with 3 CFs
-  - [ ] DB is `Send + Sync` (wrapped in Arc)
+  - [x] `cargo build -p rr-storage` compiles without rocks
+  - [x] `cargo build -p rr-storage --features rocks` compiles with rocks
+  - [x] `RocksStorage::open_default("/tmp/test-db")` creates DB with 3 CFs
+  - [x] DB is `Send + Sync` (wrapped in Arc)
 
   **QA Scenarios:**
   ```
@@ -626,7 +626,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `Cargo.toml`, `crates/rr-storage/Cargo.toml`, `crates/rr-storage/src/rocks.rs`, `crates/rr-storage/src/lib.rs`
   - Pre-commit: `cargo build -p rr-storage && cargo build -p rr-storage --features rocks`
 
-- [ ] 7. RocksStorage Implementing StorageEngine Trait
+- [x] 7. RocksStorage Implementing StorageEngine Trait
 
   **What to do**:
   - Implement `StorageEngine` trait for `RocksStorage` in `crates/rr-storage/src/rocks.rs`
@@ -679,11 +679,11 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-storage/src/mem.rs` — Existing MemStorage tests (replicate same test cases)
 
   **Acceptance Criteria**:
-  - [ ] `RocksStorage` implements all 7 methods of `StorageEngine`
-  - [ ] All RocksDB calls wrapped in `spawn_blocking`
-  - [ ] `cargo test -p rr-storage --features rocks` — all tests pass (10+ tests)
-  - [ ] Tests use tempdir for database paths
-  - [ ] Error mapping preserves error context
+  - [x] `RocksStorage` implements all 7 methods of `StorageEngine`
+  - [x] All RocksDB calls wrapped in `spawn_blocking`
+  - [x] `cargo test -p rr-storage --features rocks` — all tests pass (10+ tests)
+  - [x] Tests use tempdir for database paths
+  - [x] Error mapping preserves error context
 
   **QA Scenarios:**
   ```
@@ -713,7 +713,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-storage/src/rocks.rs`
   - Pre-commit: `cargo test -p rr-storage --features rocks`
 
-- [ ] 8. CI/CD GitHub Actions Pipeline
+- [x] 8. CI/CD GitHub Actions Pipeline
 
   **What to do**:
   - Create `.github/workflows/ci.yml` with the following jobs:
@@ -752,10 +752,10 @@ Max Concurrent: 8 (Wave 1)
   - RocksDB on CI: needs `libclang-dev` for bindgen, `cmake` for building
 
   **Acceptance Criteria**:
-  - [ ] `.github/workflows/ci.yml` exists
-  - [ ] Build, test, clippy, fmt jobs defined
-  - [ ] RocksDB system deps installed for rocks jobs
-  - [ ] Cargo cache configured
+  - [x] `.github/workflows/ci.yml` exists
+  - [x] Build, test, clippy, fmt jobs defined
+  - [x] RocksDB system deps installed for rocks jobs
+  - [x] Cargo cache configured
 
   **QA Scenarios:**
   ```
@@ -782,7 +782,7 @@ Max Concurrent: 8 (Wave 1)
 
 ---
 
-- [ ] 9. RocksDB-Backed RaftLogStorage (Persistent Raft Log)
+- [x] 9. RocksDB-Backed RaftLogStorage (Persistent Raft Log)
 
   **What to do**:
   - Create `RocksLogStorage` in `crates/rr-raft/src/rocks_log_storage.rs` (gated with `#[cfg(feature = "rocks")]`)
@@ -830,10 +830,10 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-core/src/storage.rs` — StorageEngine (use this for persistence)
 
   **Acceptance Criteria**:
-  - [ ] `RocksLogStorage` implements `RaftLogStorage` completely
-  - [ ] Vote persists across DB close/reopen
-  - [ ] Log entries persist across DB close/reopen
-  - [ ] `cargo test -p rr-raft --features rocks` — all tests pass
+  - [x] `RocksLogStorage` implements `RaftLogStorage` completely
+  - [x] Vote persists across DB close/reopen
+  - [x] Log entries persist across DB close/reopen
+  - [x] `cargo test -p rr-raft --features rocks` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -862,7 +862,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-raft/src/rocks_log_storage.rs`, `crates/rr-raft/Cargo.toml`, `crates/rr-raft/src/lib.rs`
   - Pre-commit: `cargo test -p rr-raft --features rocks`
 
-- [ ] 10. RocksDB Production Config Tuning
+- [x] 10. RocksDB Production Config Tuning
 
   **What to do**:
   - Create `RocksConfig` struct in `crates/rr-storage/src/rocks.rs` with configurable parameters:
@@ -900,9 +900,9 @@ Max Concurrent: 8 (Wave 1)
   - Compression per level: L0-L1 No, L2-L4 Lz4, L5-L6 Zstd
 
   **Acceptance Criteria**:
-  - [ ] `RocksConfig` struct with builder pattern or defaults
-  - [ ] Production defaults match TiKV-style tuning
-  - [ ] `cargo test -p rr-storage --features rocks` — all tests pass
+  - [x] `RocksConfig` struct with builder pattern or defaults
+  - [x] Production defaults match TiKV-style tuning
+  - [x] `cargo test -p rr-storage --features rocks` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -920,7 +920,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-storage/src/rocks.rs`
   - Pre-commit: `cargo test -p rr-storage --features rocks`
 
-- [ ] 11. Multi-Node Integration Test Harness
+- [x] 11. Multi-Node Integration Test Harness
 
   **What to do**:
   - Extend `ClusterBuilder` in `tests/integration/src/lib.rs` to support real multi-node clusters:
@@ -961,10 +961,10 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-network/src/channel_pool.rs` — ChannelPool for node-to-node connections
 
   **Acceptance Criteria**:
-  - [ ] `ClusterBuilder::with_real_network()` creates nodes with gRPC servers
-  - [ ] Existing 4 integration tests still pass
-  - [ ] Port allocation is dynamic (no hardcoded ports)
-  - [ ] Clean shutdown verified
+  - [x] `ClusterBuilder::with_real_network()` creates nodes with gRPC servers
+  - [x] Existing 4 integration tests still pass
+  - [x] Port allocation is dynamic (no hardcoded ports)
+  - [x] Clean shutdown verified
 
   **QA Scenarios:**
   ```
@@ -992,7 +992,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `tests/integration/src/lib.rs`, `tests/integration/Cargo.toml`
   - Pre-commit: `cargo test -p integration`
 
-- [ ] 12. Three-Node Leader Election + Write Replication Tests
+- [x] 12. Three-Node Leader Election + Write Replication Tests
 
   **What to do**:
   - Using the multi-node harness from T11, write integration tests:
@@ -1025,10 +1025,10 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-raft/src/raft_node.rs` — RaftNode API for client_write
 
   **Acceptance Criteria**:
-  - [ ] 4 new multi-node tests pass
-  - [ ] Leader election verified across real gRPC
-  - [ ] Write replication verified on all 3 nodes
-  - [ ] Follower redirect returns valid leader info
+  - [x] 4 new multi-node tests pass
+  - [x] Leader election verified across real gRPC
+  - [x] Write replication verified on all 3 nodes
+  - [x] Follower redirect returns valid leader info
 
   **QA Scenarios:**
   ```
@@ -1048,7 +1048,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `tests/integration/src/lib.rs`
   - Pre-commit: `cargo test -p integration`
 
-- [ ] 13. Extend RoutingTableChange with Node/Membership Events
+- [x] 13. Extend RoutingTableChange with Node/Membership Events
 
   **What to do**:
   - Add new variants to `RoutingTableChange` enum in `crates/rr-core/src/config.rs`:
@@ -1084,12 +1084,12 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-config/src/mem.rs` — MemConfigProvider with broadcast channel
 
   **Acceptance Criteria**:
-  - [ ] 3 new variants added to RoutingTableChange
-  - [ ] `add_node()` broadcasts NodeAdded
-  - [ ] `remove_node()` broadcasts NodeRemoved
-  - [ ] `update_group_membership()` broadcasts GroupMembershipChanged
-  - [ ] Existing config tests still pass
-  - [ ] `cargo test -p rr-config` — all tests pass
+  - [x] 3 new variants added to RoutingTableChange
+  - [x] `add_node()` broadcasts NodeAdded
+  - [x] `remove_node()` broadcasts NodeRemoved
+  - [x] `update_group_membership()` broadcasts GroupMembershipChanged
+  - [x] Existing config tests still pass
+  - [x] `cargo test -p rr-config` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -1113,7 +1113,7 @@ Max Concurrent: 8 (Wave 1)
 
 ---
 
-- [ ] 14. RrNode Config Watch Loop
+- [x] 14. RrNode Config Watch Loop
 
   **What to do**:
   - Add a background task in `RrNode::start()` that subscribes to `config_provider.watch_changes()`
@@ -1154,11 +1154,11 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-raft/src/group_manager.rs` — start_group/stop_group
 
   **Acceptance Criteria**:
-  - [ ] Watch loop starts with RrNode
-  - [ ] PartitionAdded triggers group start
-  - [ ] PartitionRemoved triggers group stop
-  - [ ] Watch task cancelled on shutdown
-  - [ ] `cargo test -p rr-server` — all tests pass
+  - [x] Watch loop starts with RrNode
+  - [x] PartitionAdded triggers group start
+  - [x] PartitionRemoved triggers group stop
+  - [x] Watch task cancelled on shutdown
+  - [x] `cargo test -p rr-server` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -1177,7 +1177,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-server/src/node.rs`
   - Pre-commit: `cargo test -p rr-server`
 
-- [ ] 15. Expose openraft Membership APIs
+- [x] 15. Expose openraft Membership APIs
 
   **What to do**:
   - Add methods to `RaftNode`:
@@ -1218,9 +1218,9 @@ Max Concurrent: 8 (Wave 1)
   - `BasicNode { addr: String }` — node descriptor
 
   **Acceptance Criteria**:
-  - [ ] `add_learner`, `change_membership`, `get_membership` methods exist on RaftNode
-  - [ ] Same methods exist on RaftGroupManager (delegating to correct group)
-  - [ ] `cargo test -p rr-raft` — all tests pass
+  - [x] `add_learner`, `change_membership`, `get_membership` methods exist on RaftNode
+  - [x] Same methods exist on RaftGroupManager (delegating to correct group)
+  - [x] `cargo test -p rr-raft` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -1238,7 +1238,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-raft/src/raft_node.rs`, `crates/rr-raft/src/group_manager.rs`
   - Pre-commit: `cargo test -p rr-raft`
 
-- [ ] 16. Dynamic Partition Add at Runtime
+- [x] 16. Dynamic Partition Add at Runtime
 
   **What to do**:
   - Integrate T14 (watch loop) + T15 (membership APIs) for full dynamic partition flow:
@@ -1273,10 +1273,10 @@ Max Concurrent: 8 (Wave 1)
   - `tests/integration/src/lib.rs` — ClusterBuilder for test setup
 
   **Acceptance Criteria**:
-  - [ ] Partition can be added at runtime via ConfigProvider
-  - [ ] New node joins cluster as learner, then promotes
-  - [ ] Data replicates to new partition
-  - [ ] Integration test passes
+  - [x] Partition can be added at runtime via ConfigProvider
+  - [x] New node joins cluster as learner, then promotes
+  - [x] Data replicates to new partition
+  - [x] Integration test passes
 
   **QA Scenarios:**
   ```
@@ -1295,7 +1295,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-server/src/node.rs`, `tests/integration/src/lib.rs`
   - Pre-commit: `cargo test -p integration`
 
-- [ ] 17. Complete install_snapshot Flow
+- [x] 17. Complete install_snapshot Flow
 
   **What to do**:
   - Implement full snapshot transfer in `RrStateMachine` (rr-raft):
@@ -1335,10 +1335,10 @@ Max Concurrent: 8 (Wave 1)
   - openraft `RaftStateMachine::get_snapshot_builder()` — for snapshot creation
 
   **Acceptance Criteria**:
-  - [ ] Snapshot creation serializes state machine state
-  - [ ] Snapshot installation restores state machine state
-  - [ ] End-to-end: leader snapshot → gRPC stream → follower install
-  - [ ] `cargo test -p rr-raft` — snapshot tests pass
+  - [x] Snapshot creation serializes state machine state
+  - [x] Snapshot installation restores state machine state
+  - [x] End-to-end: leader snapshot → gRPC stream → follower install
+  - [x] `cargo test -p rr-raft` — snapshot tests pass
 
   **QA Scenarios:**
   ```
@@ -1356,7 +1356,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-raft/src/sm_adapter.rs`
   - Pre-commit: `cargo test -p rr-raft`
 
-- [ ] 18. Snapshot Streaming with Chunked Transfer
+- [x] 18. Snapshot Streaming with Chunked Transfer
 
   **What to do**:
   - Implement chunked snapshot transfer for large snapshots:
@@ -1390,9 +1390,9 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-network/src/raft_service.rs:112-159` — install_snapshot server receiving
 
   **Acceptance Criteria**:
-  - [ ] Large snapshots chunked into 64KB pieces
-  - [ ] Chunks reassembled correctly on receiver
-  - [ ] `cargo test -p rr-raft` — chunked transfer test passes
+  - [x] Large snapshots chunked into 64KB pieces
+  - [x] Chunks reassembled correctly on receiver
+  - [x] `cargo test -p rr-raft` — chunked transfer test passes
 
   **QA Scenarios:**
   ```
@@ -1416,7 +1416,7 @@ Max Concurrent: 8 (Wave 1)
 
 ---
 
-- [ ] 19. rr-client Crate Scaffolding + gRPC Client
+- [x] 19. rr-client Crate Scaffolding + gRPC Client
 
   **What to do**:
   - Create new crate `crates/rr-client/` with `Cargo.toml` and `src/lib.rs`
@@ -1459,11 +1459,11 @@ Max Concurrent: 8 (Wave 1)
   - `crates/rr-core/src/types.rs` — GroupId, NodeId, NodeAddr
 
   **Acceptance Criteria**:
-  - [ ] `crates/rr-client/` crate exists and compiles
-  - [ ] `RrClient::connect()` establishes connection
-  - [ ] `send_request()` sends payload via gRPC
-  - [ ] `get_cluster_info()` returns cluster state
-  - [ ] `cargo test -p rr-client` — all tests pass
+  - [x] `crates/rr-client/` crate exists and compiles
+  - [x] `RrClient::connect()` establishes connection
+  - [x] `send_request()` sends payload via gRPC
+  - [x] `get_cluster_info()` returns cluster state
+  - [x] `cargo test -p rr-client` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -1481,7 +1481,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-client/Cargo.toml`, `crates/rr-client/src/lib.rs`
   - Pre-commit: `cargo test -p rr-client`
 
-- [ ] 20. Client Auto Leader-Redirect + Retry
+- [x] 20. Client Auto Leader-Redirect + Retry
 
   **What to do**:
   - Enhance `RrClient::send_request()` with leader redirect logic:
@@ -1524,11 +1524,11 @@ Max Concurrent: 8 (Wave 1)
   - tonic `Status::code()` for connection error detection
 
   **Acceptance Criteria**:
-  - [ ] Leader redirect works: follower → leader → success
-  - [ ] Connection failure triggers retry to next node
-  - [ ] Max retries exceeded returns meaningful error
-  - [ ] Leader cache updated on redirect
-  - [ ] `cargo test -p rr-client` — all tests pass
+  - [x] Leader redirect works: follower → leader → success
+  - [x] Connection failure triggers retry to next node
+  - [x] Max retries exceeded returns meaningful error
+  - [x] Leader cache updated on redirect
+  - [x] `cargo test -p rr-client` — all tests pass
 
   **QA Scenarios:**
   ```
@@ -1554,7 +1554,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-client/src/lib.rs`
   - Pre-commit: `cargo test -p rr-client`
 
-- [ ] 21. Dynamic Node Add/Remove at Runtime
+- [x] 21. Dynamic Node Add/Remove at Runtime
 
   **What to do**:
   - Implement the full node lifecycle:
@@ -1586,9 +1586,9 @@ Max Concurrent: 8 (Wave 1)
   - `tests/integration/src/lib.rs` — ClusterBuilder
 
   **Acceptance Criteria**:
-  - [ ] New node can join existing cluster
-  - [ ] Node removal drains and leaves gracefully
-  - [ ] Integration test passes with 4th node join + removal
+  - [x] New node can join existing cluster
+  - [x] Node removal drains and leaves gracefully
+  - [x] Integration test passes with 4th node join + removal
 
   **QA Scenarios:**
   ```
@@ -1606,7 +1606,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `crates/rr-server/src/node.rs`, `tests/integration/src/lib.rs`
   - Pre-commit: `cargo test -p integration`
 
-- [ ] 22. Node Restart with RocksDB Persistence Test
+- [x] 22. Node Restart with RocksDB Persistence Test
 
   **What to do**:
   - Write integration test verifying data persistence across node restarts:
@@ -1640,10 +1640,10 @@ Max Concurrent: 8 (Wave 1)
   - T11 multi-node harness — ClusterBuilder with real networking
 
   **Acceptance Criteria**:
-  - [ ] Node restarts and rejoins cluster
-  - [ ] Data from before restart is present on disk
-  - [ ] Vote persists (same term/candidate after restart)
-  - [ ] Test passes: `cargo test -p integration --features rocks -- restart_persistence`
+  - [x] Node restarts and rejoins cluster
+  - [x] Data from before restart is present on disk
+  - [x] Vote persists (same term/candidate after restart)
+  - [x] Test passes: `cargo test -p integration --features rocks -- restart_persistence`
 
   **QA Scenarios:**
   ```
@@ -1667,7 +1667,7 @@ Max Concurrent: 8 (Wave 1)
 
 ---
 
-- [ ] 23. Client SDK Integration Tests
+- [x] 23. Client SDK Integration Tests
 
   **What to do**:
   - Write integration tests using `RrClient` against a real 3-node cluster:
@@ -1696,9 +1696,9 @@ Max Concurrent: 8 (Wave 1)
   - T11/T12 multi-node cluster harness
 
   **Acceptance Criteria**:
-  - [ ] 4 integration tests pass
-  - [ ] Client auto-discovers leader
-  - [ ] Client survives leader failover
+  - [x] 4 integration tests pass
+  - [x] Client auto-discovers leader
+  - [x] Client survives leader failover
 
   **QA Scenarios:**
   ```
@@ -1716,7 +1716,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `tests/integration/src/lib.rs`
   - Pre-commit: `cargo test -p integration`
 
-- [ ] 24. Partition Migration Test
+- [x] 24. Partition Migration Test
 
   **What to do**:
   - Write integration test for partition migration:
@@ -1746,8 +1746,8 @@ Max Concurrent: 8 (Wave 1)
   - T11 multi-node harness
 
   **Acceptance Criteria**:
-  - [ ] Partition migration test passes
-  - [ ] Data available on new replica set after migration
+  - [x] Partition migration test passes
+  - [x] Data available on new replica set after migration
 
   **QA Scenarios:**
   ```
@@ -1764,7 +1764,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `tests/integration/src/lib.rs`
   - Pre-commit: `cargo test -p integration`
 
-- [ ] 25. Node Failure + Recovery Test
+- [x] 25. Node Failure + Recovery Test
 
   **What to do**:
   - Write integration test for node failure scenarios:
@@ -1795,9 +1795,9 @@ Max Concurrent: 8 (Wave 1)
   - T11 multi-node harness
 
   **Acceptance Criteria**:
-  - [ ] Cluster survives node crash
-  - [ ] Recovered node catches up with all data
-  - [ ] Test passes with RocksDB persistence
+  - [x] Cluster survives node crash
+  - [x] Recovered node catches up with all data
+  - [x] Test passes with RocksDB persistence
 
   **QA Scenarios:**
   ```
@@ -1814,7 +1814,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `tests/integration/src/lib.rs`
   - Pre-commit: `cargo test -p integration --features rocks`
 
-- [ ] 26. Snapshot-Based Node Catch-Up Test
+- [x] 26. Snapshot-Based Node Catch-Up Test
 
   **What to do**:
   - Write integration test for snapshot-based catch-up:
@@ -1844,9 +1844,9 @@ Max Concurrent: 8 (Wave 1)
   - openraft `Raft::trigger().purge_log()` — trigger log compaction
 
   **Acceptance Criteria**:
-  - [ ] New node catches up via snapshot (not log replay)
-  - [ ] All data present after snapshot install
-  - [ ] Test passes
+  - [x] New node catches up via snapshot (not log replay)
+  - [x] All data present after snapshot install
+  - [x] Test passes
 
   **QA Scenarios:**
   ```
@@ -1867,7 +1867,7 @@ Max Concurrent: 8 (Wave 1)
 
 ### Wave 6 — Polish (after Wave 5)
 
-- [ ] 27. Update KV Store Example for Multi-Node
+- [x] 27. Update KV Store Example for Multi-Node
 
   **What to do**:
   - Update `examples/kv-store/` to demonstrate a multi-node cluster:
@@ -1897,9 +1897,9 @@ Max Concurrent: 8 (Wave 1)
   - T2 RaftGroupLookupImpl, T3 ClientDispatchImpl
 
   **Acceptance Criteria**:
-  - [ ] Example compiles: `cargo build --example kv-store` or `cargo build -p kv-store`
-  - [ ] Single-node mode still works
-  - [ ] CLI args for multi-node documented
+  - [x] Example compiles: `cargo build --example kv-store` or `cargo build -p kv-store`
+  - [x] Single-node mode still works
+  - [x] CLI args for multi-node documented
 
   **QA Scenarios:**
   ```
@@ -1917,7 +1917,7 @@ Max Concurrent: 8 (Wave 1)
   - Files: `examples/kv-store/src/main.rs`
   - Pre-commit: `cargo build -p kv-store`
 
-- [ ] 28. End-to-End Smoke Test (Full Cluster Lifecycle)
+- [x] 28. End-to-End Smoke Test (Full Cluster Lifecycle)
 
   **What to do**:
   - Write comprehensive integration test covering the full lifecycle:
@@ -1953,9 +1953,9 @@ Max Concurrent: 8 (Wave 1)
   - All previous tasks — this test exercises everything
 
   **Acceptance Criteria**:
-  - [ ] Full lifecycle test passes within 60 seconds
-  - [ ] All 12 steps verified with assertions
-  - [ ] Test passes with RocksDB feature enabled
+  - [x] Full lifecycle test passes within 60 seconds
+  - [x] All 12 steps verified with assertions
+  - [x] Test passes with RocksDB feature enabled
 
   **QA Scenarios:**
   ```
@@ -1980,19 +1980,19 @@ Max Concurrent: 8 (Wave 1)
 
 > 4 review agents run in PARALLEL. ALL must APPROVE. Rejection → fix → re-run.
 
-- [ ] F1. **Plan Compliance Audit** — `oracle`
+- [x] F1. **Plan Compliance Audit** — `oracle`
   Read the plan end-to-end. For each "Must Have": verify implementation exists (read file, run test, cargo check). For each "Must NOT Have": search codebase for forbidden patterns (anyhow in lib, println in lib, circular deps, placeholder asserts). Check evidence files exist in `.sisyphus/evidence/`. Compare deliverables against plan.
   Output: `Must Have [N/N] | Must NOT Have [N/N] | Tasks [N/N] | VERDICT: APPROVE/REJECT`
 
-- [ ] F2. **Code Quality Review** — `unspecified-high`
+- [x] F2. **Code Quality Review** — `unspecified-high`
   Run `cargo clippy --workspace -- -D warnings` + `cargo fmt --check` + `cargo test --workspace`. Review all changed files for: `as any` casts, empty catches, `unwrap()` in production paths, `todo!()`/`unimplemented!()`, unused imports. Check AI slop: excessive comments, over-abstraction, generic names.
   Output: `Build [PASS/FAIL] | Clippy [PASS/FAIL] | Tests [N pass/N fail] | Files [N clean/N issues] | VERDICT`
 
-- [ ] F3. **Real Manual QA** — `unspecified-high`
+- [x] F3. **Real Manual QA** — `unspecified-high`
   Start 3-node cluster from clean state. Run full lifecycle: elect leader → write through client SDK → verify replication → kill a node → verify cluster recovers → restart killed node with RocksDB → verify data persists → add partition at runtime → verify routing. Save evidence to `.sisyphus/evidence/final-qa/`.
   Output: `Scenarios [N/N pass] | Integration [N/N] | Edge Cases [N tested] | VERDICT`
 
-- [ ] F4. **Scope Fidelity Check** — `deep`
+- [x] F4. **Scope Fidelity Check** — `deep`
   For each task: read "What to do", read actual diff (git log/diff). Verify 1:1 correspondence. Check "Must NOT do" compliance. Detect cross-task contamination. Flag unaccounted changes.
   Output: `Tasks [N/N compliant] | Contamination [CLEAN/N issues] | Unaccounted [CLEAN/N files] | VERDICT`
 
@@ -2035,13 +2035,13 @@ cargo build --workspace --features rocks  # Expected: builds with RocksDB
 ```
 
 ### Final Checklist
-- [ ] All 113 existing tests still pass
-- [ ] 3-node Raft cluster works end-to-end
-- [ ] RocksDB storage persists across restarts
-- [ ] Dynamic partition add/remove works at runtime
-- [ ] Client SDK auto-discovers leader and retries
-- [ ] Snapshot transfer works between nodes
-- [ ] CI pipeline passes on all PRs
-- [ ] No `anyhow` in library crates
-- [ ] No `println!` in library crates
-- [ ] No circular crate dependencies
+- [x] All 113 existing tests still pass
+- [x] 3-node Raft cluster works end-to-end
+- [x] RocksDB storage persists across restarts
+- [x] Dynamic partition add/remove works at runtime
+- [x] Client SDK auto-discovers leader and retries
+- [x] Snapshot transfer works between nodes
+- [x] CI pipeline passes on all PRs
+- [x] No `anyhow` in library crates
+- [x] No `println!` in library crates
+- [x] No circular crate dependencies
