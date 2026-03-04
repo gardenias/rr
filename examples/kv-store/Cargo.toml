@@ -9,6 +9,9 @@ rr-server = { path = "../../crates/rr-server" }
 rr-raft = { path = "../../crates/rr-raft" }
 rr-config = { path = "../../crates/rr-config" }
 rr-storage = { path = "../../crates/rr-storage" }
+rr-network = { path = "../../crates/rr-network" }
+rr-router = { path = "../../crates/rr-router" }
+rr-client = { path = "../../crates/rr-client" }
 tokio.workspace = true
 serde.workspace = true
 bincode.workspace = true
