@@ -210,3 +210,13 @@ integration Cargo.toml, added `test_restart_persistence` integration test.
 ### Test Results
 - `cargo test -p integration --features rocks -- restart_persistence`: PASS (1.55s)
 - `cargo test --workspace`: 165 tests, 0 failures
+
+## B1: Prometheus Metrics Recorder Wiring
+
+- `metrics-exporter-prometheus` v0.16.x depends on `metrics = "0.24"` — correct match for workspace
+- v0.18.x uses `metrics = "0.25"` which is incompatible with our workspace `metrics = "0.24"`
+- The `http-listener` feature is required for `install()` and `with_http_listener()`
+- `install()` returns `Result<(), BuildError>` — the error type is `BuildError`, not a generic error
+- `with_http_listener` takes `impl Into<SocketAddr>`
+- Recorder is a global singleton — calling `install()` multiple times will fail with "recorder already set"
+- Therefore, unit tests should only test config fields, not actually install the recorder

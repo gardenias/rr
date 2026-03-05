@@ -221,3 +221,12 @@ Convention: Using bilingual format with Chinese first followed by English for ea
 - RoutingTable has nested PartitionConfig (enum) and GroupMeta.
 
 - Created deployment.md with production build instructions (release/rocks), cluster setup (bootstrap/join), monitoring (tracing/metrics), backup (snapshot/rocks), and node operations (add/remove).
+
+## F3 Build + Link Verification QA (2026-03-04)
+- Docusaurus build succeeds with exit code 0 (onBrokenLinks: 'warn')
+- 20 HTML files generated (19 doc pages + 404)
+- 19 MD source files
+- Known broken link: `/docs/intro` in footer/nav (pre-existing template artifact, appears on all 20 pages)
+- NEW broken links found in `intro.md`: `/architecture` and `/guide` — these are category paths, not valid doc routes. Should be `/architecture/overview` and `/guide/getting-started`
+- cargo doc exits 0 with 2 warnings (intra-doc link issues in integration test and kv-store example, pre-existing)
+- All 4 sidebar sections present: Architecture (6), Guide (6), Reference (5), Deployment (1)
