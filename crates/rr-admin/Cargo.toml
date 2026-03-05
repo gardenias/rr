@@ -1,0 +1,19 @@
+[package]
+name = "rr-admin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rr-network = { path = "../rr-network" }
+tokio.workspace = true
+tonic.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true
+rustyline = "14"
+bincode.workspace = true
+
+[[bin]]
+name = "rr-admin"
+path = "src/main.rs"

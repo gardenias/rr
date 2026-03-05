@@ -2,6 +2,7 @@
 //!
 //! Part of the `rr` distributed framework.
 
+pub mod admin;
 pub mod config;
 pub mod dispatch;
 pub mod lookup;

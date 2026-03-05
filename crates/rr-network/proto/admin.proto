@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package rr.admin;
+
+/// Admin service for node management and observability.
+service AdminService {
+    /// Get node-level status.
+    rpc GetNodeStatus(Empty) returns (NodeStatus);
+    /// Get status for a specific Raft group.
+    rpc GetGroupStatus(GroupId) returns (GroupStatus);
+    /// Trigger a manual snapshot/log compaction for a group.
+    rpc TriggerSnapshot(GroupId) returns (TriggerSnapshotResponse);
+    /// Transfer leadership to another node.
+    rpc TransferLeader(TransferLeaderRequest) returns (TransferLeaderResponse);
+    /// Get a top-level metrics summary.
+    rpc GetMetricsSummary(Empty) returns (MetricsSummary);
+}
+
+message Empty {}
+
+message GroupId {
+    uint64 group_id = 1;
+}
+
+message NodeStatus {
+    uint64 node_id = 1;
+    string listen_addr = 2;
+    repeated uint64 group_ids = 3;
+    uint64 uptime_secs = 4;
+}
+
+message GroupStatus {
+    uint64 group_id = 1;
+    bool is_leader = 2;
+    uint64 current_term = 3;
+    uint64 last_log_index = 4;
+    uint64 leader_node_id = 5;
+}
+
+message TriggerSnapshotResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message TransferLeaderRequest {
+    uint64 group_id = 1;
+    uint64 target_node_id = 2;
+}
+
+message TransferLeaderResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message MetricsSummary {
+    uint64 total_proposals = 1;
+    uint64 total_applied = 2;
+    uint64 total_snapshots = 3;
+}

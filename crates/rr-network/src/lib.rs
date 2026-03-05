@@ -13,6 +13,9 @@ pub mod proto {
     pub mod client {
         tonic::include_proto!("rr.client");
     }
+    pub mod admin {
+        tonic::include_proto!("rr.admin");
+    }
 }
 pub mod client_service;
 pub mod raft_service;

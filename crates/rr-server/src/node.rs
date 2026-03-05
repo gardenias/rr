@@ -20,10 +20,12 @@ use rr_network::client_service::{ClientDispatch, ClientServiceImpl};
 use rr_network::proto::client::client_service_server::ClientServiceServer;
 use rr_network::proto::raft::raft_service_server::RaftServiceServer;
 use rr_network::raft_service::{RaftGroupLookup, RaftServiceImpl};
+use rr_network::proto::admin::admin_service_server::AdminServiceServer;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_router::router::ShardRouter;
 
 use crate::config::NodeConfig;
+use crate::admin::AdminServiceImpl;
 
 /// The main node lifecycle manager.
 ///
@@ -47,6 +49,12 @@ pub struct RrNode {
     server_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Handle to the config watch loop task; `None` if not started.
     watch_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Handle to the admin gRPC server task; `None` if admin service is disabled.
+    admin_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Port for the admin gRPC service, if enabled.
+    admin_port: Option<u16>,
+    /// Health reporter for gRPC health checking protocol.
+    health_reporter: Mutex<Option<tonic_health::server::HealthReporter>>,
 }
 
 impl RrNode {
@@ -59,6 +67,20 @@ impl RrNode {
             return Err(RrError::Config(ConfigError::InvalidConfig(
                 "listen_addr cannot be empty".to_string(),
             )));
+        }
+
+        // ── Install Prometheus metrics exporter (if configured) ────────────
+        if let Some(port) = config.metrics_port {
+            let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    RrError::Config(ConfigError::InvalidConfig(e.to_string()))
+                })?;
+            metrics_exporter_prometheus::PrometheusBuilder::new()
+                .with_http_listener(addr)
+                .install()
+                .map_err(|e| RrError::Config(ConfigError::InvalidConfig(e.to_string())))?;
+            info!(port, "Prometheus metrics exporter installed");
         }
 
         let group_manager = if let Some(mgr) = config.group_manager {
@@ -94,6 +116,9 @@ impl RrNode {
             shutdown_tx,
             server_handle: Mutex::new(None),
             watch_handle: Mutex::new(None),
+            admin_handle: Mutex::new(None),
+            admin_port: config.admin_port,
+            health_reporter: Mutex::new(None),
         })
     }
 
@@ -275,11 +300,14 @@ impl RrNode {
             let client_svc =
                 ClientServiceServer::new(ClientServiceImpl::new(client_dispatch.clone()));
 
+            let (health_reporter, health_service) = tonic_health::server::health_reporter();
+
             let mut shutdown_rx = self.shutdown_tx.subscribe();
 
             let handle = tokio::spawn(async move {
                 info!(%addr, "gRPC server starting");
                 let result = tonic::transport::Server::builder()
+                    .add_service(health_service)
                     .add_service(raft_svc)
                     .add_service(client_svc)
                     .serve_with_shutdown(addr, async move {
@@ -293,6 +321,12 @@ impl RrNode {
                 }
             });
 
+            // Mark the overall service as SERVING after spawning the server.
+            health_reporter
+                .set_service_status("", tonic_health::ServingStatus::Serving)
+                .await;
+            *self.health_reporter.lock().await = Some(health_reporter);
+
             *self.server_handle.lock().await = Some(handle);
             info!(node_id = self.node_id, "gRPC server spawned");
         } else {
@@ -300,6 +334,42 @@ impl RrNode {
                 node_id = self.node_id,
                 "gRPC server not started (raft_lookup or client_dispatch missing)"
             );
+        }
+
+
+        // ── 4. Start admin gRPC server (optional) ────────────────────────────
+        if let Some(port) = self.admin_port {
+            let admin_addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    RrError::Config(ConfigError::InvalidConfig(e.to_string()))
+                })?;
+
+            let admin_svc = AdminServiceServer::new(AdminServiceImpl::new(
+                self.node_id,
+                self.listen_addr.clone(),
+                Arc::clone(&self.group_manager),
+            ));
+
+            let mut shutdown_rx = self.shutdown_tx.subscribe();
+
+            let handle = tokio::spawn(async move {
+                info!(%admin_addr, "admin gRPC server starting");
+                let result = tonic::transport::Server::builder()
+                    .add_service(admin_svc)
+                    .serve_with_shutdown(admin_addr, async move {
+                        let _ = shutdown_rx.changed().await;
+                    })
+                    .await;
+
+                match result {
+                    Ok(()) => info!(%admin_addr, "admin gRPC server stopped"),
+                    Err(e) => warn!(%admin_addr, "admin gRPC server error: {e}"),
+                }
+            });
+
+            *self.admin_handle.lock().await = Some(handle);
+            info!(node_id = self.node_id, port, "admin gRPC server spawned");
         }
 
         info!(node_id = self.node_id, "RrNode started");
@@ -316,6 +386,13 @@ impl RrNode {
     pub async fn shutdown(&self) -> Result<(), RrError> {
         info!(node_id = self.node_id, "RrNode shutting down");
 
+        // ── 0. Mark health as NOT_SERVING ────────────────────────────────
+        if let Some(reporter) = self.health_reporter.lock().await.as_mut() {
+            reporter
+                .set_service_status("", tonic_health::ServingStatus::NotServing)
+                .await;
+        }
+
         // ── 1. Stop gRPC server ──────────────────────────────────────────────
         let _ = self.shutdown_tx.send(true);
 
@@ -324,6 +401,15 @@ impl RrNode {
                 Ok(Ok(())) => info!("gRPC server shutdown complete"),
                 Ok(Err(e)) => warn!("gRPC server task panicked: {e}"),
                 Err(_) => warn!("gRPC server shutdown timed out after 5s"),
+            }
+        }
+
+        // ── 1b. Stop admin gRPC server ─────────────────────────────────────
+        if let Some(handle) = self.admin_handle.lock().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => info!("admin gRPC server shutdown complete"),
+                Ok(Err(e)) => warn!("admin gRPC server task panicked: {e}"),
+                Err(_) => warn!("admin gRPC server shutdown timed out after 5s"),
             }
         }
 
@@ -435,6 +521,14 @@ mod tests {
             msg.contains("listen_addr cannot be empty"),
             "expected error about empty listen_addr, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_node_config_metrics_port() {
+        let config = make_config(1, "127.0.0.1:50051");
+        assert_eq!(config.metrics_port, None);
+        let config = config.with_metrics_port(19091);
+        assert_eq!(config.metrics_port, Some(19091));
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! KV Store StateMachine — implements the low-level [`StateMachine`] trait directly.
 //!
-//! Unlike [`KvService`], this implementation does not use the `ServiceStateMachineAdapter`.
+//! Unlike `KvService`, this implementation does not use the `ServiceStateMachineAdapter`.
 //! It owns its state mutably and tracks the last applied log index, making it suitable
 //! for use as a raw Raft state machine.
 

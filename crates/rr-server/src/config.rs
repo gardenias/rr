@@ -41,6 +41,10 @@ pub struct NodeConfig {
     /// instead of creating a fresh one. Required for real-network mode where
     /// `GrpcNetworkFactory` must be pre-wired.
     pub group_manager: Option<Arc<RaftGroupManager>>,
+    /// Optional port for Prometheus `/metrics` HTTP endpoint. `None` = disabled.
+    pub metrics_port: Option<u16>,
+    /// Optional port for the Admin gRPC service. `None` = disabled.
+    pub admin_port: Option<u16>,
 }
 
 impl NodeConfig {
@@ -64,6 +68,8 @@ impl NodeConfig {
             raft_lookup: None,
             client_dispatch: None,
             group_manager: None,
+            metrics_port: None,
+            admin_port: None,
         }
     }
 
@@ -82,6 +88,18 @@ impl NodeConfig {
     /// Attach a pre-built [`RaftGroupManager`].
     pub fn with_group_manager(mut self, mgr: Arc<RaftGroupManager>) -> Self {
         self.group_manager = Some(mgr);
+        self
+    }
+
+    /// Enable Prometheus metrics export on the given port.
+    pub fn with_metrics_port(mut self, port: u16) -> Self {
+        self.metrics_port = Some(port);
+        self
+    }
+
+    /// Enable the Admin gRPC service on the given port.
+    pub fn with_admin_port(mut self, port: u16) -> Self {
+        self.admin_port = Some(port);
         self
     }
 }

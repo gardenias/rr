@@ -15,9 +15,11 @@ async-trait.workspace = true
 tracing.workspace = true
 tonic.workspace = true
 metrics.workspace = true
+metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
 bincode.workspace = true
 openraft.workspace = true
 futures.workspace = true
+tonic-health = "0.14"
 
 [[bin]]
 name = "rr-server"

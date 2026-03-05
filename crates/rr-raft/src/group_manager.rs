@@ -1,9 +1,10 @@
 //! Manages the lifecycle of multiple Raft groups on a single node.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::Instant;
 use std::sync::Arc;
 
-use metrics::counter;
+use metrics::{counter, gauge, histogram};
 use openraft::BasicNode;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
@@ -12,7 +13,7 @@ use rr_core::error::{RaftError, RrError};
 use rr_core::state_machine::StateMachine;
 use rr_core::types::{GroupId, NodeId};
 
-use crate::network_factory::{ChannelPool, GrpcNetworkFactory};
+use crate::network_factory::{ChannelPoolLike, GrpcNetworkFactory};
 use crate::raft_node::{NoopNetworkFactory, RaftNode};
 use crate::type_config::RrTypeConfig;
 /// A factory function type for creating state machine instances per group.
@@ -29,7 +30,7 @@ pub struct RaftGroupManager {
     /// When `Some`, new groups are created with `GrpcNetworkFactory` for real
     /// multi-node networking.  When `None`, `NoopNetworkFactory` is used
     /// (single-node / test mode).
-    channel_pool: Option<ChannelPool>,
+    channel_pool: Option<Arc<dyn ChannelPoolLike>>,
     /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
@@ -58,7 +59,7 @@ impl RaftGroupManager {
     pub fn new_with_network(
         node_id: NodeId,
         sm_factory: StateMachineFactory,
-        channel_pool: ChannelPool,
+        channel_pool: Arc<dyn ChannelPoolLike>,
     ) -> Self {
         info!(node_id, "creating RaftGroupManager (multi-node mode)");
         Self {
@@ -212,6 +213,40 @@ impl RaftGroupManager {
         Ok(())
     }
 
+    /// Propose a client write to the Raft group, recording proposal duration
+    /// and updating Raft gauge metrics on success.
+    #[instrument(skip(self, payload))]
+    pub async fn write(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        let raft = self
+            .get_raft(group_id)
+            .await
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+
+        let start = Instant::now();
+        let result = raft
+            .client_write(payload)
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+
+        let gid = group_id.to_string();
+        histogram!("rr_proposal_duration_seconds", "group_id" => gid.clone())
+            .record(start.elapsed().as_secs_f64());
+
+        // Update raft gauge metrics from the current raft state.
+        let m = raft.metrics().borrow().clone();
+        let is_leader = if matches!(m.state, openraft::ServerState::Leader) {
+            1.0_f64
+        } else {
+            0.0_f64
+        };
+        gauge!("rr_raft_is_leader", "group_id" => gid.clone()).set(is_leader);
+        gauge!("rr_raft_current_term", "group_id" => gid.clone()).set(m.current_term as f64);
+        gauge!("rr_raft_last_log_index", "group_id" => gid)
+            .set(m.last_log_index.unwrap_or(0) as f64);
+
+        Ok(result.data)
+    }
+
     /// Get a reference to a Raft group's `openraft::Raft` instance.
     ///
     /// Returns `None` if the group does not exist.
@@ -293,6 +328,7 @@ impl RaftGroupManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network_factory::ChannelPool;
     use async_trait::async_trait;
     use rr_core::error::RrError;
     use rr_core::types::LogIndex;
@@ -398,7 +434,7 @@ mod tests {
     async fn test_group_manager_with_channel_pool() {
         // Create manager with a real ChannelPool — groups should start successfully
         // even without any actual connections (we just verify construction + start).
-        let pool = ChannelPool::new();
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
         let mgr = RaftGroupManager::new_with_network(1, noop_factory(), pool);
 
         // Starting a group with GrpcNetworkFactory should succeed
@@ -513,4 +549,30 @@ mod tests {
         new_members.insert(1u64);
         mgr.change_membership(1, new_members).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn test_write_records_proposal_metrics() {
+        // Start group, init as single-node cluster, wait for leader,
+        // then call write() — metrics macros are no-ops without a recorder
+        // so we just verify the code path doesn't panic.
+        let mgr = RaftGroupManager::new(1, noop_factory());
+        mgr.start_group(1).await.unwrap();
+
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        mgr.init_cluster(1, members).await.unwrap();
+
+        // Wait for leader election
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+        // Write should succeed and record metrics without panic
+        let result = mgr.write(1, vec![1, 2, 3]).await;
+        assert!(result.is_ok(), "write failed: {:?}", result.err());
+    }
+
 }

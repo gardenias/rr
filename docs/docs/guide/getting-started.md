@@ -210,6 +210,34 @@ cargo run -p kv-store -- --node-id 3 --port 51003 --peers 127.0.0.1:51001,127.0.
 
 ---
 
+## 管理端口与指标端口配置 / Admin Port & Metrics Port Configuration
+
+每个 `RrNode` 支持可选的管理 gRPC 端口（Admin gRPC port）和 Prometheus 指标端口（Metrics HTTP port）。
+通过 `NodeConfig` 的构建器方法可以启用它们：
+
+---
+
+Each `RrNode` supports an optional admin gRPC port and a Prometheus metrics HTTP port.
+Enable them via `NodeConfig` builder methods:
+
+```rust
+let config = NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)
+    .with_admin_port(52001)    // Admin gRPC 端口 / Admin gRPC port
+    .with_metrics_port(62001); // Prometheus /metrics HTTP 端口 / Prometheus /metrics HTTP port
+```
+
+启用后：
+- **Admin 端口**：暴露 `AdminService` gRPC API，可通过 `rr-admin` CLI 进行管理。
+- **Metrics 端口**：在 `http://<host>:<metrics_port>/metrics` 暴露 Prometheus 格式的指标。
+
+---
+
+When enabled:
+- **Admin port**: exposes the `AdminService` gRPC API, usable via the `rr-admin` CLI.
+- **Metrics port**: serves Prometheus-format metrics at `http://<host>:<metrics_port>/metrics`.
+
+---
+
 ## 接下来发生什么 / What Happens Next
 
 当集群启动后：
@@ -235,3 +263,5 @@ Dive deeper into `rr`'s core concepts:
 - [Service Trait 指南 / Service Trait Guide](/guide/service-trait)
 - [StateMachine Trait 指南 / StateMachine Trait Guide](/guide/state-machine-trait)
 - [Client SDK 使用 / Client SDK Guide](/guide/client-sdk)
+- [Admin API 参考 / Admin API Reference](/reference/admin-api)
+- [Metrics 参考 / Metrics Reference](/reference/metrics-reference)

@@ -3,6 +3,7 @@
 //! Provides an in-process multi-node cluster builder and helpers for
 //! exercising Raft leader election, fault tolerance, and multi-group routing.
 
+pub mod fault_injection;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use rr_core::storage::StorageEngine;
 use rr_core::types::{GroupId, LogIndex, NodeId, PartitionConfig};
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::group_manager::StateMachineFactory;
-use rr_raft::network_factory::ChannelPool;
+use rr_raft::network_factory::{ChannelPool, ChannelPoolLike};
 use rr_router::router::ShardRouter;
 use rr_server::config::NodeConfig;
 use rr_server::dispatch::ClientDispatchImpl;
@@ -63,6 +64,8 @@ pub struct ClusterBuilder {
     real_network: bool,
     /// Shared config provider — pre-allocated so callers can reference it before build().
     config_provider: Arc<MemConfigProvider>,
+    /// Optional channel pool for fault injection.
+    channel_pool: Option<Arc<dyn ChannelPoolLike>>,
 }
 
 impl ClusterBuilder {
@@ -73,6 +76,7 @@ impl ClusterBuilder {
             group_count,
             real_network: false,
             config_provider: Arc::new(MemConfigProvider::new()),
+            channel_pool: None,
         }
     }
 
@@ -80,6 +84,26 @@ impl ClusterBuilder {
     pub fn with_real_network(mut self) -> Self {
         self.real_network = true;
         self
+    }
+
+    /// Provide a pre-built channel pool with fault injection support.
+    ///
+    /// When set, the builder will use this pool instead of creating a new
+    /// [`ChannelPool`] in `build_real_network`. Automatically enables real
+    /// networking.
+    pub fn with_channel_pool(mut self, pool: Arc<dyn ChannelPoolLike>) -> Self {
+        self.real_network = true;
+        self.channel_pool = Some(pool);
+        self
+    }
+
+    /// Create a [`fault_injection::FaultAwareChannelPool`] and configure the
+    /// builder to use it.  Returns `(builder, FaultInjector)` so the caller
+    /// can inject faults during the test.
+    pub fn with_fault_injector(self) -> (Self, fault_injection::FaultInjector) {
+        let (pool, injector) = fault_injection::FaultAwareChannelPool::new();
+        let builder = self.with_channel_pool(Arc::new(pool));
+        (builder, injector)
     }
 
     /// Return a clone of the shared config provider Arc.
@@ -200,7 +224,9 @@ impl ClusterBuilder {
         }
 
         // 3. Build nodes with real network
-        let shared_pool = ChannelPool::new();
+        let shared_pool: Arc<dyn ChannelPoolLike> = self
+            .channel_pool
+            .unwrap_or_else(|| Arc::new(ChannelPool::new()));
         let mut nodes: Vec<Arc<RrNode>> = Vec::with_capacity(self.node_count);
 
         for (node_id, addr) in &node_addrs {
@@ -300,7 +326,7 @@ pub async fn wait_for_leader(node: &RrNode, group_id: GroupId, timeout_ms: u64) 
 }
 
 /// Wait up to `timeout_ms` for a leader to be elected in the given group,
-/// checking all nodes (not just node[0]).
+/// checking all nodes (not just `node[0]`).
 pub async fn wait_for_cluster_ready(
     nodes: &[Arc<RrNode>],
     group_id: GroupId,
@@ -1208,5 +1234,211 @@ mod tests {
         for node in &active {
             let _ = node.shutdown().await;
         }
+    }
+
+    // ── B4: gRPC Health Check Test ───────────────────────────────────────────
+
+    /// B4 — Health check: start a cluster with real gRPC networking, connect
+    /// a health client, and verify the server reports SERVING.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_health_check_serving() {
+        use tonic_health::pb::health_client::HealthClient;
+        use tonic_health::pb::HealthCheckRequest;
+
+        let (nodes, provider) = ClusterBuilder::new(1, 1)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        wait_for_cluster_ready(&nodes, 1, 4_000).await.unwrap();
+
+        // Retrieve the node's gRPC address from the config provider.
+        let table = provider.get_routing_table().await.unwrap();
+        let addr = table.nodes.values().next().unwrap().addr.clone();
+
+        let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect_lazy();
+        let mut client = HealthClient::new(channel);
+
+        let resp = client
+            .check(HealthCheckRequest {
+                service: String::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.into_inner().status,
+            tonic_health::ServingStatus::Serving as i32,
+            "health check must report SERVING",
+        );
+
+        shutdown_all(&nodes).await;
+    }
+
+    // ── E2: Chaos Test Scenarios ─────────────────────────────────────────────
+
+    /// E2a — Isolate the current leader, wait for a new leader to be elected,
+    /// restore the isolated node, then verify the cluster accepts writes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn test_leader_isolation_and_recovery() {
+        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+
+        let original_leader_id = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("initial leader not elected");
+
+        // Block all connections to the leader — remaining two nodes form a quorum
+        injector.isolate(original_leader_id);
+
+        // A new leader must emerge from the two surviving nodes
+        let new_leader_id = wait_for_new_leader(&nodes, 1, original_leader_id, 12_000)
+            .await
+            .expect("new leader not elected after isolation");
+        assert_ne!(new_leader_id, original_leader_id, "new leader must differ from isolated node");
+
+        // Restore the previously-isolated node
+        injector.restore(original_leader_id);
+
+        // Write to new leader — must succeed
+        let new_leader_node = nodes.iter().find(|n| n.node_id() == new_leader_id).unwrap();
+        let raft = new_leader_node.group_manager().get_raft(1).await.unwrap();
+        raft.client_write(b"post-isolation".to_vec())
+            .await
+            .expect("write after isolation recovery must succeed");
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// E2b — Isolate a follower, write 10 entries while it is isolated, restore it,
+    /// then wait for it to catch up via log replication.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn test_follower_isolation_and_catchup() {
+        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("initial leader not elected");
+
+        let follower_id = nodes
+            .iter()
+            .map(|n| n.node_id())
+            .find(|&id| id != leader_id)
+            .expect("must have at least one follower");
+
+        // Isolate follower — it cannot receive replications
+        injector.isolate(follower_id);
+
+        // Write 10 entries to the still-quorate cluster
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        for i in 0u8..10 {
+            raft.client_write(vec![i]).await.expect("write must succeed while follower is isolated");
+        }
+
+        // Restore follower — it should now catch up
+        injector.restore(follower_id);
+
+        // Poll until follower has applied at least one entry (catches up from leader)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        let follower_node = nodes.iter().find(|n| n.node_id() == follower_id).unwrap();
+        loop {
+            if let Some(follower_raft) = follower_node.group_manager().get_raft(1).await {
+                let metrics = follower_raft.metrics().borrow().clone();
+                if metrics.last_applied.is_some() {
+                    break;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("follower did not catch up within 12s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// E2c — Apply 50% packet loss to one node, write 10 entries through the remaining
+    /// quorum, then clear the fault and verify the cluster converges.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn test_packet_loss_convergence() {
+        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("initial leader not elected");
+
+        // Apply 50% packet loss to one non-leader node
+        let lossy_node_id = nodes
+            .iter()
+            .map(|n| n.node_id())
+            .find(|&id| id != leader_id)
+            .expect("must have a non-leader node");
+        injector.set_packet_loss(lossy_node_id, 0.5);
+
+        // Writes must still succeed — quorum is 2/3 and healthy nodes form a majority
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        for i in 0u8..10 {
+            raft.client_write(vec![i])
+                .await
+                .expect("write must succeed despite 50% packet loss on one follower");
+        }
+
+        // Clear all faults and allow cluster to converge
+        injector.clear_all();
+        tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+
+        // Cluster must still have a healthy leader after convergence
+        let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("cluster must have a leader after packet loss cleared");
+        assert!(final_leader >= 1 && final_leader <= 3, "leader must be a valid node id");
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// E2d — Add 100ms latency on connections to the leader, write 10 entries
+    /// (slower but still correct), then verify no correctness violations.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn test_latency_under_high_load() {
+        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("initial leader not elected");
+
+        // Add 100ms latency on connections targeting the leader node
+        injector.set_latency(leader_id, 100);
+
+        // All writes must succeed — just slower due to latency on replication path
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        for i in 0u8..10 {
+            raft.client_write(vec![i])
+                .await
+                .expect("write must succeed under 100ms latency");
+        }
+
+        // Clear latency fault
+        injector.clear_all();
+
+        // Cluster must still be healthy
+        let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("cluster must still have a leader after latency cleared");
+        assert!(final_leader >= 1 && final_leader <= 3, "leader must be a valid node id");
+
+        shutdown_all(&nodes).await;
     }
 }

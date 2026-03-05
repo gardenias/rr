@@ -1,0 +1,530 @@
+//! `rr-admin` — Command-line tool for administering an `rr` cluster.
+//!
+//! 提供命令行界面，用于查询节点状态、Raft 组状态、触发快照、转移领导者和查看指标摘要。
+//! 支持人类可读的表格输出和 `--output json` 机器可读模式，以及交互式 REPL。
+//!
+//! ---
+//!
+//! Provides a CLI for querying node status, Raft group status, triggering snapshots,
+//! transferring leadership, and viewing metrics summaries.
+//! Supports human-readable table output, `--output json` machine-readable mode,
+//! and an interactive REPL for kv-store operations.
+
+use anyhow::Result;
+use bincode::config::standard;
+use clap::{Parser, Subcommand, ValueEnum};
+use rr_network::proto::admin::admin_service_client::AdminServiceClient;
+use rr_network::proto::admin::{Empty, GroupId, TransferLeaderRequest};
+use rr_network::proto::client::client_service_client::ClientServiceClient;
+use rr_network::proto::client::ClientRequest;
+use tonic::transport::Channel;
+
+// ── KV wire types (mirrors kv-store's KvRequest/KvResponse) ────────────────
+
+/// KV request type, matching the kv-store example wire format.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum KvRequest {
+    Put { key: String, value: Vec<u8> },
+    Get { key: String },
+    Delete { key: String },
+}
+
+/// KV response type, matching the kv-store example wire format.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct KvResponse {
+    value: Option<Vec<u8>>,
+}
+
+// ── CLI definition ─────────────────────────────────────────────────────────────
+
+/// Output format for command results.
+#[derive(Clone, Debug, Default, ValueEnum)]
+enum OutputFormat {
+    /// Human-readable table (default).
+    #[default]
+    Human,
+    /// Machine-readable JSON.
+    Json,
+}
+
+/// rr-admin: administrative CLI for an rr cluster node.
+#[derive(Parser, Debug)]
+#[command(name = "rr-admin", about = "Administrative CLI for an rr cluster node")]
+struct Cli {
+    /// gRPC address of the target node (host:port).
+    #[arg(long, default_value = "127.0.0.1:52001")]
+    addr: String,
+
+    /// Output format.
+    #[arg(long, value_enum, default_value = "human")]
+    output: OutputFormat,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Node-level operations.
+    Node {
+        #[command(subcommand)]
+        cmd: NodeCommands,
+    },
+    /// Raft group operations.
+    Group {
+        #[command(subcommand)]
+        cmd: GroupCommands,
+    },
+    /// Show top-level metrics summary.
+    Metrics,
+    /// Launch an interactive REPL for kv-store operations.
+    Repl {
+        /// gRPC address of the target node (host:port).
+        #[arg(long, default_value = "127.0.0.1:52001")]
+        addr: String,
+        /// Raft group / partition ID to route kv commands to.
+        #[arg(long, default_value = "1")]
+        group: u64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum NodeCommands {
+    /// Get node status (node_id, listen_addr, groups, uptime).
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum GroupCommands {
+    /// Get Raft group status.
+    Status {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+    },
+    /// Trigger a manual snapshot / log compaction for a group.
+    Snapshot {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+    },
+    /// Transfer group leadership to another node.
+    TransferLeader {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+        /// Target node ID to transfer leadership to.
+        #[arg(long)]
+        to: u64,
+    },
+}
+
+// ── Entry point ────────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match &cli.command {
+        Commands::Repl { addr, group } => {
+            run_repl(addr, *group).await?;
+        }
+        _ => {
+            let channel = connect(&cli.addr).await?;
+            let mut client = AdminServiceClient::new(channel);
+
+            match &cli.command {
+                Commands::Node { cmd: NodeCommands::Status } => {
+                    let resp = client.get_node_status(Empty {}).await?.into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "node_id": resp.node_id,
+                                "listen_addr": resp.listen_addr,
+                                "group_ids": resp.group_ids,
+                                "uptime_secs": resp.uptime_secs,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("Node Status");
+                            println!("  node_id    : {}", resp.node_id);
+                            println!("  listen_addr: {}", resp.listen_addr);
+                            println!("  group_ids  : {:?}", resp.group_ids);
+                            println!("  uptime_secs: {}", resp.uptime_secs);
+                        }
+                    }
+                }
+                Commands::Group { cmd: GroupCommands::Status { group } } => {
+                    let resp = client
+                        .get_group_status(GroupId { group_id: *group })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "group_id": resp.group_id,
+                                "is_leader": resp.is_leader,
+                                "current_term": resp.current_term,
+                                "last_log_index": resp.last_log_index,
+                                "leader_node_id": resp.leader_node_id,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("Group Status (group {})", resp.group_id);
+                            println!("  is_leader     : {}", resp.is_leader);
+                            println!("  current_term  : {}", resp.current_term);
+                            println!("  last_log_index: {}", resp.last_log_index);
+                            println!("  leader_node_id: {}", resp.leader_node_id);
+                        }
+                    }
+                }
+                Commands::Group { cmd: GroupCommands::Snapshot { group } } => {
+                    let resp = client
+                        .trigger_snapshot(GroupId { group_id: *group })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "success": resp.success,
+                                "message": resp.message,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("TriggerSnapshot: success={} message={}", resp.success, resp.message);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::TransferLeader { group, to },
+                } => {
+                    let resp = client
+                        .transfer_leader(TransferLeaderRequest {
+                            group_id: *group,
+                            target_node_id: *to,
+                        })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "success": resp.success,
+                                "message": resp.message,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("TransferLeader: success={} message={}", resp.success, resp.message);
+                        }
+                    }
+                }
+                Commands::Metrics => {
+                    let resp = client.get_metrics_summary(Empty {}).await?.into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "total_proposals": resp.total_proposals,
+                                "total_applied": resp.total_applied,
+                                "total_snapshots": resp.total_snapshots,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("Metrics Summary");
+                            println!("  total_proposals: {}", resp.total_proposals);
+                            println!("  total_applied  : {}", resp.total_applied);
+                            println!("  total_snapshots: {}", resp.total_snapshots);
+                        }
+                    }
+                }
+                Commands::Repl { .. } => unreachable!("handled above"),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/// Establish a gRPC channel to the given host:port address.
+async fn connect(addr: &str) -> Result<Channel> {
+    let endpoint = format!("http://{addr}");
+    let channel = tonic::transport::Channel::from_shared(endpoint)?
+        .connect()
+        .await?;
+    Ok(channel)
+}
+
+/// Run the interactive REPL.
+///
+/// 支持 6 个命令：get、put、delete、status、members、help。
+/// get/put/delete 使用 kv-store 的 bincode wire 格式。
+///
+/// ---
+///
+/// Supports exactly 6 commands: get, put, delete, status, members, help.
+/// get/put/delete use the kv-store bincode wire format.
+async fn run_repl(addr: &str, group: u64) -> Result<()> {
+    let channel = connect(addr).await?;
+    let mut admin_client = AdminServiceClient::new(channel.clone());
+    let mut kv_client = ClientServiceClient::new(channel);
+
+    let mut rl = rustyline::DefaultEditor::new()?;
+
+    loop {
+        let line = match rl.readline("rr> ") {
+            Ok(l) => l,
+            Err(rustyline::error::ReadlineError::Eof) => break,
+            Err(rustyline::error::ReadlineError::Interrupted) => break,
+            Err(e) => return Err(e.into()),
+        };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let _ = rl.add_history_entry(&line);
+        let tokens: Vec<&str> = line.splitn(3, ' ').collect();
+        match tokens[0] {
+            "get" => {
+                if tokens.len() < 2 {
+                    println!("Usage: get <key>");
+                    continue;
+                }
+                let req = KvRequest::Get { key: tokens[1].to_string() };
+                let payload = bincode::serde::encode_to_vec(&req, standard())?;
+                match kv_client
+                    .request(ClientRequest { partition_id: group, payload })
+                    .await
+                {
+                    Ok(resp) => {
+                        let inner = resp.into_inner();
+                        if inner.success {
+                            match bincode::serde::decode_from_slice::<KvResponse, _>(
+                                &inner.payload,
+                                standard(),
+                            ) {
+                                Ok((kv_resp, _)) => match kv_resp.value {
+                                    Some(v) => println!("{}", String::from_utf8_lossy(&v)),
+                                    None => println!("(nil)"),
+                                },
+                                Err(e) => println!("decode error: {e}"),
+                            }
+                        } else {
+                            println!("Error: request not successful");
+                        }
+                    }
+                    Err(e) => println!("RPC error: {e}"),
+                }
+            }
+            "put" => {
+                if tokens.len() < 3 {
+                    println!("Usage: put <key> <value>");
+                    continue;
+                }
+                let req = KvRequest::Put {
+                    key: tokens[1].to_string(),
+                    value: tokens[2].as_bytes().to_vec(),
+                };
+                let payload = bincode::serde::encode_to_vec(&req, standard())?;
+                match kv_client
+                    .request(ClientRequest { partition_id: group, payload })
+                    .await
+                {
+                    Ok(_) => println!("OK"),
+                    Err(e) => println!("RPC error: {e}"),
+                }
+            }
+            "delete" => {
+                if tokens.len() < 2 {
+                    println!("Usage: delete <key>");
+                    continue;
+                }
+                let req = KvRequest::Delete { key: tokens[1].to_string() };
+                let payload = bincode::serde::encode_to_vec(&req, standard())?;
+                match kv_client
+                    .request(ClientRequest { partition_id: group, payload })
+                    .await
+                {
+                    Ok(_) => println!("OK"),
+                    Err(e) => println!("RPC error: {e}"),
+                }
+            }
+            "status" => {
+                match admin_client.get_node_status(Empty {}).await {
+                    Ok(resp) => {
+                        let s = resp.into_inner();
+                        println!("node_id    : {}", s.node_id);
+                        println!("listen_addr: {}", s.listen_addr);
+                        println!("group_ids  : {:?}", s.group_ids);
+                        println!("uptime_secs: {}", s.uptime_secs);
+                    }
+                    Err(e) => println!("RPC error: {e}"),
+                }
+            }
+            "members" => {
+                match admin_client.get_group_status(GroupId { group_id: group }).await {
+                    Ok(resp) => {
+                        let s = resp.into_inner();
+                        println!("group_id      : {}", s.group_id);
+                        println!("is_leader     : {}", s.is_leader);
+                        println!("current_term  : {}", s.current_term);
+                        println!("last_log_index: {}", s.last_log_index);
+                        println!("leader_node_id: {}", s.leader_node_id);
+                    }
+                    Err(e) => println!("RPC error: {e}"),
+                }
+            }
+            "help" => {
+                println!("Available commands:");
+                println!("  get <key>             — fetch a value");
+                println!("  put <key> <value>     — store a value");
+                println!("  delete <key>          — remove a key");
+                println!("  status                — show node status (via admin RPC)");
+                println!("  members               — show group membership (via admin RPC)");
+                println!("  help                  — show this help");
+                println!();
+                println!("Note: get/put/delete use kv-store wire format (bincode-encoded KvRequest/KvResponse).");
+            }
+            other => {
+                println!("Unknown command: '{other}'. Type 'help' for available commands.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Verify the CLI definition compiles and --help parses without panic.
+    #[test]
+    fn test_cli_help_does_not_panic() {
+        Cli::command().debug_assert();
+    }
+
+    /// Verify node status subcommand parses correctly.
+    #[test]
+    fn test_parse_node_status() {
+        let cli = Cli::try_parse_from(["rr-admin", "--addr", "127.0.0.1:52001", "node", "status"])
+            .expect("should parse node status");
+        assert_eq!(cli.addr, "127.0.0.1:52001");
+        assert!(matches!(cli.command, Commands::Node { cmd: NodeCommands::Status }));
+    }
+
+    /// Verify group status subcommand parses correctly.
+    #[test]
+    fn test_parse_group_status() {
+        let cli = Cli::try_parse_from(["rr-admin", "group", "status", "--group", "1"])
+            .expect("should parse group status");
+        assert!(matches!(
+            cli.command,
+            Commands::Group { cmd: GroupCommands::Status { group: 1 } }
+        ));
+    }
+
+    /// Verify group snapshot subcommand parses correctly.
+    #[test]
+    fn test_parse_group_snapshot() {
+        let cli = Cli::try_parse_from(["rr-admin", "group", "snapshot", "--group", "2"])
+            .expect("should parse group snapshot");
+        assert!(matches!(
+            cli.command,
+            Commands::Group { cmd: GroupCommands::Snapshot { group: 2 } }
+        ));
+    }
+
+    /// Verify group transfer-leader subcommand parses correctly.
+    #[test]
+    fn test_parse_group_transfer_leader() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "group",
+            "transfer-leader",
+            "--group",
+            "1",
+            "--to",
+            "3",
+        ])
+        .expect("should parse transfer-leader");
+        assert!(matches!(
+            cli.command,
+            Commands::Group {
+                cmd: GroupCommands::TransferLeader { group: 1, to: 3 }
+            }
+        ));
+    }
+
+    /// Verify metrics subcommand parses correctly.
+    #[test]
+    fn test_parse_metrics() {
+        let cli = Cli::try_parse_from(["rr-admin", "metrics"]).expect("should parse metrics");
+        assert!(matches!(cli.command, Commands::Metrics));
+    }
+
+    /// Verify --output json flag parses correctly.
+    #[test]
+    fn test_parse_json_output_flag() {
+        let cli = Cli::try_parse_from(["rr-admin", "--output", "json", "metrics"])
+            .expect("should parse --output json");
+        assert!(matches!(cli.output, OutputFormat::Json));
+    }
+
+    /// Verify default addr is 127.0.0.1:52001.
+    #[test]
+    fn test_default_addr() {
+        let cli = Cli::try_parse_from(["rr-admin", "metrics"]).expect("should parse metrics");
+        assert_eq!(cli.addr, "127.0.0.1:52001");
+    }
+
+    /// Verify repl subcommand parses correctly with defaults.
+    #[test]
+    fn test_parse_repl_subcommand() {
+        let cli = Cli::try_parse_from(["rr-admin", "repl"])
+            .expect("should parse repl");
+        assert!(matches!(cli.command, Commands::Repl { group: 1, .. }));
+    }
+
+    /// Verify repl subcommand parses --group flag.
+    #[test]
+    fn test_parse_repl_with_group() {
+        let cli = Cli::try_parse_from(["rr-admin", "repl", "--group", "2"])
+            .expect("should parse repl --group 2");
+        assert!(matches!(cli.command, Commands::Repl { group: 2, .. }));
+    }
+
+    /// Verify KvRequest::Put encodes and decodes correctly via bincode.
+    #[test]
+    fn test_encode_kv_put_roundtrip() {
+        let req = KvRequest::Put { key: "hello".to_string(), value: b"world".to_vec() };
+        let bytes = bincode::serde::encode_to_vec(&req, standard()).expect("encode");
+        let (decoded, _): (KvRequest, _) =
+            bincode::serde::decode_from_slice(&bytes, standard()).expect("decode");
+        assert!(matches!(decoded, KvRequest::Put { .. }));
+        assert!(!bytes.is_empty());
+    }
+
+    /// Verify KvRequest::Get encodes to non-empty bytes.
+    #[test]
+    fn test_encode_kv_get_produces_bytes() {
+        let req = KvRequest::Get { key: "mykey".to_string() };
+        let bytes = bincode::serde::encode_to_vec(&req, standard()).expect("encode");
+        assert!(!bytes.is_empty());
+    }
+
+    /// Verify KvRequest::Delete encodes to non-empty bytes.
+    #[test]
+    fn test_encode_kv_delete_produces_bytes() {
+        let req = KvRequest::Delete { key: "mykey".to_string() };
+        let bytes = bincode::serde::encode_to_vec(&req, standard()).expect("encode");
+        assert!(!bytes.is_empty());
+    }
+}

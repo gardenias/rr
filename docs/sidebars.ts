@@ -48,6 +48,8 @@ const sidebars: SidebarsConfig = {
         'reference/config-reference',
         'reference/error-reference',
         'reference/benchmarks',
+        'reference/admin-api',
+        'reference/metrics-reference',
       ],
     },
     {

@@ -268,4 +268,57 @@ mod tests {
             assert_eq!(val, Some(vec![i * 2]));
         }
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn proptest_mem_put_get_roundtrip(key: Vec<u8>, value: Vec<u8>) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let storage = MemStorage::new();
+                storage.put("state_machine", &key, &value).await.unwrap();
+                let got = storage.get("state_machine", &key).await.unwrap();
+                prop_assert_eq!(got, Some(value));
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn proptest_mem_delete_removes_key(key: Vec<u8>, value: Vec<u8>) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let storage = MemStorage::new();
+                storage.put("state_machine", &key, &value).await.unwrap();
+                storage.delete("state_machine", &key).await.unwrap();
+                let got = storage.get("state_machine", &key).await.unwrap();
+                prop_assert_eq!(got, None);
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn proptest_mem_last_write_wins(key: Vec<u8>, val1: Vec<u8>, val2: Vec<u8>) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let storage = MemStorage::new();
+                storage.put("state_machine", &key, &val1).await.unwrap();
+                storage.put("state_machine", &key, &val2).await.unwrap();
+                let got = storage.get("state_machine", &key).await.unwrap();
+                prop_assert_eq!(got, Some(val2));
+                Ok(())
+            })?;
+        }
+
+        #[test]
+        fn proptest_mem_get_missing_returns_none(key: Vec<u8>) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let storage = MemStorage::new();
+                let got = storage.get("state_machine", &key).await.unwrap();
+                prop_assert_eq!(got, None);
+                Ok(())
+            })?;
+        }
+    }
 }

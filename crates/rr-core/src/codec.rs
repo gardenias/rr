@@ -59,4 +59,50 @@ mod tests {
         let result: Result<TestData, _> = codec.decode(b"invalid bytes!!!!");
         assert!(result.is_err());
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn proptest_bincode_roundtrip_vec_u8(data: Vec<u8>) {
+            let codec = BincodeCodec;
+            let encoded = codec.encode(&data).expect("encode should succeed");
+            let decoded: Vec<u8> = codec.decode(&encoded).expect("decode should succeed");
+            prop_assert_eq!(data, decoded);
+        }
+
+        #[test]
+        fn proptest_bincode_roundtrip_string(data: String) {
+            let codec = BincodeCodec;
+            let encoded = codec.encode(&data).expect("encode should succeed");
+            let decoded: String = codec.decode(&encoded).expect("decode should succeed");
+            prop_assert_eq!(data, decoded);
+        }
+
+        #[test]
+        fn proptest_bincode_roundtrip_struct(key: String, value: u64) {
+            let codec = BincodeCodec;
+            let data = TestData { key, value };
+            let encoded = codec.encode(&data).expect("encode should succeed");
+            let decoded: TestData = codec.decode(&encoded).expect("decode should succeed");
+            prop_assert_eq!(data, decoded);
+        }
+
+        #[test]
+        fn proptest_bincode_encode_deterministic(data: Vec<u8>) {
+            let codec = BincodeCodec;
+            let encoded1 = codec.encode(&data).expect("encode should succeed");
+            let encoded2 = codec.encode(&data).expect("encode should succeed");
+            prop_assert_eq!(encoded1, encoded2);
+        }
+
+        #[test]
+        fn proptest_bincode_encode_decode_encode_stability(data: Vec<u8>) {
+            let codec = BincodeCodec;
+            let encoded1 = codec.encode(&data).expect("encode should succeed");
+            let decoded: Vec<u8> = codec.decode(&encoded1).expect("decode should succeed");
+            let encoded2 = codec.encode(&decoded).expect("re-encode should succeed");
+            prop_assert_eq!(encoded1, encoded2);
+        }
+    }
 }

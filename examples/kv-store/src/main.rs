@@ -45,7 +45,7 @@ use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{NodeId, PartitionConfig};
 use rr_raft::group_manager::RaftGroupManager;
-use rr_raft::network_factory::ChannelPool;
+use rr_raft::network_factory::{ChannelPool, ChannelPoolLike};
 use rr_raft::service_adapter::ServiceStateMachineAdapter;
 use rr_router::router::ShardRouter;
 use rr_server::config::NodeConfig;
@@ -259,7 +259,7 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
 
     // ── Build RaftGroupManager with real gRPC network ─────────────────────────
-    let pool = ChannelPool::new();
+    let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
     let sm_factory = Box::new(|_group_id| -> Box<dyn StateMachine> {
         Box::new(ServiceStateMachineAdapter::new(KvService::new()))
     });

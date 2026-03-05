@@ -1,0 +1,36 @@
+[package]
+name = "rr-benches"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rr-raft = { path = "../crates/rr-raft" }
+rr-storage = { path = "../crates/rr-storage" }
+rr-core = { path = "../crates/rr-core" }
+criterion = { workspace = true }
+tokio = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true }
+openraft = { workspace = true, features = ["storage-v2", "serde"] }
+tempfile = { workspace = true }
+
+[features]
+rocks = ["rr-raft/rocks", "rr-storage/rocks"]
+
+[[bench]]
+name = "log_append"
+harness = false
+
+[[bench]]
+name = "log_append_rocks"
+harness = false
+required-features = ["rocks"]
+
+[[bench]]
+name = "codec_roundtrip"
+harness = false
+
+[[bench]]
+name = "mem_storage_put_scan"
+harness = false

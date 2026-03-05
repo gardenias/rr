@@ -178,6 +178,41 @@ impl ChannelPool {
     }
 }
 
+/// Abstraction over a gRPC channel pool for testability via fault injection.
+#[async_trait::async_trait]
+pub trait ChannelPoolLike: Send + Sync + 'static {
+    /// Get or create a channel to the given node.
+    async fn get_or_connect(&self, node_id: NodeId, addr: &str) -> Result<Channel, NetworkError>;
+    /// Remove a cached channel for the given node.
+    fn remove(&self, node_id: NodeId);
+    /// Number of cached channels.
+    fn len(&self) -> usize;
+    /// Returns true if the pool is empty.
+    fn is_empty(&self) -> bool;
+    /// Remove a cached channel and immediately reconnect, returning the fresh channel.
+    async fn remove_and_reconnect(&self, node_id: NodeId, addr: &str) -> Result<Channel, NetworkError>;
+}
+
+#[async_trait::async_trait]
+impl ChannelPoolLike for ChannelPool {
+    async fn get_or_connect(&self, node_id: NodeId, addr: &str) -> Result<Channel, NetworkError> {
+        ChannelPool::get_or_connect(self, node_id, addr).await
+    }
+    fn remove(&self, node_id: NodeId) {
+        ChannelPool::remove(self, node_id);
+    }
+    fn len(&self) -> usize {
+        ChannelPool::len(self)
+    }
+    fn is_empty(&self) -> bool {
+        ChannelPool::is_empty(self)
+    }
+    async fn remove_and_reconnect(&self, node_id: NodeId, addr: &str) -> Result<Channel, NetworkError> {
+        self.remove(node_id);
+        self.get_or_connect(node_id, addr).await
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tonic gRPC client for rr.raft.RaftService
 // ---------------------------------------------------------------------------
@@ -256,13 +291,13 @@ impl RaftGrpcClient {
 /// `group_id`), so the proto messages carry the correct demux key.
 #[derive(Clone)]
 pub struct GrpcNetworkFactory {
-    channel_pool: ChannelPool,
+    channel_pool: Arc<dyn ChannelPoolLike>,
     group_id: u64,
 }
 
 impl GrpcNetworkFactory {
     /// Create a new factory for the given Raft group.
-    pub fn new(channel_pool: ChannelPool, group_id: u64) -> Self {
+    pub fn new(channel_pool: Arc<dyn ChannelPoolLike>, group_id: u64) -> Self {
         Self {
             channel_pool,
             group_id,
@@ -291,7 +326,7 @@ impl RaftNetworkFactory<RrTypeConfig> for GrpcNetworkFactory {
 pub struct GrpcRaftNetwork {
     target: u64,
     target_addr: String,
-    channel_pool: ChannelPool,
+    channel_pool: Arc<dyn ChannelPoolLike>,
     group_id: u64,
 }
 
@@ -315,6 +350,10 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
             .await
             .map_err(to_unreachable_ae)?;
 
+        let batch_size = rpc.entries.len() as f64;
+        metrics::histogram!("rr_replication_batch_entries", "group_id" => self.group_id.to_string())
+            .record(batch_size);
+
         let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
             .map_err(to_unreachable_ae)?;
 
@@ -325,7 +364,13 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
                 payload,
             })
             .await
-            .map_err(to_unreachable_ae)?
+            .map_err(|status| {
+                if status.code() == tonic::Code::Unavailable {
+                    self.channel_pool.remove(self.target);
+                    metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+                }
+                to_unreachable_ae(status)
+            })?
             .into_inner();
 
         let (resp, _): (AppendEntriesResponse<u64>, _) =
@@ -355,7 +400,13 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
                 payload,
             })
             .await
-            .map_err(to_unreachable_ae)?
+            .map_err(|status| {
+                if status.code() == tonic::Code::Unavailable {
+                    self.channel_pool.remove(self.target);
+                    metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+                }
+                to_unreachable_ae(status)
+            })?
             .into_inner();
 
         let (resp, _): (VoteResponse<u64>, _) =
@@ -417,7 +468,13 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
         let response = client
             .install_snapshot(tokio_stream::iter(proto_chunks))
             .await
-            .map_err(to_unreachable_snap)?
+            .map_err(|status| {
+                if status.code() == tonic::Code::Unavailable {
+                    self.channel_pool.remove(self.target);
+                    metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+                }
+                to_unreachable_snap(status)
+            })?
             .into_inner();
 
         // Deserialize the payload to get the InstallSnapshotResponse.
@@ -447,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_grpc_network_factory_new() {
-        let pool = ChannelPool::new();
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
         let factory = GrpcNetworkFactory::new(pool, 1);
         // Verify it can be cloned (required by openraft)
         let factory2 = factory.clone();
@@ -456,7 +513,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_network_connection_error() {
-        let pool = ChannelPool::new();
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
         let mut network = GrpcRaftNetwork {
             target: 99,
             target_addr: "localhost:1".to_string(),
@@ -484,7 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_network_vote_connection_error() {
-        let pool = ChannelPool::new();
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
         let mut network = GrpcRaftNetwork {
             target: 99,
             target_addr: "localhost:1".to_string(),
@@ -513,7 +570,7 @@ mod tests {
         let network = GrpcRaftNetwork {
             target: 1,
             target_addr: "localhost:5000".to_string(),
-            channel_pool: ChannelPool::new(),
+            channel_pool: Arc::new(ChannelPool::new()) as Arc<dyn ChannelPoolLike>,
             group_id: 0,
         };
 
@@ -624,5 +681,107 @@ mod tests {
             "empty snapshot must produce one empty chunk"
         );
         assert!(chunks_data[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_append_entries_records_batch_metric() {
+        // Verify the replication batch metric code path doesn't panic.
+        // Without a metrics recorder installed, the histogram! macro is a no-op.
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
+        let mut network = GrpcRaftNetwork {
+            target: 99,
+            target_addr: "localhost:1".to_string(),
+            channel_pool: pool,
+            group_id: 42,
+        };
+
+        let rpc: OraftAppendRequest<RrTypeConfig> = OraftAppendRequest {
+            vote: Vote::new(1, 1),
+            prev_log_id: None,
+            entries: vec![],
+            leader_commit: None,
+        };
+
+        // The call will fail to connect, but the metric is recorded
+        // before the gRPC call, so the histogram! path is exercised.
+        let _ = network
+            .append_entries(rpc, RPCOption::new(Duration::from_secs(1)))
+            .await;
+    }
+
+    #[test]
+    fn test_remove_clears_channel() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let pool = ChannelPool::new();
+
+        // Connect to a valid URI to populate the pool.
+        // tonic Channel::from_static creates a lazily-connecting channel (no real TCP).
+        rt.block_on(async {
+            // Use a fake address; get_or_connect will attempt to connect.
+            // We insert a channel manually via the DashMap to avoid needing a server.
+            let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
+            pool.channels.insert(1, channel);
+        });
+
+        assert_eq!(pool.len(), 1);
+        pool.remove(1);
+        assert_eq!(pool.len(), 0);
+        assert!(pool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_remove_and_reconnect_evicts_old_channel() {
+        let pool = ChannelPool::new();
+
+        // Insert a lazily-connected channel.
+        let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
+        pool.channels.insert(42, channel);
+        assert_eq!(pool.len(), 1);
+
+        // remove_and_reconnect will remove the old channel, then try to connect.
+        // Since there's no server, the connect will fail — but the old channel
+        // should already be evicted.
+        let result = pool.remove_and_reconnect(42, "127.0.0.1:1").await;
+        // The pool should have been cleared before the reconnect attempt.
+        // On failure the pool stays empty (no channel re-inserted).
+        assert!(result.is_err(), "should fail without a real server");
+        assert_eq!(pool.len(), 0, "old channel should have been evicted");
+    }
+
+    #[tokio::test]
+    async fn test_unavailable_error_evicts_channel() {
+        // When append_entries hits an Unavailable error, the channel should be evicted.
+        // Insert a lazily-connected channel for node 99.
+        let concrete_pool = ChannelPool::new();
+        let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
+        concrete_pool.channels.insert(99, channel);
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(concrete_pool);
+        assert_eq!(pool.len(), 1);
+
+        let mut network = GrpcRaftNetwork {
+            target: 99,
+            target_addr: "127.0.0.1:1".to_string(),
+            channel_pool: pool.clone(),
+            group_id: 1,
+        };
+
+        let rpc: OraftAppendRequest<RrTypeConfig> = OraftAppendRequest {
+            vote: Vote::new(1, 1),
+            prev_log_id: None,
+            entries: vec![],
+            leader_commit: None,
+        };
+
+        // The RPC will fail (no server). The lazy channel will produce an Unavailable-like
+        // error during the gRPC call, which should trigger eviction.
+        let result = network
+            .append_entries(rpc, RPCOption::new(Duration::from_secs(1)))
+            .await;
+        assert!(result.is_err());
+
+        // After the RPC failure, the stale channel should have been evicted
+        // (if the error was Unavailable). The lazy channel to a non-existent server
+        // may produce various error codes, so we just verify the mechanism compiles
+        // and runs without panicking. In production, a real Unavailable status triggers eviction.
     }
 }

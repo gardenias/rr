@@ -1,8 +1,8 @@
 //! High-level Service → StateMachine bridge adapter.
 //!
-//! [`ServiceStateMachineAdapter`] wraps a user's [`Service`](rr_core::service::Service)
+//! [`ServiceStateMachineAdapter`] wraps a user's [`Service`]
 //! implementation to fulfill the framework's internal
-//! [`StateMachine`](rr_core::state_machine::StateMachine) trait. It is a thin
+//! [`StateMachine`] trait. It is a thin
 //! pass-through: no interpretation of entry bytes occurs.
 
 use async_trait::async_trait;
@@ -44,7 +44,9 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
     }
 
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError> {
-        self.service.restore(snapshot).await
+        self.service.restore(snapshot).await?;
+        metrics::counter!("rr_snapshot_installs_total", "group_id" => "unknown").increment(1);
+        Ok(())
     }
 
     async fn last_applied(&self) -> Option<LogIndex> {
@@ -193,5 +195,16 @@ mod tests {
 
         let _ = adapter.apply(b"data").await;
         assert_eq!(adapter.last_applied().await, None);
+    }
+
+    #[tokio::test]
+    async fn restore_records_snapshot_install_metric() {
+        // Verify the snapshot install counter code path doesn't panic.
+        // Without a metrics recorder installed, the counter! macro is a no-op.
+        let svc = MockService::new(vec![]);
+        let mut adapter = ServiceStateMachineAdapter::new(svc);
+
+        // restore should succeed and record the metric without panic
+        adapter.restore(b"snapshot-data").await.unwrap();
     }
 }

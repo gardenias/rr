@@ -7,8 +7,11 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::ops::Bound;
 use std::ops::RangeBounds;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use openraft::storage::LogFlushed;
 use openraft::storage::RaftLogStorage;
@@ -21,6 +24,14 @@ use openraft::Vote;
 
 use crate::type_config::RrTypeConfig;
 
+/// Returns `true` when defensive-mode checks should be enabled.
+///
+/// Defensive mode is active when either:
+/// - The `defensive` cargo feature is compiled in, **or**
+/// - The environment variable `RR_STORE_DEFENSIVE` is set to `"on"`.
+fn is_defensive() -> bool {
+    cfg!(feature = "defensive") || std::env::var("RR_STORE_DEFENSIVE").as_deref() == Ok("on")
+}
 /// Inner state of [`RrLogStorage`], protected by a shared `RwLock`.
 #[derive(Default)]
 struct Inner {
@@ -48,7 +59,27 @@ impl RaftLogReader<RrTypeConfig> for RrLogStorage {
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry<RrTypeConfig>>, StorageError<u64>> {
-        let inner = self.inner.read().expect("RrLogStorage lock poisoned");
+        if is_defensive() {
+            let start = match range.start_bound() {
+                Bound::Included(&s) => Some(s),
+                Bound::Excluded(&s) => Some(s + 1),
+                Bound::Unbounded => None,
+            };
+            let end = match range.end_bound() {
+                Bound::Included(&e) => Some(e),
+                Bound::Excluded(&e) if e > 0 => Some(e - 1),
+                Bound::Excluded(_) => Some(0),
+                Bound::Unbounded => None,
+            };
+            if let (Some(s), Some(e)) = (start, end) {
+                assert!(
+                    s <= e,
+                    "defensive: try_get_log_entries called with start ({s}) > end ({e})"
+                );
+            }
+        }
+
+        let inner = self.inner.read();
         let entries: Vec<Entry<RrTypeConfig>> = inner
             .entries
             .range(range)
@@ -62,7 +93,7 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
     type LogReader = Self;
 
     async fn get_log_state(&mut self) -> Result<LogState<RrTypeConfig>, StorageError<u64>> {
-        let inner = self.inner.read().expect("RrLogStorage lock poisoned");
+        let inner = self.inner.read();
         let last_log_id = inner
             .entries
             .last_key_value()
@@ -84,12 +115,12 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
     }
 
     async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
-        self.inner.write().expect("RrLogStorage lock poisoned").vote = Some(*vote);
+        self.inner.write().vote = Some(*vote);
         Ok(())
     }
 
     async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
-        Ok(self.inner.read().expect("RrLogStorage lock poisoned").vote)
+        Ok(self.inner.read().vote)
     }
 
     async fn append<I>(
@@ -102,9 +133,28 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
         I::IntoIter: Send,
     {
         {
-            let mut inner = self.inner.write().expect("RrLogStorage lock poisoned");
-            for entry in entries {
-                inner.entries.insert(entry.log_id.index, entry);
+            let mut inner = self.inner.write();
+            if is_defensive() {
+                let mut expected_next = inner
+                    .entries
+                    .last_key_value()
+                    .map(|(k, _)| *k + 1)
+                    .or_else(|| inner.last_purged_log_id.map(|id| id.index + 1));
+                for entry in entries {
+                    if let Some(expected) = expected_next {
+                        assert!(
+                            entry.log_id.index == expected,
+                            "defensive: append entries not contiguous — expected index {expected}, got {}",
+                            entry.log_id.index
+                        );
+                    }
+                    expected_next = Some(entry.log_id.index + 1);
+                    inner.entries.insert(entry.log_id.index, entry);
+                }
+            } else {
+                for entry in entries {
+                    inner.entries.insert(entry.log_id.index, entry);
+                }
             }
         } // lock released before callback
         callback.log_io_completed(Ok(()));
@@ -112,7 +162,7 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
     }
 
     async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        let mut inner = self.inner.write().expect("RrLogStorage lock poisoned");
+        let mut inner = self.inner.write();
         let to_remove: Vec<u64> = inner
             .entries
             .range(log_id.index..)
@@ -125,7 +175,7 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
     }
 
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        let mut inner = self.inner.write().expect("RrLogStorage lock poisoned");
+        let mut inner = self.inner.write();
         let to_remove: Vec<u64> = inner
             .entries
             .range(..=log_id.index)
@@ -255,5 +305,65 @@ mod tests {
             "reader must see entries written after it was obtained"
         );
         assert_eq!(result[0].log_id.index, 1);
+    }
+}
+
+/// Tests for defensive mode checks.
+///
+/// These tests enable defensive mode via the `RR_STORE_DEFENSIVE` env var
+/// rather than the feature flag, so they run in normal `cargo test` builds.
+#[cfg(test)]
+mod defensive_tests {
+    use super::*;
+    use openraft::storage::RaftLogStorageExt;
+    use openraft::CommittedLeaderId;
+    use openraft::EntryPayload;
+
+    fn make_entry(index: u64, term: u64) -> Entry<RrTypeConfig> {
+        Entry {
+            log_id: LogId::new(CommittedLeaderId::new(term, 0), index),
+            payload: EntryPayload::Blank,
+        }
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "defensive: append entries not contiguous")]
+    async fn test_defensive_append_non_contiguous_panics() {
+        std::env::set_var("RR_STORE_DEFENSIVE", "on");
+        let mut storage = RrLogStorage::default();
+
+        // First batch: entries 1, 2
+        let entries = vec![make_entry(1, 1), make_entry(2, 1)];
+        storage.blocking_append(entries).await.unwrap();
+
+        // Second batch: gap — skip index 3, jump to 5
+        let entries = vec![make_entry(5, 1)];
+        storage.blocking_append(entries).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "defensive: try_get_log_entries called with start")]
+    async fn test_defensive_get_log_entries_start_gt_end_panics() {
+        std::env::set_var("RR_STORE_DEFENSIVE", "on");
+        let mut storage = RrLogStorage::default();
+
+        // start (5) > end (2) — must panic
+        let _ = storage.try_get_log_entries(5..3).await;
+    }
+
+    #[tokio::test]
+    async fn test_defensive_append_contiguous_succeeds() {
+        std::env::set_var("RR_STORE_DEFENSIVE", "on");
+        let mut storage = RrLogStorage::default();
+
+        let entries = vec![make_entry(1, 1), make_entry(2, 1), make_entry(3, 1)];
+        storage.blocking_append(entries).await.unwrap();
+
+        // Second contiguous batch succeeds
+        let entries = vec![make_entry(4, 1), make_entry(5, 1)];
+        storage.blocking_append(entries).await.unwrap();
+
+        let inner = storage.inner.read();
+        assert_eq!(inner.entries.len(), 5);
     }
 }

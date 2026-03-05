@@ -132,3 +132,45 @@ Clients may encounter the following common `RrError` variants during interaction
 - `RrError::Network(NetworkError::RpcFailed)` — gRPC call failed.
 - `RrError::Raft(RaftError::NotLeader)` — Target is not the leader (usually handled internally by `RrClient`).
 - `RrError::Router(RouterError::PartitionNotFound)` — Partition ID not found in the routing table.
+
+---
+
+## rr-admin repl 交互式输入 / rr-admin Interactive REPL
+
+`rr-admin repl` 提供了一个交互式命令行界面，可直接对使用 kv-store wire 格式的集群进行临时测试和调试。
+它支持 readline 历史（方向键 + Ctrl+R）和标准终端编辑功能。
+
+---
+
+`rr-admin repl` provides an interactive command-line interface for ad-hoc testing and debugging
+clusters that use the kv-store wire format. It supports readline history (arrow keys, Ctrl+R)
+and standard terminal editing.
+
+### 启动 REPL / Launching the REPL
+
+```bash
+# 连接默认地址和组 / Connect to default address and group
+rr-admin repl
+
+# 指定地址和组 / Specify address and group
+rr-admin repl --addr 127.0.0.1:52001 --group 1
+```
+
+### 支持的命令 / Supported Commands
+
+| 命令 / Command | 说明 / Description |
+| :--- | :--- |
+| `get <key>` | 读取一个键的值 / Fetch a value by key |
+| `put <key> <value>` | 写入一个键值对 / Write a key-value pair |
+| `delete <key>` | 删除一个键 / Delete a key |
+| `status` | 显示节点状态（通过 Admin RPC）/ Show node status (via Admin RPC) |
+| `members` | 显示组成员信息（通过 Admin RPC）/ Show group membership (via Admin RPC) |
+| `help` | 显示帮助信息 / Show help |
+
+:::note
+REPL 的 `get`/`put`/`delete` 命令使用 kv-store wire 格式（bincode 编码的 `KvRequest`/`KvResponse`）。
+This means the REPL is specifically designed for services using the kv-store wire format.
+
+`get`/`put`/`delete` use kv-store wire format (bincode-encoded `KvRequest`/`KvResponse`).
+:::
+

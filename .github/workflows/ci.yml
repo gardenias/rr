@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
     strategy:
       matrix:
         rust: [stable]
@@ -26,6 +28,8 @@ jobs:
 
   build-rocks:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
     strategy:
       matrix:
         rust: [stable]
@@ -50,6 +54,7 @@ jobs:
       matrix:
         rust: [stable]
     env:
+      RUSTFLAGS: "--deny=warnings"
       RUST_BACKTRACE: 1
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +75,7 @@ jobs:
       matrix:
         rust: [stable]
     env:
+      RUSTFLAGS: "--deny=warnings"
       RUST_BACKTRACE: 1
     steps:
       - uses: actions/checkout@v4
@@ -86,8 +92,32 @@ jobs:
       - name: Test with rocks feature
         run: cargo test --workspace --features rr-storage/rocks
 
+  test-defensive:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable]
+    env:
+      RUSTFLAGS: "--deny=warnings"
+      RUST_BACKTRACE: 1
+      RR_STORE_DEFENSIVE: "on"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-defensive-${{ hashFiles('**/Cargo.lock') }}
+      - name: Test with defensive store mode
+        run: cargo test --workspace
+
   clippy:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
     strategy:
       matrix:
         rust: [stable]
@@ -106,6 +136,8 @@ jobs:
 
   fmt:
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
     strategy:
       matrix:
         rust: [stable]
@@ -114,3 +146,165 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Format check
         run: cargo fmt --check
+
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        # Note: CODECOV_TOKEN secret must be configured in repository settings
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
+
+  bench:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    strategy:
+      matrix:
+        rust: [stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+      - name: Bench (compile + test mode)
+        run: cargo bench --workspace -- --test
+
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.82
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+      - name: Check MSRV
+        run: cargo check --workspace
+
+  doc-test:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-doc-test-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run doc tests
+        run: cargo test --doc --workspace --no-deps
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Run cargo audit
+        run: cargo audit
+
+  nightly:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build with nightly
+        run: cargo build --workspace
+
+  test-macos:
+    runs-on: macos-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Test on macOS
+        run: cargo test --workspace
+
+  integration:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run integration tests
+        run: cargo test -p integration
+
+  chaos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTFLAGS: "--deny=warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-chaos-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run chaos tests
+        run: cargo test --workspace -- --ignored

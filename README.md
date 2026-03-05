@@ -1,5 +1,7 @@
 # rr — Distributed Multi-Raft Consensus Framework
 
+[![Coverage](https://codecov.io/gh/OWNER/rr/branch/main/graph/badge.svg)](https://codecov.io/gh/OWNER/rr)
+
 ## 简介 / Introduction
 
 rr 是一个用 Rust 编写的分布式多 Raft 共识框架，专为构建高可用、强一致性的分布式系统而设计。它在单个节点上支持多个独立的 Raft 组，通过表格式的分片路由实现灵活的数据分布。核心特性包括可插拔的存储后端、基于 gRPC 的高效网络通信、动态的分布式配置管理和成熟的客户端 SDK，大大降低了开发分布式应用的复杂度。
