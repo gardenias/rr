@@ -1,10 +1,9 @@
 {
-  "active_plan": "/Users/louis/Code/Rust/rr/.sisyphus/plans/rr-documentation.md",
-  "started_at": "2026-03-04T13:46:48.068Z",
+  "active_plan": "/Users/louis/Code/Rust/rr/.sisyphus/plans/rr-improvements.md",
+  "started_at": "2026-03-05T00:00:00.000Z",
   "session_ids": [
-    "ses_34d98b0c0ffeZX1wooWKNlNsTk",
     "ses_34d98b0c0ffeZX1wooWKNlNsTk"
   ],
-  "plan_name": "rr-documentation",
+  "plan_name": "rr-improvements",
   "agent": "atlas"
 }
