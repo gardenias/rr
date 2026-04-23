@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tracing::instrument;
 
 use rr_core::types::GroupId;
 use rr_network::raft_service::RaftGroupLookup;
@@ -29,6 +30,7 @@ impl RaftGroupLookupImpl {
 
 #[async_trait]
 impl RaftGroupLookup for RaftGroupLookupImpl {
+    #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
     async fn append_entries(
         &self,
         group_id: GroupId,
@@ -54,6 +56,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .map_err(|e| tonic::Status::internal(format!("encode error: {e}")))
     }
 
+    #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
     async fn vote(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
         let raft = self
             .group_manager
@@ -75,6 +78,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .map_err(|e| tonic::Status::internal(format!("encode error: {e}")))
     }
 
+    #[instrument(skip(self, metadata, data), fields(meta_len = metadata.len(), data_len = data.len()))]
     async fn install_snapshot(
         &self,
         group_id: GroupId,

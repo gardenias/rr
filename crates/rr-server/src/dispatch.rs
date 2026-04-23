@@ -9,6 +9,7 @@ use rr_network::client_service::{ClientDispatch, ClientWriteResult};
 use rr_network::proto::client::GroupInfo;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_router::router::ShardRouter;
+use tracing::instrument;
 
 /// Production implementation of [`ClientDispatch`].
 ///
@@ -32,6 +33,7 @@ impl ClientDispatchImpl {
 
 #[async_trait]
 impl ClientDispatch for ClientDispatchImpl {
+    #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
     async fn submit_write(
         &self,
         partition_id: u64,
@@ -69,6 +71,7 @@ impl ClientDispatch for ClientDispatchImpl {
         }
     }
 
+    #[instrument(skip(self))]
     async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
         let group_ids = self.group_manager.group_ids().await;
         let groups = group_ids

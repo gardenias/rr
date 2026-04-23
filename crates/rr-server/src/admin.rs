@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tonic::{Request, Response, Status};
+use tracing::info;
 
 use rr_core::types::NodeId;
 use rr_network::proto::admin::admin_service_server::AdminService;
@@ -19,6 +20,17 @@ use rr_network::proto::admin::{
     TransferLeaderResponse, TriggerSnapshotResponse,
 };
 use rr_raft::group_manager::RaftGroupManager;
+
+/// Tracing target for audit events. Consumers (e.g. ops stack) can filter
+/// this target separately via `EnvFilter`:
+/// `rr::audit=info,info` — audit log at info, rest default.
+pub const AUDIT_TARGET: &str = "rr::audit";
+
+fn peer_from_request<T>(req: &Request<T>) -> String {
+    req.remote_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 /// Implementation of the AdminService gRPC interface.
 ///
@@ -50,8 +62,16 @@ impl AdminServiceImpl {
 impl AdminService for AdminServiceImpl {
     async fn get_node_status(
         &self,
-        _request: Request<Empty>,
+        request: Request<Empty>,
     ) -> Result<Response<NodeStatus>, Status> {
+        let peer = peer_from_request(&request);
+        info!(
+            target: AUDIT_TARGET,
+            op = "GetNodeStatus",
+            peer = %peer,
+            node_id = self.node_id,
+            "admin rpc"
+        );
         let group_ids = self.group_manager.group_ids().await;
         Ok(Response::new(NodeStatus {
             node_id: self.node_id,
@@ -65,7 +85,16 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GroupId>,
     ) -> Result<Response<GroupStatus>, Status> {
+        let peer = peer_from_request(&request);
         let group_id = request.into_inner().group_id;
+        info!(
+            target: AUDIT_TARGET,
+            op = "GetGroupStatus",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id,
+            "admin rpc"
+        );
         let raft = self
             .group_manager
             .get_raft(group_id)
@@ -86,30 +115,54 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GroupId>,
     ) -> Result<Response<TriggerSnapshotResponse>, Status> {
+        let peer = peer_from_request(&request);
         let group_id = request.into_inner().group_id;
+        info!(
+            target: AUDIT_TARGET,
+            op = "TriggerSnapshot",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id,
+            "admin rpc — mutation"
+        );
         let raft = self
             .group_manager
             .get_raft(group_id)
             .await
             .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
 
-        match raft.trigger().snapshot().await {
-            Ok(()) => Ok(Response::new(TriggerSnapshotResponse {
-                success: true,
-                message: "snapshot triggered".to_string(),
-            })),
-            Err(e) => Ok(Response::new(TriggerSnapshotResponse {
-                success: false,
-                message: e.to_string(),
-            })),
-        }
+        let result = raft.trigger().snapshot().await;
+        let (success, message) = match &result {
+            Ok(()) => (true, "snapshot triggered".to_string()),
+            Err(e) => (false, e.to_string()),
+        };
+        info!(
+            target: AUDIT_TARGET,
+            op = "TriggerSnapshot",
+            peer = %peer,
+            group_id,
+            success,
+            message = %message,
+            "admin rpc result"
+        );
+        Ok(Response::new(TriggerSnapshotResponse { success, message }))
     }
 
     async fn transfer_leader(
         &self,
         request: Request<TransferLeaderRequest>,
     ) -> Result<Response<TransferLeaderResponse>, Status> {
+        let peer = peer_from_request(&request);
         let req = request.into_inner();
+        info!(
+            target: AUDIT_TARGET,
+            op = "TransferLeader",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            target_node_id = req.target_node_id,
+            "admin rpc — mutation"
+        );
         let raft = self
             .group_manager
             .get_raft(req.group_id)
@@ -143,10 +196,16 @@ impl AdminService for AdminServiceImpl {
 
     async fn get_metrics_summary(
         &self,
-        _request: Request<Empty>,
+        request: Request<Empty>,
     ) -> Result<Response<MetricsSummary>, Status> {
-        // Metrics are collected via the `metrics` crate; for now return zeros.
-        // Real values flow through the Prometheus recorder installed in RrNode.
+        let peer = peer_from_request(&request);
+        info!(
+            target: AUDIT_TARGET,
+            op = "GetMetricsSummary",
+            peer = %peer,
+            node_id = self.node_id,
+            "admin rpc"
+        );
         Ok(Response::new(MetricsSummary {
             total_proposals: 0,
             total_applied: 0,
