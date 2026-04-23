@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (Phase 3 continuation — post v0.2.0-rc1)
+
+- **HTTP observability endpoints** (`rr-server::health`): single hyper server on `metrics_port` serves `GET /health` (liveness), `GET /ready` (readiness — flipped at end of `start()`, cleared on `shutdown()`), and `GET /metrics` (Prometheus). K8s manifests + Helm chart updated to use HTTP probes instead of TCP-on-gRPC-port.
+- **Semver / API stability document** (`docs/docs/reference/compatibility.md`): explicit commitments per surface (Rust API, gRPC wire, on-disk, config, CLI, metrics), pre-1.0 Cargo convention, MSRV policy, deprecation process.
+- **Five operational runbooks** under `docs/docs/operations/runbooks/`: disk-full, leader-flapping, network-partition, snapshot-corruption, configprovider-unreachable. Each structured as Symptom → Detection → Immediate mitigation → Root cause → Recovery → Prevention.
+- **`rr-client` side metrics**: `rr_client_request_duration_seconds` (histogram, `outcome=success|failure`), `rr_client_retries_total` (counter), `rr_client_leader_cache_hits_total` / `_misses_total` (counters). All labeled with `group_id`.
+- **Audit log** via dedicated tracing target `rr::audit`: every AdminService RPC emits a structured info-level event with `op`, `peer` (socket addr), `node_id`, and per-operation fields. Mutation RPCs emit both dispatch and result events for forensic pairing. `docs/docs/deployment/audit-log.md` documents schema + routing patterns.
+- **W3C traceparent propagation** (`rr-network::tracing`): `extract_traceparent` / `extract_tracestate` / `attach_traceparent` / `attach_tracestate` helpers. Inbound RPC handlers log the incoming traceparent on the tracing span for cross-service correlation. Does NOT bundle the OpenTelemetry SDK — users bring their own OTLP stack.
+- `#[instrument]` on client-dispatch, raft-group-lookup, and `RrClient::{send_request, send_request_with_partition, get_cluster_info}` for complete span coverage on hot paths.
+
 ### Added
 - `LICENSE` file (MIT) at repository root.
 - `CHANGELOG.md` following Keep a Changelog format.
