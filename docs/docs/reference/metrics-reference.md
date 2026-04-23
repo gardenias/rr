@@ -291,16 +291,56 @@ success rate.
 
 ---
 
+### Client-side (rr-client, emitted by applications that embed the SDK)
+
+#### `rr_client_request_duration_seconds`
+
+`RrClient::send_request` 的端到端耗时（含所有重试）。`outcome` 标签区分成功与最终失败。
+
+End-to-end latency of `RrClient::send_request` including all retry attempts. The `outcome` label distinguishes success from terminal failure.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | `group_id`, `outcome` (`success` \| `failure`) |
+| 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
+
+---
+
+#### `rr_client_retries_total`
+
+客户端重试次数。第 0 次尝试不计；只有第 1 次及之后的尝试才递增。
+
+Client retry attempts. The initial attempt is not counted; only attempts ≥ 1 increment.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
+
+---
+
+#### `rr_client_leader_cache_hits_total` / `rr_client_leader_cache_misses_total`
+
+客户端 leader cache 的命中/失效次数。失效意味着必须 fallback 到 bootstrap 地址轮询。两者之比反映路由稳定性；缓存命中率持续低（<80%）说明 leader 频繁切换或集群不稳。
+
+Hit / miss counts for the client's leader cache. A miss means fallback to round-robin through bootstrap addresses. The ratio reflects routing stability; a sustained low hit rate (<80%) signals frequent leader changes or cluster instability.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
+
+---
+
 ## 规划中的指标 / Planned Metrics
 
-Phase 3 计划新增以下指标（详见 `.sisyphus/plans/rr-phase3-prodready.md` T28、T29）：
+剩余 Phase 3 观测性计划：
 
-Phase 3 plans to add the following metrics (see `.sisyphus/plans/rr-phase3-prodready.md` T28, T29):
-
-- `rr_client_request_duration_seconds` — 客户端 SDK 端到端请求延迟（含重试）/ End-to-end client SDK request latency (incl. retries)
-- `rr_client_retries_total` — 客户端重试次数 / Client retry attempts
-- `rr_client_leader_cache_hits_total` / `_misses_total` — leader 缓存命中率 / Leader cache hit rate
 - `rr_raft_replication_lag` — 每个 follower 相对 leader 的 `commit_index` 差距 / Per-follower commit_index lag behind leader
+- OpenTelemetry trace propagation via tonic interceptor (`traceparent` + W3C trace context)
 
 ---
 

@@ -13,6 +13,7 @@ use rr_network::proto::client::{ClientRequest, ClusterInfo, Empty};
 use rr_network::ChannelPool;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
+use tracing::instrument;
 
 /// Configuration for retry behavior on transient failures and leader redirects.
 #[derive(Debug, Clone)]
@@ -134,6 +135,7 @@ impl RrClient {
     /// 3. If transport error: remove from cache, try next bootstrap addr round-robin
     /// 4. Max `retry_config.max_retries` total attempts before returning error
     /// 5. Exponential backoff: `retry_delay_ms * 2^attempt`
+    #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len()))]
     pub async fn send_request(
         &self,
         group_id: GroupId,
@@ -142,14 +144,32 @@ impl RrClient {
         let max_attempts = self.retry_config.max_retries + 1;
         let mut bootstrap_index: usize = 0;
         let mut last_error: Option<RrError> = None;
+        let request_start = std::time::Instant::now();
+        let gid_label = group_id.to_string();
 
         for attempt in 0..max_attempts {
-            // Determine which address to try
+            if attempt > 0 {
+                metrics::counter!(
+                    "rr_client_retries_total",
+                    "group_id" => gid_label.clone()
+                )
+                .increment(1);
+            }
+
             let addr = if let Some((_node_id, cached_addr)) = self.get_cached_leader(group_id).await
             {
+                metrics::counter!(
+                    "rr_client_leader_cache_hits_total",
+                    "group_id" => gid_label.clone()
+                )
+                .increment(1);
                 cached_addr
             } else {
-                // Round-robin through bootstrap addresses
+                metrics::counter!(
+                    "rr_client_leader_cache_misses_total",
+                    "group_id" => gid_label.clone()
+                )
+                .increment(1);
                 let addr =
                     self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
                 bootstrap_index += 1;
@@ -213,6 +233,12 @@ impl RrClient {
                         }
                     }
 
+                    metrics::histogram!(
+                        "rr_client_request_duration_seconds",
+                        "group_id" => gid_label.clone(),
+                        "outcome" => "success",
+                    )
+                    .record(request_start.elapsed().as_secs_f64());
                     return Ok(resp.payload);
                 }
                 Err(status) => {
@@ -237,6 +263,12 @@ impl RrClient {
             }
         }
 
+        metrics::histogram!(
+            "rr_client_request_duration_seconds",
+            "group_id" => gid_label.clone(),
+            "outcome" => "failure",
+        )
+        .record(request_start.elapsed().as_secs_f64());
         Err(last_error.unwrap_or_else(|| {
             RrError::Network(NetworkError::RpcFailed("max retries exhausted".to_string()))
         }))
@@ -246,6 +278,7 @@ impl RrClient {
     ///
     /// Currently maps 1:1 to `send_request` since partition_id and group_id
     /// are equivalent in the current routing model.
+    #[instrument(skip(self, payload), fields(partition_id, payload_len = payload.len()))]
     pub async fn send_request_with_partition(
         &self,
         partition_id: u64,
@@ -255,6 +288,7 @@ impl RrClient {
     }
 
     /// Get cluster topology information from the first reachable bootstrap node.
+    #[instrument(skip(self))]
     pub async fn get_cluster_info(&self) -> Result<ClusterInfo, RrError> {
         let mut last_error: Option<RrError> = None;
 
