@@ -4,6 +4,12 @@ sidebar_position: 6
 
 # 网络架构 / Networking
 
+:::info C4 对应视图 / C4 Counterparts
+- rr-network 组件图（RaftService / ClientService / AdminService / ChannelPool 细节）/ rr-network component diagram → [**c4/components-network.md**](./c4/components-network.md)
+- 容器级端口 & 流量布局 / Port & traffic layout at container level → [**c4/containers.md**](./c4/containers.md)
+- 生产部署端口方案 / Production port scheme → [**c4/deployment.md**](./c4/deployment.md)
+:::
+
 rr 框架的网络层基于 gRPC 构建，负责节点间的 Raft 共识通信以及客户端与服务器之间的请求交互。它采用了高效的连接池管理和清晰的服务抽象，以支持多 Raft 组的高性能通信。
 
 ---

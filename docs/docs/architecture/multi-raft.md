@@ -4,6 +4,11 @@ sidebar_position: 4
 
 # 多 Raft 架构 / Multi-Raft Architecture
 
+:::info C4 对应视图 / C4 Counterparts
+- rr-raft 内部组件（RaftGroupManager、适配器层、LogStorage）/ rr-raft internals (RaftGroupManager, adapters, LogStorage) → [**c4/components-raft.md**](./c4/components-raft.md)
+- 选举流程视觉化 / Election flow → [**c4/dynamic-leader-election.md**](./c4/dynamic-leader-election.md)
+:::
+
 ## 什么是多 Raft / What is Multi-Raft
 
 在 rr 框架中，Multi-Raft 是指在单个物理节点上同时运行多个独立的 Raft 共识组（RaftGroup）。每个 Raft 组负责管理集群中特定分片的数据。这种架构相比单 Raft 组具有更高的扩展性和并发处理能力。

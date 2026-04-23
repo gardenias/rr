@@ -4,6 +4,14 @@ sidebar_position: 1
 
 # 架构概览 / Architecture Overview
 
+:::tip C4 架构图 / C4 Architecture Diagrams
+本页提供高层散文说明。若需要**视觉化的多层次结构图**（Context / Container / Component / Deployment / Dynamic），请参阅 [**C4 架构图目录 / C4 Architecture Diagrams**](./c4/README.md)。
+
+This page provides a prose overview. For **visual multi-level structural diagrams** (Context / Container / Component / Deployment / Dynamic), see the [**C4 Architecture Diagrams index**](./c4/README.md).
+- 系统级定位 / System-level framing → [c4/context.md](./c4/context.md)
+- 部署单元 / Deployable units → [c4/containers.md](./c4/containers.md)
+:::
+
 ## rr 是什么 / What is rr
 
 rr 是一个基于 Rust 开发的分布式多 Raft 共识框架。它的核心目标是提供一个高度模块化、易于扩展且生产可用的共识层，让开发者可以专注于业务逻辑（通过 `Service` 或 `StateMachine` 接口），而无需处理复杂的共识算法细节、网络传输和成员变更。

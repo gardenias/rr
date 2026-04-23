@@ -4,6 +4,17 @@ sidebar_position: 2
 
 # Crate 依赖图 / Crate Dependency Map
 
+:::info C4 对应视图 / C4 Counterparts
+本页展示**编译时的 crate 依赖**（静态库依赖关系）。对应的**运行时部署视图**（哪些 crate 组成可部署单元）在 [**C4 Container 图**](./c4/containers.md) 中。每个 crate 的**内部组件结构**在 components-*.md 中：
+
+This page shows **compile-time crate dependencies** (static library deps). The corresponding **runtime deployment view** (which crates form deployable units) lives in the [**C4 Container diagram**](./c4/containers.md). Each crate's **internal component structure** is in components-*.md:
+
+- rr-server 内部 / internals → [c4/components-server.md](./c4/components-server.md)
+- rr-raft 多组引擎 / multi-Raft engine → [c4/components-raft.md](./c4/components-raft.md)
+- rr-router + rr-config → [c4/components-router.md](./c4/components-router.md)
+- rr-network gRPC 传输层 / gRPC transport → [c4/components-network.md](./c4/components-network.md)
+:::
+
 ## 依赖关系 / Dependency Graph
 
 rr 采用分层架构，各个组件之间职责清晰，不存在循环依赖。

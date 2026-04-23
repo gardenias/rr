@@ -22,18 +22,39 @@ rr is a distributed multi-Raft consensus framework written in Rust, designed for
 
 ## Architecture
 
+A C4 Container view of a deployed rr cluster — what processes run, what they talk, and over which protocols.
+
 ```mermaid
-graph TD
-    A[rr-client] --> B[rr-server]
-    B --> C[rr-raft]
-    B --> D[rr-router]
-    B --> E[rr-network]
-    C --> F[rr-core]
-    D --> F
-    E --> F
-    G[rr-storage] --> F
-    H[rr-config] --> F
+C4Container
+  title Container Diagram - rr Cluster (condensed)
+
+  Person(developer, "App Developer")
+  Person(operator, "Operator")
+
+  System_Boundary(client_side, "Client Side") {
+    Container(user_app, "User Application", "Rust + rr-client SDK", "Auto leader-redirect & retry")
+    Container(admin_cli, "rr-admin CLI", "Rust binary", "Cluster administration")
+  }
+
+  System_Boundary(cluster, "rr Cluster (N nodes)") {
+    Container(rr_node, "rr-server Node", "Rust binary", "Hosts multiple Raft groups; serves Client + Raft + Admin gRPC")
+    ContainerDb(rocks, "RocksDB Data Dir", "Local SSD", "Raft log + state (optional rocks feature)")
+  }
+
+  System_Ext(prometheus, "Prometheus", "Metrics scraping")
+
+  Rel(developer, user_app, "Builds & deploys")
+  Rel(operator, admin_cli, "Runs commands")
+  Rel(user_app, rr_node, "ClientRequest / GetClusterInfo", "gRPC")
+  Rel(admin_cli, rr_node, "Admin RPCs", "gRPC")
+  Rel(rr_node, rr_node, "Raft RPCs (AppendEntries / Vote / InstallSnapshot)", "gRPC")
+  Rel(rr_node, rocks, "Reads/writes log", "File I/O")
+  Rel(rr_node, prometheus, "Exposes /metrics", "HTTP")
+
+  UpdateRelStyle(rr_node, rr_node, $offsetX="40", $offsetY="-40")
 ```
+
+For the full C4 documentation — Context, Component, Deployment, and Dynamic flows (client PUT with leader redirect, leader election, snapshot transfer, shard routing, config updates) — see [`docs/docs/architecture/c4/`](./docs/docs/architecture/c4/README.md). For the crate dependency layering, see [`docs/docs/architecture/crate-map.md`](./docs/docs/architecture/crate-map.md).
 
 ## Quick Start
 

@@ -4,6 +4,12 @@ sidebar_position: 5
 
 # 存储层 / Storage Layer
 
+:::info C4 对应视图 / C4 Counterparts
+- 存储在 rr-raft 内部的使用方式（RrLogStorage、sm_adapter）/ How rr-raft uses StorageEngine (RrLogStorage, sm_adapter) → [**c4/components-raft.md**](./c4/components-raft.md)
+- 快照传输流程 / Snapshot transfer flow → [**c4/dynamic-snapshot-transfer.md**](./c4/dynamic-snapshot-transfer.md)
+- 生产部署中的存储卷 / Storage volumes in production → [**c4/deployment.md**](./c4/deployment.md)
+:::
+
 rr 框架采用可插拔的存储架构，通过 `StorageEngine` trait 抽象了底层的数据存储。这使得框架可以根据运行环境和性能需求，在内存存储和持久化存储（如 RocksDB）之间灵活切换。
 
 ---

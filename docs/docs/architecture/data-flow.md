@@ -4,6 +4,18 @@ sidebar_position: 3
 
 # 数据流 / Data Flow
 
+:::tip 更详细的 C4 动态图 / Detailed C4 Dynamic Diagrams
+本页以时序图形式介绍核心数据流。若需要更完整的流程分析（包括错误路径、幂等性、多组并发等），请查看 C4 Dynamic 图：
+
+This page introduces core data flows via sequence diagrams. For more thorough analyses (error paths, idempotency, multi-group concurrency), see the C4 Dynamic diagrams:
+
+- 客户端 PUT + leader 重定向 / Client PUT with leader redirect → [c4/dynamic-put-request.md](./c4/dynamic-put-request.md)
+- Raft 领导者选举 / Raft leader election → [c4/dynamic-leader-election.md](./c4/dynamic-leader-election.md)
+- 快照传输 / Snapshot transfer → [c4/dynamic-snapshot-transfer.md](./c4/dynamic-snapshot-transfer.md)
+- 分片路由解析 / Shard routing resolution → [c4/dynamic-shard-routing.md](./c4/dynamic-shard-routing.md)
+- 动态配置更新 / Dynamic config update → [c4/dynamic-config-update.md](./c4/dynamic-config-update.md)
+:::
+
 本页详细介绍了 `rr` 框架中的核心数据流，包括写请求的生命周期、领导者选举流程以及错误处理机制。
 
 This page details the core data flows within the `rr` framework, including the write request lifecycle, leader election process, and error handling mechanisms.
