@@ -1,1 +1,5 @@
 /target
+.gitnexus
+/dev-certs
+.DS_Store
+
