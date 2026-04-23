@@ -13,6 +13,13 @@ clap = { version = "4", features = ["derive"] }
 serde_json.workspace = true
 rustyline = "14"
 bincode.workspace = true
+tar = "0.4"
+flate2 = "1"
+walkdir = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [[bin]]
 name = "rr-admin"

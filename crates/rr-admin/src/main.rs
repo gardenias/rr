@@ -17,7 +17,10 @@ use rr_network::proto::admin::admin_service_client::AdminServiceClient;
 use rr_network::proto::admin::{Empty, GroupId, TransferLeaderRequest};
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::ClientRequest;
+use std::path::PathBuf;
 use tonic::transport::Channel;
+
+mod backup;
 
 // ── KV wire types (mirrors kv-store's KvRequest/KvResponse) ────────────────
 
@@ -86,6 +89,42 @@ enum Commands {
         #[arg(long, default_value = "1")]
         group: u64,
     },
+    /// Create an offline backup of a stopped node's data_dir.
+    ///
+    /// The target node MUST be stopped. See the `backup` module docs for
+    /// the rolling-backup procedure.
+    Backup {
+        /// Path to the node's data_dir (contains RocksDB files).
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// Output `.tar.gz` file path.
+        #[arg(long)]
+        output: PathBuf,
+        /// Optional: node_id to record in backup metadata (for audit).
+        #[arg(long)]
+        node_id: Option<u64>,
+        /// Optional free-form comment stored in metadata.
+        #[arg(long)]
+        comment: Option<String>,
+    },
+    /// Restore a backup tarball into an empty data_dir.
+    ///
+    /// The target `data_dir` MUST be empty or absent. The node MUST be
+    /// stopped before restore and started fresh after.
+    Restore {
+        /// Path to the backup `.tar.gz` file.
+        #[arg(long)]
+        input: PathBuf,
+        /// Path to the target data_dir (must be empty or absent).
+        #[arg(long)]
+        data_dir: PathBuf,
+    },
+    /// Show metadata of a backup tarball without unpacking it.
+    InspectBackup {
+        /// Path to the backup `.tar.gz` file.
+        #[arg(long)]
+        input: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -128,6 +167,63 @@ async fn main() -> Result<()> {
     match &cli.command {
         Commands::Repl { addr, group } => {
             run_repl(addr, *group).await?;
+        }
+        Commands::Backup {
+            data_dir,
+            output,
+            node_id,
+            comment,
+        } => {
+            let meta =
+                backup::create_backup(data_dir, output, *node_id, comment.clone())?;
+            match cli.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&meta)?);
+                }
+                OutputFormat::Human => {
+                    println!("Backup created: {}", output.display());
+                    println!("  rr_version     : {}", meta.rr_version);
+                    println!("  format_version : {}", meta.format_version);
+                    println!("  source_node_id : {:?}", meta.source_node_id);
+                    println!("  taken_at       : {}", meta.taken_at);
+                    if let Some(c) = &meta.comment {
+                        println!("  comment        : {c}");
+                    }
+                }
+            }
+        }
+        Commands::Restore { input, data_dir } => {
+            let meta = backup::restore_backup(input, data_dir)?;
+            match cli.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&meta)?);
+                }
+                OutputFormat::Human => {
+                    println!("Restored to: {}", data_dir.display());
+                    println!("  rr_version     : {}", meta.rr_version);
+                    println!("  format_version : {}", meta.format_version);
+                    println!("  source_node_id : {:?}", meta.source_node_id);
+                    println!("  taken_at       : {}", meta.taken_at);
+                }
+            }
+        }
+        Commands::InspectBackup { input } => {
+            let meta = backup::read_metadata(input)?;
+            match cli.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&meta)?);
+                }
+                OutputFormat::Human => {
+                    println!("Backup Metadata: {}", input.display());
+                    println!("  rr_version     : {}", meta.rr_version);
+                    println!("  format_version : {}", meta.format_version);
+                    println!("  source_node_id : {:?}", meta.source_node_id);
+                    println!("  taken_at       : {}", meta.taken_at);
+                    if let Some(c) = &meta.comment {
+                        println!("  comment        : {c}");
+                    }
+                }
+            }
         }
         _ => {
             let channel = connect(&cli.addr).await?;
@@ -240,7 +336,10 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                Commands::Repl { .. } => unreachable!("handled above"),
+                Commands::Repl { .. }
+                | Commands::Backup { .. }
+                | Commands::Restore { .. }
+                | Commands::InspectBackup { .. } => unreachable!("handled above"),
             }
         }
     }
