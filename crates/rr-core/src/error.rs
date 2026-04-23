@@ -28,6 +28,8 @@ pub enum RaftError {
     ProposalFailed { reason: String },
     #[error("raft timeout")]
     Timeout,
+    #[error("raft initialization failed: {reason}")]
+    InitializationFailed { reason: String },
 }
 
 #[derive(Debug, thiserror::Error)]

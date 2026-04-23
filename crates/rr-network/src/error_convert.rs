@@ -41,6 +41,9 @@ impl IntoStatus for RaftError {
             }
             RaftError::ProposalFailed { reason } => Status::internal(reason),
             RaftError::Timeout => Status::deadline_exceeded("raft operation timed out"),
+            RaftError::InitializationFailed { reason } => {
+                Status::failed_precondition(format!("raft initialization failed: {reason}"))
+            }
         }
     }
 }

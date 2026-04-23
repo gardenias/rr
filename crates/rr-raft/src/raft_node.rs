@@ -3,9 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openraft::error::Fatal;
 use openraft::error::RPCError;
-use openraft::error::RaftError;
+use openraft::error::RaftError as OpenRaftError;
 use openraft::error::Unreachable;
 use openraft::network::RPCOption;
 use openraft::network::RaftNetwork;
@@ -20,6 +19,7 @@ use openraft::BasicNode;
 use openraft::Config;
 use openraft::Raft;
 
+use rr_core::error::{ConfigError, RaftError, RrError};
 use rr_core::state_machine::StateMachine;
 use rr_core::types::GroupId;
 
@@ -40,12 +40,15 @@ impl RaftNode {
     ///
     /// The network factory is generic over the actual implementation, allowing
     /// different network transports (gRPC, mocked, etc.) to be injected.
+    ///
+    /// Returns an error if the Raft config is invalid or if openraft fails
+    /// to start (e.g., storage I/O error). Does not panic.
     pub async fn new_with_factory<NF>(
         group_id: GroupId,
         node_id: u64,
         state_machine: Box<dyn StateMachine>,
         network_factory: NF,
-    ) -> Result<Self, Fatal<u64>>
+    ) -> Result<Self, RrError>
     where
         NF: RaftNetworkFactory<RrTypeConfig> + 'static,
     {
@@ -57,14 +60,24 @@ impl RaftNode {
                 ..Default::default()
             }
             .validate()
-            .expect("invalid raft config"),
+            .map_err(|e| {
+                RrError::Config(ConfigError::InvalidConfig(format!(
+                    "raft config validation failed: {e}"
+                )))
+            })?,
         );
 
         let log_storage = RrLogStorage::default();
         let sm = RrStateMachine::new(state_machine);
         let network = network_factory;
 
-        let raft = Raft::new(node_id, config, network, log_storage, sm).await?;
+        let raft = Raft::new(node_id, config, network, log_storage, sm)
+            .await
+            .map_err(|e| {
+                RrError::Raft(RaftError::InitializationFailed {
+                    reason: format!("openraft::Raft::new failed: {e}"),
+                })
+            })?;
 
         Ok(Self { group_id, raft })
     }
@@ -77,7 +90,7 @@ impl RaftNode {
         group_id: GroupId,
         node_id: u64,
         state_machine: Box<dyn StateMachine>,
-    ) -> Result<Self, Fatal<u64>> {
+    ) -> Result<Self, RrError> {
         Self::new_with_factory(group_id, node_id, state_machine, NoopNetworkFactory).await
     }
 
@@ -98,6 +111,10 @@ impl RaftNode {
     ///
     /// This is feature-gated behind `#[cfg(feature = "rocks")]`. The log storage
     /// is opened from `rocks_path` (a directory path for the RocksDB database).
+    ///
+    /// Returns an error if the Raft config is invalid, RocksDB cannot be opened
+    /// (disk full, permission denied, corrupt DB, etc.), or openraft fails to
+    /// start. Does not panic.
     #[cfg(feature = "rocks")]
     pub async fn new_with_rocks_factory<NF>(
         group_id: GroupId,
@@ -105,7 +122,7 @@ impl RaftNode {
         state_machine: Box<dyn StateMachine>,
         network_factory: NF,
         rocks_path: &str,
-    ) -> Result<Self, Fatal<u64>>
+    ) -> Result<Self, RrError>
     where
         NF: RaftNetworkFactory<RrTypeConfig> + 'static,
     {
@@ -117,15 +134,29 @@ impl RaftNode {
                 ..Default::default()
             }
             .validate()
-            .expect("invalid raft config"),
+            .map_err(|e| {
+                RrError::Config(ConfigError::InvalidConfig(format!(
+                    "raft config validation failed: {e}"
+                )))
+            })?,
         );
 
         let log_storage = crate::rocks_log_storage::RocksLogStorage::open(rocks_path)
-            .expect("failed to open RocksLogStorage");
+            .map_err(|e| {
+                RrError::Raft(RaftError::InitializationFailed {
+                    reason: format!("failed to open RocksLogStorage at {rocks_path}: {e}"),
+                })
+            })?;
         let sm = RrStateMachine::new(state_machine);
         let network = network_factory;
 
-        let raft = Raft::new(node_id, config, network, log_storage, sm).await?;
+        let raft = Raft::new(node_id, config, network, log_storage, sm)
+            .await
+            .map_err(|e| {
+                RrError::Raft(RaftError::InitializationFailed {
+                    reason: format!("openraft::Raft::new failed: {e}"),
+                })
+            })?;
 
         Ok(Self { group_id, raft })
     }
@@ -152,7 +183,7 @@ impl RaftNetwork<RrTypeConfig> for NoopNetwork {
         &mut self,
         _rpc: AppendEntriesRequest<RrTypeConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, OpenRaftError<u64>>> {
         Err(RPCError::Unreachable(Unreachable::new(
             &std::io::Error::other("noop network"),
         )))
@@ -164,7 +195,7 @@ impl RaftNetwork<RrTypeConfig> for NoopNetwork {
         _option: RPCOption,
     ) -> Result<
         InstallSnapshotResponse<u64>,
-        RPCError<u64, BasicNode, RaftError<u64, openraft::error::InstallSnapshotError>>,
+        RPCError<u64, BasicNode, OpenRaftError<u64, openraft::error::InstallSnapshotError>>,
     > {
         Err(RPCError::Unreachable(Unreachable::new(
             &std::io::Error::other("noop network"),
@@ -175,7 +206,7 @@ impl RaftNetwork<RrTypeConfig> for NoopNetwork {
         &mut self,
         _rpc: VoteRequest<u64>,
         _option: RPCOption,
-    ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+    ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, OpenRaftError<u64>>> {
         Err(RPCError::Unreachable(Unreachable::new(
             &std::io::Error::other("noop network"),
         )))
