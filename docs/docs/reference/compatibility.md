@@ -1,0 +1,182 @@
+---
+sidebar_position: 10
+---
+
+# 兼容性与 API 稳定性 / Compatibility & API Stability
+
+本文档声明 rr 项目的版本兼容性承诺，让用户能安全地选择版本、规划升级、判断何时需要更新代码。
+
+---
+
+This document states rr's versioning and compatibility commitments so users
+can confidently choose a version, plan upgrades, and predict when code
+changes will be required.
+
+## 版本号方案 / Versioning Scheme
+
+rr 遵循 [Semantic Versioning 2.0.0](https://semver.org/)：`MAJOR.MINOR.PATCH`。
+
+rr follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`.
+
+| 版本位 / Component | 何时递增 / When it bumps |
+| :--- | :--- |
+| `MAJOR` | 破坏性变更到 public Rust API / gRPC wire protocol / on-disk format / config schema |
+| `MINOR` | 向后兼容的新功能、新 API、新 gRPC 方法、新 config 字段（可选） |
+| `PATCH` | 向后兼容的 bug 修复，含安全修复 |
+
+### Pre-1.0 语义 / Pre-1.0 Semantics
+
+在达到 `1.0.0` 前，rr 采用 **Cargo 惯例**：`0.x.y` 版本中 `x` 的递增被视作破坏性变更。也就是说 `0.2.0 → 0.3.0` 可以有 breaking API changes；`0.2.0 → 0.2.1` 不可以。
+
+Before `1.0.0`, rr follows the **Cargo convention**: a bump in `x` within
+`0.x.y` is a breaking change. So `0.2.0 → 0.3.0` may break APIs; `0.2.0 →
+0.2.1` may not.
+
+## 兼容性层次 / Compatibility Tiers
+
+不同的 rr 表面（API、wire、on-disk）有不同的稳定性强度。以下表格对每个层次给出具体保证。
+
+Different surfaces of rr (Rust API, wire protocol, on-disk format, config)
+have different stability guarantees. The table below spells out what each
+tier commits to.
+
+### 1. Rust Public API
+
+**承诺 / Commitment**: 在同一个 MAJOR 版本内，任何在 docs.rs 上可见的 `pub` 项保持**源码级兼容**。你的代码在 `cargo update` 到同 major 的新版本后应无需修改即可编译。
+
+**Within a single MAJOR release, any `pub` item visible on docs.rs is
+source-compatible.** Your code should compile without modification after
+`cargo update` within the same major.
+
+**非承诺 / Explicit non-commitments**:
+- `#[doc(hidden)]` 标注的 API
+- 任何模块路径含 `__` 或 `internal` 的 API
+- trait impl on 外部 trait（upstream 可能添加默认方法）
+- MSRV 提升仅视为 MINOR 变更，不视为 MAJOR
+
+### 2. gRPC Wire Protocol
+
+**承诺 / Commitment**: 在同一个 MAJOR 版本内，所有已发布的 `.proto` 消息字段保持**线兼容**（老 client/server 能与新版本互通）。新增字段总是以**向后兼容**的方式（新 `optional` 或 `repeated`），字段编号一经使用永不重用。
+
+**Within a single MAJOR release, all published `.proto` fields are
+wire-compatible.** Old clients / servers can interoperate with new
+versions. New fields are added in backward-compatible ways (new `optional`
+or `repeated`); field numbers, once assigned, are never reused.
+
+**混合版本集群 / Mixed-version clusters**:
+- **patch-level mix** (例如 `0.2.0` + `0.2.1`): 支持，滚动升级推荐流程
+- **minor-level mix** (例如 `0.2.x` + `0.3.x`): 跨 pre-1.0 版本 NOT supported —— 请一次性升级整个集群
+- **1.0 之后**: minor 混合会被显式支持并在 CHANGELOG 记录
+
+### 3. On-Disk Format (RocksDB schema)
+
+**承诺 / Commitment**: patch-level 升级（`0.2.0 → 0.2.1`）可以直接滚动重启；无需迁移。
+
+在 MAJOR 或 pre-1.0 MINOR 间，可能需要:
+- 先运行 `rr-admin backup` → shutdown → clean data_dir → upgrade → restore
+- 或提供专门的迁移工具（会在该版本 CHANGELOG 说明）
+
+**Across MAJOR or pre-1.0 MINOR boundaries**, migration may be required.
+The CHANGELOG will explicitly state the procedure (offline backup+restore
+or a dedicated migration tool). Check `CHANGELOG.md` before upgrading
+across these boundaries.
+
+### 4. Config File Schema
+
+**承诺 / Commitment**: 已存在的 TOML 键在同 MAJOR 内保持其含义和默认值不变。新增键总是 optional（默认值保持"老行为"）。重命名 / 删除 键是 MAJOR bump。
+
+**Within a MAJOR, existing TOML keys retain their meaning and defaults.**
+New keys are always optional (with a default that preserves the old
+behavior). Renaming or removing a key requires a MAJOR bump.
+
+**严格模式检查 / Strict schema**: rr-server 用 `#[serde(deny_unknown_fields)]` 拒绝未知键，所以 typo 会 fail-fast，不会静默降级。
+
+### 5. CLI Flags & Env Vars
+
+**承诺 / Commitment**: CLI 标志和 `RR_*` 环境变量在同 MAJOR 内保持**添加型**（新增 OK、改名/删除需 MAJOR）。变更会在 CHANGELOG 的 `Changed` / `Deprecated` / `Removed` 小节声明。
+
+CLI flags and `RR_*` env vars are **additive within a MAJOR**. Renaming or
+removal requires a MAJOR bump. Changes are declared in CHANGELOG under
+`Changed` / `Deprecated` / `Removed`.
+
+### 6. Metrics
+
+**承诺 / Commitment**: 已发布的 metric 名称和标签在同 MAJOR 内稳定。metric 的**删除或重命名**需要 MAJOR bump；**新增** metric 或 label 是 MINOR。
+
+**Published metric names and labels are stable within a MAJOR.** Deleting
+or renaming a metric requires a MAJOR bump; adding a new metric or label
+is a MINOR.
+
+**例外 / Exception**: 见 `metrics-reference.md` 中标注 "known issue" 的 metric（目前是 `rr_snapshot_installs_total` 的硬编码 group_id 标签），会在下一个 MAJOR 里修复 — 视为 bug fix 而非 breaking change。
+
+Metrics flagged as "known issue" in `metrics-reference.md` (currently
+`rr_snapshot_installs_total`'s hardcoded `group_id` label) will be fixed
+in the next MAJOR and are treated as bug fixes rather than breaking
+changes.
+
+## Minimum Supported Rust Version (MSRV)
+
+**当前 / Current**: Rust `1.82`（workspace `rust-version` field in `Cargo.toml`）。
+
+**Policy**:
+- MSRV 提升视为 **MINOR** 变更，在 CHANGELOG `Changed` 小节显式声明。
+- 不会在 PATCH 内提升 MSRV。
+- 目标是跟踪 `stable - 6 months` 的 Rust 版本，给下游提供缓冲。
+
+An MSRV bump is a **MINOR** change, announced in CHANGELOG `Changed`. MSRV
+will not rise in a PATCH. Target is `stable - 6 months` to give
+downstream users time to catch up.
+
+## 弃用流程 / Deprecation Process
+
+1. **Announce** — 在即将弃用的 API 上加 `#[deprecated(since="x.y.z", note="use Foo instead")]`；CHANGELOG 的 `Deprecated` 小节记录。
+2. **Grace period** — 至少一整个 MINOR 周期保留已弃用 API；期间继续工作（可能发出警告）。
+3. **Remove** — 在下一个 MAJOR 删除；CHANGELOG 的 `Removed` 小节记录。
+
+1. **Announce** — add `#[deprecated(since="x.y.z", note="use Foo instead")]`;
+   log under CHANGELOG `Deprecated`.
+2. **Grace period** — keep the deprecated API for at least one full MINOR
+   cycle (still functional, may emit warnings).
+3. **Remove** — drop in the next MAJOR; log under CHANGELOG `Removed`.
+
+## 支持政策 / Support Policy
+
+| 版本线 / Branch | 接收 / Receives |
+| :--- | :--- |
+| Latest MAJOR | 新功能、bug 修复、安全修复 |
+| Previous MAJOR | 安全修复 + 严重 bug 修复 (N-1 only)，为期 6 个月 |
+| Older | 不受支持，需升级 |
+
+| Branch | Receives |
+| :--- | :--- |
+| Latest MAJOR | Features, bug fixes, security fixes |
+| Previous MAJOR | Security + critical bug fixes (N-1 only), for 6 months |
+| Older | Unsupported; upgrade required |
+
+## 如何判断一次升级是否破坏兼容性 / How to Tell If an Upgrade Breaks You
+
+按顺序查看三个地方：
+
+Look at three things, in order:
+
+1. **CHANGELOG.md** — 所有破坏性变更会在 `## [x.y.z]` section 下明确列在 `### Changed` / `### Removed` / `### Breaking` 里。
+2. **The diff in docs.rs for the crate you use** — 消失的 public API 会明确列出。
+3. **Your own `cargo check`** — 通过就几乎可以确定是安全的；失败的话，上面两处应该能解释原因。
+
+## 报告兼容性 bug / Reporting Compatibility Bugs
+
+如果在 PATCH 升级后 `cargo check` 失败（或 wire mix 失败），请作为 bug 报告：
+
+If `cargo check` fails after a PATCH upgrade (or wire mix breaks), please
+file it as a bug:
+
+- 最小复现 / Minimal reproducer
+- 升级前/后的版本号 / Before-and-after versions
+- 实际 vs 预期行为 / Actual vs expected behavior
+
+邮件 / Email: gardenia.wu@outlook.com（或 GitHub issue）。
+
+## 相关 / Related
+
+- [CHANGELOG.md](../../../CHANGELOG.md)
+- [CONTRIBUTING.md](../../../CONTRIBUTING.md) — 开发者流程 / dev workflow
