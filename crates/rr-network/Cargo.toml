@@ -14,6 +14,10 @@ dashmap = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 tokio-stream = "0.1"
+rustls-pemfile = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = "0.14.5"

@@ -5,8 +5,10 @@ use std::sync::Arc;
 use rr_core::config::ConfigProvider;
 use rr_core::storage::StorageEngine;
 use rr_core::types::NodeId;
+use rr_network::auth::AuthConfig;
 use rr_network::client_service::ClientDispatch;
 use rr_network::raft_service::RaftGroupLookup;
+use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::group_manager::StateMachineFactory;
 
@@ -45,6 +47,20 @@ pub struct NodeConfig {
     pub metrics_port: Option<u16>,
     /// Optional port for the Admin gRPC service. `None` = disabled.
     pub admin_port: Option<u16>,
+    /// TLS configuration for the main gRPC server (Client + Raft services)
+    /// and the Admin gRPC server. `None` = plaintext gRPC (dev only).
+    ///
+    /// In production, set this along with a matching
+    /// [`rr_raft::network_factory::ChannelPool::with_tls`] for outbound
+    /// peer connections; inbound and outbound TLS should use the same
+    /// cert/key pair for symmetric mTLS.
+    pub tls_config: Option<TlsConfig>,
+    /// Bearer-token auth policy for AdminService (always separate token
+    /// from ClientService) and optionally ClientService. Defaults to
+    /// fully open (dev). **In production you must set at least
+    /// `admin_token`** — otherwise any network-reachable peer can
+    /// trigger snapshots, transfer leadership, etc.
+    pub auth_config: AuthConfig,
 }
 
 impl NodeConfig {
@@ -70,6 +86,8 @@ impl NodeConfig {
             group_manager: None,
             metrics_port: None,
             admin_port: None,
+            tls_config: None,
+            auth_config: AuthConfig::default(),
         }
     }
 
@@ -100,6 +118,19 @@ impl NodeConfig {
     /// Enable the Admin gRPC service on the given port.
     pub fn with_admin_port(mut self, port: u16) -> Self {
         self.admin_port = Some(port);
+        self
+    }
+
+    /// Enable TLS on all gRPC endpoints hosted by this node (Client, Raft, Admin).
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls_config = Some(tls);
+        self
+    }
+
+    /// Attach bearer-token auth policy. Setting `admin_token` enforces auth on
+    /// AdminService; setting `client_token` enforces auth on ClientService.
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth_config = auth;
         self
     }
 }

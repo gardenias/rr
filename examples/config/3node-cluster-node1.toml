@@ -1,0 +1,20 @@
+# rr-server 3-node cluster — NODE 1 (bootstrap node).
+#
+# USE THIS CONFIG ONLY ON NODE 1, AND ONLY AT INITIAL CLUSTER BRING-UP.
+# Subsequent restarts of node 1 must use the same file but with
+# cluster.bootstrap = false (or simply omit that flag).
+
+[node]
+id = 1
+listen_addr = "0.0.0.0:51001"
+data_dir = "/var/lib/rr/data"
+admin_port = 52001
+metrics_port = 9100
+
+[storage]
+backend = "rocks"
+durability = "strict"
+
+[cluster]
+bootstrap = true
+peers = []

@@ -3,7 +3,10 @@
 //! Part of the `rr` distributed framework.
 
 pub mod admin;
+pub mod builtin_service;
+pub mod cli;
 pub mod config;
+pub mod config_file;
 pub mod dispatch;
 pub mod lookup;
 pub mod node;

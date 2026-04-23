@@ -121,21 +121,50 @@ fn to_unreachable_snap<E: std::fmt::Display>(
 // Channel pool (local, avoids rr-network dep)
 // ---------------------------------------------------------------------------
 
+/// PEM file locations + peer-verification policy for TLS outbound connections.
+///
+/// Kept local to avoid a cross-crate dependency between `rr-raft` and
+/// `rr-network` (where `rr_network::TlsConfig` lives). The two types are
+/// structurally identical; `rr-server`'s `main.rs` translates between them.
+#[derive(Debug, Clone)]
+pub struct TlsPaths {
+    pub cert_path: std::path::PathBuf,
+    pub key_path: std::path::PathBuf,
+    pub ca_path: Option<std::path::PathBuf>,
+    pub domain_name: Option<String>,
+}
+
 /// A pool of reusable gRPC channels, one per node.
 ///
 /// Functionally identical to `rr_network::ChannelPool` but defined locally
-/// to avoid a cyclic crate dependency.
+/// to avoid a cyclic crate dependency. When constructed with
+/// [`ChannelPool::with_tls`], every new channel is opened over TLS.
 #[derive(Clone, Default)]
 pub struct ChannelPool {
     channels: Arc<DashMap<NodeId, Channel>>,
+    tls: Option<Arc<TlsPaths>>,
 }
 
 impl ChannelPool {
-    /// Create an empty pool.
+    /// Create an empty plaintext pool.
     pub fn new() -> Self {
         Self {
             channels: Arc::new(DashMap::new()),
+            tls: None,
         }
+    }
+
+    /// Create a pool that opens every outbound channel over TLS.
+    pub fn with_tls(tls: TlsPaths) -> Self {
+        Self {
+            channels: Arc::new(DashMap::new()),
+            tls: Some(Arc::new(tls)),
+        }
+    }
+
+    /// Whether this pool is configured to use TLS for outbound channels.
+    pub fn uses_tls(&self) -> bool {
+        self.tls.is_some()
     }
 
     /// Get an existing channel or create a new one.
@@ -147,17 +176,33 @@ impl ChannelPool {
         if let Some(channel) = self.channels.get(&node_id) {
             return Ok(channel.clone());
         }
-        let channel = Channel::from_shared(format!("http://{addr}"))
-            .map_err(|e| NetworkError::ConnectionFailed {
+        let uri = if self.tls.is_some() {
+            format!("https://{addr}")
+        } else {
+            format!("http://{addr}")
+        };
+        let mut endpoint = tonic::transport::Endpoint::from_shared(uri).map_err(|e| {
+            NetworkError::ConnectionFailed {
                 addr: addr.to_string(),
                 reason: e.to_string(),
-            })?
-            .connect()
-            .await
-            .map_err(|e| NetworkError::ConnectionFailed {
+            }
+        })?;
+        if let Some(tls) = &self.tls {
+            let client_tls = build_client_tls(tls).map_err(|e| NetworkError::ConnectionFailed {
                 addr: addr.to_string(),
-                reason: e.to_string(),
+                reason: e,
             })?;
+            endpoint = endpoint.tls_config(client_tls).map_err(|e| {
+                NetworkError::ConnectionFailed {
+                    addr: addr.to_string(),
+                    reason: format!("tls attach: {e}"),
+                }
+            })?;
+        }
+        let channel = endpoint.connect().await.map_err(|e| NetworkError::ConnectionFailed {
+            addr: addr.to_string(),
+            reason: e.to_string(),
+        })?;
         self.channels.insert(node_id, channel.clone());
         Ok(channel)
     }
@@ -176,6 +221,24 @@ impl ChannelPool {
     pub fn is_empty(&self) -> bool {
         self.channels.is_empty()
     }
+}
+
+fn build_client_tls(t: &TlsPaths) -> Result<tonic::transport::ClientTlsConfig, String> {
+    let cert = std::fs::read(&t.cert_path)
+        .map_err(|e| format!("failed to read cert at {}: {e}", t.cert_path.display()))?;
+    let key = std::fs::read(&t.key_path)
+        .map_err(|e| format!("failed to read key at {}: {e}", t.key_path.display()))?;
+    let mut cfg = tonic::transport::ClientTlsConfig::new()
+        .identity(tonic::transport::Identity::from_pem(cert, key));
+    if let Some(ca) = &t.ca_path {
+        let ca_pem = std::fs::read(ca)
+            .map_err(|e| format!("failed to read ca at {}: {e}", ca.display()))?;
+        cfg = cfg.ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
+    }
+    if let Some(name) = &t.domain_name {
+        cfg = cfg.domain_name(name.clone());
+    }
+    Ok(cfg)
 }
 
 /// Abstraction over a gRPC channel pool for testability via fault injection.

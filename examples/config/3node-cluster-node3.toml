@@ -1,0 +1,18 @@
+# rr-server 3-node cluster — NODE 3.
+#
+# Run this after nodes 1 and 2 are up.
+
+[node]
+id = 3
+listen_addr = "0.0.0.0:51001"
+data_dir = "/var/lib/rr/data"
+admin_port = 52001
+metrics_port = 9100
+
+[storage]
+backend = "rocks"
+durability = "strict"
+
+[cluster]
+bootstrap = false
+peers = ["node-1.internal:51001", "node-2.internal:51001"]

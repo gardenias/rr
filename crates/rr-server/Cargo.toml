@@ -3,6 +3,10 @@ name = "rr-server"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+rocks = ["rr-storage/rocks", "rr-raft/rocks"]
+
 [dependencies]
 rr-core = { path = "../rr-core" }
 rr-storage = { path = "../rr-storage" }
@@ -13,6 +17,7 @@ rr-router = { path = "../rr-router" }
 tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 tonic.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
@@ -20,6 +25,14 @@ bincode.workspace = true
 openraft.workspace = true
 futures.workspace = true
 tonic-health = "0.14"
+anyhow.workspace = true
+serde.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [[bin]]
 name = "rr-server"

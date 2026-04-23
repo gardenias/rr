@@ -53,6 +53,10 @@ pub struct RrNode {
     admin_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Port for the admin gRPC service, if enabled.
     admin_port: Option<u16>,
+    /// TLS config applied to all gRPC servers hosted by this node.
+    tls_config: Option<rr_network::tls::TlsConfig>,
+    /// Bearer-token auth policy. Empty = no auth (dev).
+    auth_config: rr_network::auth::AuthConfig,
     /// Health reporter for gRPC health checking protocol.
     health_reporter: Mutex<Option<tonic_health::server::HealthReporter>>,
 }
@@ -118,6 +122,8 @@ impl RrNode {
             watch_handle: Mutex::new(None),
             admin_handle: Mutex::new(None),
             admin_port: config.admin_port,
+            tls_config: config.tls_config,
+            auth_config: config.auth_config,
             health_reporter: Mutex::new(None),
         })
     }
@@ -297,16 +303,35 @@ impl RrNode {
             })?;
 
             let raft_svc = RaftServiceServer::new(RaftServiceImpl::new(raft_lookup.clone()));
-            let client_svc =
-                ClientServiceServer::new(ClientServiceImpl::new(client_dispatch.clone()));
+            let client_svc = ClientServiceServer::with_interceptor(
+                ClientServiceImpl::new(client_dispatch.clone()),
+                self.auth_config.client_interceptor(),
+            );
+            if self.auth_config.client_required() {
+                info!(%addr, "ClientService bearer-token auth enabled");
+            }
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
 
             let mut shutdown_rx = self.shutdown_tx.subscribe();
+            let mut builder = tonic::transport::Server::builder();
+            if let Some(tls) = &self.tls_config {
+                let server_tls = tls
+                    .build_server_tls()
+                    .map_err(|e| {
+                        RrError::Config(ConfigError::InvalidConfig(format!("server tls: {e}")))
+                    })?;
+                builder = builder.tls_config(server_tls).map_err(|e| {
+                    RrError::Config(ConfigError::InvalidConfig(format!(
+                        "tls_config attach failed: {e}"
+                    )))
+                })?;
+                info!(%addr, "gRPC server TLS enabled");
+            }
 
             let handle = tokio::spawn(async move {
                 info!(%addr, "gRPC server starting");
-                let result = tonic::transport::Server::builder()
+                let result = builder
                     .add_service(health_service)
                     .add_service(raft_svc)
                     .add_service(client_svc)
@@ -345,17 +370,42 @@ impl RrNode {
                     RrError::Config(ConfigError::InvalidConfig(e.to_string()))
                 })?;
 
-            let admin_svc = AdminServiceServer::new(AdminServiceImpl::new(
-                self.node_id,
-                self.listen_addr.clone(),
-                Arc::clone(&self.group_manager),
-            ));
+            let admin_svc = AdminServiceServer::with_interceptor(
+                AdminServiceImpl::new(
+                    self.node_id,
+                    self.listen_addr.clone(),
+                    Arc::clone(&self.group_manager),
+                ),
+                self.auth_config.admin_interceptor(),
+            );
+            if self.auth_config.admin_required() {
+                info!(%admin_addr, "AdminService bearer-token auth enabled");
+            } else {
+                warn!(
+                    %admin_addr,
+                    "AdminService has NO auth — anyone reaching this port can transfer \
+                     leadership or trigger snapshots. Set admin_token in production!"
+                );
+            }
 
             let mut shutdown_rx = self.shutdown_tx.subscribe();
 
+            let mut admin_builder = tonic::transport::Server::builder();
+            if let Some(tls) = &self.tls_config {
+                let server_tls = tls.build_server_tls().map_err(|e| {
+                    RrError::Config(ConfigError::InvalidConfig(format!("admin server tls: {e}")))
+                })?;
+                admin_builder = admin_builder.tls_config(server_tls).map_err(|e| {
+                    RrError::Config(ConfigError::InvalidConfig(format!(
+                        "admin tls_config attach failed: {e}"
+                    )))
+                })?;
+                info!(%admin_addr, "admin gRPC server TLS enabled");
+            }
+
             let handle = tokio::spawn(async move {
                 info!(%admin_addr, "admin gRPC server starting");
-                let result = tonic::transport::Server::builder()
+                let result = admin_builder
                     .add_service(admin_svc)
                     .serve_with_shutdown(admin_addr, async move {
                         let _ = shutdown_rx.changed().await;

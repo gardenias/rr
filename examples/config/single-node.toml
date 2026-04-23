@@ -1,0 +1,40 @@
+# rr-server single-node example configuration.
+#
+# Run with:
+#   rr-server serve --config examples/config/single-node.toml
+#
+# This brings up a single-member cluster using the built-in echo state
+# machine. Useful for smoke-testing the binary. For production, set
+# storage.backend = "rocks" and configure node.data_dir.
+
+[node]
+id = 1
+listen_addr = "127.0.0.1:51001"
+# admin_port = 52001      # optional: enable AdminService on a separate port
+# metrics_port = 9100     # optional: enable Prometheus /metrics HTTP endpoint
+
+[storage]
+# backend = "mem" is ephemeral (in-memory BTreeMap). For persistent storage
+# set "rocks" and provide node.data_dir.
+backend = "mem"
+# durability: "strict" (default, required for Raft correctness),
+#             "balanced" (no fsync — risks data loss on power failure),
+#             "fast" (no WAL — tests only; total data loss on crash).
+durability = "strict"
+
+[cluster]
+# Bootstrap = true makes this node initialize a single-member cluster.
+# USE ONCE per cluster lifetime. Do not set `bootstrap = true` on a restart
+# of an already-initialized node.
+bootstrap = true
+peers = []
+
+# [tls]
+# cert_path           = "/etc/rr/tls/node1.pem"
+# key_path            = "/etc/rr/tls/node1.key"
+# ca_path             = "/etc/rr/tls/ca.pem"
+# require_client_cert = true
+# domain_name         = "node1.rr.internal"
+#
+# See docs/docs/deployment/tls.md for how to generate dev certs via
+# scripts/gen-dev-certs.sh and the full mTLS setup.
