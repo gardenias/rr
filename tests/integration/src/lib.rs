@@ -64,8 +64,11 @@ pub struct ClusterBuilder {
     real_network: bool,
     /// Shared config provider — pre-allocated so callers can reference it before build().
     config_provider: Arc<MemConfigProvider>,
-    /// Optional channel pool for fault injection.
+    /// Optional shared channel pool (legacy mode — one pool used by all nodes).
     channel_pool: Option<Arc<dyn ChannelPoolLike>>,
+    /// Optional per-node pool factory backed by a `FaultInjector` so that
+    /// isolation semantics are bidirectional across the cluster.
+    fault_injector: Option<Arc<fault_injection::FaultInjector>>,
 }
 
 impl ClusterBuilder {
@@ -77,6 +80,7 @@ impl ClusterBuilder {
             real_network: false,
             config_provider: Arc::new(MemConfigProvider::new()),
             channel_pool: None,
+            fault_injector: None,
         }
     }
 
@@ -90,20 +94,30 @@ impl ClusterBuilder {
     ///
     /// When set, the builder will use this pool instead of creating a new
     /// [`ChannelPool`] in `build_real_network`. Automatically enables real
-    /// networking.
+    /// networking. Note: this uses a single pool shared by all nodes, which
+    /// cannot express bidirectional network isolation. For bidirectional
+    /// fault injection, use [`Self::with_fault_injector`] instead.
     pub fn with_channel_pool(mut self, pool: Arc<dyn ChannelPoolLike>) -> Self {
         self.real_network = true;
         self.channel_pool = Some(pool);
         self
     }
 
-    /// Create a [`fault_injection::FaultAwareChannelPool`] and configure the
-    /// builder to use it.  Returns `(builder, FaultInjector)` so the caller
-    /// can inject faults during the test.
-    pub fn with_fault_injector(self) -> (Self, fault_injection::FaultInjector) {
-        let (pool, injector) = fault_injection::FaultAwareChannelPool::new();
-        let builder = self.with_channel_pool(Arc::new(pool));
-        (builder, injector)
+    /// Create a bidirectional [`fault_injection::FaultInjector`] and configure
+    /// the builder to create a per-node pool for each cluster member. Returns
+    /// `(builder, Arc<FaultInjector>)` so the caller can inject faults during
+    /// the test.
+    ///
+    /// Unlike [`Self::with_channel_pool`], this setup enables bidirectional
+    /// isolation: `injector.isolate(n)` blocks BOTH outbound traffic from node
+    /// `n` and inbound traffic to node `n`.
+    pub fn with_fault_injector(
+        mut self,
+    ) -> (Self, Arc<fault_injection::FaultInjector>) {
+        let injector = Arc::new(fault_injection::FaultInjector::new());
+        self.real_network = true;
+        self.fault_injector = Some(Arc::clone(&injector));
+        (self, injector)
     }
 
     /// Return a clone of the shared config provider Arc.
@@ -223,9 +237,9 @@ impl ClusterBuilder {
                 .await;
         }
 
-        // 3. Build nodes with real network
-        let shared_pool: Arc<dyn ChannelPoolLike> = self
+        let fallback_pool: Arc<dyn ChannelPoolLike> = self
             .channel_pool
+            .clone()
             .unwrap_or_else(|| Arc::new(ChannelPool::new()));
         let mut nodes: Vec<Arc<RrNode>> = Vec::with_capacity(self.node_count);
 
@@ -233,11 +247,15 @@ impl ClusterBuilder {
             let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
             let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
 
-            // Build RaftGroupManager with real gRPC networking
+            let pool_for_node: Arc<dyn ChannelPoolLike> = match &self.fault_injector {
+                Some(inj) => inj.new_pool_for_node(*node_id),
+                None => fallback_pool.clone(),
+            };
+
             let mgr = Arc::new(RaftGroupManager::new_with_network(
                 *node_id,
                 echo_factory(),
-                shared_pool.clone(),
+                pool_for_node,
             ));
 
             // Wire lookup and dispatch using the pre-built manager
@@ -1283,7 +1301,6 @@ mod tests {
     /// E2a — Isolate the current leader, wait for a new leader to be elected,
     /// restore the isolated node, then verify the cluster accepts writes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore]
     async fn test_leader_isolation_and_recovery() {
         let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
         let nodes = builder.build().await.expect("cluster build failed");
@@ -1317,7 +1334,6 @@ mod tests {
     /// E2b — Isolate a follower, write 10 entries while it is isolated, restore it,
     /// then wait for it to catch up via log replication.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore]
     async fn test_follower_isolation_and_catchup() {
         let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
         let nodes = builder.build().await.expect("cluster build failed");
@@ -1367,7 +1383,6 @@ mod tests {
     /// E2c — Apply 50% packet loss to one node, write 10 entries through the remaining
     /// quorum, then clear the fault and verify the cluster converges.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore]
     async fn test_packet_loss_convergence() {
         let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
         let nodes = builder.build().await.expect("cluster build failed");
@@ -1409,7 +1424,6 @@ mod tests {
     /// E2d — Add 100ms latency on connections to the leader, write 10 entries
     /// (slower but still correct), then verify no correctness violations.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore]
     async fn test_latency_under_high_load() {
         let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
         let nodes = builder.build().await.expect("cluster build failed");
