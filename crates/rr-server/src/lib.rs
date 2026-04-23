@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod config_file;
 pub mod dispatch;
+pub mod health;
 pub mod lookup;
 pub mod node;
 

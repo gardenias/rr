@@ -30,6 +30,9 @@ serde.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

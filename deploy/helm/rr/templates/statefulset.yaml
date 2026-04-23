@@ -81,13 +81,15 @@ spec:
             - name: metrics
               containerPort: {{ .Values.ports.metrics }}
           readinessProbe:
-            tcpSocket:
-              port: grpc
+            httpGet:
+              path: /ready
+              port: metrics
             initialDelaySeconds: 3
             periodSeconds: 5
           livenessProbe:
-            tcpSocket:
-              port: grpc
+            httpGet:
+              path: /health
+              port: metrics
             initialDelaySeconds: 10
             periodSeconds: 10
           volumeMounts:

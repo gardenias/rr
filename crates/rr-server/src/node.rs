@@ -24,8 +24,9 @@ use rr_network::proto::admin::admin_service_server::AdminServiceServer;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_router::router::ShardRouter;
 
-use crate::config::NodeConfig;
 use crate::admin::AdminServiceImpl;
+use crate::config::NodeConfig;
+use crate::health::{spawn_http_server, ReadinessFlag};
 
 /// The main node lifecycle manager.
 ///
@@ -51,12 +52,20 @@ pub struct RrNode {
     watch_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Handle to the admin gRPC server task; `None` if admin service is disabled.
     admin_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Handle to the HTTP observability server (/health /ready /metrics); `None` if disabled.
+    http_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Port for the admin gRPC service, if enabled.
     admin_port: Option<u16>,
+    /// Port for HTTP observability endpoints (/health /ready /metrics).
+    metrics_port: Option<u16>,
     /// TLS config applied to all gRPC servers hosted by this node.
     tls_config: Option<rr_network::tls::TlsConfig>,
     /// Bearer-token auth policy. Empty = no auth (dev).
     auth_config: rr_network::auth::AuthConfig,
+    /// Readiness signal driving HTTP `/ready`.
+    readiness: ReadinessFlag,
+    /// Prometheus metrics handle (Some iff metrics_port was configured).
+    prom_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     /// Health reporter for gRPC health checking protocol.
     health_reporter: Mutex<Option<tonic_health::server::HealthReporter>>,
 }
@@ -73,19 +82,17 @@ impl RrNode {
             )));
         }
 
-        // ── Install Prometheus metrics exporter (if configured) ────────────
-        if let Some(port) = config.metrics_port {
-            let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
-                .parse()
-                .map_err(|e: std::net::AddrParseError| {
-                    RrError::Config(ConfigError::InvalidConfig(e.to_string()))
-                })?;
-            metrics_exporter_prometheus::PrometheusBuilder::new()
-                .with_http_listener(addr)
-                .install()
+        let prom_handle = if config.metrics_port.is_some() {
+            let (recorder, _exporter_handle) = metrics_exporter_prometheus::PrometheusBuilder::new()
+                .build()
                 .map_err(|e| RrError::Config(ConfigError::InvalidConfig(e.to_string())))?;
-            info!(port, "Prometheus metrics exporter installed");
-        }
+            let handle = recorder.handle();
+            let _ = metrics::set_global_recorder(recorder);
+            info!("Prometheus recorder installed (metrics served via HTTP observability port)");
+            Some(handle)
+        } else {
+            None
+        };
 
         let group_manager = if let Some(mgr) = config.group_manager {
             mgr
@@ -121,9 +128,13 @@ impl RrNode {
             server_handle: Mutex::new(None),
             watch_handle: Mutex::new(None),
             admin_handle: Mutex::new(None),
+            http_handle: Mutex::new(None),
             admin_port: config.admin_port,
+            metrics_port: config.metrics_port,
             tls_config: config.tls_config,
             auth_config: config.auth_config,
+            readiness: ReadinessFlag::new(),
+            prom_handle,
             health_reporter: Mutex::new(None),
         })
     }
@@ -422,6 +433,19 @@ impl RrNode {
             info!(node_id = self.node_id, port, "admin gRPC server spawned");
         }
 
+        if let (Some(port), Some(handle)) = (self.metrics_port, self.prom_handle.clone()) {
+            let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    RrError::Config(ConfigError::InvalidConfig(e.to_string()))
+                })?;
+            let shutdown_rx = self.shutdown_tx.subscribe();
+            let http = spawn_http_server(addr, handle, self.readiness.clone(), shutdown_rx).await?;
+            *self.http_handle.lock().await = Some(http);
+            info!(node_id = self.node_id, port, "HTTP observability server spawned");
+        }
+
+        self.readiness.set(true);
         info!(node_id = self.node_id, "RrNode started");
         counter!("node.started").increment(1);
         Ok(())
@@ -435,8 +459,8 @@ impl RrNode {
     #[instrument(skip(self))]
     pub async fn shutdown(&self) -> Result<(), RrError> {
         info!(node_id = self.node_id, "RrNode shutting down");
+        self.readiness.set(false);
 
-        // ── 0. Mark health as NOT_SERVING ────────────────────────────────
         if let Some(reporter) = self.health_reporter.lock().await.as_mut() {
             reporter
                 .set_service_status("", tonic_health::ServingStatus::NotServing)
@@ -454,12 +478,19 @@ impl RrNode {
             }
         }
 
-        // ── 1b. Stop admin gRPC server ─────────────────────────────────────
         if let Some(handle) = self.admin_handle.lock().await.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
                 Ok(Ok(())) => info!("admin gRPC server shutdown complete"),
                 Ok(Err(e)) => warn!("admin gRPC server task panicked: {e}"),
                 Err(_) => warn!("admin gRPC server shutdown timed out after 5s"),
+            }
+        }
+
+        if let Some(handle) = self.http_handle.lock().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), handle).await {
+                Ok(Ok(())) => info!("HTTP observability server shutdown complete"),
+                Ok(Err(e)) => warn!("HTTP observability server task panicked: {e}"),
+                Err(_) => warn!("HTTP observability server shutdown timed out after 3s"),
             }
         }
 
