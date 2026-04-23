@@ -101,6 +101,20 @@ pub struct ServeArgs {
     /// SNI domain name to verify in the server cert when dialing peers.
     #[arg(long = "tls-domain", env = "RR_TLS_DOMAIN")]
     pub tls_domain: Option<String>,
+
+    /// Max requests/sec for AdminService. Omit = unlimited.
+    /// **Never** rate-limits Raft RPCs.
+    #[arg(long = "admin-rps", env = "RR_ADMIN_RPS")]
+    pub admin_rps: Option<u32>,
+
+    /// Max requests/sec for ClientService. Omit = unlimited.
+    #[arg(long = "client-rps", env = "RR_CLIENT_RPS")]
+    pub client_rps: Option<u32>,
+
+    /// Rate-limit burst size (max concurrent-acceptance window).
+    /// If unset, defaults to `max(rps, 10)` per service.
+    #[arg(long = "rate-limit-burst", env = "RR_RATE_LIMIT_BURST")]
+    pub rate_limit_burst: Option<u32>,
 }
 
 #[cfg(test)]

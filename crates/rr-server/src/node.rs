@@ -62,6 +62,8 @@ pub struct RrNode {
     tls_config: Option<rr_network::tls::TlsConfig>,
     /// Bearer-token auth policy. Empty = no auth (dev).
     auth_config: rr_network::auth::AuthConfig,
+    /// Rate-limit policy (admin/client only, never Raft).
+    rate_limit_config: rr_network::rate_limit::RateLimitConfig,
     /// Readiness signal driving HTTP `/ready`.
     readiness: ReadinessFlag,
     /// Prometheus metrics handle (Some iff metrics_port was configured).
@@ -133,6 +135,7 @@ impl RrNode {
             metrics_port: config.metrics_port,
             tls_config: config.tls_config,
             auth_config: config.auth_config,
+            rate_limit_config: config.rate_limit_config,
             readiness: ReadinessFlag::new(),
             prom_handle,
             health_reporter: Mutex::new(None),
@@ -314,12 +317,19 @@ impl RrNode {
             })?;
 
             let raft_svc = RaftServiceServer::new(RaftServiceImpl::new(raft_lookup.clone()));
+            let client_chain = rr_network::ChainedInterceptor {
+                first: self.auth_config.client_interceptor(),
+                second: self.rate_limit_config.client_interceptor(),
+            };
             let client_svc = ClientServiceServer::with_interceptor(
                 ClientServiceImpl::new(client_dispatch.clone()),
-                self.auth_config.client_interceptor(),
+                client_chain,
             );
             if self.auth_config.client_required() {
                 info!(%addr, "ClientService bearer-token auth enabled");
+            }
+            if let Some(rps) = self.rate_limit_config.client_rps {
+                info!(%addr, rps, "ClientService rate limit enabled");
             }
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -381,13 +391,17 @@ impl RrNode {
                     RrError::Config(ConfigError::InvalidConfig(e.to_string()))
                 })?;
 
+            let admin_chain = rr_network::ChainedInterceptor {
+                first: self.auth_config.admin_interceptor(),
+                second: self.rate_limit_config.admin_interceptor(),
+            };
             let admin_svc = AdminServiceServer::with_interceptor(
                 AdminServiceImpl::new(
                     self.node_id,
                     self.listen_addr.clone(),
                     Arc::clone(&self.group_manager),
                 ),
-                self.auth_config.admin_interceptor(),
+                admin_chain,
             );
             if self.auth_config.admin_required() {
                 info!(%admin_addr, "AdminService bearer-token auth enabled");
@@ -397,6 +411,9 @@ impl RrNode {
                     "AdminService has NO auth — anyone reaching this port can transfer \
                      leadership or trigger snapshots. Set admin_token in production!"
                 );
+            }
+            if let Some(rps) = self.rate_limit_config.admin_rps {
+                info!(%admin_addr, rps, "AdminService rate limit enabled");
             }
 
             let mut shutdown_rx = self.shutdown_tx.subscribe();

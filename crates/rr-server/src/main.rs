@@ -17,6 +17,7 @@ use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{NodeAddr, NodeId, PartitionConfig};
 use rr_network::auth::AuthConfig;
+use rr_network::rate_limit::RateLimitConfig;
 use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::network_factory::{ChannelPool, ChannelPoolLike, TlsPaths};
@@ -149,6 +150,13 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<Arc<RrNode>> {
         client_token: cfg.auth.client_token.clone(),
     };
     node_config = node_config.with_auth(auth_config);
+
+    let rl_config = RateLimitConfig {
+        admin_rps: cfg.rate_limit.admin_rps,
+        client_rps: cfg.rate_limit.client_rps,
+        burst: cfg.rate_limit.burst,
+    };
+    node_config = node_config.with_rate_limit(rl_config);
 
     let node = Arc::new(RrNode::new(node_config)?);
     node.start().await?;

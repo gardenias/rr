@@ -30,6 +30,8 @@ pub struct ConfigFile {
     pub tls: TlsSection,
     #[serde(default)]
     pub auth: AuthSection,
+    #[serde(default)]
+    pub rate_limit: RateLimitSection,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -89,6 +91,17 @@ pub struct AuthSection {
     pub client_token_env: Option<String>,
 }
 
+/// `[rate_limit]` section — per-service rate limits. RaftService is
+/// intentionally not configurable: throttling Raft destabilizes
+/// consensus.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitSection {
+    pub admin_rps: Option<u32>,
+    pub client_rps: Option<u32>,
+    pub burst: Option<u32>,
+}
+
 /// Fully-resolved configuration after merging file + CLI + defaults.
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
@@ -104,6 +117,15 @@ pub struct ResolvedConfig {
     pub log_level: String,
     pub tls: Option<ResolvedTls>,
     pub auth: ResolvedAuth,
+    pub rate_limit: ResolvedRateLimit,
+}
+
+/// Resolved rate-limit settings. All fields default to `None` = unlimited.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedRateLimit {
+    pub admin_rps: Option<u32>,
+    pub client_rps: Option<u32>,
+    pub burst: Option<u32>,
 }
 
 /// Resolved bearer-token auth settings.
@@ -223,6 +245,11 @@ impl ResolvedConfig {
 
         let tls = resolve_tls(args, &file.tls)?;
         let auth = resolve_auth(&file.auth);
+        let rate_limit = ResolvedRateLimit {
+            admin_rps: args.admin_rps.or(file.rate_limit.admin_rps),
+            client_rps: args.client_rps.or(file.rate_limit.client_rps),
+            burst: args.rate_limit_burst.or(file.rate_limit.burst),
+        };
 
         Ok(Self {
             node_id,
@@ -237,6 +264,7 @@ impl ResolvedConfig {
             log_level: args.log_level.clone(),
             tls,
             auth,
+            rate_limit,
         })
     }
 

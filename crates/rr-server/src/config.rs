@@ -8,6 +8,7 @@ use rr_core::types::NodeId;
 use rr_network::auth::AuthConfig;
 use rr_network::client_service::ClientDispatch;
 use rr_network::raft_service::RaftGroupLookup;
+use rr_network::rate_limit::RateLimitConfig;
 use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::group_manager::StateMachineFactory;
@@ -61,6 +62,10 @@ pub struct NodeConfig {
     /// `admin_token`** — otherwise any network-reachable peer can
     /// trigger snapshots, transfer leadership, etc.
     pub auth_config: AuthConfig,
+    /// Per-service rate limits (admin / client). `RaftService` is never
+    /// rate-limited — throttling Raft RPCs destabilizes consensus.
+    /// Defaults to unlimited on every service.
+    pub rate_limit_config: RateLimitConfig,
 }
 
 impl NodeConfig {
@@ -88,6 +93,7 @@ impl NodeConfig {
             admin_port: None,
             tls_config: None,
             auth_config: AuthConfig::default(),
+            rate_limit_config: RateLimitConfig::default(),
         }
     }
 
@@ -131,6 +137,12 @@ impl NodeConfig {
     /// AdminService; setting `client_token` enforces auth on ClientService.
     pub fn with_auth(mut self, auth: AuthConfig) -> Self {
         self.auth_config = auth;
+        self
+    }
+
+    /// Attach rate-limit policy (admin / client services only).
+    pub fn with_rate_limit(mut self, rl: RateLimitConfig) -> Self {
+        self.rate_limit_config = rl;
         self
     }
 }
