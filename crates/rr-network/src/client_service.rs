@@ -73,8 +73,13 @@ impl client_service_server::ClientService for ClientServiceImpl {
         &self,
         request: tonic::Request<ClientRequest>,
     ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
+        let traceparent = crate::tracing::extract_traceparent(&request);
         let req = request.into_inner();
-        tracing::debug!(partition_id = req.partition_id, "client request received");
+        tracing::debug!(
+            partition_id = req.partition_id,
+            traceparent = traceparent.as_deref().unwrap_or(""),
+            "client request received"
+        );
 
         let result = self
             .dispatch
@@ -95,9 +100,13 @@ impl client_service_server::ClientService for ClientServiceImpl {
 
     async fn get_cluster_info(
         &self,
-        _request: tonic::Request<Empty>,
+        request: tonic::Request<Empty>,
     ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
-        tracing::debug!("get_cluster_info request received");
+        let traceparent = crate::tracing::extract_traceparent(&request);
+        tracing::debug!(
+            traceparent = traceparent.as_deref().unwrap_or(""),
+            "get_cluster_info request received"
+        );
 
         let groups = self.dispatch.get_cluster_info().await?;
 

@@ -8,6 +8,7 @@ pub mod channel_pool;
 pub mod client;
 pub mod error_convert;
 pub mod tls;
+pub mod tracing;
 pub mod proto {
     pub mod raft {
         tonic::include_proto!("rr.raft");
@@ -27,6 +28,10 @@ pub use auth::{attach_bearer_token, AuthConfig, BearerInterceptor};
 pub use channel_pool::ChannelPool;
 pub use client::RrGrpcClient;
 pub use tls::TlsConfig;
+pub use tracing::{
+    attach_traceparent, attach_tracestate, extract_traceparent, extract_tracestate,
+    TRACEPARENT_HEADER, TRACESTATE_HEADER,
+};
 pub use client_service::{ClientDispatch, ClientServiceImpl, ClientWriteResult};
 pub use error_convert::IntoStatus;
 pub use raft_service::{RaftGroupLookup, RaftServiceImpl};

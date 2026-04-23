@@ -77,9 +77,14 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: tonic::Request<AppendEntriesRequest>,
     ) -> Result<tonic::Response<AppendEntriesResponse>, tonic::Status> {
+        let traceparent = crate::tracing::extract_traceparent(&request);
         let req = request.into_inner();
         let group_id = req.group_id;
-        tracing::debug!(group_id, "append_entries RPC received");
+        tracing::debug!(
+            group_id,
+            traceparent = traceparent.as_deref().unwrap_or(""),
+            "append_entries RPC received"
+        );
 
         let payload = self.groups.append_entries(group_id, req.payload).await?;
 
@@ -93,9 +98,14 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: tonic::Request<VoteRequest>,
     ) -> Result<tonic::Response<VoteResponse>, tonic::Status> {
+        let traceparent = crate::tracing::extract_traceparent(&request);
         let req = request.into_inner();
         let group_id = req.group_id;
-        tracing::debug!(group_id, "vote RPC received");
+        tracing::debug!(
+            group_id,
+            traceparent = traceparent.as_deref().unwrap_or(""),
+            "vote RPC received"
+        );
 
         let payload = self.groups.vote(group_id, req.payload).await?;
 
