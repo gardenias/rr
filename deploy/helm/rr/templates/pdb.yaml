@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rr.fullname" . }}
+  labels:
+    {{- include "rr.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.cluster.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "rr.selectorLabels" . | nindent 6 }}

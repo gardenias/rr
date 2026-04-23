@@ -1,0 +1,15 @@
+target/
+dev-certs/
+.git/
+.gitnexus/
+.sisyphus/
+.github/
+.claude/
+.opencode/
+docs/build/
+docs/node_modules/
+docs/.docusaurus/
+tmp/
+*.log
+*.tar.gz
+.DS_Store

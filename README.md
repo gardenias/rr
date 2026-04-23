@@ -1,6 +1,6 @@
 # rr — Distributed Multi-Raft Consensus Framework
 
-[![Coverage](https://codecov.io/gh/OWNER/rr/branch/main/graph/badge.svg)](https://codecov.io/gh/OWNER/rr)
+[![Coverage](https://codecov.io/gh/gardenias/rr/branch/main/graph/badge.svg)](https://codecov.io/gh/gardenias/rr)
 
 ## 简介 / Introduction
 

@@ -1,0 +1,54 @@
+services:
+  rr-1:
+    build: .
+    image: rr:dev
+    container_name: rr-1
+    hostname: rr-1
+    networks: [rrnet]
+    volumes:
+      - rr1-data:/var/lib/rr/data
+      - ./deploy/compose/config/node1.toml:/etc/rr/config.toml:ro
+    ports:
+      - "51001:51001"
+      - "52001:52001"
+      - "9101:9100"
+    restart: unless-stopped
+
+  rr-2:
+    image: rr:dev
+    depends_on: [rr-1]
+    container_name: rr-2
+    hostname: rr-2
+    networks: [rrnet]
+    volumes:
+      - rr2-data:/var/lib/rr/data
+      - ./deploy/compose/config/node2.toml:/etc/rr/config.toml:ro
+    ports:
+      - "51002:51001"
+      - "52002:52001"
+      - "9102:9100"
+    restart: unless-stopped
+
+  rr-3:
+    image: rr:dev
+    depends_on: [rr-1]
+    container_name: rr-3
+    hostname: rr-3
+    networks: [rrnet]
+    volumes:
+      - rr3-data:/var/lib/rr/data
+      - ./deploy/compose/config/node3.toml:/etc/rr/config.toml:ro
+    ports:
+      - "51003:51001"
+      - "52003:52001"
+      - "9103:9100"
+    restart: unless-stopped
+
+networks:
+  rrnet:
+    driver: bridge
+
+volumes:
+  rr1-data:
+  rr2-data:
+  rr3-data:

@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RaftError::InitializationFailed { reason }` variant in `rr-core::error`.
 - **Offline backup / restore** in `rr-admin`: new `backup` / `restore` / `inspect-backup` subcommands producing gzip-compressed tar archives containing a `metadata.json` descriptor + the node's data_dir. Format versioned (`format_version = 1`); restore refuses newer majors. 6 unit tests + e2e roundtrip verified.
 - **Deployment artifacts**: multi-stage `Dockerfile` (Debian slim, non-root `rr:rr` at UID 10001), `.dockerignore`, `docker-compose.yml` for local 3-node cluster, raw K8s manifests (`deploy/k8s/statefulset.yaml`) with StatefulSet + headless Service + client Service + PodDisruptionBudget, and a full Helm chart at `deploy/helm/rr/` with TLS + auth + storage knobs in `values.yaml`.
-- `.github/workflows/release.yml`: publishes Docker image to `ghcr.io/<owner>/rr` and Helm chart (OCI) to `ghcr.io/<owner>/charts/rr` on tag push. Optional crates.io publish via `workflow_dispatch`.
+- `.github/workflows/release.yml`: publishes Docker image to `ghcr.io/gardenias/rr` and Helm chart (OCI) to `ghcr.io/gardenias/charts/rr` on tag push. Optional crates.io publish via `workflow_dispatch`.
 - `docs/docs/deployment/kubernetes.md` — K8s deployment guide (raw manifests + Helm, with cert-manager TLS example).
 
 ### Changed
@@ -76,5 +76,5 @@ Phase 2 established the core distributed framework capabilities. Not published t
 - No distributed tracing (W3C traceparent propagation).
 - Not published to crates.io.
 
-[Unreleased]: https://github.com/OWNER/rr/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/OWNER/rr/releases/tag/v0.1.0
+[Unreleased]: https://github.com/gardenias/rr/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/gardenias/rr/releases/tag/v0.1.0

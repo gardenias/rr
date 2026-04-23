@@ -1,0 +1,54 @@
+image:
+  repository: ghcr.io/gardenias/rr
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 3
+
+ports:
+  grpc: 51001
+  admin: 52001
+  metrics: 9100
+
+storage:
+  backend: "rocks"
+  durability: "strict"
+  dataSize: "20Gi"
+  storageClassName: ""
+
+cluster:
+  terminationGracePeriodSeconds: 30
+  podDisruptionBudget:
+    minAvailable: 2
+
+auth:
+  adminTokenSecret:
+    name: "rr-admin-token"
+    key: "token"
+    optional: true
+
+tls:
+  enabled: false
+  existingSecret: ""
+  requireClientCert: false
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+serviceAccount:
+  create: true
+  name: ""
+
+log:
+  level: "info"

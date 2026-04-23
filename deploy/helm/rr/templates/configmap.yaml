@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rr.fullname" . }}-config
+  labels:
+    {{- include "rr.labels" . | nindent 4 }}
+data:
+  config.toml.tmpl: |
+    [node]
+    id = {{`{{NODE_ID}}`}}
+    listen_addr = "0.0.0.0:{{ .Values.ports.grpc }}"
+    data_dir = "/var/lib/rr/data"
+    admin_port = {{ .Values.ports.admin }}
+    metrics_port = {{ .Values.ports.metrics }}
+
+    [storage]
+    backend = "{{ .Values.storage.backend }}"
+    durability = "{{ .Values.storage.durability }}"
+
+    [cluster]
+    bootstrap = {{`{{BOOTSTRAP}}`}}
+    peers = {{`{{PEERS}}`}}
+
+    {{- if .Values.auth.adminTokenSecret.name }}
+
+    [auth]
+    admin_token_env = "RR_ADMIN_TOKEN"
+    {{- end }}
+
+    {{- if .Values.tls.enabled }}
+
+    [tls]
+    cert_path = "/etc/rr/tls/tls.crt"
+    key_path  = "/etc/rr/tls/tls.key"
+    ca_path   = "/etc/rr/tls/ca.crt"
+    require_client_cert = {{ .Values.tls.requireClientCert }}
+    {{- end }}

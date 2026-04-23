@@ -26,7 +26,7 @@ in under 20 minutes, and explains how to propose changes.
 ## 2. Clone & build
 
 ```bash
-git clone https://github.com/OWNER/rr.git
+git clone https://github.com/gardenias/rr.git
 cd rr
 cargo build --workspace
 ```
@@ -199,7 +199,7 @@ rr/
 
 - Read the [Architecture Overview](./docs/docs/architecture/overview.md)
   and [C4 Diagrams](./docs/docs/architecture/c4/README.md).
-- Search existing [GitHub issues](https://github.com/OWNER/rr/issues) before
+- Search existing [GitHub issues](https://github.com/gardenias/rr/issues) before
   opening a new one.
 - For design discussions, open a GitHub Discussion tagged `design` or
   `question`.

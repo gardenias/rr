@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "rr.fullname" . }}
+  labels:
+    {{- include "rr.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "rr.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      {{- include "rr.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rr.selectorLabels" . | nindent 8 }}
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.cluster.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+        - name: render-config
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              ORDINAL="${POD_NAME##*-}"
+              NODE_ID=$((ORDINAL + 1))
+              if [ "$ORDINAL" = "0" ]; then
+                BOOTSTRAP=true
+                PEERS="[]"
+              else
+                BOOTSTRAP=false
+                PEERS_JSON="["
+                for i in $(seq 0 $((ORDINAL - 1))); do
+                  [ $i -gt 0 ] && PEERS_JSON="${PEERS_JSON},"
+                  PEERS_JSON="${PEERS_JSON}\"{{ include "rr.fullname" . }}-${i}.{{ include "rr.fullname" . }}:{{ .Values.ports.grpc }}\""
+                done
+                PEERS="${PEERS_JSON}]"
+              fi
+              sed \
+                -e "s|{{`{{NODE_ID}}`}}|${NODE_ID}|g" \
+                -e "s|{{`{{BOOTSTRAP}}`}}|${BOOTSTRAP}|g" \
+                -e "s|{{`{{PEERS}}`}}|${PEERS}|g" \
+                /tmpl/config.toml.tmpl > /rendered/config.toml
+              cat /rendered/config.toml
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: config-template
+              mountPath: /tmpl
+            - name: config-rendered
+              mountPath: /rendered
+      containers:
+        - name: rr-server
+          image: {{ include "rr.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--config", "/etc/rr/config.toml"]
+          env:
+            - name: RUST_LOG
+              value: "{{ .Values.log.level }}"
+            {{- if .Values.auth.adminTokenSecret.name }}
+            - name: RR_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.adminTokenSecret.name }}
+                  key: {{ .Values.auth.adminTokenSecret.key }}
+                  optional: {{ .Values.auth.adminTokenSecret.optional }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.ports.grpc }}
+            - name: admin
+              containerPort: {{ .Values.ports.admin }}
+            - name: metrics
+              containerPort: {{ .Values.ports.metrics }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rr/data
+            - name: config-rendered
+              mountPath: /etc/rr
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/rr/tls
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config-template
+          configMap:
+            name: {{ include "rr.fullname" . }}-config
+        - name: config-rendered
+          emptyDir: {}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ required "tls.existingSecret is required when tls.enabled=true" .Values.tls.existingSecret }}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.storageClassName }}
+        storageClassName: {{ .Values.storage.storageClassName }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.dataSize }}

@@ -1,0 +1,17 @@
+apiVersion: v2
+name: rr
+description: rr — distributed multi-Raft consensus framework
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/gardenias/rr
+sources:
+  - https://github.com/gardenias/rr
+keywords:
+  - raft
+  - consensus
+  - distributed
+  - kv
+maintainers:
+  - name: gardenia
+    email: gardenia.wu@outlook.com
