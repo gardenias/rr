@@ -12,38 +12,41 @@ rr uses **table-based routing** rather than hash rings. This diagram shows how `
 
 ## 图示 / Diagram
 
-```mermaid
-C4Component
-  title Component Diagram - rr-router + rr-config
+```plantuml
+@startuml
+!include <C4/C4_Component.puml>
 
-  Container_Ext(rr_server, "rr-server", "Rust binary", "Owns & queries the router")
-  Container_Ext(rr_client, "rr-client SDK", "Rust library", "Queries cluster info via GetClusterInfo RPC")
-  Container_Ext(source, "Config Source", "In-memory / etcd / file / custom", "Production-varies backing store")
+title Component Diagram - rr-router + rr-config
 
-  Container_Boundary(routing_system, "Routing System") {
-    Component_Boundary(router_crate, "rr-router") {
-      Component(shard_router, "ShardRouter", "rr-router::router", "Stateless resolver. route(partition_id) → (GroupId, leader NodeId, leader addr). Caches RoutingTable snapshot; refreshes on change events")
-    }
+Container_Ext(rr_server, "rr-server", "Rust binary", "Owns & queries the router")
+Container_Ext(rr_client, "rr-client SDK", "Rust library", "Queries cluster info via GetClusterInfo RPC")
+Container_Ext(source, "Config Source", "In-memory / etcd / file / custom", "Production-varies backing store")
 
-    Component_Boundary(config_crate, "rr-config") {
-      Component(cfg_trait, "ConfigProvider (trait)", "rr-core::config", "get_routing_table() / subscribe_changes() / update_group_membership() etc.")
-      Component(mem_cfg, "MemConfigProvider", "rr-config::mem", "In-process impl. tokio::sync::broadcast for change notification. Default in examples & tests")
-      Component(routing_table, "RoutingTable", "rr-core::types", "Pure data: partitions, groups, nodes. Serializable. Snapshot-style: cheap to clone")
-      Component(change_ev, "RoutingTableChange", "rr-core::types", "Enum: PartitionAdded, NodeAdded, GroupMembershipChanged, LeaderChanged, NodeRemoved, etc.")
-    }
+Container_Boundary(routing_system, "Routing System") {
+  Boundary(router_crate, "rr-router", "crate") {
+    Component(shard_router, "ShardRouter", "rr-router::router", "Stateless resolver. route(partition_id) → (GroupId, leader NodeId, leader addr). Caches RoutingTable snapshot; refreshes on change events")
   }
 
-  Rel(rr_server, shard_router, "route(partition_id) for client writes")
-  Rel(rr_client, rr_server, "GetClusterInfo() → RoutingTable snapshot", "gRPC")
+  Boundary(config_crate, "rr-config", "crate") {
+    Component(cfg_trait, "ConfigProvider (trait)", "rr-core::config", "get_routing_table() / subscribe_changes() / update_group_membership() etc.")
+    Component(mem_cfg, "MemConfigProvider", "rr-config::mem", "In-process impl. tokio::sync::broadcast for change notification. Default in examples & tests")
+    Component(routing_table, "RoutingTable", "rr-core::types", "Pure data: partitions, groups, nodes. Serializable. Snapshot-style: cheap to clone")
+    Component(change_ev, "RoutingTableChange", "rr-core::types", "Enum: PartitionAdded, NodeAdded, GroupMembershipChanged, LeaderChanged, NodeRemoved, etc.")
+  }
+}
 
-  Rel(shard_router, cfg_trait, "Initial load + subscribe_changes()")
-  Rel(shard_router, routing_table, "Holds cached snapshot")
-  Rel(cfg_trait, routing_table, "Returns on get/update")
-  Rel(cfg_trait, change_ev, "Broadcasts on mutation")
-  Rel(mem_cfg, cfg_trait, "Implements")
-  Rel(mem_cfg, source, "For MemConfigProvider: kept in-process. Production impls load from source")
+Rel(rr_server, shard_router, "route(partition_id) for client writes")
+Rel(rr_client, rr_server, "GetClusterInfo() → RoutingTable snapshot", "gRPC")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+Rel(shard_router, cfg_trait, "Initial load + subscribe_changes()")
+Rel(shard_router, routing_table, "Holds cached snapshot")
+Rel(cfg_trait, routing_table, "Returns on get/update")
+Rel(cfg_trait, change_ev, "Broadcasts on mutation")
+Rel(mem_cfg, cfg_trait, "Implements")
+Rel(mem_cfg, source, "For MemConfigProvider: kept in-process. Production impls load from source")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 核心数据结构 / Core Data Structures

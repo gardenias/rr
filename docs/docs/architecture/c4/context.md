@@ -12,28 +12,31 @@ The System Context diagram answers one simple question: **what is rr, who uses i
 
 ## 图示 / Diagram
 
-```mermaid
-C4Context
-  title System Context - rr-based Distributed Service
+```plantuml
+@startuml
+!include <C4/C4_Context.puml>
 
-  Person(developer, "Application Developer", "Implements Service / StateMachine trait, configures & deploys the cluster")
-  Person(operator, "Cluster Operator / SRE", "Monitors health, triggers snapshots, transfers leadership, scales cluster")
-  Person_Ext(end_user, "End User", "Consumes the application (KV store, counter, etc.) — unaware of rr")
+title System Context - rr-based Distributed Service
 
-  System(rr_service, "rr-based Service", "Distributed service (e.g. KV store) running on a multi-Raft rr cluster. Provides strong consistency + high availability.")
+Person(developer, "Application Developer", "Implements Service / StateMachine trait, configures & deploys the cluster")
+Person(operator, "Cluster Operator / SRE", "Monitors health, triggers snapshots, transfers leadership, scales cluster")
+Person_Ext(end_user, "End User", "Consumes the application (KV store, counter, etc.) — unaware of rr")
 
-  System_Ext(prometheus, "Prometheus", "Time-series metrics DB. Scrapes per-node /metrics")
-  System_Ext(config_store, "External ConfigProvider (optional)", "etcd / file / custom source for routing table in production")
-  SystemDb_Ext(disk, "Local Disk", "Per-node data directory for RocksDB log & state (when rocks feature is enabled)")
+System(rr_service, "rr-based Service", "Distributed service (e.g. KV store) running on a multi-Raft rr cluster. Provides strong consistency + high availability.")
 
-  Rel(end_user, rr_service, "Uses (e.g. GET/PUT keys)", "gRPC via rr-client SDK")
-  Rel(developer, rr_service, "Builds & deploys", "cargo, config, topology")
-  Rel(operator, rr_service, "Administers", "rr-admin CLI / gRPC")
-  Rel(rr_service, prometheus, "Exposes metrics", "HTTP /metrics")
-  Rel(rr_service, disk, "Persists Raft log, snapshots, state", "File I/O via RocksDB")
-  Rel(rr_service, config_store, "Loads routing table, watches changes", "ConfigProvider trait")
+System_Ext(prometheus, "Prometheus", "Time-series metrics DB. Scrapes per-node /metrics")
+System_Ext(config_store, "External ConfigProvider (optional)", "etcd / file / custom source for routing table in production")
+SystemDb_Ext(disk, "Local Disk", "Per-node data directory for RocksDB log & state (when rocks feature is enabled)")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+Rel(end_user, rr_service, "Uses (e.g. GET/PUT keys)", "gRPC via rr-client SDK")
+Rel(developer, rr_service, "Builds & deploys", "cargo, config, topology")
+Rel(operator, rr_service, "Administers", "rr-admin CLI / gRPC")
+Rel(rr_service, prometheus, "Exposes metrics", "HTTP /metrics")
+Rel(rr_service, disk, "Persists Raft log, snapshots, state", "File I/O via RocksDB")
+Rel(rr_service, config_store, "Loads routing table, watches changes", "ConfigProvider trait")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 外部行为者 / External Actors

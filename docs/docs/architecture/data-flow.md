@@ -42,26 +42,27 @@ Write requests in `rr` follow a complete path from the client to the Raft group 
 4.  **Raft Write**: The request is submitted to the `openraft` instance for log replication.
 5.  **State Machine Apply**: Once the log reaches consensus on a majority of nodes, `RrStateMachine` calls the user-defined `StateMachine::apply`.
 
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant Client as RrClient
-    participant Server as rr-server (RrNode)
-    participant Router as ShardRouter
-    participant Raft as RaftGroup
-    participant SM as StateMachine
+```plantuml
+@startuml
+participant App as "Application"
+participant Client as "RrClient"
+participant Server as "rr-server (RrNode)"
+participant Router as "ShardRouter"
+participant Raft as "RaftGroup"
+participant SM as "StateMachine"
 
-    App->>Client: send_request(group_id, payload)
-    Client->>Server: gRPC ClientRequest
-    Server->>Router: route(partition_id)
-    Router-->>Server: leader_addr
-    Server->>Raft: raft.client_write(entry)
-    Note over Raft: Log replication to majority
-    Raft->>SM: apply(log_entry)
-    SM-->>Raft: response
-    Raft-->>Server: ClientWriteResponse
-    Server-->>Client: gRPC response
-    Client-->>App: result
+App -> Client : send_request(group_id, payload)
+Client -> Server : gRPC ClientRequest
+Server -> Router : route(partition_id)
+Router --> Server : leader_addr
+Server -> Raft : raft.client_write(entry)
+note over Raft : Log replication to majority
+Raft -> SM : apply(log_entry)
+SM --> Raft : response
+Raft --> Server : ClientWriteResponse
+Server --> Client : gRPC response
+Client --> App : result
+@enduml
 ```
 
 ## 领导者选举流程 / Leader Election Flow
@@ -82,21 +83,22 @@ sequenceDiagram
 *   **Voting**: The candidate issues a `VoteRequest` to cluster members.
 *   **Winning**: The candidate that receives a majority of votes becomes the new leader and starts sending heartbeats.
 
-```mermaid
-sequenceDiagram
-    participant N1 as Node 1
-    participant N2 as Node 2
-    participant N3 as Node 3
+```plantuml
+@startuml
+participant N1 as "Node 1"
+participant N2 as "Node 2"
+participant N3 as "Node 3"
 
-    Note over N1,N3: Election timeout expires on N1
-    N1->>N1: transition to Candidate
-    N1->>N2: VoteRequest(term, last_log)
-    N1->>N3: VoteRequest(term, last_log)
-    N2-->>N1: VoteResponse(granted=true)
-    N3-->>N1: VoteResponse(granted=true)
-    Note over N1: Majority granted → becomes Leader
-    N1->>N2: AppendEntries (heartbeat)
-    N1->>N3: AppendEntries (heartbeat)
+note over N1, N3 : Election timeout expires on N1
+N1 -> N1 : transition to Candidate
+N1 -> N2 : VoteRequest(term, last_log)
+N1 -> N3 : VoteRequest(term, last_log)
+N2 --> N1 : VoteResponse(granted=true)
+N3 --> N1 : VoteResponse(granted=true)
+note over N1 : Majority granted → becomes Leader
+N1 -> N2 : AppendEntries (heartbeat)
+N1 -> N3 : AppendEntries (heartbeat)
+@enduml
 ```
 
 ## 领导者转发机制 / ForwardToLeader Error Handling
@@ -117,17 +119,18 @@ sequenceDiagram
 2.  **Return Redirect**: `openraft` returns a `ForwardToLeader` error containing the leader ID and address.
 3.  **Client Retry**: `RrClient` catches this response, updates its local leader cache, and re-issues the request to the correct address.
 
-```mermaid
-sequenceDiagram
-    participant Client as RrClient
-    participant Follower as Follower Node
-    participant Leader as Leader Node
+```plantuml
+@startuml
+participant Client as "RrClient"
+participant Follower as "Follower Node"
+participant Leader as "Leader Node"
 
-    Client->>Follower: gRPC ClientRequest
-    Follower-->>Client: Error: ForwardToLeader(leader_id, leader_addr)
-    Note over Client: RetryConfig.max_retries allows retry
-    Client->>Leader: gRPC ClientRequest (retry)
-    Leader-->>Client: Success response
+Client -> Follower : gRPC ClientRequest
+Follower --> Client : Error: ForwardToLeader(leader_id, leader_addr)
+note over Client : RetryConfig.max_retries allows retry
+Client -> Leader : gRPC ClientRequest (retry)
+Leader --> Client : Success response
+@enduml
 ```
 
 ## 读请求路径 / Read Request Path

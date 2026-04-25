@@ -12,92 +12,95 @@ When a follower falls too far behind (missing log entries have already been comp
 
 ## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
 
-```mermaid
-C4Dynamic
-  title Dynamic Diagram - Snapshot Transfer to Lagging Follower
+```plantuml
+@startuml
+!include <C4/C4_Dynamic.puml>
 
-  Container_Boundary(leader, "Leader Node") {
-    Component(l_raft, "RaftNode G7", "rr-raft", "openraft leader logic")
-    Component(l_sm, "RrStateMachine", "rr-raft::sm_adapter", "Captures snapshot from user Service")
-    Component(l_net, "GrpcRaftNetwork", "rr-raft::network_factory", "Streams chunks")
-  }
+title Dynamic Diagram - Snapshot Transfer to Lagging Follower
 
-  Container_Boundary(follower, "Follower Node (lagging)") {
-    Component(f_grpc, "RaftServiceImpl", "rr-network::raft_service", "Receives InstallSnapshot stream")
-    Component(f_raft, "RaftNode G7", "rr-raft", "openraft follower logic")
-    Component(f_sm, "RrStateMachine", "rr-raft::sm_adapter", "Applies snapshot to user SM")
-    Component(f_svc, "User Service", "rr-core::Service", "Implements restore()")
-  }
+Container_Boundary(leader, "Leader Node") {
+  Component(l_raft, "RaftNode G7", "rr-raft", "openraft leader logic")
+  Component(l_sm, "RrStateMachine", "rr-raft::sm_adapter", "Captures snapshot from user Service")
+  Component(l_net, "GrpcRaftNetwork", "rr-raft::network_factory", "Streams chunks")
+}
 
-  ContainerDb(f_disk, "Follower Disk", "Local SSD", "RocksDB data dir")
+Container_Boundary(follower, "Follower Node (lagging)") {
+  Component(f_grpc, "RaftServiceImpl", "rr-network::raft_service", "Receives InstallSnapshot stream")
+  Component(f_raft, "RaftNode G7", "rr-raft", "openraft follower logic")
+  Component(f_sm, "RrStateMachine", "rr-raft::sm_adapter", "Applies snapshot to user SM")
+  Component(f_svc, "User Service", "rr-core::Service", "Implements restore()")
+}
 
-  Rel(l_raft, l_raft, "1. Detect follower too far behind (next_index < log_start_index)")
-  Rel(l_raft, l_sm, "2. Get or build snapshot (bincode-serialized user state)")
-  Rel(l_sm, l_net, "3. Start InstallSnapshot stream")
+ContainerDb(f_disk, "Follower Disk", "Local SSD", "RocksDB data dir")
 
-  Rel(l_net, f_grpc, "4. Stream SnapshotChunk[0..N]", "gRPC streaming")
-  Rel(f_grpc, f_raft, "5. Assemble & deliver full snapshot")
-  Rel(f_raft, f_sm, "6. apply_snapshot(meta, data)")
-  Rel(f_sm, f_svc, "7. Service::restore(data)")
-  Rel(f_sm, f_disk, "8. Persist snapshot + update last_applied")
+Rel(l_raft, l_raft, "1. Detect follower too far behind (next_index < log_start_index)")
+Rel(l_raft, l_sm, "2. Get or build snapshot (bincode-serialized user state)")
+Rel(l_sm, l_net, "3. Start InstallSnapshot stream")
 
-  Rel(f_raft, l_raft, "9. InstallSnapshotResponse(success, last_applied)", "gRPC")
-  Rel(l_raft, f_raft, "10. Resume AppendEntries from last_applied+1", "gRPC")
+Rel(l_net, f_grpc, "4. Stream SnapshotChunk[0..N]", "gRPC streaming")
+Rel(f_grpc, f_raft, "5. Assemble & deliver full snapshot")
+Rel(f_raft, f_sm, "6. apply_snapshot(meta, data)")
+Rel(f_sm, f_svc, "7. Service::restore(data)")
+Rel(f_sm, f_disk, "8. Persist snapshot + update last_applied")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+Rel(f_raft, l_raft, "9. InstallSnapshotResponse(success, last_applied)", "gRPC")
+Rel(l_raft, f_raft, "10. Resume AppendEntries from last_applied+1", "gRPC")
+
+@enduml
 ```
 
 ## 详细时序图 / Detailed Sequence
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant L as Leader<br/>(RaftNode G7)
-    participant LSM as Leader SM<br/>(RrStateMachine)
-    participant LSvc as User Service<br/>(on Leader)
-    participant LNet as GrpcRaftNetwork
-    participant FNet as RaftServiceImpl<br/>(on Follower)
-    participant F as Follower<br/>(RaftNode G7)
-    participant FSM as Follower SM<br/>(RrStateMachine)
-    participant FSvc as User Service<br/>(on Follower)
-    participant FDisk as Follower Disk
+```plantuml
+@startuml
+autonumber
+participant L as "Leader\n(RaftNode G7)"
+participant LSM as "Leader SM\n(RrStateMachine)"
+participant LSvc as "User Service\n(on Leader)"
+participant LNet as "GrpcRaftNetwork"
+participant FNet as "RaftServiceImpl\n(on Follower)"
+participant F as "Follower\n(RaftNode G7)"
+participant FSM as "Follower SM\n(RrStateMachine)"
+participant FSvc as "User Service\n(on Follower)"
+participant FDisk as "Follower Disk"
 
-    Note over L,F: Normal replication attempts fail — follower's next_index < log_start_index
-    L->>F: AppendEntries(prev_log_idx=50)
-    F-->>L: Error: log already compacted (my last_applied=10)
+note over L, F : Normal replication attempts fail — follower's next_index < log_start_index
+L -> F : AppendEntries(prev_log_idx=50)
+F --> L : Error: log already compacted (my last_applied=10)
 
-    Note over L: Trigger snapshot transfer path
-    L->>LSM: get_snapshot() — is current snapshot fresh enough?
-    alt Snapshot exists and covers follower's gap
-        LSM-->>L: cached snapshot
-    else No snapshot or stale
-        LSM->>LSvc: Service::snapshot()<br/>(bincode-encode user state)
-        LSvc-->>LSM: Vec<u8>
-        LSM->>LSM: build SnapshotMeta (last_log_id, term, id)
-        LSM-->>L: new snapshot
-    end
+note over L : Trigger snapshot transfer path
+L -> LSM : get_snapshot() — is current snapshot fresh enough?
+alt Snapshot exists and covers follower's gap
+  LSM --> L : cached snapshot
+else No snapshot or stale
+  LSM -> LSvc : Service::snapshot()\n(bincode-encode user state)
+  LSvc --> LSM : Vec<u8>
+  LSM -> LSM : build SnapshotMeta (last_log_id, term, id)
+  LSM --> L : new snapshot
+end
 
-    L->>LNet: install_snapshot_stream(meta, data)
-    LNet->>FNet: gRPC InstallSnapshot stream opens
+L -> LNet : install_snapshot_stream(meta, data)
+LNet -> FNet : gRPC InstallSnapshot stream opens
 
-    loop For each chunk (e.g. 1 MB each)
-        LNet->>FNet: SnapshotChunk { offset, bytes, done? }
-    end
+loop For each chunk (e.g. 1 MB each)
+  LNet -> FNet : SnapshotChunk { offset, bytes, done? }
+end
 
-    FNet->>F: Full snapshot assembled
-    F->>FSM: apply_snapshot(meta, full_data)
-    FSM->>FSvc: Service::restore(&data)
-    FSvc-->>FSM: Ok
-    FSM->>FDisk: persist snapshot blob + metadata
-    FSM-->>F: Ok, last_applied = meta.last_log_id
+FNet -> F : Full snapshot assembled
+F -> FSM : apply_snapshot(meta, full_data)
+FSM -> FSvc : Service::restore(&data)
+FSvc --> FSM : Ok
+FSM -> FDisk : persist snapshot blob + metadata
+FSM --> F : Ok, last_applied = meta.last_log_id
 
-    F-->>L: InstallSnapshotResponse(success, last_applied = meta.last_log_id)
+F --> L : InstallSnapshotResponse(success, last_applied = meta.last_log_id)
 
-    Note over L: Update match_index[follower] = meta.last_log_id
-    L->>F: AppendEntries (starting from last_applied + 1)
-    F-->>L: ack
+note over L : Update match_index[follower] = meta.last_log_id
+L -> F : AppendEntries (starting from last_applied + 1)
+F --> L : ack
 
-    Note over L,F: Follower caught up; normal replication resumes
+note over L, F : Follower caught up; normal replication resumes
+@enduml
 ```
 
 ## 什么时候会触发快照传输？/ When Does Snapshot Transfer Trigger?
@@ -183,5 +186,5 @@ impl Service for MyService {
 
 ## 相关 / Related
 
-- 存储层细节：[../storage.md](../storage.md#snapshot-handling)
+- 存储层细节：[../storage.md](../storage.md#快照处理--snapshot-handling)
 - rr-raft 组件：[components-raft.md](./components-raft.md)

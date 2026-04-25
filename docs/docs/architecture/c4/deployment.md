@@ -12,66 +12,69 @@ This diagram shows a typical **three-node production deployment**: rr-server run
 
 ## 图示 / Diagram
 
-```mermaid
-C4Deployment
-  title Deployment Diagram - 3-node rr Cluster
+```plantuml
+@startuml
+!include <C4/C4_Deployment.puml>
 
-  Deployment_Node(client_zone, "Application Tier", "VPC / Subnet") {
-    Deployment_Node(app_host, "App Server", "Linux, multiple instances") {
-      Container(user_app, "User Application", "Rust + rr-client SDK", "Embeds rr-client; bootstrap list = [node-1, node-2, node-3]")
-    }
+title Deployment Diagram - 3-node rr Cluster
+
+Deployment_Node(client_zone, "Application Tier", "VPC / Subnet") {
+  Deployment_Node(app_host, "App Server", "Linux, multiple instances") {
+    Container(user_app, "User Application", "Rust + rr-client SDK", "Embeds rr-client; bootstrap list = [node-1, node-2, node-3]")
   }
+}
 
-  Deployment_Node(ops_zone, "Operator Workstation", "Developer/SRE laptop or bastion") {
-    Container(admin_cli, "rr-admin CLI", "Rust binary", "Run ad-hoc; no daemon")
+Deployment_Node(ops_zone, "Operator Workstation", "Developer/SRE laptop or bastion") {
+  Container(admin_cli, "rr-admin CLI", "Rust binary", "Run ad-hoc; no daemon")
+}
+
+Deployment_Node(cluster_zone, "rr Cluster", "VPC / 3 availability zones") {
+  Deployment_Node(host1, "Node Host 1", "Linux, AZ-a") {
+    Container(rr1, "rr-server #1", "Rust binary", "node_id=1, listen=:51001, admin=:52001, metrics=:9100")
+    ContainerDb(disk1, "Data Volume 1", "Local SSD / EBS", "/var/lib/rr/data — RocksDB log + snapshots")
   }
-
-  Deployment_Node(cluster_zone, "rr Cluster", "VPC / 3 availability zones") {
-    Deployment_Node(host1, "Node Host 1", "Linux, AZ-a") {
-      Container(rr1, "rr-server #1", "Rust binary", "node_id=1, listen=:51001, admin=:52001, metrics=:9100")
-      ContainerDb(disk1, "Data Volume 1", "Local SSD / EBS", "/var/lib/rr/data — RocksDB log + snapshots")
-    }
-    Deployment_Node(host2, "Node Host 2", "Linux, AZ-b") {
-      Container(rr2, "rr-server #2", "Rust binary", "node_id=2, listen=:51001, admin=:52001, metrics=:9100")
-      ContainerDb(disk2, "Data Volume 2", "Local SSD / EBS", "/var/lib/rr/data")
-    }
-    Deployment_Node(host3, "Node Host 3", "Linux, AZ-c") {
-      Container(rr3, "rr-server #3", "Rust binary", "node_id=3, listen=:51001, admin=:52001, metrics=:9100")
-      ContainerDb(disk3, "Data Volume 3", "Local SSD / EBS", "/var/lib/rr/data")
-    }
+  Deployment_Node(host2, "Node Host 2", "Linux, AZ-b") {
+    Container(rr2, "rr-server #2", "Rust binary", "node_id=2, listen=:51001, admin=:52001, metrics=:9100")
+    ContainerDb(disk2, "Data Volume 2", "Local SSD / EBS", "/var/lib/rr/data")
   }
-
-  Deployment_Node(obs_zone, "Observability") {
-    Container_Ext(prometheus, "Prometheus", "Time-series DB", "Scrapes each node :9100/metrics")
+  Deployment_Node(host3, "Node Host 3", "Linux, AZ-c") {
+    Container(rr3, "rr-server #3", "Rust binary", "node_id=3, listen=:51001, admin=:52001, metrics=:9100")
+    ContainerDb(disk3, "Data Volume 3", "Local SSD / EBS", "/var/lib/rr/data")
   }
+}
 
-  Deployment_Node(cfg_zone, "Control Plane (optional)") {
-    Container_Ext(etcd, "etcd / Config Store", "KV store", "Holds routing table for production ConfigProvider")
-  }
+Deployment_Node(obs_zone, "Observability", "Monitoring") {
+  Container_Ext(prometheus, "Prometheus", "Time-series DB", "Scrapes each node :9100/metrics")
+}
 
-  Rel(user_app, rr1, "Client RPCs", "gRPC :51001")
-  Rel(user_app, rr2, "Client RPCs (bootstrap alt)", "gRPC :51001")
-  Rel(user_app, rr3, "Client RPCs (bootstrap alt)", "gRPC :51001")
+Deployment_Node(cfg_zone, "Control Plane (optional)", "Config store") {
+  Container_Ext(etcd, "etcd / Config Store", "KV store", "Holds routing table for production ConfigProvider")
+}
 
-  Rel(admin_cli, rr1, "Admin RPCs", "gRPC :52001")
+Rel(user_app, rr1, "Client RPCs", "gRPC :51001")
+Rel(user_app, rr2, "Client RPCs (bootstrap alt)", "gRPC :51001")
+Rel(user_app, rr3, "Client RPCs (bootstrap alt)", "gRPC :51001")
 
-  Rel(rr1, rr2, "Raft RPCs", "gRPC :51001")
-  Rel(rr1, rr3, "Raft RPCs", "gRPC :51001")
-  Rel(rr2, rr3, "Raft RPCs", "gRPC :51001")
+Rel(admin_cli, rr1, "Admin RPCs", "gRPC :52001")
 
-  Rel(rr1, disk1, "Reads/writes", "File I/O")
-  Rel(rr2, disk2, "Reads/writes", "File I/O")
-  Rel(rr3, disk3, "Reads/writes", "File I/O")
+Rel(rr1, rr2, "Raft RPCs", "gRPC :51001")
+Rel(rr1, rr3, "Raft RPCs", "gRPC :51001")
+Rel(rr2, rr3, "Raft RPCs", "gRPC :51001")
 
-  Rel(prometheus, rr1, "Scrapes /metrics", "HTTP :9100")
-  Rel(prometheus, rr2, "Scrapes /metrics", "HTTP :9100")
-  Rel(prometheus, rr3, "Scrapes /metrics", "HTTP :9100")
+Rel(rr1, disk1, "Reads/writes", "File I/O")
+Rel(rr2, disk2, "Reads/writes", "File I/O")
+Rel(rr3, disk3, "Reads/writes", "File I/O")
 
-  Rel(rr1, etcd, "Loads routing table (optional)", "etcd v3 gRPC")
-  Rel(rr2, etcd, "Loads routing table (optional)", "etcd v3 gRPC")
-  Rel(rr3, etcd, "Loads routing table (optional)", "etcd v3 gRPC")
+Rel(prometheus, rr1, "Scrapes /metrics", "HTTP :9100")
+Rel(prometheus, rr2, "Scrapes /metrics", "HTTP :9100")
+Rel(prometheus, rr3, "Scrapes /metrics", "HTTP :9100")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+Rel(rr1, etcd, "Loads routing table (optional)", "etcd v3 gRPC")
+Rel(rr2, etcd, "Loads routing table (optional)", "etcd v3 gRPC")
+Rel(rr3, etcd, "Loads routing table (optional)", "etcd v3 gRPC")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 端口方案 / Port Scheme

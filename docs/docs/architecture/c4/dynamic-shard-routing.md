@@ -12,83 +12,80 @@ Every request carries a `partition_id`. rr must resolve it into **"which Raft gr
 
 ## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
 
-```mermaid
-C4Dynamic
-  title Dynamic Diagram - Partition → Group → Leader Resolution
+```plantuml
+@startuml
+!include <C4/C4_Dynamic.puml>
 
-  Container(client, "rr-client SDK", "Rust library", "User application")
+title Dynamic Diagram - Partition → Group → Leader Resolution
 
-  Container_Boundary(node, "rr-server Node (any)") {
-    Component(grpc, "ClientServiceImpl", "rr-network", "gRPC handler")
-    Component(dispatch, "ClientDispatchImpl", "rr-server", "Request dispatcher")
-    Component(router, "ShardRouter", "rr-router", "Partition → group → leader resolver")
-    Component(table, "Cached RoutingTable", "rr-core::types", "ArcSwap snapshot")
-  }
+Container(client, "rr-client SDK", "Rust library", "User application")
 
-  Container_Ext(cfg, "ConfigProvider", "rr-config", "Source of truth")
+Container_Boundary(node, "rr-server Node (any)") {
+  Component(grpc, "ClientServiceImpl", "rr-network", "gRPC handler")
+  Component(dispatch, "ClientDispatchImpl", "rr-server", "Request dispatcher")
+  Component(router, "ShardRouter", "rr-router", "Partition → group → leader resolver")
+  Component(table, "Cached RoutingTable", "rr-core::types", "ArcSwap snapshot")
+}
 
-  Rel(client, grpc, "1. ClientRequest(partition_id=42)", "gRPC")
-  Rel(grpc, dispatch, "2. dispatch(request)")
-  Rel(dispatch, router, "3. route(42)")
+Container_Ext(cfg, "ConfigProvider", "rr-config", "Source of truth")
 
-  Rel(router, table, "4a. lookup partitions[42] → GroupMeta{group_id=7, leader=node_2}")
-  Rel(router, table, "4b. lookup nodes[node_2] → addr='host-2:51001'")
-  Rel(router, dispatch, "5. ResolvedRoute{group_id=7, leader_node=2, leader_addr='host-2:51001'}")
+Rel(client, grpc, "1. ClientRequest(partition_id=42)", "gRPC")
+Rel(grpc, dispatch, "2. dispatch(request)")
+Rel(dispatch, router, "3. route(42)")
 
-  Rel(cfg, table, "(async) RoutingTableChange events keep snapshot fresh")
+Rel(router, table, "4a. lookup partitions[42] → GroupMeta{group_id=7, leader=node_2}")
+Rel(router, table, "4b. lookup nodes[node_2] → addr='host-2:51001'")
+Rel(router, dispatch, "5. ResolvedRoute{group_id=7, leader_node=2, leader_addr='host-2:51001'}")
 
-  UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
+Rel(cfg, table, "(async) RoutingTableChange events keep snapshot fresh")
+
+@enduml
 ```
 
 ## 详细时序图 / Detailed Sequence
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Client as rr-client SDK
-    participant Node as rr-server Node
-    participant Router as ShardRouter
-    participant Snap as ArcSwap<RoutingTable>
-    participant Cfg as ConfigProvider
-    participant Raft as RaftGroupManager
+```plantuml
+@startuml
+autonumber
+participant Client as "rr-client SDK"
+participant Node as "rr-server Node"
+participant Router as "ShardRouter"
+participant Snap as "ArcSwap<RoutingTable>"
+participant Cfg as "ConfigProvider"
+participant Raft as "RaftGroupManager"
 
-    rect rgb(240, 248, 255)
-        Note over Client,Raft: COLD PATH — first request after boot
-    end
+group #LightBlue COLD PATH — first request after boot
+  Client -> Node : ClientRequest(partition=42)
+  Node -> Router : route(42)
+  Router -> Snap : load() → RoutingTable snapshot
+  Snap --> Router : &RoutingTable
+  Router -> Router : partitions.get(&42) → GroupMeta{group_id:7, members:[1,2,3], leader:2}
+  Router -> Router : nodes.get(&2) → NodeAddr("host-2:51001")
+  Router --> Node : Resolved(group=7, leader_id=2, addr="host-2:51001")
 
-    Client->>Node: ClientRequest(partition=42)
-    Node->>Router: route(42)
-    Router->>Snap: load() → RoutingTable snapshot
-    Snap-->>Router: &RoutingTable
-    Router->>Router: partitions.get(&42) → GroupMeta{group_id:7, members:[1,2,3], leader:2}
-    Router->>Router: nodes.get(&2) → NodeAddr("host-2:51001")
-    Router-->>Node: Resolved(group=7, leader_id=2, addr="host-2:51001")
+  alt This node IS leader of group 7
+    Node -> Raft : client_write on G7
+    Raft --> Node : response
+    Node --> Client : ClientWriteResponse
+  else This node is NOT leader
+    Node --> Client : ForwardToLeader{node_id:2, addr:"host-2:51001"}
+  end
+end
 
-    alt This node IS leader of group 7
-        Node->>Raft: client_write on G7
-        Raft-->>Node: response
-        Node-->>Client: ClientWriteResponse
-    else This node is NOT leader
-        Node-->>Client: ForwardToLeader{node_id:2, addr:"host-2:51001"}
-    end
+group #LightGreen HOT PATH — subsequent requests for partition 42
+  Client -> Client : leader_cache[group=7] hit → use "host-2:51001"
+  Client -> Node : direct to node_2
+  note over Node : (same route() resolution happens on each node\n— but resolution is O(1) hashmap lookup)
+  Node -> Raft : client_write
+  Raft --> Client : ClientWriteResponse
+end
 
-    rect rgb(240, 255, 240)
-        Note over Client,Raft: HOT PATH — subsequent requests for partition 42
-    end
-
-    Client->>Client: leader_cache[group=7] hit → use "host-2:51001"
-    Client->>Node: direct to node_2
-    Note over Node: (same route() resolution happens on each node<br/>— but resolution is O(1) hashmap lookup)
-    Node->>Raft: client_write
-    Raft-->>Client: ClientWriteResponse
-
-    rect rgb(255, 248, 240)
-        Note over Client,Raft: CHANGE — routing table updates
-    end
-
-    Cfg->>Snap: broadcast RoutingTableChange::LeaderChanged{group:7, leader:3}
-    Snap->>Snap: ArcSwap::store(new RoutingTable)
-    Note over Router: Next route(42) sees leader=3 without locking<br/>(ArcSwap gives us lock-free snapshot reads)
+group #Wheat CHANGE — routing table updates
+  Cfg -> Snap : broadcast RoutingTableChange::LeaderChanged{group:7, leader:3}
+  Snap -> Snap : ArcSwap::store(new RoutingTable)
+  note over Router : Next route(42) sees leader=3 without locking\n(ArcSwap gives us lock-free snapshot reads)
+end
+@enduml
 ```
 
 ## 查询的两层 / The Two Layers

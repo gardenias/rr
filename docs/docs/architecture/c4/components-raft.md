@@ -12,49 +12,52 @@ sidebar_position: 4
 
 ## 图示 / Diagram
 
-```mermaid
-C4Component
-  title Component Diagram - rr-raft (Multi-Raft Engine)
+```plantuml
+@startuml
+!include <C4/C4_Component.puml>
 
-  Container_Ext(rr_server, "rr-server / RrNode", "Rust binary", "Owns & supervises the group manager")
-  Component_Ext(storage, "StorageEngine", "rr-storage", "Mem or RocksDB backend")
-  Component_Ext(network, "rr-network (gRPC)", "tonic + ChannelPool", "Remote AppendEntries / Vote / InstallSnapshot")
-  Component_Ext(user_service, "User Service / StateMachine", "rr-core::Service trait impl", "Application-defined business logic")
+title Component Diagram - rr-raft (Multi-Raft Engine)
 
-  Container_Boundary(rr_raft, "rr-raft") {
-    Component(group_mgr, "RaftGroupManager", "rr-raft::group_manager", "Owns DashMap<GroupId, RaftNode>. Starts/stops groups, initializes clusters, adds learners, changes membership")
+Container_Ext(rr_server, "rr-server / RrNode", "Rust binary", "Owns & supervises the group manager")
+Component_Ext(storage, "StorageEngine", "rr-storage", "Mem or RocksDB backend")
+Component_Ext(network, "rr-network (gRPC)", "tonic + ChannelPool", "Remote AppendEntries / Vote / InstallSnapshot")
+Component_Ext(user_service, "User Service / StateMachine", "rr-core::Service trait impl", "Application-defined business logic")
 
-    Component(raft_node, "RaftNode", "rr-raft::raft_node", "Wraps openraft::Raft<RrTypeConfig> for one group. Holds references to log storage, state machine, network factory")
-    Component(type_cfg, "RrTypeConfig", "rr-raft::type_config", "declare_raft_types! macro binding: NodeId=u64, Entry, Snapshot, D=bytes, R=bytes")
+Container_Boundary(rr_raft, "rr-raft") {
+  Component(group_mgr, "RaftGroupManager", "rr-raft::group_manager", "Owns DashMap<GroupId, RaftNode>. Starts/stops groups, initializes clusters, adds learners, changes membership")
 
-    Component(log_storage, "RrLogStorage", "rr-raft::log_storage", "In-memory implementation of openraft::RaftLogStorage (BTreeMap)")
-    Component(rocks_log, "RocksLogStorage", "rr-raft::rocks_log_storage", "Persistent openraft::RaftLogStorage backed by RocksStorage (rocks feature)")
-    Component(sm_adapter, "RrStateMachine", "rr-raft::sm_adapter", "Implements openraft::RaftStateMachine. Delegates apply() to ServiceStateMachineAdapter; owns snapshot creation via bincode")
-    Component(svc_adapter, "ServiceStateMachineAdapter", "rr-raft::service_adapter", "Bridges Service trait (async handle / snapshot / restore) to rr's internal StateMachine trait")
+  Component(raft_node, "RaftNode", "rr-raft::raft_node", "Wraps openraft::Raft<RrTypeConfig> for one group. Holds references to log storage, state machine, network factory")
+  Component(type_cfg, "RrTypeConfig", "rr-raft::type_config", "declare_raft_types! macro binding: NodeId=u64, Entry, Snapshot, D=bytes, R=bytes")
 
-    Component(net_factory, "GrpcNetworkFactory", "rr-raft::network_factory", "Implements openraft::RaftNetworkFactory. For each peer node, creates a GrpcRaftNetwork")
-    Component(net_client, "GrpcRaftNetwork", "rr-raft::network_factory", "Implements openraft::RaftNetwork. Converts openraft RPC calls → bincode-serialized bytes → gRPC messages via ChannelPool")
-  }
+  Component(log_storage, "RrLogStorage", "rr-raft::log_storage", "In-memory implementation of openraft::RaftLogStorage (BTreeMap)")
+  Component(rocks_log, "RocksLogStorage", "rr-raft::rocks_log_storage", "Persistent openraft::RaftLogStorage backed by RocksStorage (rocks feature)")
+  Component(sm_adapter, "RrStateMachine", "rr-raft::sm_adapter", "Implements openraft::RaftStateMachine. Delegates apply() to ServiceStateMachineAdapter; owns snapshot creation via bincode")
+  Component(svc_adapter, "ServiceStateMachineAdapter", "rr-raft::service_adapter", "Bridges Service trait (async handle / snapshot / restore) to rr's internal StateMachine trait")
 
-  Rel(rr_server, group_mgr, "Constructs + supervises")
+  Component(net_factory, "GrpcNetworkFactory", "rr-raft::network_factory", "Implements openraft::RaftNetworkFactory. For each peer node, creates a GrpcRaftNetwork")
+  Component(net_client, "GrpcRaftNetwork", "rr-raft::network_factory", "Implements openraft::RaftNetwork. Converts openraft RPC calls → bincode-serialized bytes → gRPC messages via ChannelPool")
+}
 
-  Rel(group_mgr, raft_node, "start_group → new RaftNode", "1 per GroupId")
-  Rel(raft_node, type_cfg, "Parameterized by")
-  Rel(raft_node, log_storage, "Passes to openraft::Raft::new")
-  Rel(raft_node, rocks_log, "Alternative (rocks feature)")
-  Rel(raft_node, sm_adapter, "Passes to openraft::Raft::new")
-  Rel(raft_node, net_factory, "Passes to openraft::Raft::new")
+Rel(rr_server, group_mgr, "Constructs + supervises")
 
-  Rel(sm_adapter, svc_adapter, "Delegates apply / snapshot / restore")
-  Rel(svc_adapter, user_service, "Invokes Service::handle / snapshot / restore")
+Rel(group_mgr, raft_node, "start_group → new RaftNode", "1 per GroupId")
+Rel(raft_node, type_cfg, "Parameterized by")
+Rel(raft_node, log_storage, "Passes to openraft::Raft::new")
+Rel(raft_node, rocks_log, "Alternative (rocks feature)")
+Rel(raft_node, sm_adapter, "Passes to openraft::Raft::new")
+Rel(raft_node, net_factory, "Passes to openraft::Raft::new")
 
-  Rel(log_storage, storage, "put/get/scan on raft_log CF")
-  Rel(rocks_log, storage, "Same, via RocksStorage")
+Rel(sm_adapter, svc_adapter, "Delegates apply / snapshot / restore")
+Rel(svc_adapter, user_service, "Invokes Service::handle / snapshot / restore")
 
-  Rel(net_factory, network, "Uses ChannelPool")
-  Rel(net_client, network, "Sends bincode-in-proto frames")
+Rel(log_storage, storage, "put/get/scan on raft_log CF")
+Rel(rocks_log, storage, "Same, via RocksStorage")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+Rel(net_factory, network, "Uses ChannelPool")
+Rel(net_client, network, "Sends bincode-in-proto frames")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 分层适配 / Adapter Layering

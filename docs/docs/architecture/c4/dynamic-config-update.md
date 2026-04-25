@@ -12,99 +12,102 @@ A key rr feature is **runtime dynamic configuration**: adding partitions, migrat
 
 ## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
 
-```mermaid
-C4Dynamic
-  title Dynamic Diagram - Routing Table Change Propagation
+```plantuml
+@startuml
+!include <C4/C4_Dynamic.puml>
 
-  Person(operator, "Operator")
+title Dynamic Diagram - Routing Table Change Propagation
 
-  Container_Boundary(target_node, "Target Node (receives admin RPC)") {
-    Component(admin_svc, "AdminService", "rr-network", "gRPC handler")
-    Component(admin_hdl, "Admin Handlers", "rr-server::admin", "Routing-level + Raft-level orchestration")
-    Component(cfg_local, "ConfigProvider (local)", "rr-config", "Broadcast-based change pub/sub")
-    Component(router_t, "ShardRouter (local)", "rr-router", "Subscribed consumer")
-    Component(raft_mgr_t, "RaftGroupManager", "rr-raft", "Manages group members")
-  }
+Person(operator, "Operator")
 
-  Container_Ext(external_cfg, "External ConfigProvider", "etcd / custom", "Production-only source of truth")
+Container_Boundary(target_node, "Target Node (receives admin RPC)") {
+  Component(admin_svc, "AdminService", "rr-network", "gRPC handler")
+  Component(admin_hdl, "Admin Handlers", "rr-server::admin", "Routing-level + Raft-level orchestration")
+  Component(cfg_local, "ConfigProvider (local)", "rr-config", "Broadcast-based change pub/sub")
+  Component(router_t, "ShardRouter (local)", "rr-router", "Subscribed consumer")
+  Component(raft_mgr_t, "RaftGroupManager", "rr-raft", "Manages group members")
+}
 
-  Container_Boundary(other_node, "Other Node") {
-    Component(cfg_other, "ConfigProvider (peer)", "rr-config", "Receives watch events")
-    Component(router_o, "ShardRouter (peer)", "rr-router", "Updates its cache")
-    Component(raft_mgr_o, "RaftGroupManager (peer)", "rr-raft", "May start/stop groups")
-  }
+Container_Ext(external_cfg, "External ConfigProvider", "etcd / custom", "Production-only source of truth")
 
-  Container_Ext(client, "rr-client SDK", "Rust library", "User application")
+Container_Boundary(other_node, "Other Node") {
+  Component(cfg_other, "ConfigProvider (peer)", "rr-config", "Receives watch events")
+  Component(router_o, "ShardRouter (peer)", "rr-router", "Updates its cache")
+  Component(raft_mgr_o, "RaftGroupManager (peer)", "rr-raft", "May start/stop groups")
+}
 
-  Rel(operator, admin_svc, "1. rr-admin group add-learner --group=7 --node=4", "gRPC")
-  Rel(admin_svc, admin_hdl, "2. dispatch")
-  Rel(admin_hdl, cfg_local, "3. update_group_membership(7, [1,2,3,4])")
+Container_Ext(client, "rr-client SDK", "Rust library", "User application")
 
-  Rel(cfg_local, external_cfg, "4a. Persist to external store (production path)")
-  Rel(cfg_local, router_t, "4b. Broadcast RoutingTableChange")
-  Rel(cfg_local, raft_mgr_t, "4c. RrNode watches changes → add_learner(7, 4)")
+Rel(operator, admin_svc, "1. rr-admin group add-learner --group=7 --node=4", "gRPC")
+Rel(admin_svc, admin_hdl, "2. dispatch")
+Rel(admin_hdl, cfg_local, "3. update_group_membership(7, [1,2,3,4])")
 
-  Rel(external_cfg, cfg_other, "5. Subscribed peers receive update")
-  Rel(cfg_other, router_o, "6. Broadcast to local subscribers")
-  Rel(cfg_other, raft_mgr_o, "7. Node 4: start_group(7) as learner")
+Rel(cfg_local, external_cfg, "4a. Persist to external store (production path)")
+Rel(cfg_local, router_t, "4b. Broadcast RoutingTableChange")
+Rel(cfg_local, raft_mgr_t, "4c. RrNode watches changes → add_learner(7, 4)")
 
-  Rel(client, router_o, "8. Next GetClusterInfo → sees new topology (via any node)")
+Rel(external_cfg, cfg_other, "5. Subscribed peers receive update")
+Rel(cfg_other, router_o, "6. Broadcast to local subscribers")
+Rel(cfg_other, raft_mgr_o, "7. Node 4: start_group(7) as learner")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+Rel(client, router_o, "8. Next GetClusterInfo → sees new topology (via any node)")
+
+@enduml
 ```
 
 ## 详细时序图 / Detailed Sequence
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Op as Operator
-    participant CLI as rr-admin CLI
-    participant N1 as Node 1 (target)
-    participant Cfg1 as ConfigProvider<br/>(on Node 1)
-    participant Ext as External<br/>ConfigProvider (etcd)
-    participant Router1 as ShardRouter<br/>(on Node 1)
-    participant RMgr1 as RaftGroupManager<br/>(on Node 1)
-    participant Cfg4 as ConfigProvider<br/>(on new Node 4)
-    participant RMgr4 as RaftGroupManager<br/>(on new Node 4)
+```plantuml
+@startuml
+autonumber
+participant Op as "Operator"
+participant CLI as "rr-admin CLI"
+participant N1 as "Node 1 (target)"
+participant Cfg1 as "ConfigProvider\n(on Node 1)"
+participant Ext as "External\nConfigProvider (etcd)"
+participant Router1 as "ShardRouter\n(on Node 1)"
+participant RMgr1 as "RaftGroupManager\n(on Node 1)"
+participant Cfg4 as "ConfigProvider\n(on new Node 4)"
+participant RMgr4 as "RaftGroupManager\n(on new Node 4)"
 
-    Op->>CLI: rr-admin group add-learner --group 7 --node 4 --addr host-4:51001
-    CLI->>N1: gRPC AdminService.AddLearner(group=7, node_id=4, addr=...)
+Op -> CLI : rr-admin group add-learner --group 7 --node 4 --addr host-4:51001
+CLI -> N1 : gRPC AdminService.AddLearner(group=7, node_id=4, addr=...)
 
-    N1->>Cfg1: add_node(4, "host-4:51001")
-    N1->>Cfg1: update_group_membership(7, members=[1,2,3], learners=[4])
+N1 -> Cfg1 : add_node(4, "host-4:51001")
+N1 -> Cfg1 : update_group_membership(7, members=[1,2,3], learners=[4])
 
-    par Persist & distribute
-        Cfg1->>Ext: PUT /rr/routing_table {...}
-        Ext-->>Cfg1: ack
-    and Local broadcast
-        Cfg1->>Router1: tx.send(RoutingTableChange::NodeAdded{4, ...})
-        Cfg1->>Router1: tx.send(RoutingTableChange::GroupMembershipChanged{7, ...})
-    end
+par Persist & distribute
+  Cfg1 -> Ext : PUT /rr/routing_table {...}
+  Ext --> Cfg1 : ack
+else Local broadcast
+  Cfg1 -> Router1 : tx.send(RoutingTableChange::NodeAdded{4, ...})
+  Cfg1 -> Router1 : tx.send(RoutingTableChange::GroupMembershipChanged{7, ...})
+end
 
-    Router1->>Router1: ArcSwap::store(updated RoutingTable)
+Router1 -> Router1 : ArcSwap::store(updated RoutingTable)
 
-    Note over N1: N1 is Leader of group 7 → it's the one to execute the Raft membership change
-    N1->>RMgr1: add_learner(group=7, node_id=4, addr=host-4:51001)
-    RMgr1->>RMgr1: openraft::Raft::add_learner(4, node_4_info)
+note over N1 : N1 is Leader of group 7 → it's the one to execute the Raft membership change
+N1 -> RMgr1 : add_learner(group=7, node_id=4, addr=host-4:51001)
+RMgr1 -> RMgr1 : openraft::Raft::add_learner(4, node_4_info)
 
-    Note over Ext: External store notifies all subscribers
-    Ext->>Cfg4: Watch event: routing_table updated
-    Cfg4->>Cfg4: Update internal state
-    Cfg4->>RMgr4: (via RrNode watcher) start_group(7) if not already running
-    RMgr4->>RMgr4: Create RaftNode for group 7<br/>(as learner — will catch up via AppendEntries / snapshot)
+note over Ext : External store notifies all subscribers
+Ext -> Cfg4 : Watch event: routing_table updated
+Cfg4 -> Cfg4 : Update internal state
+Cfg4 -> RMgr4 : (via RrNode watcher) start_group(7) if not already running
+RMgr4 -> RMgr4 : Create RaftNode for group 7\n(as learner — will catch up via AppendEntries / snapshot)
 
-    Note over RMgr1,RMgr4: Normal Raft replication starts<br/>(may trigger snapshot transfer if log-gap too large)
+note over RMgr1, RMgr4 : Normal Raft replication starts\n(may trigger snapshot transfer if log-gap too large)
 
-    Op->>CLI: (later) rr-admin group promote-learner --group 7 --node 4
-    CLI->>N1: gRPC AdminService.ChangeMembership(group=7, voters=[1,2,3,4])
-    N1->>RMgr1: change_membership(7, [1,2,3,4])
-    RMgr1->>RMgr1: openraft joint consensus<br/>(new config must be committed by both old and new quorums)
+Op -> CLI : (later) rr-admin group promote-learner --group 7 --node 4
+CLI -> N1 : gRPC AdminService.ChangeMembership(group=7, voters=[1,2,3,4])
+N1 -> RMgr1 : change_membership(7, [1,2,3,4])
+RMgr1 -> RMgr1 : openraft joint consensus\n(new config must be committed by both old and new quorums)
 
-    Note over Cfg1,Ext: After joint consensus commits, update routing table
-    Cfg1->>Ext: PUT /rr/routing_table (promote node 4 to voter)
-    Ext->>Cfg4: Watch event
-    Cfg4->>Router1: LeaderChanged broadcast etc.
+note over Cfg1, Ext : After joint consensus commits, update routing table
+Cfg1 -> Ext : PUT /rr/routing_table (promote node 4 to voter)
+Ext -> Cfg4 : Watch event
+Cfg4 -> Router1 : LeaderChanged broadcast etc.
+@enduml
 ```
 
 ## ConfigProvider 的两种形态 / Two Shapes of ConfigProvider

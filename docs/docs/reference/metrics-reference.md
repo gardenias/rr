@@ -323,9 +323,9 @@ Client retry attempts. The initial attempt is not counted; only attempts ≥ 1 i
 
 #### `rr_client_leader_cache_hits_total` / `rr_client_leader_cache_misses_total`
 
-客户端 leader cache 的命中/失效次数。失效意味着必须 fallback 到 bootstrap 地址轮询。两者之比反映路由稳定性；缓存命中率持续低（<80%）说明 leader 频繁切换或集群不稳。
+客户端 leader cache 的命中/失效次数。失效意味着必须 fallback 到 bootstrap 地址轮询。两者之比反映路由稳定性；缓存命中率持续低（`<80%`）说明 leader 频繁切换或集群不稳。
 
-Hit / miss counts for the client's leader cache. A miss means fallback to round-robin through bootstrap addresses. The ratio reflects routing stability; a sustained low hit rate (<80%) signals frequent leader changes or cluster instability.
+Hit / miss counts for the client's leader cache. A miss means fallback to round-robin through bootstrap addresses. The ratio reflects routing stability; a sustained low hit rate (`<80%`) signals frequent leader changes or cluster instability.
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |

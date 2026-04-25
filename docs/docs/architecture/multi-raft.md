@@ -33,29 +33,39 @@ Each Raft group is completely independent:
 
 The diagram below shows how three nodes host three different Raft groups. Each group may have different roles (Leader or Follower) on different nodes.
 
-```mermaid
-graph TD
-    subgraph Node1[Node 1]
-        G1_1[Raft Group 1 - Leader]
-        G2_1[Raft Group 2 - Follower]
-        G3_1[Raft Group 3 - Follower]
-    end
-    subgraph Node2[Node 2]
-        G1_2[Raft Group 1 - Follower]
-        G2_2[Raft Group 2 - Leader]
-        G3_2[Raft Group 3 - Follower]
-    end
-    subgraph Node3[Node 3]
-        G1_3[Raft Group 1 - Follower]
-        G2_3[Raft Group 2 - Follower]
-        G3_3[Raft Group 3 - Leader]
-    end
-    G1_1 <-->|Raft RPCs| G1_2
-    G1_1 <-->|Raft RPCs| G1_3
-    G2_2 <-->|Raft RPCs| G2_1
-    G2_2 <-->|Raft RPCs| G2_3
-    G3_3 <-->|Raft RPCs| G3_1
-    G3_3 <-->|Raft RPCs| G3_2
+```plantuml
+@startuml
+!include <C4/C4_Component.puml>
+
+title Component Diagram - Multi-Raft Layout Across 3 Nodes
+
+Container_Boundary(node1, "Node 1") {
+  Component(g1_1, "Raft Group 1", "Leader", "Accepts writes for G1")
+  Component(g2_1, "Raft Group 2", "Follower", "Replicates G2 log")
+  Component(g3_1, "Raft Group 3", "Follower", "Replicates G3 log")
+}
+
+Container_Boundary(node2, "Node 2") {
+  Component(g1_2, "Raft Group 1", "Follower", "Replicates G1 log")
+  Component(g2_2, "Raft Group 2", "Leader", "Accepts writes for G2")
+  Component(g3_2, "Raft Group 3", "Follower", "Replicates G3 log")
+}
+
+Container_Boundary(node3, "Node 3") {
+  Component(g1_3, "Raft Group 1", "Follower", "Replicates G1 log")
+  Component(g2_3, "Raft Group 2", "Follower", "Replicates G2 log")
+  Component(g3_3, "Raft Group 3", "Leader", "Accepts writes for G3")
+}
+
+BiRel(g1_1, g1_2, "Raft RPCs", "gRPC")
+BiRel(g1_1, g1_3, "Raft RPCs", "gRPC")
+BiRel(g2_2, g2_1, "Raft RPCs", "gRPC")
+BiRel(g2_2, g2_3, "Raft RPCs", "gRPC")
+BiRel(g3_3, g3_1, "Raft RPCs", "gRPC")
+BiRel(g3_3, g3_2, "Raft RPCs", "gRPC")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 共识组管理器 / RaftGroupManager

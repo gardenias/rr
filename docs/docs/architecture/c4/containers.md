@@ -12,41 +12,43 @@ The Container diagram shows **deployable units** in an rr system — independent
 
 ## 图示 / Diagram
 
-```mermaid
-C4Container
-  title Container Diagram - rr Cluster
+```plantuml
+@startuml
+!include <C4/C4_Container.puml>
 
-  Person(developer, "Application Developer")
-  Person(operator, "Cluster Operator")
-  Person_Ext(end_user, "End User")
+title Container Diagram - rr Cluster
 
-  System_Boundary(client_side, "Client Side") {
-    Container(user_app, "User Application", "Rust + rr-client SDK", "Implements Service trait; uses RrClient with auto leader-redirect & retry")
-    Container(admin_cli, "rr-admin CLI", "Rust binary, clap + tonic", "Interactive REPL & one-shot commands for cluster administration")
-  }
+Person(developer, "Application Developer")
+Person(operator, "Cluster Operator")
+Person_Ext(end_user, "End User")
 
-  System_Boundary(cluster, "rr Cluster (N nodes)") {
-    Container(rr_node, "rr-server Node", "Rust binary built from examples/* or custom server", "Hosts multiple Raft groups, serves Client + Raft + Admin gRPC on a single port (51001 by convention) plus admin port")
-    ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-node: Raft log, state machine data, metadata, snapshots (enabled by rocks feature)")
-  }
+System_Boundary(client_side, "Client Side") {
+  Container(user_app, "User Application", "Rust + rr-client SDK", "Implements Service trait; uses RrClient with auto leader-redirect & retry")
+  Container(admin_cli, "rr-admin CLI", "Rust binary, clap + tonic", "Interactive REPL & one-shot commands for cluster administration")
+}
 
-  System_Ext(prometheus, "Prometheus", "Scrapes /metrics over HTTP")
-  System_Ext(config_store, "External ConfigProvider", "etcd / file / custom - optional in prod")
+System_Boundary(cluster, "rr Cluster (N nodes)") {
+  Container(rr_node, "rr-server Node", "Rust binary built from examples/* or custom server", "Hosts multiple Raft groups, serves Client + Raft + Admin gRPC on a single port (51001 by convention) plus admin port")
+  ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-node: Raft log, state machine data, metadata, snapshots (enabled by rocks feature)")
+}
 
-  Rel(end_user, user_app, "Sends domain requests", "Any protocol")
-  Rel(user_app, rr_node, "Submits ClientRequest, receives ClusterInfo / LeaderRedirect", "gRPC / HTTP2")
-  Rel(admin_cli, rr_node, "Queries status, triggers snapshot, transfers leader", "gRPC (AdminService)")
+System_Ext(prometheus, "Prometheus", "Scrapes /metrics over HTTP")
+System_Ext(config_store, "External ConfigProvider", "etcd / file / custom - optional in prod")
 
-  Rel(rr_node, rr_node, "Raft RPCs (AppendEntries, Vote, InstallSnapshot)", "gRPC / HTTP2")
-  Rel(rr_node, rocks, "Reads/writes log, CF-scoped", "File I/O")
-  Rel(rr_node, config_store, "Loads routing table, subscribes to changes", "ConfigProvider trait")
-  Rel(rr_node, prometheus, "Exposes metrics", "HTTP /metrics")
+Rel(end_user, user_app, "Sends domain requests", "Any protocol")
+Rel(user_app, rr_node, "Submits ClientRequest, receives ClusterInfo / LeaderRedirect", "gRPC / HTTP2")
+Rel(admin_cli, rr_node, "Queries status, triggers snapshot, transfers leader", "gRPC (AdminService)")
 
-  Rel(developer, user_app, "Builds & deploys")
-  Rel(operator, admin_cli, "Runs commands")
+Rel_U(rr_node, rr_node, "Raft RPCs (AppendEntries, Vote, InstallSnapshot)", "gRPC / HTTP2")
+Rel(rr_node, rocks, "Reads/writes log, CF-scoped", "File I/O")
+Rel(rr_node, config_store, "Loads routing table, subscribes to changes", "ConfigProvider trait")
+Rel(rr_node, prometheus, "Exposes metrics", "HTTP /metrics")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
-  UpdateRelStyle(rr_node, rr_node, $offsetX="40", $offsetY="-40")
+Rel(developer, user_app, "Builds & deploys")
+Rel(operator, admin_cli, "Runs commands")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 容器清单 / Container Inventory

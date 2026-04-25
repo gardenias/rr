@@ -12,52 +12,55 @@ sidebar_position: 6
 
 ## 图示 / Diagram
 
-```mermaid
-C4Component
-  title Component Diagram - rr-network (gRPC Transport)
+```plantuml
+@startuml
+!include <C4/C4_Component.puml>
 
-  Container_Ext(rr_client, "rr-client SDK", "Rust library", "User application")
-  Container_Ext(rr_admin, "rr-admin CLI", "Rust binary", "Operator tool")
-  Container_Ext(peer_node, "Peer rr-server Node", "Rust binary", "Other Raft members")
-  Container_Ext(raft_mgr, "RaftGroupManager (local)", "rr-raft", "Holds all local groups")
-  Container_Ext(dispatch, "ClientDispatchImpl (local)", "rr-server", "ClientDispatch trait impl")
-  Container_Ext(admin_hdl, "Admin Handlers (local)", "rr-server", "AdminService trait impl")
+title Component Diagram - rr-network (gRPC Transport)
 
-  Container_Boundary(rr_network, "rr-network") {
-    Component(proto_raft, "raft.proto → RaftService", "tonic-generated", "AppendEntries, Vote, InstallSnapshot (streaming). Bytes field carries bincode-encoded openraft types")
-    Component(proto_client, "client.proto → ClientService", "tonic-generated", "Request(ClientRequest), GetClusterInfo(Empty)")
-    Component(proto_admin, "admin.proto → AdminService", "tonic-generated", "GetNodeStatus, GetGroupStatus, TriggerSnapshot, TransferLeader, GetMetricsSummary")
+Container_Ext(rr_client, "rr-client SDK", "Rust library", "User application")
+Container_Ext(rr_admin, "rr-admin CLI", "Rust binary", "Operator tool")
+Container_Ext(peer_node, "Peer rr-server Node", "Rust binary", "Other Raft members")
+Container_Ext(raft_mgr, "RaftGroupManager (local)", "rr-raft", "Holds all local groups")
+Container_Ext(dispatch, "ClientDispatchImpl (local)", "rr-server", "ClientDispatch trait impl")
+Container_Ext(admin_hdl, "Admin Handlers (local)", "rr-server", "AdminService trait impl")
 
-    Component(rr_grpc_server, "RrGrpcServer", "rr-network::server", "Builds a tonic Server registering Raft + Client + Admin + Health on one bind addr")
-    Component(raft_svc_impl, "RaftServiceImpl", "rr-network::raft_service", "gRPC handler. Delegates to injected RaftGroupLookup trait")
-    Component(client_svc_impl, "ClientServiceImpl", "rr-network::client_service", "gRPC handler. Delegates to injected ClientDispatch trait")
+Container_Boundary(rr_network, "rr-network") {
+  Component(proto_raft, "raft.proto → RaftService", "tonic-generated", "AppendEntries, Vote, InstallSnapshot (streaming). Bytes field carries bincode-encoded openraft types")
+  Component(proto_client, "client.proto → ClientService", "tonic-generated", "Request(ClientRequest), GetClusterInfo(Empty)")
+  Component(proto_admin, "admin.proto → AdminService", "tonic-generated", "GetNodeStatus, GetGroupStatus, TriggerSnapshot, TransferLeader, GetMetricsSummary")
 
-    Component(channel_pool, "ChannelPool", "rr-network::channel_pool", "DashMap<NodeId, tonic::Channel>. Lazy creation; drops unhealthy channels")
-    Component(rr_grpc_client, "RrGrpcClient", "rr-network::client", "Wraps tonic clients for RaftService + ClientService. Retrieves channels from pool")
+  Component(rr_grpc_server, "RrGrpcServer", "rr-network::server", "Builds a tonic Server registering Raft + Client + Admin + Health on one bind addr")
+  Component(raft_svc_impl, "RaftServiceImpl", "rr-network::raft_service", "gRPC handler. Delegates to injected RaftGroupLookup trait")
+  Component(client_svc_impl, "ClientServiceImpl", "rr-network::client_service", "gRPC handler. Delegates to injected ClientDispatch trait")
 
-    Component(err_convert, "error_convert", "rr-network::error_convert", "Converts between gRPC Status ↔ RrError ↔ openraft errors. Preserves ForwardToLeader info")
-  }
+  Component(channel_pool, "ChannelPool", "rr-network::channel_pool", "DashMap<NodeId, tonic::Channel>. Lazy creation; drops unhealthy channels")
+  Component(rr_grpc_client, "RrGrpcClient", "rr-network::client", "Wraps tonic clients for RaftService + ClientService. Retrieves channels from pool")
 
-  Rel(rr_client, client_svc_impl, "Client RPCs", "gRPC")
-  Rel(rr_admin, proto_admin, "Admin RPCs", "gRPC")
-  Rel(peer_node, raft_svc_impl, "Raft RPCs", "gRPC")
+  Component(err_convert, "error_convert", "rr-network::error_convert", "Converts between gRPC Status ↔ RrError ↔ openraft errors. Preserves ForwardToLeader info")
+}
 
-  Rel(rr_grpc_server, raft_svc_impl, "Registers")
-  Rel(rr_grpc_server, client_svc_impl, "Registers")
-  Rel(rr_grpc_server, proto_admin, "Registers")
+Rel(rr_client, client_svc_impl, "Client RPCs", "gRPC")
+Rel(rr_admin, proto_admin, "Admin RPCs", "gRPC")
+Rel(peer_node, raft_svc_impl, "Raft RPCs", "gRPC")
 
-  Rel(raft_svc_impl, raft_mgr, "Via RaftGroupLookup trait")
-  Rel(client_svc_impl, dispatch, "Via ClientDispatch trait")
-  Rel(proto_admin, admin_hdl, "Delegates to handlers")
+Rel(rr_grpc_server, raft_svc_impl, "Registers")
+Rel(rr_grpc_server, client_svc_impl, "Registers")
+Rel(rr_grpc_server, proto_admin, "Registers")
 
-  Rel(rr_grpc_client, channel_pool, "Get channel for NodeId")
-  Rel(rr_grpc_client, peer_node, "RPC", "gRPC over HTTP/2")
-  Rel(channel_pool, peer_node, "TCP + HTTP/2 connection", "Lazy + reused")
+Rel(raft_svc_impl, raft_mgr, "Via RaftGroupLookup trait")
+Rel(client_svc_impl, dispatch, "Via ClientDispatch trait")
+Rel(proto_admin, admin_hdl, "Delegates to handlers")
 
-  Rel(raft_svc_impl, err_convert, "On error")
-  Rel(client_svc_impl, err_convert, "On error")
+Rel(rr_grpc_client, channel_pool, "Get channel for NodeId")
+Rel(rr_grpc_client, peer_node, "RPC", "gRPC over HTTP/2")
+Rel(channel_pool, peer_node, "TCP + HTTP/2 connection", "Lazy + reused")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
+Rel(raft_svc_impl, err_convert, "On error")
+Rel(client_svc_impl, err_convert, "On error")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## Protobuf 服务定义 / Protobuf Service Definitions

@@ -37,17 +37,35 @@ rr adopts a multi-Raft design philosophy. Unlike traditional single-Raft instanc
 
 ## 系统架构 / System Architecture
 
-```mermaid
-graph TD
-    Client[Client App] -->|gRPC| Server[rr-server / RrNode]
-    Server --> Router[rr-router / ShardRouter]
-    Server --> RaftMgr[rr-raft / RaftGroupManager]
-    Server --> Network[rr-network / gRPC Services]
-    RaftMgr -->|Multiple groups| Raft1[Raft Group 1]
-    RaftMgr -->|Multiple groups| Raft2[Raft Group N]
-    Raft1 --> Storage[rr-storage / StorageEngine]
-    Raft2 --> Storage
-    Router --> Config[rr-config / ConfigProvider]
+```plantuml
+@startuml
+!include <C4/C4_Container.puml>
+
+title Container Diagram - rr System Architecture
+
+Container(client, "Client App", "Rust + rr-client", "Application using the cluster")
+
+Container_Boundary(server, "rr-server / RrNode") {
+  Component(router, "ShardRouter", "rr-router", "Partition → group resolver")
+  Component(raft_mgr, "RaftGroupManager", "rr-raft", "Manages multiple Raft groups")
+  Component(network, "gRPC Services", "rr-network", "RaftService + ClientService + AdminService")
+  Component(raft1, "Raft Group 1", "openraft", "Independent consensus group")
+  Component(raftN, "Raft Group N", "openraft", "Independent consensus group")
+}
+
+ComponentDb(storage, "StorageEngine", "rr-storage", "Mem or RocksDB backend")
+Component(config, "ConfigProvider", "rr-config", "Routing table source")
+
+Rel(client, network, "Client RPCs", "gRPC")
+Rel(network, router, "Routes requests via")
+Rel(network, raft_mgr, "Dispatches Raft RPCs to")
+Rel(raft_mgr, raft1, "Manages", "Multiple groups")
+Rel(raft_mgr, raftN, "Manages", "Multiple groups")
+Rel(raft1, storage, "Log + SM persistence")
+Rel(raftN, storage, "Log + SM persistence")
+Rel(router, config, "Loads routing table")
+
+@enduml
 ```
 
 ## 设计哲学 / Design Philosophy

@@ -23,23 +23,55 @@ rr 采用分层架构，各个组件之间职责清晰，不存在循环依赖�
 
 rr uses a layered architecture where each component has distinct responsibilities, and no circular dependencies exist.
 
-```mermaid
-graph TD
-    rr-core --> nothing[Nothing]
-    rr-config --> rr-core
-    rr-storage --> rr-core
-    rr-raft --> rr-core
-    rr-raft --> rr-storage
-    rr-network --> rr-core
-    rr-router --> rr-core
-    rr-server --> rr-core
-    rr-server --> rr-raft
-    rr-server --> rr-network
-    rr-server --> rr-router
-    rr-server --> rr-config
-    rr-server --> rr-storage
-    rr-client --> rr-core
-    rr-client --> rr-network
+```plantuml
+@startuml
+title Crate Dependency Graph - rr Framework
+
+skinparam componentStyle rectangle
+skinparam component {
+  BackgroundColor<<foundation>> #FFF4C2
+  BackgroundColor<<infra>> #C8E0F4
+  BackgroundColor<<orchestration>> #D5E8D4
+  BackgroundColor<<app>> #F8CECC
+}
+
+package "Foundation" {
+  [rr-core] <<foundation>>
+}
+
+package "Infrastructure" {
+  [rr-config] <<infra>>
+  [rr-storage] <<infra>>
+  [rr-raft] <<infra>>
+  [rr-network] <<infra>>
+  [rr-router] <<infra>>
+}
+
+package "Orchestration" {
+  [rr-server] <<orchestration>>
+}
+
+package "Application" {
+  [rr-client] <<app>>
+}
+
+[rr-config] --> [rr-core]
+[rr-storage] --> [rr-core]
+[rr-raft] --> [rr-core]
+[rr-raft] --> [rr-storage]
+[rr-network] --> [rr-core]
+[rr-router] --> [rr-core]
+
+[rr-server] --> [rr-core]
+[rr-server] --> [rr-raft]
+[rr-server] --> [rr-network]
+[rr-server] --> [rr-router]
+[rr-server] --> [rr-config]
+[rr-server] --> [rr-storage]
+
+[rr-client] --> [rr-core]
+[rr-client] --> [rr-network]
+@enduml
 ```
 
 ## Crate 详细说明 / Crate Details

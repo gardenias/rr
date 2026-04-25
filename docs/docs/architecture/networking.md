@@ -34,23 +34,45 @@ rr's network communication is built on `tonic` (a Rust gRPC framework) and `pros
 
 ## 架构图 / Architecture Diagram
 
-```mermaid
-graph TD
-    subgraph Client Side
-        RrClient[RrClient] -->|gRPC ClientRequest| ClientServiceImpl
-    end
-    subgraph Server Side
-        RrGrpcServer -->|dispatches| RaftServiceImpl
-        RrGrpcServer -->|dispatches| ClientServiceImpl
-        RaftServiceImpl -->|RaftGroupLookup| RaftGroupManager[RaftGroupManager]
-        ClientServiceImpl -->|ClientDispatch| ClientDispatchImpl
-    end
-    subgraph Raft Networking
-        GrpcNetworkFactory -->|creates| GrpcRaftNetwork
-        GrpcRaftNetwork -->|AppendEntries/Vote/InstallSnapshot| RemoteNode[Remote Node]
-    end
-    ChannelPool -->|reuses connections| RemoteNode
-    GrpcRaftNetwork -->|uses| ChannelPool
+```plantuml
+@startuml
+!include <C4/C4_Component.puml>
+
+title Component Diagram - rr Networking Layer
+
+Container_Boundary(client_side, "Client Side") {
+  Component(rr_client, "RrClient", "rr-client", "Client SDK")
+}
+
+Container_Boundary(server_side, "Server Side") {
+  Component(grpc_server, "RrGrpcServer", "rr-network", "Hosts all gRPC services")
+  Component(raft_svc_impl, "RaftServiceImpl", "rr-network", "gRPC handler")
+  Component(client_svc_impl, "ClientServiceImpl", "rr-network", "gRPC handler")
+  Component(raft_mgr, "RaftGroupManager", "rr-raft", "Multi-group manager")
+  Component(dispatch, "ClientDispatchImpl", "rr-server", "Request dispatcher")
+}
+
+Container_Boundary(raft_net, "Raft Networking") {
+  Component(net_factory, "GrpcNetworkFactory", "rr-raft", "Per-peer network factory")
+  Component(grpc_raft_net, "GrpcRaftNetwork", "rr-raft", "Per-peer Raft RPC client")
+}
+
+Container_Ext(remote_node, "Remote Node", "rr-server", "Peer in same Raft group")
+Component(channel_pool, "ChannelPool", "rr-network", "Shared tonic Channel cache")
+
+Rel(rr_client, client_svc_impl, "gRPC ClientRequest")
+Rel(grpc_server, raft_svc_impl, "dispatches")
+Rel(grpc_server, client_svc_impl, "dispatches")
+Rel(raft_svc_impl, raft_mgr, "via RaftGroupLookup trait")
+Rel(client_svc_impl, dispatch, "via ClientDispatch trait")
+
+Rel(net_factory, grpc_raft_net, "creates")
+Rel(grpc_raft_net, remote_node, "AppendEntries / Vote / InstallSnapshot", "gRPC")
+Rel(grpc_raft_net, channel_pool, "uses")
+Rel(channel_pool, remote_node, "reuses connections", "HTTP/2")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 连接池 / ChannelPool

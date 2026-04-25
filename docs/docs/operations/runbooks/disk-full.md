@@ -121,7 +121,7 @@ After relieving disk pressure:
 
 ## Prevention / 预防
 
-- **告警** — 设置磁盘 <20% 的警告、<10% 的 ticket/page。
+- **告警** — 设置磁盘 `<20%` 的警告、`<10%` 的 ticket/page。
 - **容量预留** — RocksDB 在 compaction 期间可能瞬时占用 2× 数据大小；确保 overhead ≥ 100%。
 - **配置 tuning** — 在 `RocksConfig` 里合理设置 `max_background_jobs`（≥4）与 `level_zero_stop_trigger`。
 - **专用 volume** — `/var/lib/rr/data` 独占一个 volume，避免和日志、swap 抢空间。

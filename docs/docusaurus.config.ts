@@ -51,12 +51,6 @@ const config: Config = {
     ],
   ],
 
-  themes: ['@docusaurus/theme-mermaid'],
-
-  markdown: {
-    mermaid: true,
-  },
-
   themeConfig: {
     // Replace with your project's social card
     image: 'img/docusaurus-social-card.jpg',
@@ -92,7 +86,7 @@ const config: Config = {
           items: [
             {
               label: 'Tutorial',
-              to: '/docs/intro',
+              to: '/',
             },
           ],
         },
@@ -128,12 +122,6 @@ const config: Config = {
     prism: {
       theme: prismThemes.github,
       darkTheme: prismThemes.dracula,
-    },
-    mermaid: {
-      theme: {
-        light: 'default',
-        dark: 'dark',
-      },
     },
   } satisfies Preset.ThemeConfig,
 };

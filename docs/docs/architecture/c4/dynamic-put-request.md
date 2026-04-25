@@ -12,94 +12,95 @@ The most common execution flow in rr: a user application calls `rr-client` to is
 
 ## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
 
-```mermaid
-C4Dynamic
-  title Dynamic Diagram - Client PUT with Leader Redirect
+```plantuml
+@startuml
+!include <C4/C4_Dynamic.puml>
 
-  Container(user_app, "User Application", "Rust + rr-client", "Invokes RrClient.send_request")
+title Dynamic Diagram - Client PUT with Leader Redirect
 
-  Container_Boundary(follower, "rr-server Node A (Follower for Group 7)") {
-    Component(f_grpc, "RrGrpcServer", "rr-network", "gRPC listener")
-    Component(f_dispatch, "ClientDispatchImpl", "rr-server", "Routes client writes")
-    Component(f_router, "ShardRouter", "rr-router", "Partition → group resolver")
-  }
+Container(user_app, "User Application", "Rust + rr-client", "Invokes RrClient.send_request")
 
-  Container_Boundary(leader, "rr-server Node B (Leader for Group 7)") {
-    Component(l_grpc, "RrGrpcServer", "rr-network", "gRPC listener")
-    Component(l_dispatch, "ClientDispatchImpl", "rr-server", "Submits to local Raft")
-    Component(l_raft, "RaftGroupManager (G7)", "rr-raft", "Holds the G7 leader Raft node")
-  }
+Container_Boundary(follower, "rr-server Node A (Follower for Group 7)") {
+  Component(f_grpc, "RrGrpcServer", "rr-network", "gRPC listener")
+  Component(f_dispatch, "ClientDispatchImpl", "rr-server", "Routes client writes")
+  Component(f_router, "ShardRouter", "rr-router", "Partition → group resolver")
+}
 
-  ContainerDb_Ext(followers, "Other Followers", "Peer nodes", "Remaining Group 7 members")
+Container_Boundary(leader, "rr-server Node B (Leader for Group 7)") {
+  Component(l_grpc, "RrGrpcServer", "rr-network", "gRPC listener")
+  Component(l_dispatch, "ClientDispatchImpl", "rr-server", "Submits to local Raft")
+  Component(l_raft, "RaftGroupManager (G7)", "rr-raft", "Holds the G7 leader Raft node")
+}
 
-  Rel(user_app, f_grpc, "1. ClientRequest(partition=42, payload)", "gRPC")
-  Rel(f_grpc, f_dispatch, "2. dispatch(request)")
-  Rel(f_dispatch, f_router, "3. route(42) → (G7, leader=B)")
-  Rel(f_dispatch, user_app, "4. LeaderRedirect{node_id=B, addr=host-B:51001}", "gRPC Status")
+ContainerDb_Ext(followers, "Other Followers", "Peer nodes", "Remaining Group 7 members")
 
-  Rel(user_app, l_grpc, "5. Retry: ClientRequest (partition=42)", "gRPC")
-  Rel(l_grpc, l_dispatch, "6. dispatch(request)")
-  Rel(l_dispatch, l_raft, "7. raft.client_write(entry)")
-  Rel(l_raft, followers, "8. AppendEntries (replicate)", "gRPC")
-  Rel(l_raft, user_app, "9. ClientWriteResponse(data)", "gRPC")
+Rel(user_app, f_grpc, "1. ClientRequest(partition=42, payload)", "gRPC")
+Rel(f_grpc, f_dispatch, "2. dispatch(request)")
+Rel(f_dispatch, f_router, "3. route(42) → (G7, leader=B)")
+Rel(f_dispatch, user_app, "4. LeaderRedirect{node_id=B, addr=host-B:51001}", "gRPC Status")
 
-  UpdateRelStyle(user_app, f_grpc, $offsetY="-20")
-  UpdateRelStyle(f_dispatch, user_app, $textColor="red", $offsetX="-50")
-  UpdateRelStyle(user_app, l_grpc, $offsetY="-10")
+Rel(user_app, l_grpc, "5. Retry: ClientRequest (partition=42)", "gRPC")
+Rel(l_grpc, l_dispatch, "6. dispatch(request)")
+Rel(l_dispatch, l_raft, "7. raft.client_write(entry)")
+Rel(l_raft, followers, "8. AppendEntries (replicate)", "gRPC")
+Rel(l_raft, user_app, "9. ClientWriteResponse(data)", "gRPC")
+
+@enduml
 ```
 
 ## 详细时序图 / Detailed Sequence
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant App as User App
-    participant Client as RrClient<br/>(leader_cache, RetryConfig)
-    participant NodeA as Node A<br/>(Follower for G7)
-    participant Router as ShardRouter<br/>(on Node A)
-    participant NodeB as Node B<br/>(Leader for G7)
-    participant RaftB as RaftNode G7<br/>(on Node B)
-    participant NodeC as Node C<br/>(Follower for G7)
-    participant SM as StateMachine<br/>(on each member)
+```plantuml
+@startuml
+autonumber
+participant App as "User App"
+participant Client as "RrClient\n(leader_cache, RetryConfig)"
+participant NodeA as "Node A\n(Follower for G7)"
+participant Router as "ShardRouter\n(on Node A)"
+participant NodeB as "Node B\n(Leader for G7)"
+participant RaftB as "RaftNode G7\n(on Node B)"
+participant NodeC as "Node C\n(Follower for G7)"
+participant SM as "StateMachine\n(on each member)"
 
-    App->>Client: send_request(partition=42, payload)
+App -> Client : send_request(partition=42, payload)
 
-    Note over Client: leader_cache[42] empty → pick bootstrap addr (Node A)
+note over Client : leader_cache[42] empty → pick bootstrap addr (Node A)
 
-    Client->>NodeA: gRPC ClientRequest(partition=42, payload)
-    NodeA->>Router: route(42)
-    Router-->>NodeA: (group_id=7, leader=B, addr=host-B:51001)
+Client -> NodeA : gRPC ClientRequest(partition=42, payload)
+NodeA -> Router : route(42)
+Router --> NodeA : (group_id=7, leader=B, addr=host-B:51001)
 
-    Note over NodeA: this is not the leader
-    NodeA-->>Client: Status: ForwardToLeader{node_id=B, addr=host-B:51001}
+note over NodeA : this is not the leader
+NodeA --> Client : Status: ForwardToLeader{node_id=B, addr=host-B:51001}
 
-    Note over Client: Update leader_cache[group=7] = host-B:51001<br/>Retry counter: 1/3
+note over Client : Update leader_cache[group=7] = host-B:51001\nRetry counter: 1/3
 
-    Client->>NodeB: gRPC ClientRequest(partition=42, payload)
-    NodeB->>Router: route(42)
-    Router-->>NodeB: (group_id=7, leader=B, ...)
+Client -> NodeB : gRPC ClientRequest(partition=42, payload)
+NodeB -> Router : route(42)
+Router --> NodeB : (group_id=7, leader=B, ...)
 
-    Note over NodeB: this IS the leader
-    NodeB->>RaftB: raft.client_write(entry)
+note over NodeB : this IS the leader
+NodeB -> RaftB : raft.client_write(entry)
 
-    par Replicate to followers
-        RaftB->>NodeA: AppendEntries([entry])
-        NodeA-->>RaftB: ack (term, match_index)
-    and
-        RaftB->>NodeC: AppendEntries([entry])
-        NodeC-->>RaftB: ack (term, match_index)
-    end
+par Replicate to followers
+  RaftB -> NodeA : AppendEntries([entry])
+  NodeA --> RaftB : ack (term, match_index)
+else
+  RaftB -> NodeC : AppendEntries([entry])
+  NodeC --> RaftB : ack (term, match_index)
+end
 
-    Note over RaftB: Quorum reached (2/3) → commit_index advances
+note over RaftB : Quorum reached (2/3) → commit_index advances
 
-    RaftB->>SM: apply(entry)
-    SM-->>RaftB: Vec<u8> (app response)
+RaftB -> SM : apply(entry)
+SM --> RaftB : Vec<u8> (app response)
 
-    RaftB-->>NodeB: ClientWriteResponse(data)
-    NodeB-->>Client: gRPC ClientResponse(data)
-    Client-->>App: Ok(data)
+RaftB --> NodeB : ClientWriteResponse(data)
+NodeB --> Client : gRPC ClientResponse(data)
+Client --> App : Ok(data)
 
-    Note over Client: Next request to partition 42 goes directly to Node B
+note over Client : Next request to partition 42 goes directly to Node B
+@enduml
 ```
 
 ## 关键设计点 / Key Design Points

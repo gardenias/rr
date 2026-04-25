@@ -24,20 +24,31 @@ The rr framework employs a pluggable storage architecture, abstracting the under
 
 The storage layer connects Raft logs, the state machine, and the underlying physical storage engines.
 
-```mermaid
-graph TD
-    subgraph rr-raft
-        RrLogStorage[RrLogStorage]
-        RrStateMachine[RrStateMachine]
-    end
-    subgraph rr-storage
-        MemStorage[MemStorage]
-        RocksStorage[RocksStorage]
-    end
-    RrLogStorage -->|implements via| StorageEngine[StorageEngine trait]
-    RrStateMachine -->|delegates to| StorageEngine
-    MemStorage -->|implements| StorageEngine
-    RocksStorage -->|implements| StorageEngine
+```plantuml
+@startuml
+!include <C4/C4_Component.puml>
+
+title Component Diagram - Storage Layer
+
+Container_Boundary(raft_crate, "rr-raft") {
+  Component(log_storage, "RrLogStorage", "rr-raft::log_storage", "openraft log storage impl")
+  Component(sm, "RrStateMachine", "rr-raft::sm_adapter", "openraft state machine impl")
+}
+
+Container_Boundary(storage_crate, "rr-storage") {
+  Component(mem_storage, "MemStorage", "rr-storage::mem", "In-memory backend")
+  Component(rocks_storage, "RocksStorage", "rr-storage::rocks", "Persistent backend (rocks feature)")
+}
+
+Component(storage_trait, "StorageEngine trait", "rr-core::storage", "Abstract KV with column families")
+
+Rel(log_storage, storage_trait, "implements via")
+Rel(sm, storage_trait, "delegates to")
+Rel(mem_storage, storage_trait, "implements")
+Rel(rocks_storage, storage_trait, "implements")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## StorageEngine 接口 / StorageEngine Trait

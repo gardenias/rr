@@ -12,59 +12,62 @@ This diagram zooms into a single **rr-server node process**, showing how it asse
 
 ## 图示 / Diagram
 
-```mermaid
-C4Component
-  title Component Diagram - rr-server Node (single process)
+```plantuml
+@startuml
+!include <C4/C4_Component.puml>
 
-  Container_Ext(user_app, "User Application", "Rust + rr-client", "Embeds rr-client SDK")
-  Container_Ext(peer_node, "Peer rr-server Node", "Rust binary", "Other members of the same Raft groups")
-  Container_Ext(admin_cli, "rr-admin CLI", "Rust binary", "Operator tool")
-  ContainerDb_Ext(disk, "Local Disk", "Local filesystem", "RocksDB data dir (rocks feature)")
-  Container_Ext(config_store, "ConfigProvider Source", "etcd / memory / file", "Routing table source of truth")
+title Component Diagram - rr-server Node (single process)
 
-  Container_Boundary(node, "rr-server Node (process)") {
-    Component(rr_node, "RrNode", "rr-server::node", "Top-level orchestrator. Boots all subsystems, wires them together, holds JoinHandles, serves graceful shutdown")
-    Component(node_config, "NodeConfig", "rr-server::config", "listen_addr, admin_port, metrics_port, node_id, data_dir, feature flags")
+Container_Ext(user_app, "User Application", "Rust + rr-client", "Embeds rr-client SDK")
+Container_Ext(peer_node, "Peer rr-server Node", "Rust binary", "Other members of the same Raft groups")
+Container_Ext(admin_cli, "rr-admin CLI", "Rust binary", "Operator tool")
+ContainerDb_Ext(disk, "Local Disk", "Local filesystem", "RocksDB data dir (rocks feature)")
+Container_Ext(config_store, "ConfigProvider Source", "etcd / memory / file", "Routing table source of truth")
 
-    Component(client_dispatch, "ClientDispatchImpl", "rr-server::dispatch", "Implements ClientDispatch trait. Routes client writes to correct Raft group via ShardRouter")
-    Component(raft_lookup, "RaftGroupLookupImpl", "rr-server::lookup", "Implements RaftGroupLookup trait. Routes incoming Raft RPCs to local RaftGroupManager")
-    Component(admin_impl, "Admin Handlers", "rr-server::admin", "Implements AdminService: node status, group status, snapshots, leader transfer, metrics summary")
+Container_Boundary(node, "rr-server Node (process)") {
+  Component(rr_node, "RrNode", "rr-server::node", "Top-level orchestrator. Boots all subsystems, wires them together, holds JoinHandles, serves graceful shutdown")
+  Component(node_config, "NodeConfig", "rr-server::config", "listen_addr, admin_port, metrics_port, node_id, data_dir, feature flags")
 
-    Component(metrics_exp, "Metrics Exporter", "metrics-exporter-prometheus", "Binds HTTP /metrics endpoint when metrics_port is configured")
+  Component(client_dispatch, "ClientDispatchImpl", "rr-server::dispatch", "Implements ClientDispatch trait. Routes client writes to correct Raft group via ShardRouter")
+  Component(raft_lookup, "RaftGroupLookupImpl", "rr-server::lookup", "Implements RaftGroupLookup trait. Routes incoming Raft RPCs to local RaftGroupManager")
+  Component(admin_impl, "Admin Handlers", "rr-server::admin", "Implements AdminService: node status, group status, snapshots, leader transfer, metrics summary")
 
-    Component(grpc_server, "RrGrpcServer", "rr-network::server", "Hosts RaftService + ClientService + AdminService + tonic-health on the same tonic Server")
-    Component(raft_mgr, "RaftGroupManager", "rr-raft::group_manager", "Owns all local Raft groups; handles start/stop/init/membership")
-    Component(router, "ShardRouter", "rr-router::router", "Resolves partition_id → group_id → leader address via ConfigProvider")
-    Component(cfg_provider, "ConfigProvider", "rr-config (trait impl)", "Watches routing table; broadcasts RoutingTableChange events")
-    Component(storage, "StorageEngine", "rr-storage::mem | rr-storage::rocks", "CF-scoped KV store. Used by Raft log & state machine")
-  }
+  Component(metrics_exp, "Metrics Exporter", "metrics-exporter-prometheus", "Binds HTTP /metrics endpoint when metrics_port is configured")
 
-  Rel(user_app, grpc_server, "ClientRequest / GetClusterInfo", "gRPC")
-  Rel(peer_node, grpc_server, "AppendEntries / Vote / InstallSnapshot", "gRPC")
-  Rel(admin_cli, grpc_server, "Admin RPCs", "gRPC")
+  Component(grpc_server, "RrGrpcServer", "rr-network::server", "Hosts RaftService + ClientService + AdminService + tonic-health on the same tonic Server")
+  Component(raft_mgr, "RaftGroupManager", "rr-raft::group_manager", "Owns all local Raft groups; handles start/stop/init/membership")
+  Component(router, "ShardRouter", "rr-router::router", "Resolves partition_id → group_id → leader address via ConfigProvider")
+  Component(cfg_provider, "ConfigProvider", "rr-config (trait impl)", "Watches routing table; broadcasts RoutingTableChange events")
+  Component(storage, "StorageEngine", "rr-storage::mem | rr-storage::rocks", "CF-scoped KV store. Used by Raft log & state machine")
+}
 
-  Rel(grpc_server, client_dispatch, "Dispatches client writes")
-  Rel(grpc_server, raft_lookup, "Dispatches Raft RPCs")
-  Rel(grpc_server, admin_impl, "Dispatches admin RPCs")
+Rel(user_app, grpc_server, "ClientRequest / GetClusterInfo", "gRPC")
+Rel(peer_node, grpc_server, "AppendEntries / Vote / InstallSnapshot", "gRPC")
+Rel(admin_cli, grpc_server, "Admin RPCs", "gRPC")
 
-  Rel(rr_node, grpc_server, "Starts on listen_addr")
-  Rel(rr_node, raft_mgr, "Creates & supervises")
-  Rel(rr_node, router, "Creates & wires ConfigProvider")
-  Rel(rr_node, cfg_provider, "Subscribes to changes")
-  Rel(rr_node, metrics_exp, "Binds on metrics_port")
-  Rel(rr_node, node_config, "Reads at boot")
+Rel(grpc_server, client_dispatch, "Dispatches client writes")
+Rel(grpc_server, raft_lookup, "Dispatches Raft RPCs")
+Rel(grpc_server, admin_impl, "Dispatches admin RPCs")
 
-  Rel(client_dispatch, router, "Resolves partition → group & leader")
-  Rel(client_dispatch, raft_mgr, "raft.client_write(entry) on local leader")
-  Rel(raft_lookup, raft_mgr, "group_id → RaftNode")
-  Rel(admin_impl, raft_mgr, "Inspects & mutates groups")
+Rel(rr_node, grpc_server, "Starts on listen_addr")
+Rel(rr_node, raft_mgr, "Creates & supervises")
+Rel(rr_node, router, "Creates & wires ConfigProvider")
+Rel(rr_node, cfg_provider, "Subscribes to changes")
+Rel(rr_node, metrics_exp, "Binds on metrics_port")
+Rel(rr_node, node_config, "Reads at boot")
 
-  Rel(raft_mgr, storage, "Log + state machine persistence")
-  Rel(router, cfg_provider, "Reads RoutingTable snapshot")
-  Rel(storage, disk, "File I/O", "RocksDB (rocks feature)")
-  Rel(cfg_provider, config_store, "Loads & watches")
+Rel(client_dispatch, router, "Resolves partition → group & leader")
+Rel(client_dispatch, raft_mgr, "raft.client_write(entry) on local leader")
+Rel(raft_lookup, raft_mgr, "group_id → RaftNode")
+Rel(admin_impl, raft_mgr, "Inspects & mutates groups")
 
-  UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+Rel(raft_mgr, storage, "Log + state machine persistence")
+Rel(router, cfg_provider, "Reads RoutingTable snapshot")
+Rel(storage, disk, "File I/O", "RocksDB (rocks feature)")
+Rel(cfg_provider, config_store, "Loads & watches")
+
+LAYOUT_WITH_LEGEND()
+@enduml
 ```
 
 ## 核心组件 / Core Components

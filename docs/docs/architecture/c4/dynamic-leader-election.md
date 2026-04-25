@@ -12,81 +12,84 @@ Leader election happens **independently inside each Raft group**. When a group's
 
 ## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
 
-```mermaid
-C4Dynamic
-  title Dynamic Diagram - Raft Leader Election (Group 7)
+```plantuml
+@startuml
+!include <C4/C4_Dynamic.puml>
 
-  Container_Boundary(n1, "Node 1 (was Leader, now unreachable)") {
-    Component(n1_raft, "RaftNode G7", "rr-raft", "Lost heartbeat to followers")
-  }
+title Dynamic Diagram - Raft Leader Election (Group 7)
 
-  Container_Boundary(n2, "Node 2 (Follower → Candidate → Leader)") {
-    Component(n2_raft, "RaftNode G7", "rr-raft", "openraft core")
-    Component(n2_sm, "StateMachine G7", "rr-raft::sm_adapter", "User state machine")
-  }
+Container_Boundary(n1, "Node 1 (was Leader, now unreachable)") {
+  Component(n1_raft, "RaftNode G7", "rr-raft", "Lost heartbeat to followers")
+}
 
-  Container_Boundary(n3, "Node 3 (Follower)") {
-    Component(n3_raft, "RaftNode G7", "rr-raft", "openraft core")
-  }
+Container_Boundary(n2, "Node 2 (Follower → Candidate → Leader)") {
+  Component(n2_raft, "RaftNode G7", "rr-raft", "openraft core")
+  Component(n2_sm, "StateMachine G7", "rr-raft::sm_adapter", "User state machine")
+}
 
-  Container_Ext(cfg, "ConfigProvider", "rr-config", "Routing table source")
-  Container_Ext(client, "rr-client", "Rust library", "User application")
+Container_Boundary(n3, "Node 3 (Follower)") {
+  Component(n3_raft, "RaftNode G7", "rr-raft", "openraft core")
+}
 
-  Rel(n2_raft, n2_raft, "1. Election timeout → Candidate, term += 1")
-  Rel(n2_raft, n3_raft, "2. VoteRequest(term, last_log_idx, last_log_term)", "gRPC")
-  Rel(n2_raft, n1_raft, "3. VoteRequest (may fail - unreachable)", "gRPC")
-  Rel(n3_raft, n2_raft, "4. VoteResponse(granted=true)", "gRPC")
-  Rel(n2_raft, n2_raft, "5. Quorum (2/3) → Leader")
-  Rel(n2_raft, n3_raft, "6. AppendEntries heartbeat", "gRPC")
-  Rel(n2_raft, cfg, "7. update_leader(G7, node=2) (if configured)")
-  Rel(cfg, client, "8. ClusterInfo eventually reflects new leader", "gRPC GetClusterInfo")
+Container_Ext(cfg, "ConfigProvider", "rr-config", "Routing table source")
+Container_Ext(client, "rr-client", "Rust library", "User application")
 
-  UpdateRelStyle(n2_raft, n1_raft, $textColor="gray", $lineColor="gray")
+Rel(n2_raft, n2_raft, "1. Election timeout → Candidate, term += 1")
+Rel(n2_raft, n3_raft, "2. VoteRequest(term, last_log_idx, last_log_term)", "gRPC")
+Rel(n2_raft, n1_raft, "3. VoteRequest (may fail - unreachable)", "gRPC")
+Rel(n3_raft, n2_raft, "4. VoteResponse(granted=true)", "gRPC")
+Rel(n2_raft, n2_raft, "5. Quorum (2/3) → Leader")
+Rel(n2_raft, n3_raft, "6. AppendEntries heartbeat", "gRPC")
+Rel(n2_raft, cfg, "7. update_leader(G7, node=2) (if configured)")
+Rel(cfg, client, "8. ClusterInfo eventually reflects new leader", "gRPC GetClusterInfo")
+
+@enduml
 ```
 
 ## 详细时序图 / Detailed Sequence
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant N1 as Node 1 (Leader,<br/>then crashes)
-    participant N2 as Node 2 (Follower)
-    participant N3 as Node 3 (Follower)
-    participant Cfg as ConfigProvider
-    participant Client as rr-client<br/>(user app)
+```plantuml
+@startuml
+autonumber
+participant N1 as "Node 1 (Leader,\nthen crashes)"
+participant N2 as "Node 2 (Follower)"
+participant N3 as "Node 3 (Follower)"
+participant Cfg as "ConfigProvider"
+participant Client as "rr-client\n(user app)"
 
-    Note over N1,N3: Normal steady state: N1 sends heartbeats at interval T
-    N1->>N2: AppendEntries (empty, heartbeat)
-    N1->>N3: AppendEntries (empty, heartbeat)
-    N2-->>N1: ack
-    N3-->>N1: ack
+note over N1, N3 : Normal steady state: N1 sends heartbeats at interval T
+N1 -> N2 : AppendEntries (empty, heartbeat)
+N1 -> N3 : AppendEntries (empty, heartbeat)
+N2 --> N1 : ack
+N3 --> N1 : ack
 
-    Note over N1: 💥 N1 crashes / network partitions
+note over N1 : 💥 N1 crashes / network partitions
 
-    Note over N2: Election timeout (randomized 150-300ms)<br/>fires first on N2
-    N2->>N2: state = Candidate<br/>current_term += 1<br/>voted_for = self
-    N2->>N3: VoteRequest(term, last_log_idx, last_log_term)
-    N2->>N1: VoteRequest (connection fails — N1 down)
+note over N2 : Election timeout (randomized 150-300ms)\nfires first on N2
+N2 -> N2 : state = Candidate\ncurrent_term += 1\nvoted_for = self
+N2 -> N3 : VoteRequest(term, last_log_idx, last_log_term)
+N2 -> N1 : VoteRequest (connection fails — N1 down)
 
-    Note over N3: term > my current_term ✓<br/>log at least as up-to-date ✓<br/>haven't voted this term ✓
-    N3->>N3: current_term = N2.term<br/>voted_for = N2
-    N3-->>N2: VoteResponse(granted=true)
+note over N3 : term > my current_term ✓\nlog at least as up-to-date ✓\nhaven't voted this term ✓
+N3 -> N3 : current_term = N2.term\nvoted_for = N2
+N3 --> N2 : VoteResponse(granted=true)
 
-    Note over N2: Votes: self(1) + N3(1) = 2/3 → Quorum
-    N2->>N2: state = Leader<br/>initialize next_index[], match_index[]
+note over N2 : Votes: self(1) + N3(1) = 2/3 → Quorum
+N2 -> N2 : state = Leader\ninitialize next_index[], match_index[]
 
-    N2->>N3: AppendEntries (empty, heartbeat with new term)
-    N3-->>N2: ack
+N2 -> N3 : AppendEntries (empty, heartbeat with new term)
+N3 --> N2 : ack
 
-    Note over N2: Optional: notify ConfigProvider if configured
-    N2->>Cfg: update_leader(group=7, leader=N2)
-    Cfg-->>Cfg: broadcast RoutingTableChange::LeaderChanged
+note over N2 : Optional: notify ConfigProvider if configured
+N2 -> Cfg : update_leader(group=7, leader=N2)
+Cfg --> Cfg : broadcast RoutingTableChange::LeaderChanged
 
-    Note over Client: Next request lands on old leader (N1)<br/>→ connection fails<br/>→ client tries next bootstrap → N3<br/>→ N3 returns ForwardToLeader{N2}
-    Client->>N3: ClientRequest(partition=42)
-    N3-->>Client: ForwardToLeader{node_id=2, addr=host-2:51001}
-    Client->>N2: ClientRequest (retry)
-    N2-->>Client: ClientWriteResponse
+note over Client : Next request lands on old leader (N1)\n→ connection fails\n→ client tries next bootstrap → N3\n→ N3 returns ForwardToLeader{N2}
+Client -> N3 : ClientRequest(partition=42)
+N3 --> Client : ForwardToLeader{node_id=2, addr=host-2:51001}
+Client -> N2 : ClientRequest (retry)
+N2 --> Client : ClientWriteResponse
+@enduml
 ```
 
 ## 选举安全性保证 / Election Safety Guarantees
@@ -141,16 +144,24 @@ In rr's implementation, each group elects independently — **an election storm 
 
 When an entire node crashes, **N Raft groups simultaneously lose a member** — if that node was the leader of multiple groups, multiple elections start concurrently:
 
-```mermaid
-graph LR
-    subgraph "Node 2 crashes (was leader of G1, G3, G7)"
-        t0[t=0: Node 2 down]
-    end
-    subgraph "Concurrent elections"
-        t0 --> g1[G1: N1 → Leader]
-        t0 --> g3[G3: N3 → Leader]
-        t0 --> g7[G7: N1 → Leader]
-    end
+```plantuml
+@startuml
+left to right direction
+
+package "Node 2 crashes (was leader of G1, G3, G7)" {
+  rectangle "t=0: Node 2 down" as t0
+}
+
+package "Concurrent elections" {
+  rectangle "G1: N1 → Leader" as g1
+  rectangle "G3: N3 → Leader" as g3
+  rectangle "G7: N1 → Leader" as g7
+}
+
+t0 --> g1
+t0 --> g3
+t0 --> g7
+@enduml
 ```
 
 rr 通过 **独立的 openraft 任务和独立的随机超时**，让每个 group 的选举互不干扰。但要注意：
