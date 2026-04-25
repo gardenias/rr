@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `docs/docs/guide/consumer-guide.md` — bilingual guide for consuming rr from downstream business projects (git+tag, path, crates.io), with full `Cargo.toml` templates, the private-repo SSH setup, and `rust-version` pitfalls.
 
-## [0.2.0-rc2] — 2026-04-25
+## [0.2.0-rc2] — 2026-04-23
 
 Release candidate 2 — see tag `v0.2.0-rc2` for the exact commit. All items below are Phase 3 continuation work landed after `v0.2.0-rc1`.
 
