@@ -2,12 +2,26 @@
 //!
 //! [`ServiceStateMachineAdapter`] wraps a user's [`Service`]
 //! implementation to fulfill the framework's internal
-//! [`StateMachine`] trait. It is a thin
-//! pass-through: no interpretation of entry bytes occurs.
+//! [`StateMachine`] trait.
+//!
+//! # Snapshot framing
+//!
+//! From v0.3.0 onward, the adapter wraps the user's
+//! [`Service::snapshot`] bytes in a [`FramedSnapshot`] envelope so the
+//! framework can persist its own state (idempotency layer, command
+//! ingestor offsets) alongside the user's. On `restore()` the adapter
+//! detects the envelope by its magic prefix; bytes lacking the prefix
+//! are treated as legacy v0.2.x raw user snapshots and migrated
+//! transparently. After the next `snapshot()` call the on-disk format
+//! is the new framed envelope.
+//!
+//! `Service::handle` / `Service::snapshot` / `Service::restore` see
+//! only the user's raw bytes — the framing is invisible to them.
 
 use async_trait::async_trait;
 
 use rr_core::error::RrError;
+use rr_core::framed_snapshot::FramedSnapshot;
 use rr_core::service::Service;
 use rr_core::state_machine::StateMachine;
 use rr_core::types::{GroupId, LogIndex};
@@ -51,11 +65,34 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
     }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
-        self.service.snapshot().await
+        let user_snapshot = self.service.snapshot().await?;
+        FramedSnapshot::new(user_snapshot).encode()
     }
 
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError> {
-        self.service.restore(snapshot).await?;
+        let user_bytes: Vec<u8> = match FramedSnapshot::decode(snapshot)? {
+            Some(framed) => {
+                tracing::debug!(
+                    group_id = self.group_id,
+                    version = framed.version,
+                    has_idempotency = framed.framework_state.idempotency.is_some(),
+                    has_ingestor = framed.framework_state.ingestor.is_some(),
+                    user_bytes = framed.user_snapshot.len(),
+                    "restoring from framed snapshot envelope"
+                );
+                framed.user_snapshot
+            }
+            None => {
+                tracing::info!(
+                    group_id = self.group_id,
+                    snapshot_bytes = snapshot.len(),
+                    "restoring from legacy (pre-framed) snapshot — auto-migrating; \
+                     next snapshot() emits the new envelope"
+                );
+                snapshot.to_vec()
+            }
+        };
+        self.service.restore(&user_bytes).await?;
         metrics::counter!(
             "rr_snapshot_installs_total",
             "group_id" => self.group_id.to_string()
@@ -151,24 +188,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_delegates_to_service() {
+    async fn snapshot_emits_framed_envelope_carrying_user_bytes() {
         let svc = MockService::new(vec![]).with_snapshot(b"snap-state".to_vec());
         let adapter = ServiceStateMachineAdapter::new(7, svc);
 
-        let snap = adapter.snapshot().await.unwrap();
-        assert_eq!(snap, b"snap-state");
+        let encoded = adapter.snapshot().await.unwrap();
+        assert!(
+            encoded.starts_with(&rr_core::framed_snapshot::FRAMED_SNAPSHOT_MAGIC),
+            "snapshot bytes should start with the framed-snapshot magic prefix; \
+             got prefix {:?}",
+            &encoded[..encoded.len().min(8)]
+        );
+        let framed = rr_core::framed_snapshot::FramedSnapshot::decode(&encoded)
+            .expect("decode")
+            .expect("framed envelope present");
+        assert_eq!(framed.user_snapshot, b"snap-state");
+        assert!(framed.framework_state.idempotency.is_none());
+        assert!(framed.framework_state.ingestor.is_none());
     }
 
     #[tokio::test]
-    async fn restore_delegates_to_service() {
+    async fn restore_unwraps_framed_envelope_to_service() {
         let svc = MockService::new(vec![]);
         let snapshot_data = Arc::clone(&svc.snapshot_data);
         let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
-        adapter.restore(b"restored-state").await.unwrap();
+        let envelope = rr_core::framed_snapshot::FramedSnapshot::new(b"framed-state".to_vec())
+            .encode()
+            .unwrap();
+        adapter.restore(&envelope).await.unwrap();
 
         let data = snapshot_data.lock().await;
-        assert_eq!(*data, b"restored-state");
+        assert_eq!(*data, b"framed-state");
+    }
+
+    #[tokio::test]
+    async fn restore_legacy_unframed_bytes_passes_through_as_user_snapshot() {
+        let svc = MockService::new(vec![]);
+        let snapshot_data = Arc::clone(&svc.snapshot_data);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let legacy = b"raw v0.2.x snapshot bytes".to_vec();
+        adapter.restore(&legacy).await.unwrap();
+
+        let data = snapshot_data.lock().await;
+        assert_eq!(*data, legacy);
+    }
+
+    #[tokio::test]
+    async fn snapshot_then_restore_roundtrip_through_adapter() {
+        let svc1 = MockService::new(vec![]).with_snapshot(b"persistent-state".to_vec());
+        let adapter1 = ServiceStateMachineAdapter::new(7, svc1);
+        let bytes = adapter1.snapshot().await.unwrap();
+
+        let svc2 = MockService::new(vec![]);
+        let svc2_data = Arc::clone(&svc2.snapshot_data);
+        let mut adapter2 = ServiceStateMachineAdapter::new(7, svc2);
+        adapter2.restore(&bytes).await.unwrap();
+
+        assert_eq!(*svc2_data.lock().await, b"persistent-state");
+    }
+
+    #[tokio::test]
+    async fn restore_malformed_framed_bytes_errors() {
+        let svc = MockService::new(vec![]);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let mut bad = Vec::from(rr_core::framed_snapshot::FRAMED_SNAPSHOT_MAGIC);
+        bad.extend_from_slice(b"not bincode");
+        let err = adapter.restore(&bad).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("framed snapshot decode failed") || msg.contains("decode"),
+            "expected decode error, got: {msg}"
+        );
     }
 
     #[tokio::test]

@@ -46,6 +46,7 @@
 pub mod codec;
 pub mod config;
 pub mod error;
+pub mod framed_snapshot;
 pub mod service;
 pub mod state_machine;
 pub mod storage;
@@ -55,6 +56,10 @@ pub use codec::{BincodeCodec, Codec};
 pub use config::{ConfigProvider, RoutingTableChange};
 pub use error::{
     CodecError, ConfigError, NetworkError, RaftError, RouterError, RrError, StorageError,
+};
+pub use framed_snapshot::{
+    FramedSnapshot, FrameworkState, IdempotencyState, IngestorState, FRAMED_SNAPSHOT_MAGIC,
+    FRAMED_SNAPSHOT_VERSION,
 };
 pub use service::Service;
 pub use state_machine::StateMachine;
