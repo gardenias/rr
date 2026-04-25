@@ -5,7 +5,6 @@
 
 pub mod auth;
 pub mod channel_pool;
-pub mod client;
 pub mod error_convert;
 pub mod rate_limit;
 pub mod tls;
@@ -23,11 +22,9 @@ pub mod proto {
 }
 pub mod client_service;
 pub mod raft_service;
-pub mod server;
 
 pub use auth::{attach_bearer_token, AuthConfig, BearerInterceptor};
 pub use channel_pool::ChannelPool;
-pub use client::RrGrpcClient;
 pub use rate_limit::{RateLimitConfig, RateLimitInterceptor, RateLimiter};
 pub use tls::TlsConfig;
 pub use tracing::{
@@ -60,4 +57,3 @@ where
 pub use client_service::{ClientDispatch, ClientServiceImpl, ClientWriteResult};
 pub use error_convert::IntoStatus;
 pub use raft_service::{RaftGroupLookup, RaftServiceImpl};
-pub use server::RrGrpcServer;

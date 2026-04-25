@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `docs/docs/guide/consumer-guide.md` — bilingual guide for consuming rr from downstream business projects (git+tag, path, crates.io), with full `Cargo.toml` templates, the private-repo SSH setup, and `rust-version` pitfalls.
 
+### Removed
+- `rr_network::RrGrpcClient` and `rr_network::RrGrpcServer` (along with the `client` and `server` modules in `rr-network`). These were Phase 2 scaffolding stubs that were never wired into the production startup path — `rr_server::node::RrNode::start()` always constructs services and calls `tonic::transport::Server::builder()` directly. The stubs had 0% production coverage and only appeared in documentation. Architecture documentation describing them as the gRPC server entry point is being updated to reflect the actual lifecycle.
+
 ## [0.2.0-rc2] — 2026-04-23
 
 Release candidate 2 — see tag `v0.2.0-rc2` for the exact commit. All items below are Phase 3 continuation work landed after `v0.2.0-rc1`.
