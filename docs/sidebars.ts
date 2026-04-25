@@ -37,6 +37,7 @@ const sidebars: SidebarsConfig = {
         'guide/config-provider',
         'guide/storage-engines',
         'guide/client-sdk',
+        'guide/consumer-guide',
       ],
     },
     {
