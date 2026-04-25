@@ -1455,4 +1455,104 @@ mod tests {
 
         shutdown_all(&nodes).await;
     }
+
+    /// Verify HTTP /health, /ready, /metrics endpoints work end-to-end.
+    ///
+    /// Spawns a single-node `RrNode` with `metrics_port` set, sends real HTTP
+    /// requests via reqwest, and validates status codes + response bodies for
+    /// the three observability endpoints plus a 404 fallback. Covers the full
+    /// lifecycle of `rr_server::health::spawn_http_server` — previously this
+    /// code path had ~24% line coverage with no integration test.
+    #[tokio::test]
+    async fn test_health_endpoints_full_lifecycle() {
+        async fn pick_port() -> u16 {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            port
+        }
+
+        let metrics_port = pick_port().await;
+        let grpc_port = pick_port().await;
+
+        // Minimal single-node setup. We do not initialize Raft groups because
+        // the HTTP server lifecycle is independent of consensus state.
+        let config_provider = Arc::new(MemConfigProvider::new());
+        let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
+        let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
+
+        let config = NodeConfig::new(
+            1,
+            format!("127.0.0.1:{grpc_port}"),
+            storage,
+            provider,
+            echo_factory(),
+        )
+        .with_metrics_port(metrics_port);
+
+        let node = Arc::new(RrNode::new(config).expect("RrNode::new"));
+        node.start().await.expect("RrNode::start");
+
+        let base = format!("http://127.0.0.1:{metrics_port}");
+
+        // /health → 200 "ok\n"
+        let resp = reqwest::get(format!("{base}/health"))
+            .await
+            .expect("/health request");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "/health status");
+        assert_eq!(
+            resp.text().await.expect("/health body"),
+            "ok\n",
+            "/health body"
+        );
+
+        // /ready → 200 "ready\n" (readiness flag flipped at end of start())
+        let resp = reqwest::get(format!("{base}/ready"))
+            .await
+            .expect("/ready request");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "/ready status");
+        assert_eq!(
+            resp.text().await.expect("/ready body"),
+            "ready\n",
+            "/ready body"
+        );
+
+        // /metrics → 200 + Prometheus exposition format
+        let resp = reqwest::get(format!("{base}/metrics"))
+            .await
+            .expect("/metrics request");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK, "/metrics status");
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        assert_eq!(
+            content_type.as_deref(),
+            Some("text/plain; version=0.0.4; charset=utf-8"),
+            "/metrics content-type"
+        );
+        let body = resp.text().await.expect("/metrics body");
+        assert!(
+            body.contains("# TYPE") || body.contains("# HELP"),
+            "/metrics body should contain Prometheus exposition format markers, got: {body}"
+        );
+
+        // Unknown path → 404 "not found\n"
+        let resp = reqwest::get(format!("{base}/unknown"))
+            .await
+            .expect("/unknown request");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "/unknown status"
+        );
+        assert_eq!(
+            resp.text().await.expect("/unknown body"),
+            "not found\n",
+            "/unknown body"
+        );
+
+        node.shutdown().await.expect("RrNode::shutdown");
+    }
 }
