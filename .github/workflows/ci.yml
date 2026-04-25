@@ -201,7 +201,7 @@ jobs:
       RUSTFLAGS: "--deny=warnings"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: actions/cache@v4
         with:
           path: |
