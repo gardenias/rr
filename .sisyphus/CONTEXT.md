@@ -3,12 +3,14 @@
 > Top-level session-handoff / onboarding file. Each session should UPDATE
 > the sections below rather than rewrite. Per-phase deep dives live in
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
+> Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-04-23
+**Last updated**: 2026-04-24
 **Current phase**: Phase 3 (production-readiness) — core tasks complete, v0.2.0-rc1 shipped
 **Active plan**: `.sisyphus/plans/rr-phase3-prodready.md`
 **Latest tag**: `v0.2.0-rc1`
 **Main branch HEAD**: pushed to `origin/main`
+**Latest design discussion**: 2026-04-24 — input/output enhancements (see ADR section below)
 
 ---
 
@@ -108,6 +110,65 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft 0.9 + tonic gRPC 
   - Nightly `--branch` 触发 LLVM SIGSEGV，已知 bug；stable 的 region
     coverage 实际等价于分支覆盖率（region 粒度包含条件分支）
 
+### 2026-04-24 session — Mermaid→PlantUML 转换 + I/O 设计 ADR 三连
+
+**文档层（docs/）**:
+
+- **Mermaid → C4-PlantUML 全量转换**：`docs/docs/` 下 18 个 markdown 文件、
+  26 个 mermaid 代码块 100% 替换。7 个 C4 图（Context/Container/4×
+  Components/Deployment）用 `!include <C4/C4_*.puml>`；5 个 C4Dynamic 用
+  `C4_Dynamic`；7 个 sequenceDiagram 用 PlantUML 原生 sequence；6 个
+  graph/flowchart 视情况用 C4-PlantUML 或 PlantUML component/package 图。
+- **移除 `@docusaurus/theme-mermaid`**：`package.json` + `docusaurus.config.ts`
+  + `package-lock.json` 同步；npm install 通过，`npx tsc --noEmit` 零错误。
+- **MDX 解析错误修复**：`disk-full.md` + `metrics-reference.md` 里 `<N%` 被
+  MDX v3 当成 JSX 标签，用反引号 `` `<N%` `` 包成 inline code 解决。
+- **Broken links 清零**：~30 处 `/docs/intro` 改 `/`（`routeBasePath:'/'` +
+  `slug:/`）；`compatibility.md` 引用 `../../../CHANGELOG.md` 改 GitHub 绝对
+  链接（Docusaurus 不解析 docs 目录外的相对链接）。
+- **Broken anchor 修复**：`dynamic-snapshot-transfer.md#snapshot-handling` →
+  `#快照处理--snapshot-handling`（Docusaurus 为双语 heading 生成含中文的
+  slug）。
+- **验证**：`npm run build` 最终零警告，26 个 plantuml 代码块，0 个 mermaid。
+
+**框架能力调研（5 个并行 explore agent）**:
+
+研究了 rr 框架的 5 个维度并向用户报告：
+- 入口方法（gRPC 三服务 + HTTP 观测 + SDK + CLI；**无 Kafka/MQ**，全 grep 零命中）
+- Raft log 持久化与恢复（RocksDB 3 CF；Strict/Balanced/Fast durability；openraft 自动恢复）
+- 快照机制（`Service::snapshot/restore` trait + 64KB chunked gRPC 流式传输 + 自动 restore-on-start）
+- Req-resp 模式（纯同步 blocking；无 request-id；断链 = 状态已变更+响应丢失+无法恢复）
+- 业务输出（metrics + 结构化日志 + tracing + admin status + topology + config watch + health；**无 CDC/watch stream/state callback**）
+
+**设计讨论 → 三份 ADR（`.sisyphus/adr/`，英文，`proposed` 状态）**:
+
+- **A-0001 CommandIngestor abstraction** — trait 放 rr-core（无 MQ 依赖），
+  `rr-ingestor-kafka` 独立 crate（拒绝 NATS/Pulsar 当前范围）。Per-group 独立
+  topic（`input_<G>`），leader-exclusive 消费，offset 进每个 Raft log entry，
+  snapshot 记 `last_applied_offset`。
+- **A-0002 Snapshot consistency + recovery** — 通过 **librarian 拉 openraft
+  源码（`databendlabs/openraft @ 30dc1f0c`）**权威核对 3 条关键契约，纠正了
+  讨论中几个不准确的说法（见下方"常见陷阱"新增条目）。计划改动：
+  `DurabilityPolicy` rename + deprecate、`Service` safety invariants 文档化、
+  `rr-admin node-reset` 单节点灾难恢复命令、6 步 recovery flow 表。
+- **A-0003 Framework idempotency** — per `(request_type, request_id)` 去重，
+  `client_id` 仅做诊断字段；opt-in per request（不带 key 走原路径，兼容业务
+  自己做多字段复合幂等）；watermarks + bounded LRU，随框架 snapshot 自动
+  持久化；新增 `IdempotencyExpired` error。
+
+**Phase 4 执行计划**:
+
+- `.sisyphus/plans/rr-phase4-v030.md` — Tier 0 (docs patches) → Tier 1
+  (FramedSnapshot 基础) → Tier 2 (幂等) + Tier 3 (Kafka) 并行 → Tier 4
+  (协同+文档) → Tier 5 (release)，约 3-4 周到 v0.3.0。
+- **Momus 两轮审阅**（session `ses_2404bbf16ffeKOS5yqjsWAPjYa`）：
+  第 1 轮 NEEDS-CHANGES（3 个 issue：T3.1-3 object-safety、T2.3 文件路径错+
+  缺 dispatch、T4.4 QA 不可重复）→ 修复后第 2 轮 OKAY。
+- 主要修复：`CommandIngestor` 用双 trait（implementer 面 associated type +
+  framework 面 `DynCommandIngestor` 类型擦除 `Vec<u8>` offset）解决
+  object-safety；T2.3 补全 gRPC → dispatch → apply 三段链路；T4.4 换成 6 步
+  可重复 QA 清单。
+
 ---
 
 ## 未完成 / 需要重做 / Open Work
@@ -146,8 +207,18 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft 0.9 + tonic gRPC 
 
 ## 下一步工作 / Next Session's Candidate Work
 
-**完整计划已写入 `.sisyphus/plans/rr-phase3.1-hardening.md`**（Phase 3.1
-分 Tier 0 / Tier 1 / Tier 2，含依赖矩阵和验收标准）。
+两条平行候选线：
+
+**Line A（v0.2.0 闭环）**: `.sisyphus/plans/rr-phase3.1-hardening.md` — 清掉
+Phase 3 尾巴 + 切 v0.2.0 final + hardening。
+
+**Line B（v0.3.0 前瞻）**: `.sisyphus/plans/rr-phase4-v030.md` — 实施 3 份
+ADR（Kafka 输入 + Snapshot 契约 + 幂等）。Momus 已审阅通过。前置条件是
+v0.2.0 final 先切。所以 Line A → Line B 顺序。
+
+---
+
+**Line A 摘要（原 Phase 3.1 计划）**:
 
 摘要 / Summary:
 
@@ -179,6 +250,45 @@ cross-partition transactions、partition split/merge 等。
 
 ## 常见陷阱 / Common Pitfalls (Lessons Learned This Phase)
 
+### OpenRaft 契约纠错（2026-04-24 sourcecheck，commit `30dc1f0c`）
+
+- **OpenRaft 不保证 snapshot 原子性**——`build_snapshot()` 在 spawned task
+  里跑，和 `apply()` 并发。实现者（`Service::snapshot()`）**必须**自己用
+  lock 或 immutable view 保证原子。证据：`openraft/src/core/sm/worker.rs#L233-L237`。
+  → 已写入 ADR A-0002 §Contract 1 + `Service` trait 计划中的 Safety
+  Invariants doc。
+- **`applied_state > log_state` 不是错误**——这是 crash-after-snapshot-install
+  的正常恢复路径。OpenRaft 会 purge logs to last_applied。证据：
+  `openraft/src/storage/helper.rs#L153-L165`。→ 已写入 ADR A-0002 §Contract 3。
+- **真正的不可恢复场景**：`last_applied < committed` AND 所需 log 已经被
+  purge（`start < last_purged_log_id+1`）→ `StorageError: read_log_at_index`。
+  这才是需要 `rr-admin node-reset` 的场景。
+- **OpenRaft 允许三种 apply 策略**：persistent SM（apply 时持久化）、
+  persistent snapshot only（靠 replay）、transient SM（in-memory + 必须实现
+  `save_committed()`）。用户 `Service` 属于哪种影响恢复行为，要文档化。
+
+### Docusaurus / MDX 陷阱
+
+- **MDX v3 把 `<N%` 当 JSX 标签**，build 报 "Unexpected character"。用
+  反引号包成 inline code：`` `<20%` `` 而不是 `<20%`。
+- **Docusaurus 不解析 `docs/docs/` 目录外的相对链接**（例如
+  `../../../CHANGELOG.md`）。引用仓库根文件要用 GitHub 绝对 URL。
+- **双语 heading 的 slug 含中文**：`## 快照处理 / Snapshot Handling` 生成
+  `#快照处理--snapshot-handling`，不是 `#snapshot-handling`。引用 anchor
+  要用完整 slug。
+- **`routeBasePath: '/'` + `slug: /` 的 docs 不能用 `/docs/intro` 引用**，
+  用 `/` 或 `/intro`（看 slug 定义）。
+
+### Rust trait design 陷阱
+
+- **Trait with associated type 不是 object-safe**——`Box<dyn Trait>` 编不过
+  如果 associated type 出现在方法签名里。解法是双 trait 模式：公共 trait 保
+  implementer 的 typed 体验；framework-internal 类型擦除 trait（例如用
+  `Vec<u8>` 代替 `Self::Assoc`）提供 object-safety。ADR A-0001 的
+  `CommandIngestor` + `DynCommandIngestor` 是例子。
+
+### 原有陷阱（Phase 3）
+
 - **RocksDB fsync 不配置 = Raft 持久性被破坏**。默认行为是 WAL 不 fsync，
   节点 crash 可能丢已 commit 的条目。永远用 `DurabilityPolicy::Strict`
   除非你真的理解后果（replicated 数据 + 定期备份）。
@@ -203,6 +313,41 @@ cross-partition transactions、partition split/merge 等。
 ---
 
 ## 未来想法记录 / Future Ideas
+
+### 正式 ADR（`.sisyphus/adr/`）
+
+2026-04-24 的 design session 产出了三份 ADR，`proposed` 状态，尚未排期：
+
+- **[A-0001](./adr/A-0001-command-ingestor-abstraction.md)** —
+  `CommandIngestor` trait in rr-core + `rr-ingestor-kafka` 独立 crate。支持
+  Kafka topic 作为命令源（每 Raft group 对应独立 topic `input_<G>`，单
+  partition，leader-exclusive 消费）。offset 作为字段进入每个 Raft log
+  entry，snapshot 记 `last_applied_offset`。明确拒绝：不做 feature flag
+  方案（拒绝 librdkafka C 依赖污染 rr-core）；暂不做 NATS / Pulsar /
+  RocketMQ 支持。
+- **[A-0002](./adr/A-0002-snapshot-consistency-and-recovery.md)** —
+  Snapshot 一致性契约 + 灾难恢复路径。包含对 OpenRaft 契约的**权威核对**
+  （librarian task `bg_e072f2fd` 拉 openraft `30dc1f0c` 源码验证），纠正了
+  几条之前文档里不准确的说法：
+  1. OpenRaft **不**保证 snapshot 原子性——是实现者（`Service::snapshot()`）
+     的责任。
+  2. Recovery 流程分 6 步（install snapshot → replay logs → purge hole）。
+  3. `applied > log_state` 是**正常恢复路径**，不是错误。
+  4. `DurabilityPolicy::{Balanced, Fast}` 违反 OpenRaft durability 契约，
+     计划 rename + deprecate。
+  5. 新增 `rr-admin node-reset` 单节点灾难恢复命令。
+- **[A-0003](./adr/A-0003-framework-idempotency-layer.md)** —
+  框架级幂等：`(request_type, request_id)` 去重，`client_id` 仅作诊断字段。
+  Opt-in per request（`ClientRequest.idem_key` optional），不带 key 的请求
+  照常走原路径。watermarks + bounded LRU response cache，随框架 snapshot
+  自动持久化。新增 `IdempotencyExpired` error。和 A-0001 天然协同——Kafka
+  at-least-once + 框架 dedup = exactly-once apply。
+
+三份 ADR 关系：**A-0002 是 A-0001/A-0003 的前置**（后两者依赖框架 state
+machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-0003
+**强烈建议一起发布**（共用 `FramedSnapshot` 格式，避免多次 snapshot 迁移）。
+
+### 未成 ADR 的零散想法
 
 - **Per-caller rate limiting**（现在只有 per-service）：需要知道 caller
   identity，依赖 auth module 的 subject claim。和 audit log 的 caller
@@ -248,6 +393,19 @@ cross-partition transactions、partition split/merge 等。
 ### 本次 session 的计划
 - `.sisyphus/plans/rr-phase3-prodready.md` — Phase 3 完整 roadmap（~30 任务 × 5 wave）
 
+### 前瞻设计 ADR
+- `.sisyphus/adr/README.md` — ADR 索引 + 状态图
+- `.sisyphus/adr/A-0001-command-ingestor-abstraction.md` — Kafka 输入
+- `.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md` — 快照契约 + 灾难恢复
+- `.sisyphus/adr/A-0003-framework-idempotency-layer.md` — 框架幂等
+
+### Phase 4 执行计划
+- `.sisyphus/plans/rr-phase4-v030.md` — v0.3.0 I/O enhancements 执行计划
+  （Tier 0 docs patches + Tier 1 framework wrapper + Tier 2 idempotency +
+  Tier 3 Kafka + Tier 4 synergies + Tier 5 release，~3 周）。
+  **Momus 审阅通过**（session `ses_2404bbf16ffeKOS5yqjsWAPjYa`，两轮审阅，
+  最终 OKAY）。
+
 ### 覆盖率报告
 - `target/coverage/html/html/index.html` — HTML 可点击报告
 - `target/coverage/lcov.info` — Codecov 兼容格式
@@ -257,10 +415,22 @@ cross-partition transactions、partition split/merge 等。
 
 ## Git 状态
 
-- `main` 已 push 到 `origin/main`（最新 commit: `acc3c8b` rate limiting）
+- `main` 已 push 到 `origin/main`（最新 commit: `dd5a058` handoff context
+  + Phase 3.1 plan）
 - `v0.2.0-rc1` 标签已 push（指向 `a9edbb9`）
-- v0.2.0-rc1 之后的 8 个 commit 还没有 tag。
-- 工作树干净，无 uncommitted 改动。
+- v0.2.0-rc1 之后的 commit 还没有 tag。
+- **工作树有 uncommitted 改动**（2026-04-24 session 产出，未 commit）：
+  - 26 个 mermaid → plantuml 转换（18 个文档文件）
+  - `@docusaurus/theme-mermaid` 移除（package.json + docusaurus.config.ts
+    + package-lock.json）
+  - MDX 错误 + broken links + broken anchor 修复
+  - 新增 `.sisyphus/adr/` (4 files) + `.sisyphus/plans/rr-phase4-v030.md`
+  - `.sisyphus/CONTEXT.md` 更新（本次 session）
+  - 混入一些上轮 session 未 commit 的（`CHANGELOG.md`, `Cargo.toml`,
+    `rust-toolchain.toml`, `consumer-guide.md` — 注意不是本 session 的）
+- **下次 session 开始前需要决定**：哪些改动分组到同一 commit。建议至少 3 个
+  逻辑 commit：(1) mermaid→plantuml 迁移 + 配置清理，(2) docs build 修复
+  （MDX + links + anchor），(3) 设计文档（ADR + plan + CONTEXT 更新）。
 
 ---
 
