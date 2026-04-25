@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added (Phase 3 continuation — post v0.2.0-rc1)
+### Changed
+- `workspace.package.rust-version` bumped from `1.82` to `1.88`. This reflects the actual minimum needed to compile the transitive dependency graph (`clap_lex ≥ 1.1.0` requires `edition2024` stable in 1.85; `validit 0.2.5` uses `let_chains` stable in 1.88). Added `rust-toolchain.toml` pinning `channel = "1.88"` so contributors get the right toolchain automatically.
+
+### Added
+- `docs/docs/guide/consumer-guide.md` — bilingual guide for consuming rr from downstream business projects (git+tag, path, crates.io), with full `Cargo.toml` templates, the private-repo SSH setup, and `rust-version` pitfalls.
+
+## [0.2.0-rc2] — 2026-04-25
+
+Release candidate 2 — see tag `v0.2.0-rc2` for the exact commit. All items below are Phase 3 continuation work landed after `v0.2.0-rc1`.
+
+### Added
 
 - **HTTP observability endpoints** (`rr-server::health`): single hyper server on `metrics_port` serves `GET /health` (liveness), `GET /ready` (readiness — flipped at end of `start()`, cleared on `shutdown()`), and `GET /metrics` (Prometheus). K8s manifests + Helm chart updated to use HTTP probes instead of TCP-on-gRPC-port.
 - **Semver / API stability document** (`docs/docs/reference/compatibility.md`): explicit commitments per surface (Rust API, gRPC wire, on-disk, config, CLI, metrics), pre-1.0 Cargo convention, MSRV policy, deprecation process.
