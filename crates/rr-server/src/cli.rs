@@ -57,8 +57,10 @@ pub struct ServeArgs {
     #[arg(long = "storage", env = "RR_STORAGE")]
     pub storage: Option<String>,
 
-    /// RocksDB durability policy: `strict` (default), `balanced`, or `fast`.
-    /// Weakening this below `strict` breaks Raft's durability contract.
+    /// RocksDB durability policy: `strict` (default), `replicated_only`, or
+    /// `test_only`. Weakening this below `strict` breaks OpenRaft's durability
+    /// contract. Deprecated aliases `balanced` → `replicated_only` and
+    /// `fast` → `test_only` still parse but emit a startup warning.
     #[arg(long = "durability", env = "RR_DURABILITY")]
     pub durability: Option<String>,
 

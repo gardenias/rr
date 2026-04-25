@@ -25,6 +25,63 @@ Internally, the framework wraps your `Service` in a `ServiceStateMachineAdapter`
 | **快照 / Snapshot** | 简单的序列化与反序列化 / Simple serialize/deserialize | 复杂的日志管理 / Complex log management |
 | **使用场景 / Use when** | 大多数应用程序 / Most applications | 需要完全控制 Raft 日志 / Need full Raft log control |
 
+## 安全不变量 / Safety Invariants (MUST uphold)
+
+实现 `Service` 时必须遵守 **3 条安全不变量**——违反任何一条都会导致**静默
+数据损坏**（snapshot 不一致、follower 与 leader 偏离），且没有运行时检查
+能在数据写到生产之前 catch 住。完整契约（含 OpenRaft 源码引用）见 trait 的
+[rustdoc](https://docs.rs/rr-core/latest/rr_core/service/trait.Service.html)
+和 [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)。
+
+---
+
+Implementing `Service` requires upholding **3 safety invariants** — violating
+any of them causes **silent data corruption** (inconsistent snapshots,
+followers diverging from the leader), with no runtime check that catches
+it before the data ships. See the trait
+[rustdoc](https://docs.rs/rr-core/latest/rr_core/service/trait.Service.html)
+and [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)
+for the full contract with OpenRaft source citations.
+
+| # | Invariant | Failure mode |
+| :- | :--- | :--- |
+| 1 | `snapshot()` captures an atomically-consistent view (single lock or immutable clone) | Snapshot bytes mix old + new state; followers receive corrupt snapshot |
+| 2 | `handle()` completes all state mutations synchronously before returning | Subsequent `snapshot()` reads stale state; followers diverge |
+| 3 | `restore()` completely replaces state (no merging into existing data) | Restored node retains pre-restore data, drifts from leader's authoritative state |
+
+### 反例与正例 / Anti-pattern and Correct Pattern (Invariant 1)
+
+下面是最常见的违反 Invariant 1 的写法 vs 正确写法。两个 lock 之间出现的 gap
+window 让 `apply()` 可以提交一个更新到 `map_b` 但 `map_a` 还没——`snapshot()`
+拿到的两半就不对应同一个时刻。
+
+---
+
+The most common violation of Invariant 1 vs. the correct fix. The gap
+window between two `read()` calls lets `apply()` commit an update to
+`map_b` while `map_a` is unchanged — `snapshot()` returns two halves that
+don't correspond to the same moment.
+
+```rust
+// ❌ 错误 / Incorrect — gap window between lock acquisitions
+async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+    let a = self.map_a.read().await;
+    let snap_a = a.clone();
+    drop(a);                                // gap window opens here
+    let b = self.map_b.read().await;        // b may already reflect a write
+    let snap_b = b.clone();
+    bincode::serde::encode_to_vec(&(snap_a, snap_b), bincode::config::standard())
+        .map_err(|e| RrError::Codec(/* ... */))
+}
+
+// ✅ 正确 / Correct — single lock covers all fields
+async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+    let state = self.state.read().await;    // covers ALL fields
+    bincode::serde::encode_to_vec(&*state, bincode::config::standard())
+        .map_err(|e| RrError::Codec(/* ... */))
+}
+```
+
 ## Service Trait 定义 / Service Trait Definition
 
 以下是 `Service` trait 的核心方法（定义在 `crates/rr-core/src/service.rs`）：

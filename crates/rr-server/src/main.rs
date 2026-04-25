@@ -228,8 +228,8 @@ fn build_storage(cfg: &ResolvedConfig) -> Result<Arc<dyn StorageEngine>> {
                 let mut rocks_cfg = RocksConfig::default();
                 rocks_cfg.durability = match cfg.durability {
                     DurabilityChoice::Strict => DurabilityPolicy::Strict,
-                    DurabilityChoice::Balanced => DurabilityPolicy::Balanced,
-                    DurabilityChoice::Fast => DurabilityPolicy::Fast,
+                    DurabilityChoice::ReplicatedOnly => DurabilityPolicy::ReplicatedOnly,
+                    DurabilityChoice::TestOnly => DurabilityPolicy::TestOnly,
                 };
                 let storage = RocksStorage::open(
                     data_dir

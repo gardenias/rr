@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+Post-`v0.2.0` security hardening + Phase 4 Tier 0 docs patches. No release tag yet.
+
+### Added
+
+#### Security
+- **Production safety validation in `RrNode::new`**: refuses to start when any of five gates is violated — RaftService without TLS, RaftService without mTLS, bearer-token auth without TLS, AdminService without TLS, or AdminService without `admin_token`. All violations are aggregated into a single error so operators fix the config in one pass. Closes F2.1 + F2.2 + F2.4 from the F1-F4 review.
+- **`NodeConfig::allow_insecure` opt-in escape hatch** (CLI `--allow-insecure`, env `RR_ALLOW_INSECURE`, TOML `[node].allow_insecure`) for dev / examples / CI. When enabled, the node emits a structured `INSECURE MODE ACTIVE` warning at startup and sets the Prometheus gauge `rr_security_insecure_mode = 1` so monitoring can alert on accidental production deployment.
+- **Audit log** now covers `BearerInterceptor` and `RateLimitInterceptor` rejections: per-reject events on `rr::audit` with `op="auth"` / `op="rate_limit"`, `service` (admin/client), `peer`, and `reason`. `TransferLeader` now emits paired before/after events matching `TriggerSnapshot`. New `rr_network::audit` module with `ServiceLabel` enum and `AUDIT_TARGET` constant. Schema documented in `docs/deployment/audit-log.md`.
+- **`InstallSnapshot` byte cap**: server-side enforces a 4 GiB ceiling on the total streamed bytes (`MAX_INSTALL_SNAPSHOT_BYTES`) to block memory-exhaustion DoS from authenticated peers. Closes F2.6.
+- **`rr-admin` upgrading guide** (`docs/deployment/upgrading.md`) walks operators through the v0.2.x → strict three-phase rolling upgrade.
+
+#### Documentation
+- **`Service` and `StateMachine` trait safety invariants** (T0.1 of Phase 4 Tier 0): three rustdoc invariants documenting OpenRaft's concurrency contract — `snapshot()` atomic capture, `apply()` synchronous mutation, `restore()` complete replacement. Worked anti-pattern + correct-pattern examples. Cross-references to ADR A-0002 with OpenRaft source citations. Same content surfaces in `docs/guide/service-trait.md` and `docs/guide/state-machine-trait.md`.
+- **Storage durability policy doc** (`docs/guide/storage-engines.md`): comparison table of all three policies, the v0.3.0 rename note, and the runtime behaviour (startup `tracing::warn!` when policy is non-Strict).
+
+### Changed
+
+#### Security (breaking — gated by `allow_insecure = false` default)
+- `BearerInterceptor::new` and `BearerInterceptor::disabled` now require a `ServiceLabel` argument so audit events identify which service rejected.
+- `RateLimitInterceptor::disabled` and `RateLimitInterceptor::with_limiter` likewise require a `ServiceLabel`.
+- `config_file::resolve_auth` now returns `Result<ResolvedAuth>` and fails closed when an `*_token_env` variable is unset or empty (was: silently disabled auth — a fail-open security anti-pattern). Closes F2.3.
+- `IntoStatus` impls for `RaftError`, `StorageError`, `ConfigError`, `NetworkError`, and `CodecError` no longer leak peer addresses, openraft internals, bincode errors, file paths, or storage corruption strings to the gRPC client. Detail is logged at `warn!` / `error!` server-side; clients see one short generic message + the correct gRPC code. Closes F2.5.
+- `RaftGroupLookupImpl` and `ClientDispatchImpl` similarly sanitize all internal errors before returning to the client.
+
+#### Metrics (breaking)
+- **`rr_snapshot_installs_total`** is now correctly labelled with `group_id` (was: hardcoded `"unknown"`). Required `ServiceStateMachineAdapter::new` to take `group_id` as its first argument; updated `examples/counter`, `examples/kv-store`, README, and getting-started guide. Closes F1/T3.
+
+#### Storage (breaking — deprecation aliases preserve compilation)
+- **`DurabilityPolicy` rename** (T0.2 of Phase 4 Tier 0):
+  - `Balanced` → `ReplicatedOnly` (clearer intent — only safe with multi-node replication).
+  - `Fast` → `TestOnly` (clearer intent — never use in production).
+  - Old names remain as `#[deprecated(since = "0.3.0")]` aliases for one minor version. TOML / CLI also accept old strings (`"balanced"` / `"fast"`) but emit a deprecation warning at startup. Migrate before v0.4.0.
+- `RocksStorage::open` now emits a `tracing::warn!` at startup when the policy is not `Strict` (violates OpenRaft's durability contract per ADR A-0002).
+
+### Fixed
+
+- Error sanitization (F2.5) plus full audit trail (F2.4): the network layer no longer surfaces internal state to attackers, and unauthorized rejects are now investigatable from the audit sink.
 
 ## [0.2.0] — _TBD on tag cut_
 

@@ -1,4 +1,13 @@
-//! StateMachine trait for user-defined state machines backed by Raft consensus.
+//! [`StateMachine`] — low-level Raft state-machine trait.
+//!
+//! Implement [`StateMachine`] directly when you need full control over the
+//! framework integration: custom snapshot framing, log-index-aware apply,
+//! or interleaving with non-Raft state. Most users should prefer
+//! [`crate::service::Service`] (a higher-level trait) and let
+//! `rr_raft::ServiceStateMachineAdapter` bridge it for them.
+//!
+//! See the [`StateMachine`] trait rustdoc for the **mandatory** safety
+//! invariants every implementation must uphold.
 
 use async_trait::async_trait;
 
@@ -11,34 +20,89 @@ use crate::types::LogIndex;
 /// maintain their own serialization/deserialization. The framework handles
 /// the Raft consensus — the state machine only needs to apply entries.
 ///
+/// # Safety Invariants (MUST uphold)
+///
+/// The same three invariants as [`crate::service::Service`] apply, mapped
+/// onto the lower-level trait shape. Violating them produces **silent data
+/// corruption** with no runtime check.
+///
+/// ## Invariant 1 — `snapshot()` captures an atomically-consistent view
+///
+/// OpenRaft calls [`snapshot`](Self::snapshot) in a spawned task that runs
+/// **concurrently** with [`apply`](Self::apply). The implementer MUST hold
+/// a single lock or use immutable structures so the bytes reflect a
+/// point-in-time view of the entire state machine.
+///
+/// See `docs/docs/guide/state-machine-trait.md` for worked examples.
+///
+/// ## Invariant 2 — `apply()` completes mutations before returning
+///
+/// After [`apply`](Self::apply) returns, [`snapshot`](Self::snapshot) may
+/// be invoked immediately. Every mutation triggered by the entry must be
+/// persisted to `self` (or to whatever backing store the snapshot reads
+/// from) **before** returning. No `tokio::spawn` of write tasks; no
+/// channels-buffered writes that haven't drained.
+///
+/// Additionally, `apply` MUST update `last_applied` — the value
+/// returned by [`last_applied`](Self::last_applied) must reflect the index
+/// of the entry just applied (or higher). This is essential for OpenRaft's
+/// recovery flow; see ADR A-0002 §Contract 2.
+///
+/// ## Invariant 3 — `restore()` completely replaces state
+///
+/// When [`restore`](Self::restore) is called, every prior state must be
+/// discarded and rebuilt from the snapshot bytes. After `restore`,
+/// [`last_applied`](Self::last_applied) must reflect the snapshot's
+/// `last_log_id`, not the value before restore.
+///
 /// # Example
 /// ```rust,ignore
-/// struct KvStateMachine { store: HashMap<String, String> }
+/// struct KvStateMachine {
+///     store: HashMap<String, String>,
+///     last_applied: Option<LogIndex>,
+/// }
 ///
 /// #[async_trait::async_trait]
 /// impl StateMachine for KvStateMachine {
 ///     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
-///         // decode entry, update store, return response
+///         // decode entry, update store synchronously, set self.last_applied,
+///         // then return — no spawned writes.
 ///     }
 ///     // ...
 /// }
 /// ```
+///
+/// # See also
+///
+/// - [`crate::service::Service`] — higher-level trait that's easier to get
+///   right; the same invariants apply but the framework manages
+///   `last_applied` for you.
+/// - [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)
+///   for the OpenRaft source citations behind these invariants.
 #[async_trait]
 pub trait StateMachine: Send + Sync {
     /// Apply a committed Raft log entry to the state machine.
     ///
     /// `entry` is the raw bytes payload proposed by the client.
     /// Returns the response bytes to be sent back to the client.
+    ///
+    /// **Must satisfy [Invariant 2](Self#invariant-2--apply-completes-mutations-before-returning)**:
+    /// every mutation must be persisted to `self` synchronously before
+    /// returning, and `self.last_applied` must reflect the applied index.
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError>;
 
     /// Create a consistent snapshot of the current state.
     ///
-    /// Returns serialized snapshot bytes.
+    /// **Must satisfy [Invariant 1](Self#invariant-1--snapshot-captures-an-atomically-consistent-view)**:
+    /// the bytes must reflect a single point-in-time view; take one lock
+    /// (or one structural clone) and hold it until serialization completes.
     async fn snapshot(&self) -> Result<Vec<u8>, RrError>;
 
     /// Restore state from a snapshot.
     ///
-    /// Called when installing a snapshot received from the leader.
+    /// **Must satisfy [Invariant 3](Self#invariant-3--restore-completely-replaces-state)**:
+    /// discard all existing state, rebuild from the bytes, and update
+    /// `last_applied` to match the snapshot's `last_log_id`.
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError>;
 
     /// Return the index of the last applied log entry, if any.
@@ -49,7 +113,6 @@ pub trait StateMachine: Send + Sync {
 mod tests {
     use super::*;
 
-    // Verify StateMachine is object-safe
     #[test]
     fn test_state_machine_is_object_safe() {
         let _: Option<Box<dyn StateMachine>> = None;

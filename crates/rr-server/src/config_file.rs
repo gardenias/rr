@@ -4,7 +4,7 @@
 //! 1. CLI flags (from [`crate::cli::ServeArgs`])
 //! 2. Environment variables (already parsed into `ServeArgs` by clap)
 //! 3. TOML config file values
-//! 4. Built-in defaults (see [`ResolvedConfig::defaults`])
+//! 4. Built-in defaults (applied inside [`ResolvedConfig::resolve`])
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -160,11 +160,17 @@ pub enum StorageBackend {
 
 /// Selected durability policy string; converted to the actual enum at storage
 /// construction time (keeps this module free of the `rocks` feature gate).
+///
+/// Names changed in v0.3.0:
+/// - `"balanced"` → `"replicated_only"` (canonical) — old name still parses
+///   with a deprecation warning.
+/// - `"fast"` → `"test_only"` (canonical) — old name still parses with a
+///   deprecation warning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityChoice {
     Strict,
-    Balanced,
-    Fast,
+    ReplicatedOnly,
+    TestOnly,
 }
 
 impl ResolvedConfig {
@@ -206,18 +212,34 @@ impl ResolvedConfig {
             }
         };
 
-        let durability = match args
+        let durability_str = args
             .durability
             .as_deref()
             .or(file.storage.durability.as_deref())
-            .unwrap_or("strict")
-        {
+            .unwrap_or("strict");
+        let durability = match durability_str {
             "strict" => DurabilityChoice::Strict,
-            "balanced" => DurabilityChoice::Balanced,
-            "fast" => DurabilityChoice::Fast,
+            "replicated_only" => DurabilityChoice::ReplicatedOnly,
+            "test_only" => DurabilityChoice::TestOnly,
+            "balanced" => {
+                tracing::warn!(
+                    "durability='balanced' is deprecated; rename to 'replicated_only' \
+                     (same on-disk behavior). The old name will be removed in v0.4.0."
+                );
+                DurabilityChoice::ReplicatedOnly
+            }
+            "fast" => {
+                tracing::warn!(
+                    "durability='fast' is deprecated; rename to 'test_only' (same \
+                     on-disk behavior). The old name will be removed in v0.4.0."
+                );
+                DurabilityChoice::TestOnly
+            }
             other => {
                 return Err(anyhow!(
-                    "invalid durability '{other}': expected 'strict', 'balanced', or 'fast'"
+                    "invalid durability '{other}': expected 'strict', \
+                     'replicated_only', or 'test_only' (deprecated aliases: \
+                     'balanced' → 'replicated_only', 'fast' → 'test_only')"
                 ))
             }
         };
@@ -425,11 +447,11 @@ mod tests {
             id = 7
             listen_addr = "127.0.0.1:51001"
             metrics_port = 9100
-            
+
             [storage]
             backend = "mem"
-            durability = "balanced"
-            
+            durability = "replicated_only"
+
             [cluster]
             bootstrap = true
             "#,
@@ -440,8 +462,68 @@ mod tests {
         assert_eq!(resolved.listen_addr, "127.0.0.1:51001");
         assert_eq!(resolved.metrics_port, Some(9100));
         assert!(matches!(resolved.storage_backend, StorageBackend::Mem));
-        assert!(matches!(resolved.durability, DurabilityChoice::Balanced));
+        assert!(matches!(
+            resolved.durability,
+            DurabilityChoice::ReplicatedOnly
+        ));
         assert!(resolved.bootstrap);
+    }
+
+    #[test]
+    fn balanced_alias_resolves_to_replicated_only() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [storage]
+            durability = "balanced"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(
+            resolved.durability,
+            DurabilityChoice::ReplicatedOnly
+        ));
+    }
+
+    #[test]
+    fn fast_alias_resolves_to_test_only() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [storage]
+            durability = "fast"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(resolved.durability, DurabilityChoice::TestOnly));
+    }
+
+    #[test]
+    fn replicated_only_canonical_resolves_directly() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [storage]
+            durability = "replicated_only"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(
+            resolved.durability,
+            DurabilityChoice::ReplicatedOnly
+        ));
     }
 
     #[test]

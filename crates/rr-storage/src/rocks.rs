@@ -15,9 +15,21 @@ use rr_core::storage::{BatchOp, StorageEngine};
 
 /// Durability policy controlling when RocksDB syncs writes to disk.
 ///
-/// Choosing the wrong policy for your workload can either destroy
-/// durability (under-sync) or cripple throughput (over-sync). Read the
-/// variant docs carefully.
+/// **Only [`Strict`](Self::Strict) upholds OpenRaft's durability contract.**
+/// Every other policy violates the contract and is provided only for tests
+/// or for users who explicitly accept the risk of losing committed entries
+/// on power failure (and have replication + external backup as
+/// compensating controls). See ADR A-0002 §Contract 4.
+///
+/// Names changed in v0.3.0:
+/// - `Balanced` → [`ReplicatedOnly`](Self::ReplicatedOnly) (clearer intent
+///   — only safe with multi-node replication)
+/// - `Fast` → [`TestOnly`](Self::TestOnly) (clearer intent — never use in
+///   production)
+///
+/// The old names remain as `#[deprecated]` aliases for one minor version;
+/// they map to the new variants with the same on-disk behavior. Update
+/// your code to the new names before upgrading past v0.4.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityPolicy {
     /// **Production default.** Every committed write issues an `fsync` on
@@ -34,31 +46,52 @@ pub enum DurabilityPolicy {
     /// the durability/performance tradeoff.
     Strict,
     /// WAL is written but NOT fsynced. A process crash still recovers
-    /// (the WAL is still on disk via OS buffers); a **kernel panic or
-    /// power loss will lose the last ~seconds of writes**.
+    /// (the WAL is on disk via OS buffers); a **kernel panic or power
+    /// loss will lose the last ~seconds of writes**.
     ///
-    /// Safe only for replicated data where missing writes can be recovered
-    /// from healthy peers, AND the application tolerates brief amnesia.
-    /// Raft's safety guarantees do NOT hold with this policy — a committed
-    /// entry can be lost if a majority of nodes simultaneously power-fail.
+    /// Safe ONLY when ALL of these hold:
+    /// - replication factor ≥ 3,
+    /// - nodes on independent power domains,
+    /// - external backup captures the Raft log retention.
     ///
+    /// **Violates** OpenRaft's durability contract — Raft's safety
+    /// guarantees do NOT hold under simultaneous quorum power loss.
     /// Performance: 10–100× faster than `Strict` on typical hardware.
-    Balanced,
+    ReplicatedOnly,
     /// No sync and no WAL. Maximum throughput. **Total data loss on crash.**
     ///
-    /// Only appropriate for tests and throwaway / cache workloads.
+    /// Only appropriate for tests and throwaway / cache workloads. Never
+    /// use in production.
+    TestOnly,
+    /// Deprecated alias for [`ReplicatedOnly`](Self::ReplicatedOnly). Same
+    /// on-disk behavior; kept for one minor version to ease migration.
+    #[deprecated(since = "0.3.0", note = "renamed to `ReplicatedOnly`")]
+    Balanced,
+    /// Deprecated alias for [`TestOnly`](Self::TestOnly). Same on-disk
+    /// behavior; kept for one minor version to ease migration.
+    #[deprecated(since = "0.3.0", note = "renamed to `TestOnly`")]
     Fast,
 }
 
 impl DurabilityPolicy {
+    /// Returns true iff this policy upholds OpenRaft's durability contract
+    /// (i.e. fsyncs every committed write). Only [`Strict`](Self::Strict)
+    /// qualifies.
+    pub fn is_strict(self) -> bool {
+        matches!(self, DurabilityPolicy::Strict)
+    }
+
     /// Apply this policy to an `Options` (controls SST sync behavior).
     fn apply_to_db_options(self, opts: &mut Options) {
+        #[allow(deprecated)]
         match self {
             DurabilityPolicy::Strict => {
-                // fsync on SST file writes (safer but slower than fdatasync)
                 opts.set_use_fsync(true);
             }
-            DurabilityPolicy::Balanced | DurabilityPolicy::Fast => {
+            DurabilityPolicy::ReplicatedOnly
+            | DurabilityPolicy::TestOnly
+            | DurabilityPolicy::Balanced
+            | DurabilityPolicy::Fast => {
                 // Default: fdatasync or OS-buffer only
             }
         }
@@ -68,18 +101,31 @@ impl DurabilityPolicy {
     /// This is called on every write; constructing is cheap.
     fn write_options(self) -> WriteOptions {
         let mut opts = WriteOptions::default();
+        #[allow(deprecated)]
         match self {
             DurabilityPolicy::Strict => {
-                opts.set_sync(true); // fsync WAL after every write
+                opts.set_sync(true);
             }
-            DurabilityPolicy::Balanced => {
+            DurabilityPolicy::ReplicatedOnly | DurabilityPolicy::Balanced => {
                 // Default: WAL is written but not synced.
             }
-            DurabilityPolicy::Fast => {
-                opts.disable_wal(true); // bypass WAL entirely
+            DurabilityPolicy::TestOnly | DurabilityPolicy::Fast => {
+                opts.disable_wal(true);
             }
         }
         opts
+    }
+
+    /// Human-readable name for the policy, used in startup warnings and
+    /// metrics labels. Old aliases collapse onto their new canonical name
+    /// so dashboards stay stable across the rename.
+    fn canonical_name(self) -> &'static str {
+        #[allow(deprecated)]
+        match self {
+            DurabilityPolicy::Strict => "strict",
+            DurabilityPolicy::ReplicatedOnly | DurabilityPolicy::Balanced => "replicated_only",
+            DurabilityPolicy::TestOnly | DurabilityPolicy::Fast => "test_only",
+        }
     }
 }
 
@@ -136,7 +182,7 @@ impl RocksConfig {
     ///
     /// Uses a small block cache (8 MB), tiny write buffers (4 MB),
     /// a single background job, no compression, and
-    /// [`DurabilityPolicy::Fast`] (no WAL, no fsync) to keep the test
+    /// [`DurabilityPolicy::TestOnly`] (no WAL, no fsync) to keep the test
     /// suite fast.
     pub fn for_testing() -> Self {
         Self {
@@ -147,7 +193,7 @@ impl RocksConfig {
             compression: DBCompressionType::None,
             level_zero_slowdown_trigger: 20,
             level_zero_stop_trigger: 36,
-            durability: DurabilityPolicy::Fast,
+            durability: DurabilityPolicy::TestOnly,
         }
     }
 }
@@ -178,6 +224,15 @@ impl RocksStorage {
         tracing::info!("Opening RocksDB with config: {:?}", config);
 
         let durability = config.durability;
+        if !durability.is_strict() {
+            tracing::warn!(
+                policy = durability.canonical_name(),
+                "DurabilityPolicy is not Strict — RocksDB will skip WAL fsync. \
+                 This violates OpenRaft's durability contract and is only safe \
+                 with replication + external backup. See \
+                 docs/docs/guide/storage-engines.md for details."
+            );
+        }
 
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -695,7 +750,7 @@ mod tests {
             compression: rocksdb::DBCompressionType::None,
             level_zero_slowdown_trigger: 10,
             level_zero_stop_trigger: 20,
-            durability: DurabilityPolicy::Balanced,
+            durability: DurabilityPolicy::ReplicatedOnly,
         };
         let storage = RocksStorage::open(
             tmp.path().to_str().unwrap(),
@@ -703,7 +758,10 @@ mod tests {
             config,
         )
         .expect("should open with custom config");
-        assert_eq!(storage.durability_policy(), DurabilityPolicy::Balanced);
+        assert_eq!(
+            storage.durability_policy(),
+            DurabilityPolicy::ReplicatedOnly
+        );
         storage
             .put("state_machine", b"key1", b"value1")
             .await
@@ -723,9 +781,37 @@ mod tests {
     }
 
     #[test]
-    fn test_testing_durability_is_fast() {
+    fn test_testing_durability_is_test_only() {
         let config = RocksConfig::for_testing();
-        assert_eq!(config.durability, DurabilityPolicy::Fast);
+        assert_eq!(config.durability, DurabilityPolicy::TestOnly);
+    }
+
+    #[test]
+    fn test_deprecated_aliases_have_same_canonical_name() {
+        #[allow(deprecated)]
+        {
+            assert_eq!(
+                DurabilityPolicy::Balanced.canonical_name(),
+                DurabilityPolicy::ReplicatedOnly.canonical_name()
+            );
+            assert_eq!(
+                DurabilityPolicy::Fast.canonical_name(),
+                DurabilityPolicy::TestOnly.canonical_name()
+            );
+        }
+        assert_eq!(DurabilityPolicy::Strict.canonical_name(), "strict");
+    }
+
+    #[test]
+    fn test_only_strict_is_strict() {
+        assert!(DurabilityPolicy::Strict.is_strict());
+        assert!(!DurabilityPolicy::ReplicatedOnly.is_strict());
+        assert!(!DurabilityPolicy::TestOnly.is_strict());
+        #[allow(deprecated)]
+        {
+            assert!(!DurabilityPolicy::Balanced.is_strict());
+            assert!(!DurabilityPolicy::Fast.is_strict());
+        }
     }
 
     #[tokio::test]

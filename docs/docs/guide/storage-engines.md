@@ -126,6 +126,48 @@ let storage = RocksStorage::open(path, vec!["raft_log", "state_machine", "metada
 */
 ```
 
+### 持久性策略 / Durability Policy
+
+`RocksConfig.durability` 控制 RocksDB 何时把写入 fsync 到磁盘。**只有
+`Strict` 满足 OpenRaft 的持久性契约**——其它策略在 power loss 下可能丢失
+已 commit 的 log entry，违反 Raft 的安全保证。
+
+---
+
+`RocksConfig.durability` controls when RocksDB fsyncs writes to disk.
+**Only `Strict` upholds OpenRaft's durability contract** — any weaker
+policy can lose committed log entries on power loss, violating Raft's
+safety guarantees.
+
+| Variant | TOML / CLI string | Behaviour | Safe in production? |
+| :--- | :--- | :--- | :--- |
+| `DurabilityPolicy::Strict` | `"strict"` | fsync WAL on every write | ✅ Yes (default) |
+| `DurabilityPolicy::ReplicatedOnly` | `"replicated_only"` | WAL written, no fsync | ⚠️ Only with replication ≥ 3 + external backup |
+| `DurabilityPolicy::TestOnly` | `"test_only"` | No WAL, no fsync | ❌ Tests only |
+
+**v0.3.0 rename**: 旧名称 `Balanced` / `Fast` 被重命名为
+`ReplicatedOnly` / `TestOnly` 以更明确表达意图。旧名仍作为 `#[deprecated]`
+alias 保留一个 minor version；TOML / CLI 也接受旧字符串
+（`"balanced"` / `"fast"`）但会在启动时发出 deprecation warning。在 v0.4.0
+之前请迁移到新名。
+
+---
+
+**v0.3.0 rename**: the old variants `Balanced` / `Fast` were renamed to
+`ReplicatedOnly` / `TestOnly` for clearer intent. The old names remain as
+`#[deprecated]` aliases for one minor version; TOML / CLI still accept the
+old strings (`"balanced"` / `"fast"`) but emit a deprecation warning at
+startup. Migrate to the new names before v0.4.0.
+
+`RocksStorage::open()` 在 policy 不是 `Strict` 时也会在启动日志里发一条
+`tracing::warn!`，提醒 ops 这个节点违反了 Raft 的持久性契约。
+
+---
+
+`RocksStorage::open()` additionally emits a `tracing::warn!` at startup
+when the policy is not `Strict`, reminding operators that the node
+violates Raft's durability contract.
+
 ## 选择存储引擎 / Choosing a Storage Engine
 
 根据你的应用阶段和需求选择合适的引擎：

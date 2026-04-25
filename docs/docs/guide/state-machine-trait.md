@@ -16,6 +16,37 @@ The `StateMachine` trait is the core low-level interface for implementing state 
 
 Use this trait when you need fine-grained control over state machine behavior or prefer not to use the higher-level `Service` abstraction. It grants you full autonomy over serialization, deserialization, and state transition logic.
 
+## 安全不变量 / Safety Invariants (MUST uphold)
+
+`StateMachine` 实现必须遵守和 [`Service`](./service-trait.md) 同样的 3 条
+安全不变量——违反任何一条都会导致**静默数据损坏**。低层级 trait 多了一条
+要求：`apply()` 必须在返回前更新 `last_applied`，否则 OpenRaft 的恢复
+流程会算错 replay 起点（见 ADR A-0002 §Contract 2）。
+
+---
+
+`StateMachine` implementations must uphold the same 3 safety invariants as
+[`Service`](./service-trait.md) — violating any causes **silent data
+corruption**. The low-level trait has one additional requirement:
+`apply()` must update `last_applied` before returning, or OpenRaft's
+recovery flow will compute the wrong replay anchor (see ADR A-0002
+§Contract 2).
+
+| # | Invariant | Failure mode |
+| :- | :--- | :--- |
+| 1 | `snapshot()` captures an atomically-consistent view | Snapshot bytes mix old + new state |
+| 2 | `apply()` completes mutations synchronously AND updates `last_applied` before returning | Recovery replays wrong range; followers diverge |
+| 3 | `restore()` completely replaces state, including `last_applied` | Restored node uses stale replay anchor |
+
+完整契约见 [trait rustdoc](https://docs.rs/rr-core/latest/rr_core/state_machine/trait.StateMachine.html)
+和 [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)。
+
+---
+
+See the [trait rustdoc](https://docs.rs/rr-core/latest/rr_core/state_machine/trait.StateMachine.html)
+and [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)
+for the complete contract.
+
 ## StateMachine Trait 方法 / StateMachine Trait Methods
 
 以下是 `StateMachine` Trait 的核心定义（位于 `crates/rr-core/src/state_machine.rs`）：
