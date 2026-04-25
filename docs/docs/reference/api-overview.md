@@ -26,7 +26,7 @@ cargo doc --workspace --no-deps --open
 | `rr-config` | 配置提供者实现 / Config provider implementations | `MemConfigProvider` | `ConfigProvider` |
 | `rr-storage` | 存储引擎实现 / Storage engine implementations | `MemStorage`, `RocksStorage`, `RocksConfig` | `StorageEngine` |
 | `rr-raft` | Raft 共识引擎 / Raft consensus engine | `RaftGroupManager`, `RaftNode` | — |
-| `rr-network` | gRPC 传输层 / gRPC transport | `RrGrpcServer`, `RrGrpcClient`, `ChannelPool` | `RaftGroupLookup`, `ClientDispatch` |
+| `rr-network` | gRPC 传输层 / gRPC transport | `RaftServiceImpl`, `ClientServiceImpl`, `ChannelPool`, `BearerInterceptor`, `RateLimitInterceptor` | `RaftGroupLookup`, `ClientDispatch` |
 | `rr-router` | 分片路由 / Partition routing | `ShardRouter` | — |
 | `rr-client` | 客户端 SDK / Client SDK | `RrClient`, `RetryConfig` | — |
 | `rr-server` | 节点编排 / Node orchestration | `RrNode`, `NodeConfig` | — |

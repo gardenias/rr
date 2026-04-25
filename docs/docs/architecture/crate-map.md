@@ -82,7 +82,7 @@ package "Application" {
 | **rr-config** | 基础设施 / Infrastructure | 基于内存的配置提供者实现。 | MemConfigProvider |
 | **rr-storage** | 基础设施 / Infrastructure | 存储引擎实现（内存及 RocksDB）。 | MemStorage, RocksStorage (开启 `rocks` 特性时) |
 | **rr-raft** | 基础设施 / Infrastructure | 基于 openraft 的共识引擎。 | RaftGroupManager, RaftNode, RrTypeConfig |
-| **rr-network** | 基础设施 / Infrastructure | 基于 gRPC 的网络传输层。 | RrGrpcServer, RrGrpcClient, ChannelPool |
+| **rr-network** | 基础设施 / Infrastructure | 基于 gRPC 的网络传输层。 | RaftServiceImpl, ClientServiceImpl, ChannelPool, BearerInterceptor, RateLimitInterceptor |
 | **rr-router** | 基础设施 / Infrastructure | 处理分片到节点的路由逻辑。 | ShardRouter |
 | **rr-client** | 应用层 / Application | 客户端 SDK。 | RrClient, RetryConfig |
 | **rr-server** | 编排层 / Orchestration | 顶层节点的生命周期管理。 | RrNode, NodeConfig |
