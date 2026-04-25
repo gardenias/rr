@@ -158,6 +158,10 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<Arc<RrNode>> {
     };
     node_config = node_config.with_rate_limit(rl_config);
 
+    if cfg.allow_insecure {
+        node_config = node_config.with_allow_insecure(true);
+    }
+
     let node = Arc::new(RrNode::new(node_config)?);
     node.start().await?;
 

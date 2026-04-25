@@ -158,8 +158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_provider = Arc::new(MemConfigProvider::new());
     
     // 将 Service 包装为状态机 / Wrap Service as a StateMachine
-    let sm_factory = Box::new(|_group_id| {
-        Box::new(ServiceStateMachineAdapter::new(KvService::new()))
+    let sm_factory = Box::new(|group_id| {
+        Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
 
     let config = NodeConfig::new(

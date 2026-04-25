@@ -3,6 +3,7 @@
 //! This crate provides the generated protobuf types, gRPC service stubs,
 //! channel pooling, and error conversions for the rr distributed framework.
 
+pub mod audit;
 pub mod auth;
 pub mod channel_pool;
 pub mod error_convert;
@@ -23,6 +24,7 @@ pub mod proto {
 pub mod client_service;
 pub mod raft_service;
 
+pub use audit::{ServiceLabel, AUDIT_TARGET};
 pub use auth::{attach_bearer_token, AuthConfig, BearerInterceptor};
 pub use channel_pool::ChannelPool;
 pub use rate_limit::{RateLimitConfig, RateLimitInterceptor, RateLimiter};

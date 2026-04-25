@@ -24,11 +24,17 @@
 //!   mitigate timing attacks.
 //! - Tokens travel over the wire in plaintext inside the gRPC metadata;
 //!   **TLS must be enabled** to prevent interception. Bearer-token auth
-//!   without TLS is equivalent to no auth.
+//!   without TLS is equivalent to no auth — `RrNode` enforces this at
+//!   startup unless `allow_insecure = true`.
+//! - Every reject is emitted to the audit log
+//!   ([`crate::audit::AUDIT_TARGET`]) with peer address + reason so
+//!   operators can detect spray attacks and credential rotation needs.
 
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::{Request, Status};
+
+use crate::audit::{ServiceLabel, AUDIT_TARGET};
 
 /// Bearer-token authentication policy for rr gRPC services.
 #[derive(Debug, Clone, Default)]
@@ -50,6 +56,7 @@ impl AuthConfig {
     pub fn admin_interceptor(&self) -> BearerInterceptor {
         BearerInterceptor {
             expected: self.admin_token.clone(),
+            service: ServiceLabel::Admin,
         }
     }
 
@@ -57,6 +64,7 @@ impl AuthConfig {
     pub fn client_interceptor(&self) -> BearerInterceptor {
         BearerInterceptor {
             expected: self.client_token.clone(),
+            service: ServiceLabel::Client,
         }
     }
 
@@ -73,22 +81,34 @@ impl AuthConfig {
 
 /// A tonic interceptor that validates a bearer token in the `authorization`
 /// metadata header. `expected = None` = pass-through.
+///
+/// On reject, emits a structured audit-log event at
+/// [`crate::audit::AUDIT_TARGET`] with `op="auth"` plus peer / service /
+/// reason so SOC tooling can alert on credential abuse.
 #[derive(Debug, Clone)]
 pub struct BearerInterceptor {
     expected: Option<String>,
+    service: ServiceLabel,
 }
 
 impl BearerInterceptor {
-    /// Create a new interceptor requiring the given token.
-    pub fn new(expected_token: String) -> Self {
+    /// Create a new interceptor requiring the given token, tagged with
+    /// the service it protects (used in audit events).
+    pub fn new(service: ServiceLabel, expected_token: String) -> Self {
         Self {
             expected: Some(expected_token),
+            service,
         }
     }
 
-    /// Create a pass-through interceptor (no auth check).
-    pub fn disabled() -> Self {
-        Self { expected: None }
+    /// Create a pass-through interceptor (no auth check), still tagged
+    /// with a service label for any reject events emitted by other
+    /// layers in the chain.
+    pub fn disabled(service: ServiceLabel) -> Self {
+        Self {
+            expected: None,
+            service,
+        }
     }
 }
 
@@ -98,24 +118,41 @@ impl Interceptor for BearerInterceptor {
             return Ok(request);
         };
 
-        let header = request
-            .metadata()
-            .get("authorization")
-            .ok_or_else(|| Status::unauthenticated("missing authorization header"))?;
+        let peer = request
+            .remote_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
 
-        let header_str = header
-            .to_str()
-            .map_err(|_| Status::unauthenticated("authorization header is not valid ASCII"))?;
+        let outcome = (|| -> Result<(), &'static str> {
+            let header = request
+                .metadata()
+                .get("authorization")
+                .ok_or("missing_credential")?;
+            let header_str = header.to_str().map_err(|_| "missing_credential")?;
+            let token = header_str
+                .strip_prefix("Bearer ")
+                .ok_or("missing_credential")?;
+            if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+                return Err("invalid_credential");
+            }
+            Ok(())
+        })();
 
-        let token = header_str
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| Status::unauthenticated("authorization must be 'Bearer <token>'"))?;
-
-        if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
-            return Err(Status::unauthenticated("invalid token"));
+        match outcome {
+            Ok(()) => Ok(request),
+            Err(reason) => {
+                tracing::warn!(
+                    target: AUDIT_TARGET,
+                    op = "auth",
+                    service = self.service.as_str(),
+                    peer = %peer,
+                    result = "rejected",
+                    reason,
+                    "auth rejected"
+                );
+                Err(Status::unauthenticated("authentication failed"))
+            }
         }
-
-        Ok(request)
     }
 }
 
@@ -133,8 +170,11 @@ pub fn attach_bearer_token<T>(request: &mut Request<T>, token: &str) -> Result<(
 
 /// Constant-time byte-slice equality.
 ///
-/// Prevents token length / prefix leaks through timing side channels.
-/// See RFC 8628 §7.1 and OWASP ASVS V2.2.1.
+/// Prevents token *content* leaks through timing side channels. Note that
+/// this implementation returns early on length mismatch (a length oracle is
+/// considered acceptable: tokens are fixed-length in practice and length
+/// is not the secret). For full length-blinding, switch to the `subtle`
+/// crate.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -161,20 +201,20 @@ mod tests {
 
     #[test]
     fn disabled_interceptor_allows_missing_auth() {
-        let mut interceptor = BearerInterceptor::disabled();
+        let mut interceptor = BearerInterceptor::disabled(ServiceLabel::Admin);
         assert!(interceptor.call(req_with_auth(None)).is_ok());
     }
 
     #[test]
     fn enabled_interceptor_rejects_missing_auth() {
-        let mut interceptor = BearerInterceptor::new("secret".into());
+        let mut interceptor = BearerInterceptor::new(ServiceLabel::Admin, "secret".into());
         let err = interceptor.call(req_with_auth(None)).unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]
     fn enabled_interceptor_rejects_wrong_token() {
-        let mut interceptor = BearerInterceptor::new("secret".into());
+        let mut interceptor = BearerInterceptor::new(ServiceLabel::Admin, "secret".into());
         let err = interceptor
             .call(req_with_auth(Some("Bearer wrong")))
             .unwrap_err();
@@ -183,7 +223,7 @@ mod tests {
 
     #[test]
     fn enabled_interceptor_rejects_bad_scheme() {
-        let mut interceptor = BearerInterceptor::new("secret".into());
+        let mut interceptor = BearerInterceptor::new(ServiceLabel::Admin, "secret".into());
         let err = interceptor
             .call(req_with_auth(Some("Basic dXNlcjpwYXNz")))
             .unwrap_err();
@@ -192,8 +232,26 @@ mod tests {
 
     #[test]
     fn enabled_interceptor_accepts_correct_token() {
-        let mut interceptor = BearerInterceptor::new("secret".into());
+        let mut interceptor = BearerInterceptor::new(ServiceLabel::Admin, "secret".into());
         assert!(interceptor.call(req_with_auth(Some("Bearer secret"))).is_ok());
+    }
+
+    #[test]
+    fn rejected_message_does_not_distinguish_failure_modes() {
+        // Information-leak hardening: external clients see one generic
+        // message regardless of which auth check tripped. Detail goes
+        // only to the audit log (verified separately via tracing test).
+        let mut interceptor = BearerInterceptor::new(ServiceLabel::Admin, "secret".into());
+        let missing_msg = interceptor.call(req_with_auth(None)).unwrap_err();
+        let scheme_msg = interceptor
+            .call(req_with_auth(Some("Basic abc")))
+            .unwrap_err();
+        let invalid_msg = interceptor
+            .call(req_with_auth(Some("Bearer wrong")))
+            .unwrap_err();
+        assert_eq!(missing_msg.message(), "authentication failed");
+        assert_eq!(scheme_msg.message(), "authentication failed");
+        assert_eq!(invalid_msg.message(), "authentication failed");
     }
 
     #[test]

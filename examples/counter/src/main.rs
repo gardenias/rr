@@ -242,8 +242,8 @@ async fn run_demo() -> Result<()> {
 
     let storage_engine: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
 
-    let sm_factory = Box::new(|_group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(CounterService::new()))
+    let sm_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
+        Box::new(ServiceStateMachineAdapter::new(group_id, CounterService::new()))
     });
 
     let config = NodeConfig::new(
@@ -339,8 +339,8 @@ async fn run_node(cli: CliConfig) -> Result<()> {
 
     // ── Build RaftGroupManager with real gRPC network ───────────────────────
     let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
-    let sm_factory = Box::new(|_group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(CounterService::new()))
+    let sm_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
+        Box::new(ServiceStateMachineAdapter::new(group_id, CounterService::new()))
     });
 
     let mgr = Arc::new(RaftGroupManager::new_with_network(
@@ -356,8 +356,8 @@ async fn run_node(cli: CliConfig) -> Result<()> {
 
     // ── Build and start RrNode ──────────────────────────────────────────────
     let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
-    let dummy_factory = Box::new(|_group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(CounterService::new()))
+    let dummy_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
+        Box::new(ServiceStateMachineAdapter::new(group_id, CounterService::new()))
     });
 
     let config = NodeConfig::new(
@@ -369,7 +369,8 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     )
     .with_group_manager(Arc::clone(&mgr))
     .with_raft_lookup(lookup)
-    .with_client_dispatch(dispatch);
+    .with_client_dispatch(dispatch)
+    .with_allow_insecure(true);
 
     let node = Arc::new(RrNode::new(config)?);
     node.start().await?;

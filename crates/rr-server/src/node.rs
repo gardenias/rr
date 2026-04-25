@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use metrics::counter;
+use metrics::{counter, gauge};
 use tokio::sync::{watch, Mutex};
 use tracing::{info, instrument, warn};
 
@@ -27,6 +27,85 @@ use rr_router::router::ShardRouter;
 use crate::admin::AdminServiceImpl;
 use crate::config::NodeConfig;
 use crate::health::{spawn_http_server, ReadinessFlag};
+
+/// Validate the production security invariants. Returns `Err` describing
+/// every gate that is violated unless `config.allow_insecure` opts out.
+///
+/// Aggregates ALL violations into a single error message so operators
+/// fix the config in one pass rather than chasing them one at a time.
+fn validate_security_invariants(config: &NodeConfig) -> Result<(), RrError> {
+    if config.allow_insecure {
+        return Ok(());
+    }
+
+    let raft_enabled = config.raft_lookup.is_some();
+    let admin_enabled = config.admin_port.is_some();
+    let tls_enabled = config.tls_config.is_some();
+    let auth_required = config.auth_config.admin_required() || config.auth_config.client_required();
+
+    let mut violations: Vec<&'static str> = Vec::new();
+
+    if raft_enabled && !tls_enabled {
+        violations.push(
+            "RaftService is enabled but TLS is not configured. Inter-node Raft RPCs \
+             must run over TLS so peer identity is established at the transport layer.",
+        );
+    }
+
+    if raft_enabled
+        && tls_enabled
+        && !config
+            .tls_config
+            .as_ref()
+            .map(|t| t.require_client_cert)
+            .unwrap_or(false)
+    {
+        violations.push(
+            "RaftService is enabled with TLS but tls.require_client_cert = false. \
+             RaftService has no bearer-token path; mTLS is the ONLY peer-identity \
+             check, so require_client_cert must be true.",
+        );
+    }
+
+    if auth_required && !tls_enabled {
+        violations.push(
+            "Bearer-token auth is configured (admin_token or client_token) but TLS \
+             is not. Tokens would travel in plaintext gRPC metadata.",
+        );
+    }
+
+    if admin_enabled && !tls_enabled {
+        violations.push(
+            "AdminService is enabled but TLS is not configured. AdminService \
+             exposes leadership transfer and snapshot triggering — running over \
+             plaintext is a denial-of-service vector.",
+        );
+    }
+
+    if admin_enabled && config.auth_config.admin_token.is_none() {
+        violations.push(
+            "AdminService is enabled but admin_token is not set. Anyone reaching \
+             the admin port can transfer leadership or trigger snapshots; this \
+             is a cluster-wide DoS vector.",
+        );
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = String::from(
+        "rr-server refuses to start: production safety invariants violated. \
+         Either fix the configuration below, or pass --allow-insecure / \
+         set RR_ALLOW_INSECURE=1 / set [node].allow_insecure=true in the TOML \
+         to opt out (DEV ONLY — see NodeConfig::allow_insecure docs).\n\nViolations:",
+    );
+    for v in &violations {
+        msg.push_str("\n  - ");
+        msg.push_str(v);
+    }
+    Err(RrError::Config(ConfigError::InvalidConfig(msg)))
+}
 
 /// The main node lifecycle manager.
 ///
@@ -84,6 +163,25 @@ impl RrNode {
             )));
         }
 
+        validate_security_invariants(&config)?;
+
+        if config.allow_insecure {
+            warn!(
+                node_id = config.node_id,
+                listen_addr = %config.listen_addr,
+                raft_service_enabled = config.raft_lookup.is_some(),
+                admin_service_enabled = config.admin_port.is_some(),
+                tls_enabled = config.tls_config.is_some(),
+                admin_auth_required = config.auth_config.admin_required(),
+                client_auth_required = config.auth_config.client_required(),
+                "INSECURE MODE ACTIVE — production safety gates bypassed. Do NOT \
+                 run this configuration in production. See NodeConfig::allow_insecure \
+                 for the full list of bypassed checks. Set --allow-insecure=false \
+                 (or remove the flag) and configure TLS + auth + admin_token to \
+                 disable insecure mode."
+            );
+        }
+
         let prom_handle = if config.metrics_port.is_some() {
             let (recorder, _exporter_handle) = metrics_exporter_prometheus::PrometheusBuilder::new()
                 .build()
@@ -91,6 +189,8 @@ impl RrNode {
             let handle = recorder.handle();
             let _ = metrics::set_global_recorder(recorder);
             info!("Prometheus recorder installed (metrics served via HTTP observability port)");
+            gauge!("rr_security_insecure_mode")
+                .set(if config.allow_insecure { 1.0 } else { 0.0 });
             Some(handle)
         } else {
             None
@@ -562,9 +662,75 @@ mod tests {
     use rr_core::error::RrError;
     use rr_core::state_machine::StateMachine;
     use rr_core::storage::StorageEngine;
-    use rr_core::types::{LogIndex, PartitionConfig};
+    use rr_core::types::{GroupId, LogIndex, PartitionConfig};
+    use rr_network::auth::AuthConfig;
+    use rr_network::client_service::{ClientDispatch, ClientWriteResult};
+    use rr_network::proto::client::GroupInfo;
+    use rr_network::raft_service::RaftGroupLookup;
+    use rr_network::tls::TlsConfig;
     use rr_raft::group_manager::StateMachineFactory;
     use rr_storage::mem::MemStorage;
+    use std::path::PathBuf;
+
+    struct DummyRaftLookup;
+
+    #[async_trait]
+    impl RaftGroupLookup for DummyRaftLookup {
+        async fn append_entries(
+            &self,
+            _: GroupId,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn vote(&self, _: GroupId, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn install_snapshot(
+            &self,
+            _: GroupId,
+            _: Vec<u8>,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+    }
+
+    struct DummyClientDispatch;
+
+    #[async_trait]
+    impl ClientDispatch for DummyClientDispatch {
+        async fn submit_write(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+        ) -> Result<ClientWriteResult, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+    }
+
+    fn tls_without_mtls() -> TlsConfig {
+        TlsConfig {
+            cert_path: PathBuf::from("/tmp/cert.pem"),
+            key_path: PathBuf::from("/tmp/key.pem"),
+            ca_path: None,
+            require_client_cert: false,
+            domain_name: None,
+        }
+    }
+
+    fn tls_with_mtls() -> TlsConfig {
+        TlsConfig {
+            cert_path: PathBuf::from("/tmp/cert.pem"),
+            key_path: PathBuf::from("/tmp/key.pem"),
+            ca_path: Some(PathBuf::from("/tmp/ca.pem")),
+            require_client_cert: true,
+            domain_name: None,
+        }
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -784,6 +950,117 @@ mod tests {
         );
 
         node.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn validate_security_raft_without_tls_rejects() {
+        let cfg = make_config(1, "127.0.0.1:50100")
+            .with_raft_lookup(Arc::new(DummyRaftLookup));
+        let err = RrNode::new(cfg).err().expect("must reject raft without tls");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("RaftService") && msg.contains("TLS"),
+            "expected RaftService+TLS error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_raft_without_mtls_rejects() {
+        let cfg = make_config(1, "127.0.0.1:50101")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_tls(tls_without_mtls());
+        let err = RrNode::new(cfg).err().expect("must reject raft without mtls");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("require_client_cert"),
+            "expected require_client_cert error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_auth_without_tls_rejects() {
+        let cfg = make_config(1, "127.0.0.1:50102").with_auth(AuthConfig {
+            admin_token: Some("x".into()),
+            client_token: None,
+        });
+        let err = RrNode::new(cfg).err().expect("must reject bearer auth without tls");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Bearer-token") && msg.contains("TLS"),
+            "expected bearer+TLS error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_admin_without_tls_rejects() {
+        let cfg = make_config(1, "127.0.0.1:50103")
+            .with_admin_port(9999)
+            .with_auth(AuthConfig {
+                admin_token: Some("x".into()),
+                client_token: None,
+            });
+        let err = RrNode::new(cfg).err().expect("must reject admin port without tls");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AdminService") && msg.contains("TLS"),
+            "expected AdminService+TLS error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_admin_without_token_rejects() {
+        let cfg = make_config(1, "127.0.0.1:50104")
+            .with_admin_port(9999)
+            .with_tls(tls_with_mtls());
+        let err = RrNode::new(cfg).err().expect("must reject admin port without token");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("admin_token"),
+            "expected admin_token error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_full_strict_path_passes() {
+        let cfg = make_config(1, "127.0.0.1:50105")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_client_dispatch(Arc::new(DummyClientDispatch))
+            .with_admin_port(9999)
+            .with_tls(tls_with_mtls())
+            .with_auth(AuthConfig {
+                admin_token: Some("admin-secret".into()),
+                client_token: Some("client-secret".into()),
+            });
+        let _node = RrNode::new(cfg).expect("strict + correct config must validate");
+    }
+
+    #[test]
+    fn validate_security_allow_insecure_bypasses_all() {
+        let cfg = make_config(1, "127.0.0.1:50106")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_admin_port(9999)
+            .with_allow_insecure(true);
+        let _node = RrNode::new(cfg).expect("allow_insecure=true must bypass validation");
+    }
+
+    #[test]
+    fn validate_security_minimal_dev_config_still_passes() {
+        let _node = RrNode::new(make_config(1, "127.0.0.1:50107"))
+            .expect("library users with no raft/admin should not be forced to TLS");
+    }
+
+    #[test]
+    fn validate_security_aggregates_all_violations() {
+        let cfg = make_config(1, "127.0.0.1:50108")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_admin_port(9999);
+        let err = RrNode::new(cfg).err().expect("must aggregate violations");
+        let msg = err.to_string();
+        assert!(msg.contains("RaftService"), "missing raft violation: {msg}");
+        assert!(
+            msg.contains("AdminService"),
+            "missing admin violation: {msg}"
+        );
     }
 
     #[tokio::test]

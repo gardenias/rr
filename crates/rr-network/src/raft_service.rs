@@ -20,6 +20,17 @@ use crate::proto::raft::{
     VoteResponse,
 };
 
+/// Hard cap on the total number of bytes accepted across all chunks of a
+/// single `InstallSnapshot` stream. Prevents an authenticated peer from
+/// exhausting node memory by streaming an unbounded snapshot.
+///
+/// Snapshots in rr are application state plus framework metadata. Even
+/// large state machines (millions of keys) typically serialize to a few
+/// hundred megabytes; 4 GiB is a generous ceiling. Operators with
+/// genuinely larger snapshots should refactor toward chunked apply
+/// (out of scope for this protection).
+pub const MAX_INSTALL_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
 /// Trait for dispatching Raft RPCs to the correct group.
 ///
 /// All payloads are raw bytes (bincode-serialized openraft messages).
@@ -118,9 +129,24 @@ impl raft_service_server::RaftService for RaftServiceImpl {
     ) -> Result<tonic::Response<SnapshotResponse>, tonic::Status> {
         let mut stream = request.into_inner();
         let mut chunks: Vec<SnapshotChunk> = Vec::new();
+        let mut total_bytes: usize = 0;
 
         while let Some(chunk) = stream.next().await {
-            chunks.push(chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?);
+            let chunk =
+                chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?;
+            total_bytes = total_bytes.saturating_add(chunk.data.len());
+            if total_bytes > MAX_INSTALL_SNAPSHOT_BYTES {
+                tracing::error!(
+                    group_id = chunk.group_id,
+                    total_bytes,
+                    cap = MAX_INSTALL_SNAPSHOT_BYTES,
+                    "install_snapshot stream exceeded byte cap; aborting (DoS mitigation)"
+                );
+                return Err(tonic::Status::resource_exhausted(
+                    "install_snapshot stream exceeded server byte cap",
+                ));
+            }
+            chunks.push(chunk);
         }
 
         if chunks.is_empty() {
@@ -133,17 +159,16 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         tracing::debug!(
             group_id,
             num_chunks = chunks.len(),
+            total_bytes,
             "install_snapshot RPC received"
         );
 
-        // Find the final chunk (done == true) and extract metadata from it.
         let final_chunk = chunks.iter().find(|c| c.done).ok_or_else(|| {
             tonic::Status::invalid_argument("no final chunk (done=true) in snapshot stream")
         })?;
         let metadata = final_chunk.metadata.clone();
 
-        // Concatenate all data chunks.
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(total_bytes);
         for chunk in &chunks {
             data.extend_from_slice(&chunk.data);
         }

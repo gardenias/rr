@@ -42,6 +42,10 @@ pub struct NodeSection {
     pub data_dir: Option<PathBuf>,
     pub admin_port: Option<u16>,
     pub metrics_port: Option<u16>,
+    /// DANGEROUS — bypass production security validation. Dev/CI only.
+    /// See `NodeConfig::allow_insecure` rustdoc for the full list of
+    /// gates that get bypassed.
+    pub allow_insecure: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -118,6 +122,8 @@ pub struct ResolvedConfig {
     pub tls: Option<ResolvedTls>,
     pub auth: ResolvedAuth,
     pub rate_limit: ResolvedRateLimit,
+    /// DANGEROUS — see `NodeConfig::allow_insecure`.
+    pub allow_insecure: bool,
 }
 
 /// Resolved rate-limit settings. All fields default to `None` = unlimited.
@@ -244,12 +250,13 @@ impl ResolvedConfig {
         }
 
         let tls = resolve_tls(args, &file.tls)?;
-        let auth = resolve_auth(&file.auth);
+        let auth = resolve_auth(&file.auth)?;
         let rate_limit = ResolvedRateLimit {
             admin_rps: args.admin_rps.or(file.rate_limit.admin_rps),
             client_rps: args.client_rps.or(file.rate_limit.client_rps),
             burst: args.rate_limit_burst.or(file.rate_limit.burst),
         };
+        let allow_insecure = args.allow_insecure || file.node.allow_insecure.unwrap_or(false);
 
         Ok(Self {
             node_id,
@@ -265,6 +272,7 @@ impl ResolvedConfig {
             tls,
             auth,
             rate_limit,
+            allow_insecure,
         })
     }
 
@@ -277,20 +285,37 @@ impl ResolvedConfig {
     }
 }
 
-fn resolve_auth(file: &AuthSection) -> ResolvedAuth {
-    let admin_token = file
-        .admin_token_env
-        .as_ref()
-        .and_then(|var| std::env::var(var).ok())
-        .filter(|s| !s.is_empty());
-    let client_token = file
-        .client_token_env
-        .as_ref()
-        .and_then(|var| std::env::var(var).ok())
-        .filter(|s| !s.is_empty());
-    ResolvedAuth {
+fn resolve_auth(file: &AuthSection) -> Result<ResolvedAuth> {
+    let admin_token = match &file.admin_token_env {
+        Some(var) => Some(read_token_env(var, "admin")?),
+        None => None,
+    };
+    let client_token = match &file.client_token_env {
+        Some(var) => Some(read_token_env(var, "client")?),
+        None => None,
+    };
+    Ok(ResolvedAuth {
         admin_token,
         client_token,
+    })
+}
+
+fn read_token_env(var_name: &str, role: &str) -> Result<String> {
+    match std::env::var(var_name) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        Ok(_) => Err(anyhow!(
+            "auth.{role}_token_env points to environment variable '{var_name}' \
+             which is set but EMPTY. Refusing to start with an empty token: this would \
+             silently disable {role} auth (fail-open is a security anti-pattern). \
+             Set {var_name}=<non-empty-secret>, or remove auth.{role}_token_env from \
+             the config to explicitly disable {role} auth."
+        )),
+        Err(_) => Err(anyhow!(
+            "auth.{role}_token_env references environment variable '{var_name}' \
+             which is NOT SET. Refusing to start: this would silently disable {role} \
+             auth (fail-open). Either set {var_name}=<secret>, or remove \
+             auth.{role}_token_env from the config to explicitly disable {role} auth."
+        )),
     }
 }
 
@@ -574,6 +599,89 @@ mod tests {
         assert_eq!(tls.ca_path, Some(PathBuf::from("/etc/rr/ca.pem")));
         assert!(tls.require_client_cert);
         assert_eq!(tls.domain_name.as_deref(), Some("rr.internal"));
+    }
+
+    #[test]
+    fn auth_env_var_unset_fails_closed() {
+        let unique_var = format!("RR_TEST_UNSET_{}", std::process::id());
+        std::env::remove_var(&unique_var);
+        let f = write_toml(&format!(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [auth]
+            admin_token_env = "{unique_var}"
+            "#
+        ));
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("NOT SET") && msg.contains(&unique_var),
+            "expected fail-closed error mentioning unset var, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_env_var_empty_fails_closed() {
+        let unique_var = format!("RR_TEST_EMPTY_{}", std::process::id());
+        std::env::set_var(&unique_var, "");
+        let f = write_toml(&format!(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [auth]
+            client_token_env = "{unique_var}"
+            "#
+        ));
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        std::env::remove_var(&unique_var);
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("EMPTY") && msg.contains(&unique_var),
+            "expected fail-closed error for empty var, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_env_var_set_loads_token() {
+        let unique_var = format!("RR_TEST_SET_{}", std::process::id());
+        std::env::set_var(&unique_var, "supersecret");
+        let f = write_toml(&format!(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [auth]
+            admin_token_env = "{unique_var}"
+            "#
+        ));
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        std::env::remove_var(&unique_var);
+        assert_eq!(resolved.auth.admin_token.as_deref(), Some("supersecret"));
+        assert_eq!(resolved.auth.client_token, None);
+    }
+
+    #[test]
+    fn auth_no_env_var_configured_yields_no_tokens() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.auth.admin_token, None);
+        assert_eq!(resolved.auth.client_token, None);
     }
 
     #[test]

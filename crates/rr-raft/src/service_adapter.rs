@@ -10,21 +10,32 @@ use async_trait::async_trait;
 use rr_core::error::RrError;
 use rr_core::service::Service;
 use rr_core::state_machine::StateMachine;
-use rr_core::types::LogIndex;
+use rr_core::types::{GroupId, LogIndex};
 
 /// Adapter that bridges a high-level [`Service`] to the low-level [`StateMachine`] trait.
 ///
 /// The adapter delegates all operations directly to the wrapped service and
 /// tracks how many entries have been applied via an internal counter.
+///
+/// The `group_id` is captured at construction so the framework can label
+/// per-group metrics correctly (e.g. `rr_snapshot_installs_total{group_id="…"}`).
+/// Construct via the state-machine factory closure passed to
+/// [`crate::group_manager::RaftGroupManager`]:
+///
+/// ```ignore
+/// Box::new(|group_id| Box::new(ServiceStateMachineAdapter::new(group_id, MyService::new())))
+/// ```
 pub struct ServiceStateMachineAdapter<S: Service> {
+    group_id: GroupId,
     service: S,
     applied_count: u64,
 }
 
 impl<S: Service> ServiceStateMachineAdapter<S> {
-    /// Create a new adapter wrapping the given service.
-    pub fn new(service: S) -> Self {
+    /// Create a new adapter wrapping the given service for `group_id`.
+    pub fn new(group_id: GroupId, service: S) -> Self {
         Self {
+            group_id,
             service,
             applied_count: 0,
         }
@@ -45,7 +56,11 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
 
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError> {
         self.service.restore(snapshot).await?;
-        metrics::counter!("rr_snapshot_installs_total", "group_id" => "unknown").increment(1);
+        metrics::counter!(
+            "rr_snapshot_installs_total",
+            "group_id" => self.group_id.to_string()
+        )
+        .increment(1);
         Ok(())
     }
 
@@ -124,7 +139,7 @@ mod tests {
     async fn apply_passes_bytes_unchanged() {
         let svc = MockService::new(b"response-42".to_vec());
         let calls = Arc::clone(&svc.calls);
-        let mut adapter = ServiceStateMachineAdapter::new(svc);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
         let input = b"request-data";
         let result = adapter.apply(input).await.unwrap();
@@ -138,7 +153,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_delegates_to_service() {
         let svc = MockService::new(vec![]).with_snapshot(b"snap-state".to_vec());
-        let adapter = ServiceStateMachineAdapter::new(svc);
+        let adapter = ServiceStateMachineAdapter::new(7, svc);
 
         let snap = adapter.snapshot().await.unwrap();
         assert_eq!(snap, b"snap-state");
@@ -148,7 +163,7 @@ mod tests {
     async fn restore_delegates_to_service() {
         let svc = MockService::new(vec![]);
         let snapshot_data = Arc::clone(&svc.snapshot_data);
-        let mut adapter = ServiceStateMachineAdapter::new(svc);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
         adapter.restore(b"restored-state").await.unwrap();
 
@@ -159,7 +174,7 @@ mod tests {
     #[tokio::test]
     async fn error_propagation_from_handle() {
         let svc = MockService::new(vec![]).with_error("service failed");
-        let mut adapter = ServiceStateMachineAdapter::new(svc);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
         let result = adapter.apply(b"anything").await;
         assert!(result.is_err());
@@ -170,20 +185,16 @@ mod tests {
     #[tokio::test]
     async fn last_applied_tracking() {
         let svc = MockService::new(b"ok".to_vec());
-        let mut adapter = ServiceStateMachineAdapter::new(svc);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
-        // Initially None
         assert_eq!(adapter.last_applied().await, None);
 
-        // After 1 apply → Some(1)
         adapter.apply(b"a").await.unwrap();
         assert_eq!(adapter.last_applied().await, Some(1));
 
-        // After 2 applies → Some(2)
         adapter.apply(b"b").await.unwrap();
         assert_eq!(adapter.last_applied().await, Some(2));
 
-        // After 3 applies → Some(3)
         adapter.apply(b"c").await.unwrap();
         assert_eq!(adapter.last_applied().await, Some(3));
     }
@@ -191,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn failed_apply_does_not_increment_counter() {
         let svc = MockService::new(vec![]).with_error("boom");
-        let mut adapter = ServiceStateMachineAdapter::new(svc);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
         let _ = adapter.apply(b"data").await;
         assert_eq!(adapter.last_applied().await, None);
@@ -199,12 +210,16 @@ mod tests {
 
     #[tokio::test]
     async fn restore_records_snapshot_install_metric() {
-        // Verify the snapshot install counter code path doesn't panic.
-        // Without a metrics recorder installed, the counter! macro is a no-op.
         let svc = MockService::new(vec![]);
-        let mut adapter = ServiceStateMachineAdapter::new(svc);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
-        // restore should succeed and record the metric without panic
         adapter.restore(b"snapshot-data").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn group_id_is_preserved_for_metric_label() {
+        let svc = MockService::new(vec![]);
+        let adapter = ServiceStateMachineAdapter::new(42, svc);
+        assert_eq!(adapter.group_id, 42);
     }
 }

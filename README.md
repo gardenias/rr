@@ -159,7 +159,7 @@ use rr_raft::service_adapter::ServiceStateMachineAdapter;
 #[tokio::main]
 async fn main() -> Result<()> {
     let service = KvService::new();
-    let state_machine = ServiceStateMachineAdapter::new(service);
+    let state_machine = ServiceStateMachineAdapter::new(1, service);
     
     let config = NodeConfig {
         node_id: 1,

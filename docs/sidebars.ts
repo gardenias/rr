@@ -58,6 +58,10 @@ const sidebars: SidebarsConfig = {
       label: 'Deployment',
       items: [
         'deployment/deployment',
+        'deployment/tls',
+        'deployment/audit-log',
+        'deployment/kubernetes',
+        'deployment/upgrading',
       ],
     },
   ],

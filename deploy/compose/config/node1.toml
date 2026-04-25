@@ -4,6 +4,11 @@ listen_addr = "0.0.0.0:51001"
 data_dir = "/var/lib/rr/data"
 admin_port = 52001
 metrics_port = 9100
+# DEV/CI ONLY — bypass production security gates so docker compose can boot
+# without provisioning certs + tokens. Remove (or set false) for production
+# and configure [tls] + [auth] + admin_token instead. See
+# `docs/docs/deployment/upgrading.md` for the secure-rollout procedure.
+allow_insecure = true
 
 [storage]
 backend = "rocks"

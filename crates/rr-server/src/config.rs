@@ -29,7 +29,7 @@ pub struct NodeConfig {
     /// `ServiceStateMachineAdapter`:
     ///
     /// ```ignore
-    /// Box::new(|_group_id| Box::new(ServiceStateMachineAdapter::new(MyService::new())))
+    /// Box::new(|group_id| Box::new(ServiceStateMachineAdapter::new(group_id, MyService::new())))
     /// ```
     pub state_machine_factory: StateMachineFactory,
     /// Optional Raft RPC lookup — enables inter-node Raft RPCs.
@@ -66,6 +66,33 @@ pub struct NodeConfig {
     /// rate-limited — throttling Raft RPCs destabilizes consensus.
     /// Defaults to unlimited on every service.
     pub rate_limit_config: RateLimitConfig,
+    /// **DANGEROUS — development escape hatch.**
+    ///
+    /// When `false` (the default), [`RrNode::new`](super::node::RrNode::new)
+    /// refuses to start if any of the production safety invariants are
+    /// violated:
+    ///
+    /// 1. `RaftService` enabled (i.e. `raft_lookup` is `Some`) without TLS.
+    /// 2. `RaftService` enabled with TLS but `tls_config.require_client_cert`
+    ///    is `false` (RaftService relies on mTLS for peer identity).
+    /// 3. Bearer-token auth required (any token in [`AuthConfig`]) without
+    ///    TLS — the token would travel in plaintext.
+    /// 4. `AdminService` enabled (`admin_port = Some`) without TLS.
+    /// 5. `AdminService` enabled with no `admin_token` — anyone reaching
+    ///    the port can transfer leadership / trigger snapshots.
+    ///
+    /// Setting this to `true` bypasses ALL of the above checks. Use only
+    /// for local dev / examples / CI. Production binaries should never
+    /// flip this in their default config; operators must opt in
+    /// explicitly via `--allow-insecure` (CLI) or
+    /// `RR_ALLOW_INSECURE=1` (env).
+    ///
+    /// When set, the node:
+    /// - emits a single multi-line `tracing::warn!` at startup listing
+    ///   every gate that was bypassed and the bound `listen_addr`, and
+    /// - exposes a Prometheus gauge `rr_security_insecure_mode = 1` so
+    ///   monitoring can alert.
+    pub allow_insecure: bool,
 }
 
 impl NodeConfig {
@@ -94,6 +121,7 @@ impl NodeConfig {
             tls_config: None,
             auth_config: AuthConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
+            allow_insecure: false,
         }
     }
 
@@ -143,6 +171,14 @@ impl NodeConfig {
     /// Attach rate-limit policy (admin / client services only).
     pub fn with_rate_limit(mut self, rl: RateLimitConfig) -> Self {
         self.rate_limit_config = rl;
+        self
+    }
+
+    /// **DANGEROUS** — bypass startup security validation. See
+    /// [`NodeConfig::allow_insecure`] for the full list of gates that
+    /// are skipped. Intended only for local dev, examples, and CI.
+    pub fn with_allow_insecure(mut self, allow: bool) -> Self {
+        self.allow_insecure = allow;
         self
     }
 }

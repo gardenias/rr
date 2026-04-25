@@ -65,7 +65,13 @@ impl ClientDispatch for ClientDispatchImpl {
                         leader_addr: fwd.leader_node.as_ref().map(|n: &BasicNode| n.addr.clone()),
                     })
                 } else {
-                    Err(tonic::Status::internal(format!("client_write error: {e}")))
+                    tracing::error!(
+                        partition_id,
+                        group_id,
+                        error = %e,
+                        "client_write failed (detail sanitized for client)"
+                    );
+                    Err(tonic::Status::internal("client write failed"))
                 }
             }
         }

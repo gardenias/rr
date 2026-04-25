@@ -45,15 +45,32 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
         let req: openraft::raft::AppendEntriesRequest<RrTypeConfig> =
             bincode::serde::decode_from_slice(&payload, bincode::config::standard())
                 .map(|(v, _)| v)
-                .map_err(|e| tonic::Status::invalid_argument(format!("decode error: {e}")))?;
+                .map_err(|e| {
+                    tracing::warn!(
+                        group_id,
+                        error = %e,
+                        "raft AppendEntries: payload decode failed (detail sanitized for client)"
+                    );
+                    tonic::Status::invalid_argument("invalid request payload")
+                })?;
 
-        let resp = raft
-            .append_entries(req)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("append_entries error: {e}")))?;
+        let resp = raft.append_entries(req).await.map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft AppendEntries failed (detail sanitized for client)"
+            );
+            tonic::Status::internal("raft rpc failed")
+        })?;
 
-        bincode::serde::encode_to_vec(&resp, bincode::config::standard())
-            .map_err(|e| tonic::Status::internal(format!("encode error: {e}")))
+        bincode::serde::encode_to_vec(&resp, bincode::config::standard()).map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft AppendEntries: response encode failed"
+            );
+            tonic::Status::internal("internal encode error")
+        })
     }
 
     #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
@@ -67,15 +84,32 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
         let req: openraft::raft::VoteRequest<u64> =
             bincode::serde::decode_from_slice(&payload, bincode::config::standard())
                 .map(|(v, _)| v)
-                .map_err(|e| tonic::Status::invalid_argument(format!("decode error: {e}")))?;
+                .map_err(|e| {
+                    tracing::warn!(
+                        group_id,
+                        error = %e,
+                        "raft Vote: payload decode failed (detail sanitized for client)"
+                    );
+                    tonic::Status::invalid_argument("invalid request payload")
+                })?;
 
-        let resp = raft
-            .vote(req)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("vote error: {e}")))?;
+        let resp = raft.vote(req).await.map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft Vote failed (detail sanitized for client)"
+            );
+            tonic::Status::internal("raft rpc failed")
+        })?;
 
-        bincode::serde::encode_to_vec(&resp, bincode::config::standard())
-            .map_err(|e| tonic::Status::internal(format!("encode error: {e}")))
+        bincode::serde::encode_to_vec(&resp, bincode::config::standard()).map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft Vote: response encode failed"
+            );
+            tonic::Status::internal("internal encode error")
+        })
     }
 
     #[instrument(skip(self, metadata, data), fields(meta_len = metadata.len(), data_len = data.len()))]
@@ -91,24 +125,37 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .await
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
-        // Decode the InstallSnapshotRequest from metadata bytes; data is the raw snapshot.
         let mut req: openraft::raft::InstallSnapshotRequest<RrTypeConfig> =
             bincode::serde::decode_from_slice(&metadata, bincode::config::standard())
                 .map(|(v, _)| v)
                 .map_err(|e| {
-                    tonic::Status::invalid_argument(format!("decode metadata error: {e}"))
+                    tracing::warn!(
+                        group_id,
+                        error = %e,
+                        "raft InstallSnapshot: metadata decode failed (detail sanitized for client)"
+                    );
+                    tonic::Status::invalid_argument("invalid request payload")
                 })?;
 
-        // Inject the snapshot data into the request.
         req.data = data;
 
-        let resp = raft
-            .install_snapshot(req)
-            .await
-            .map_err(|e| tonic::Status::internal(format!("install_snapshot error: {e}")))?;
+        let resp = raft.install_snapshot(req).await.map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft InstallSnapshot failed (detail sanitized for client)"
+            );
+            tonic::Status::internal("raft rpc failed")
+        })?;
 
-        bincode::serde::encode_to_vec(&resp, bincode::config::standard())
-            .map_err(|e| tonic::Status::internal(format!("encode error: {e}")))
+        bincode::serde::encode_to_vec(&resp, bincode::config::standard()).map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft InstallSnapshot: response encode failed"
+            );
+            tonic::Status::internal("internal encode error")
+        })
     }
 }
 

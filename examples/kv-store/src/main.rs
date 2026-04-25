@@ -159,8 +159,8 @@ async fn run_demo() -> Result<()> {
 
     let storage_engine: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
 
-    let sm_factory = Box::new(|_group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(KvService::new()))
+    let sm_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
+        Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
 
     let config = NodeConfig::new(
@@ -260,8 +260,8 @@ async fn run_node(cli: CliConfig) -> Result<()> {
 
     // ── Build RaftGroupManager with real gRPC network ─────────────────────────
     let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
-    let sm_factory = Box::new(|_group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(KvService::new()))
+    let sm_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
+        Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
 
     let mgr = Arc::new(RaftGroupManager::new_with_network(
@@ -277,9 +277,8 @@ async fn run_node(cli: CliConfig) -> Result<()> {
 
     // ── Build and start RrNode ────────────────────────────────────────────────
     let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
-    // sm_factory consumed by mgr above; pass a dummy for config (ignored when group_manager pre-built)
-    let dummy_factory = Box::new(|_group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(KvService::new()))
+    let dummy_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
+        Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
 
     let config = NodeConfig::new(
@@ -291,7 +290,8 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     )
     .with_group_manager(Arc::clone(&mgr))
     .with_raft_lookup(lookup)
-    .with_client_dispatch(dispatch);
+    .with_client_dispatch(dispatch)
+    .with_allow_insecure(true);
 
     let node = Arc::new(RrNode::new(config)?);
     node.start().await?;

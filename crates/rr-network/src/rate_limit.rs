@@ -40,6 +40,8 @@ use tokio::sync::Semaphore;
 use tonic::service::Interceptor;
 use tonic::{Request, Status};
 
+use crate::audit::{ServiceLabel, AUDIT_TARGET};
+
 /// Configuration for rate limiting admin and client gRPC services.
 ///
 /// `None` for a field = unlimited for that service.
@@ -60,12 +62,12 @@ impl RateLimitConfig {
     /// Build an interceptor suitable for AdminService. Returns a
     /// pass-through interceptor if `admin_rps` is `None`.
     pub fn admin_interceptor(&self) -> RateLimitInterceptor {
-        RateLimitInterceptor::from_rps(self.admin_rps, self.burst)
+        RateLimitInterceptor::from_rps(ServiceLabel::Admin, self.admin_rps, self.burst)
     }
 
     /// Build an interceptor suitable for ClientService.
     pub fn client_interceptor(&self) -> RateLimitInterceptor {
-        RateLimitInterceptor::from_rps(self.client_rps, self.burst)
+        RateLimitInterceptor::from_rps(ServiceLabel::Client, self.client_rps, self.burst)
     }
 }
 
@@ -141,31 +143,38 @@ impl RateLimiter {
 
 /// A tonic interceptor that enforces a [`RateLimiter`]. When `limiter`
 /// is `None`, the interceptor is a pass-through (disabled mode).
+///
+/// Every reject is emitted to the audit log
+/// ([`crate::audit::AUDIT_TARGET`]) with `op="rate_limit"` plus peer /
+/// service so operators can detect noisy clients and runaway scripts.
 #[derive(Clone)]
 pub struct RateLimitInterceptor {
     limiter: Option<RateLimiter>,
+    service: ServiceLabel,
 }
 
 impl RateLimitInterceptor {
-    /// Build an interceptor from an optional rate. `None` = disabled
-    /// (every request passes). `Some(rps)` = enforce.
-    fn from_rps(rps: Option<u32>, burst: Option<u32>) -> Self {
+    fn from_rps(service: ServiceLabel, rps: Option<u32>, burst: Option<u32>) -> Self {
         let limiter = rps.map(|r| {
             let b = burst.unwrap_or(r.max(10));
             RateLimiter::new(r, b)
         });
-        Self { limiter }
+        Self { limiter, service }
     }
 
     /// Disabled constructor (mostly for tests or explicit opt-out).
-    pub fn disabled() -> Self {
-        Self { limiter: None }
+    pub fn disabled(service: ServiceLabel) -> Self {
+        Self {
+            limiter: None,
+            service,
+        }
     }
 
     /// Enabled constructor with a custom limiter.
-    pub fn with_limiter(limiter: RateLimiter) -> Self {
+    pub fn with_limiter(service: ServiceLabel, limiter: RateLimiter) -> Self {
         Self {
             limiter: Some(limiter),
+            service,
         }
     }
 }
@@ -178,6 +187,18 @@ impl Interceptor for RateLimitInterceptor {
         if limiter.try_acquire() {
             Ok(request)
         } else {
+            let peer = request
+                .remote_addr()
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            tracing::warn!(
+                target: AUDIT_TARGET,
+                op = "rate_limit",
+                service = self.service.as_str(),
+                peer = %peer,
+                result = "rejected",
+                "rate limit exceeded"
+            );
             Err(Status::resource_exhausted("rate limit exceeded"))
         }
     }
@@ -189,7 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_interceptor_always_allows() {
-        let mut interceptor = RateLimitInterceptor::disabled();
+        let mut interceptor = RateLimitInterceptor::disabled(ServiceLabel::Admin);
         for _ in 0..100 {
             assert!(interceptor.call(Request::new(())).is_ok());
         }
@@ -214,7 +235,7 @@ mod tests {
     #[tokio::test]
     async fn interceptor_rejects_with_resource_exhausted() {
         let limiter = RateLimiter::new(1, 1);
-        let mut interceptor = RateLimitInterceptor::with_limiter(limiter);
+        let mut interceptor = RateLimitInterceptor::with_limiter(ServiceLabel::Admin, limiter);
         assert!(interceptor.call(Request::new(())).is_ok());
         let err = interceptor.call(Request::new(())).unwrap_err();
         assert_eq!(err.code(), tonic::Code::ResourceExhausted);

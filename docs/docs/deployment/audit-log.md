@@ -19,17 +19,26 @@ append-only audit sink (e.g. read-only file, syslog, cloud immutable log).
 | Field | Type | Example |
 | :--- | :--- | :--- |
 | `target` | always `rr::audit` | — |
-| `op` | Admin RPC method | `TriggerSnapshot`, `TransferLeader`, `GetNodeStatus`, `GetGroupStatus`, `GetMetricsSummary` |
+| `op` | operation | `TriggerSnapshot`, `TransferLeader`, `GetNodeStatus`, `GetGroupStatus`, `GetMetricsSummary`, `auth`, `rate_limit` |
+| `service` | gRPC surface (auth/rate_limit events) | `admin`, `client`, `raft` |
 | `peer` | caller socket addr (from tonic) | `10.0.1.23:51234` or `unknown` |
 | `node_id` | local node id serving the RPC | `1` |
 | `group_id` | for group-scoped operations | `7` |
 | `target_node_id` | for `TransferLeader` only | `3` |
+| `result` | event lifecycle | `started`, `succeeded`, `failed`, `rejected` |
 | `success` | on mutation result | `true` / `false` |
+| `reason` | on reject (auth / rate_limit) | `missing_credential`, `invalid_credential` |
 | `message` | on mutation result | free-form response |
 
 Mutation operations (`TriggerSnapshot`, `TransferLeader`) emit **two**
-events — one at dispatch ("admin rpc — mutation") and one at completion
-("admin rpc result"). Read-only operations emit one event.
+events — one at dispatch (`result="started"`) and one at completion
+(`result="succeeded"|"failed"`). Read-only operations emit one event.
+
+`BearerInterceptor` and `RateLimitInterceptor` emit one **reject** event
+per blocked request (`op="auth"` or `op="rate_limit"`,
+`result="rejected"`), tagged with the `service` they protect. This makes
+credential abuse and runaway-script detection greppable from the same sink
+as RPC audit trail.
 
 ## 配置独立的审计 sink / Routing audit events to a dedicated sink
 
@@ -89,8 +98,15 @@ Layered defenses:
 
 ## 已知限制 / Known limitations
 
-- 审计事件目前**不含调用者身份**（除 peer IP）。Phase 3 的 auth interceptor 目前只校验 token 不 forward 身份到 handler。未来计划在 gRPC metadata extension 里透传 subject claim，让 audit 事件携带 `caller_subject` 字段。
-- 审计事件**与应用日志共享 subscriber**——如果 ops 团队配置了 `RUST_LOG=warn` 则 audit info 会被过滤掉。**建议用独立的 EnvFilter**: `RUST_LOG="warn,rr::audit=info"`.
+- 审计事件目前**不含调用者身份**（除 peer IP）。Auth interceptor 校验 token 但
+  不 forward 身份到 handler。未来计划在 gRPC metadata extension 里透传
+  subject claim，让 audit 事件携带 `caller_subject` 字段。
+- Auth / rate-limit reject 事件以 `warn!` 级别发，AdminService RPC
+  事件以 `info!` 级别发——确保 EnvFilter 至少包含两者：
+  `RUST_LOG="warn,rr::audit=info"`。
+- 审计事件**与应用日志共享 subscriber**——如果 ops 团队配置了 `RUST_LOG=warn`
+  则 admin rpc 的 info 会被过滤掉。**建议用独立的 EnvFilter**:
+  `RUST_LOG="warn,rr::audit=info"`.
 
 ---
 

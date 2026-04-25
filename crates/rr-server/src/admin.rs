@@ -14,17 +14,13 @@ use tonic::{Request, Response, Status};
 use tracing::info;
 
 use rr_core::types::NodeId;
+use rr_network::audit::AUDIT_TARGET;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
     Empty, GroupId, GroupStatus, MetricsSummary, NodeStatus, TransferLeaderRequest,
     TransferLeaderResponse, TriggerSnapshotResponse,
 };
 use rr_raft::group_manager::RaftGroupManager;
-
-/// Tracing target for audit events. Consumers (e.g. ops stack) can filter
-/// this target separately via `EnvFilter`:
-/// `rr::audit=info,info` — audit log at info, rest default.
-pub const AUDIT_TARGET: &str = "rr::audit";
 
 fn peer_from_request<T>(req: &Request<T>) -> String {
     req.remote_addr()
@@ -161,37 +157,63 @@ impl AdminService for AdminServiceImpl {
             node_id = self.node_id,
             group_id = req.group_id,
             target_node_id = req.target_node_id,
+            result = "started",
             "admin rpc — mutation"
         );
-        let raft = self
-            .group_manager
-            .get_raft(req.group_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("group {} not found", req.group_id)))?;
+        let raft = match self.group_manager.get_raft(req.group_id).await {
+            Some(r) => r,
+            None => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TransferLeader",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.target_node_id,
+                    success = false,
+                    result = "failed",
+                    reason = "group_not_found",
+                    "admin rpc result"
+                );
+                return Err(Status::not_found(format!(
+                    "group {} not found",
+                    req.group_id
+                )));
+            }
+        };
 
-        // openraft 0.9 does not expose a direct transfer_leader API.
-        // We can trigger an election on this node if it is the target; otherwise
-        // the caller must invoke the RPC on the target node directly.
-        if req.target_node_id == self.node_id {
+        let response = if req.target_node_id == self.node_id {
             match raft.trigger().elect().await {
-                Ok(()) => Ok(Response::new(TransferLeaderResponse {
+                Ok(()) => TransferLeaderResponse {
                     success: true,
                     message: "election triggered on this node".to_string(),
-                })),
-                Err(e) => Ok(Response::new(TransferLeaderResponse {
+                },
+                Err(e) => TransferLeaderResponse {
                     success: false,
                     message: e.to_string(),
-                })),
+                },
             }
         } else {
-            Ok(Response::new(TransferLeaderResponse {
+            TransferLeaderResponse {
                 success: false,
                 message: format!(
                     "transfer to remote node {} not supported; call the target node's admin API",
                     req.target_node_id
                 ),
-            }))
-        }
+            }
+        };
+
+        info!(
+            target: AUDIT_TARGET,
+            op = "TransferLeader",
+            peer = %peer,
+            group_id = req.group_id,
+            target_node_id = req.target_node_id,
+            success = response.success,
+            result = if response.success { "succeeded" } else { "failed" },
+            message = %response.message,
+            "admin rpc result"
+        );
+        Ok(Response::new(response))
     }
 
     async fn get_metrics_summary(

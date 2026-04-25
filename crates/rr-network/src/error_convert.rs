@@ -3,6 +3,30 @@
 //! Because neither `RrError` nor `tonic::Status` are defined in this crate,
 //! the orphan rule prevents `From` impls. Instead, we provide the [`IntoStatus`]
 //! trait and implement it for all rr error types.
+//!
+//! # Information-leak hardening
+//!
+//! Most internal error detail (peer addresses, file paths from
+//! `io::Error`, openraft / bincode internal strings, storage corruption
+//! diagnostics) is **not** safe to return to an untrusted client — it
+//! leaks topology, layout, and version metadata that helps attackers
+//! reconnoiter the system. So this module follows a uniform rule:
+//!
+//! * **Client message**: a short, action-oriented sentence with the
+//!   correct gRPC code. Never includes peer addresses, file paths,
+//!   library-internal strings, or stack traces.
+//! * **Server log**: the full detail goes to `tracing::warn!` / `error!`
+//!   under the active span (so existing `#[instrument]` annotations on
+//!   handlers carry caller / group / payload metadata for correlation).
+//!
+//! Exceptions where it IS safe to echo input back:
+//!
+//! * `StorageError::NotFound { key }` — the key was user-supplied.
+//! * `RaftError::GroupNotFound { group_id }` — the group_id was
+//!   user-supplied.
+//! * `RouterError::*` — partition / group IDs are user-supplied.
+//! * `RrError::Application(msg)` — the user's own service produced it;
+//!   it is the user's responsibility not to leak in their own message.
 
 use rr_core::error::{
     CodecError, ConfigError, NetworkError, RaftError, RouterError, RrError, StorageError,
@@ -39,10 +63,20 @@ impl IntoStatus for RaftError {
             RaftError::GroupNotFound { group_id } => {
                 Status::not_found(format!("raft group {group_id} not found"))
             }
-            RaftError::ProposalFailed { reason } => Status::internal(reason),
+            RaftError::ProposalFailed { reason } => {
+                tracing::warn!(
+                    detail = %reason,
+                    "raft proposal failed (detail sanitized for client)"
+                );
+                Status::internal("raft proposal failed")
+            }
             RaftError::Timeout => Status::deadline_exceeded("raft operation timed out"),
             RaftError::InitializationFailed { reason } => {
-                Status::failed_precondition(format!("raft initialization failed: {reason}"))
+                tracing::error!(
+                    detail = %reason,
+                    "raft initialization failed (detail sanitized for client)"
+                );
+                Status::failed_precondition("raft initialization failed")
             }
         }
     }
@@ -52,8 +86,20 @@ impl IntoStatus for StorageError {
     fn into_status(self) -> Status {
         match self {
             StorageError::NotFound { key } => Status::not_found(format!("key not found: {key}")),
-            StorageError::Io(e) => Status::internal(e.to_string()),
-            StorageError::Corruption(msg) => Status::data_loss(msg),
+            StorageError::Io(e) => {
+                tracing::error!(
+                    error = %e,
+                    "storage I/O error (detail sanitized for client)"
+                );
+                Status::internal("storage I/O error")
+            }
+            StorageError::Corruption(msg) => {
+                tracing::error!(
+                    detail = %msg,
+                    "storage corruption detected (detail sanitized for client)"
+                );
+                Status::data_loss("storage corruption")
+            }
         }
     }
 }
@@ -61,7 +107,13 @@ impl IntoStatus for StorageError {
 impl IntoStatus for ConfigError {
     fn into_status(self) -> Status {
         match self {
-            ConfigError::ProviderUnavailable(msg) => Status::unavailable(msg),
+            ConfigError::ProviderUnavailable(msg) => {
+                tracing::warn!(
+                    detail = %msg,
+                    "config provider unavailable (detail sanitized for client)"
+                );
+                Status::unavailable("config provider unavailable")
+            }
             ConfigError::InvalidConfig(msg) => Status::invalid_argument(msg),
             ConfigError::WatchDisconnected => Status::unavailable("config watch disconnected"),
         }
@@ -88,9 +140,20 @@ impl IntoStatus for NetworkError {
     fn into_status(self) -> Status {
         match self {
             NetworkError::ConnectionFailed { addr, reason } => {
-                Status::unavailable(format!("connection to {addr} failed: {reason}"))
+                tracing::warn!(
+                    peer_addr = %addr,
+                    detail = %reason,
+                    "network connection failed (detail sanitized for client)"
+                );
+                Status::unavailable("connection failed")
             }
-            NetworkError::RpcFailed(msg) => Status::internal(msg),
+            NetworkError::RpcFailed(msg) => {
+                tracing::warn!(
+                    detail = %msg,
+                    "rpc failed (detail sanitized for client)"
+                );
+                Status::internal("rpc failed")
+            }
             NetworkError::Timeout => Status::deadline_exceeded("network timeout"),
         }
     }
@@ -100,10 +163,18 @@ impl IntoStatus for CodecError {
     fn into_status(self) -> Status {
         match self {
             CodecError::SerializeFailed(msg) => {
-                Status::internal(format!("serialize failed: {msg}"))
+                tracing::error!(
+                    detail = %msg,
+                    "serialize failed (detail sanitized for client)"
+                );
+                Status::internal("serialize failed")
             }
             CodecError::DeserializeFailed(msg) => {
-                Status::internal(format!("deserialize failed: {msg}"))
+                tracing::error!(
+                    detail = %msg,
+                    "deserialize failed (detail sanitized for client)"
+                );
+                Status::internal("deserialize failed")
             }
         }
     }
@@ -202,5 +273,46 @@ mod tests {
         });
         let status = err.into_status();
         assert_eq!(status.code(), tonic::Code::Unavailable);
+    }
+
+    #[test]
+    fn test_internal_errors_dont_leak_peer_addrs() {
+        let err = RrError::Network(NetworkError::ConnectionFailed {
+            addr: "10.0.0.42:51001".to_string(),
+            reason: "secret reason".to_string(),
+        });
+        let status = err.into_status();
+        let msg = status.message();
+        assert!(
+            !msg.contains("10.0.0.42") && !msg.contains("secret reason"),
+            "client-facing message must not echo peer addr or internal reason; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_codec_errors_dont_leak_internal_detail() {
+        let err = RrError::Codec(CodecError::DeserializeFailed(
+            "bincode: invalid varint at offset 42".to_string(),
+        ));
+        let status = err.into_status();
+        let msg = status.message();
+        assert!(
+            !msg.contains("bincode") && !msg.contains("offset"),
+            "client-facing message must not echo bincode internals; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_storage_io_errors_dont_leak_paths() {
+        let err = RrError::Storage(StorageError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "/etc/rr/secrets.toml: permission denied",
+        )));
+        let status = err.into_status();
+        let msg = status.message();
+        assert!(
+            !msg.contains("/etc/rr") && !msg.contains("secrets"),
+            "client-facing message must not echo file paths; got: {msg}"
+        );
     }
 }

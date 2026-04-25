@@ -119,6 +119,13 @@ pub struct ServeArgs {
     /// If unset, defaults to `max(rps, 10)` per service.
     #[arg(long = "rate-limit-burst", env = "RR_RATE_LIMIT_BURST")]
     pub rate_limit_burst: Option<u32>,
+
+    /// DANGEROUS — bypass production security gates (no TLS / no mTLS / no
+    /// admin_token). Intended only for local dev, examples, and CI.
+    /// Enabling this also emits a startup warning and sets the Prometheus
+    /// gauge `rr_security_insecure_mode = 1`.
+    #[arg(long = "allow-insecure", env = "RR_ALLOW_INSECURE")]
+    pub allow_insecure: bool,
 }
 
 #[cfg(test)]

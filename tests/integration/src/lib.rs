@@ -272,7 +272,8 @@ impl ClusterBuilder {
             )
             .with_group_manager(Arc::clone(&mgr))
             .with_raft_lookup(lookup)
-            .with_client_dispatch(dispatch);
+            .with_client_dispatch(dispatch)
+            .with_allow_insecure(true);
 
             let node = Arc::new(RrNode::new(config)?);
             node.start().await?;
