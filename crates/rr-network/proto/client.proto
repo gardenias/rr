@@ -12,10 +12,37 @@ service ClientService {
 
 message Empty {}
 
+/// Idempotency key carried by `ClientRequest` when the caller opts in to
+/// framework-level deduplication. The pair (request_type, request_id) is
+/// the dedup identity; client_id is diagnostic-only.
+///
+/// proto3 `optional` keeps this backward-compatible: a v0.2.x client
+/// (which never sets `idem_key`) and a v0.3.x server (which checks for
+/// presence) interoperate without renegotiation.
+message IdempotencyKey {
+    string request_type = 1;
+    uint64 request_id = 2;
+    optional string client_id = 3;
+}
+
+/// Wire-level error returned in `ClientResponse.idem_error` when the
+/// request_id is below the framework watermark and has been evicted from
+/// the LRU cache. Clients should pick a new request_id > watermark.
+message IdempotencyError {
+    string request_type = 1;
+    uint64 request_id = 2;
+    uint64 watermark = 3;
+}
+
 /// Client request. partition_id is used by framework to route to correct Raft group.
 message ClientRequest {
     uint64 partition_id = 1;
     bytes payload = 2;
+    /// Optional idempotency key. When present, the framework deduplicates
+    /// retries with the same (request_type, request_id) and returns the
+    /// cached response. When absent, the request follows v0.2.x semantics
+    /// (no framework dedup).
+    optional IdempotencyKey idem_key = 3;
 }
 
 /// Client response. Contains optional leader redirect info.
@@ -23,6 +50,11 @@ message ClientResponse {
     bool success = 1;
     bytes payload = 2;
     LeaderInfo leader_info = 3;
+    /// Set when the framework rejected a request because its
+    /// idempotency key has expired (request_id below watermark, no
+    /// cache hit). Mutually exclusive with `payload` content (success
+    /// will be false).
+    optional IdempotencyError idem_error = 4;
 }
 
 /// Leader redirect information for client-side caching.

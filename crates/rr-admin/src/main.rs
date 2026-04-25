@@ -396,7 +396,11 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                 let req = KvRequest::Get { key: tokens[1].to_string() };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
-                    .request(ClientRequest { partition_id: group, payload })
+                    .request(ClientRequest {
+                        partition_id: group,
+                        payload,
+                        idem_key: None,
+                    })
                     .await
                 {
                     Ok(resp) => {
@@ -430,7 +434,11 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                 };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
-                    .request(ClientRequest { partition_id: group, payload })
+                    .request(ClientRequest {
+                        partition_id: group,
+                        payload,
+                        idem_key: None,
+                    })
                     .await
                 {
                     Ok(_) => println!("OK"),
@@ -445,7 +453,11 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                 let req = KvRequest::Delete { key: tokens[1].to_string() };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
-                    .request(ClientRequest { partition_id: group, payload })
+                    .request(ClientRequest {
+                        partition_id: group,
+                        payload,
+                        idem_key: None,
+                    })
                     .await
                 {
                     Ok(_) => println!("OK"),

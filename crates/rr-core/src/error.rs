@@ -16,6 +16,12 @@ pub enum RrError {
     Codec(#[from] CodecError),
     #[error("application error: {0}")]
     Application(String),
+    #[error("idempotency expired: request_type={request_type}, request_id={request_id}, watermark={watermark}")]
+    IdempotencyExpired {
+        request_type: String,
+        request_id: u64,
+        watermark: u64,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

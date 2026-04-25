@@ -208,6 +208,7 @@ impl RrClient {
             let request = ClientRequest {
                 partition_id: group_id,
                 payload: payload.clone(),
+                idem_key: None,
             };
 
             match grpc_client.request(tonic::Request::new(request)).await {

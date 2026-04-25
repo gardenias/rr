@@ -95,6 +95,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
             success: result.success,
             payload: result.payload,
             leader_info,
+            idem_error: None,
         }))
     }
 
@@ -190,6 +191,7 @@ mod tests {
         let proto_req = ClientRequest {
             partition_id: 7,
             payload: vec![10, 20],
+            idem_key: None,
         };
 
         let result =
@@ -240,6 +242,7 @@ mod tests {
         let proto_req = ClientRequest {
             partition_id: 1,
             payload: vec![42],
+            idem_key: None,
         };
 
         let result =
@@ -259,6 +262,7 @@ mod tests {
         let proto_req = ClientRequest {
             partition_id: 5,
             payload: vec![],
+            idem_key: None,
         };
 
         let result =

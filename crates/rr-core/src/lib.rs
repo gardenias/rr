@@ -46,7 +46,10 @@
 pub mod codec;
 pub mod config;
 pub mod error;
+pub mod framed_entry;
 pub mod framed_snapshot;
+pub mod idempotency;
+pub mod ingestor;
 pub mod service;
 pub mod state_machine;
 pub mod storage;
@@ -57,10 +60,13 @@ pub use config::{ConfigProvider, RoutingTableChange};
 pub use error::{
     CodecError, ConfigError, NetworkError, RaftError, RouterError, RrError, StorageError,
 };
+pub use framed_entry::{FramedEntry, FRAMED_ENTRY_MAGIC};
 pub use framed_snapshot::{
     FramedSnapshot, FrameworkState, IdempotencyState, IngestorState, FRAMED_SNAPSHOT_MAGIC,
     FRAMED_SNAPSHOT_VERSION,
 };
+pub use idempotency::{IdempotencyDecision, IdempotencyError, IdempotencyKey};
+pub use ingestor::{CommandIngestor, DynCommandIngestor, DynIngressCommand, IngressCommand};
 pub use service::Service;
 pub use state_machine::StateMachine;
 pub use storage::{BatchOp, StorageEngine};

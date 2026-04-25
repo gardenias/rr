@@ -49,6 +49,14 @@ impl IntoStatus for RrError {
             RrError::Network(e) => e.into_status(),
             RrError::Codec(e) => e.into_status(),
             RrError::Application(msg) => Status::internal(msg),
+            RrError::IdempotencyExpired {
+                request_type,
+                request_id,
+                watermark,
+            } => Status::failed_precondition(format!(
+                "idempotency expired: request_type={request_type}, \
+                 request_id={request_id}, watermark={watermark}"
+            )),
         }
     }
 }
