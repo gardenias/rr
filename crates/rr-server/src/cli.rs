@@ -22,6 +22,10 @@ pub struct Cli {
     pub command: Command,
 }
 
+// `Serve(ServeArgs)` is materially larger than the other variants, but the
+// CLI is parsed exactly once at process startup, so boxing the args would
+// trade allocation for no perceptible benefit. Keep the inline variant.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Start an rr node and serve gRPC + metrics.

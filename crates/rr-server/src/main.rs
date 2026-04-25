@@ -190,9 +190,7 @@ async fn build_config_provider(cfg: &ResolvedConfig) -> Result<Arc<MemConfigProv
         )
         .await;
 
-    let all_node_ids: Vec<NodeId> = if cfg.bootstrap {
-        vec![cfg.node_id]
-    } else if cfg.peers.is_empty() {
+    let all_node_ids: Vec<NodeId> = if cfg.bootstrap || cfg.peers.is_empty() {
         vec![cfg.node_id]
     } else {
         let mut ids = vec![cfg.node_id];

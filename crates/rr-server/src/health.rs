@@ -5,8 +5,8 @@
 //!
 //! - `GET /health` — liveness probe. Returns 200 iff the process is up.
 //! - `GET /ready`  — readiness probe. Returns 200 iff the node finished
-//!                   `start()` successfully; 503 otherwise (e.g. during
-//!                   startup or after `shutdown()`).
+//!   `start()` successfully; 503 otherwise (e.g. during startup or after
+//!   `shutdown()`).
 //! - `GET /metrics` — Prometheus scrape endpoint (text format).
 //!
 //! K8s `readinessProbe` / `livenessProbe` should use HTTP on this port

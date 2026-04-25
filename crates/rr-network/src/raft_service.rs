@@ -258,7 +258,7 @@ mod tests {
 
         // Verify the payload field is present and correctly stored
         assert_eq!(proto_resp.group_id, 42);
-        assert_eq!(proto_resp.success, true);
+        assert!(proto_resp.success);
         assert_eq!(proto_resp.payload, test_payload);
     }
 }

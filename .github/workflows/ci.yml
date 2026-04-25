@@ -132,7 +132,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest
@@ -165,8 +165,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install RocksDB dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --features rr-storage/rocks --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         # Note: CODECOV_TOKEN secret must be configured in repository settings
         uses: codecov/codecov-action@v4

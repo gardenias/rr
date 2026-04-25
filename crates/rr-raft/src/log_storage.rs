@@ -343,6 +343,11 @@ mod defensive_tests {
 
     #[tokio::test]
     #[should_panic(expected = "defensive: try_get_log_entries called with start")]
+    // Intentionally constructs a reversed range (5..3) to exercise the
+    // defensive panic path. Clippy's reversed_empty_ranges lint flags this
+    // as a "this range is empty" mistake; the lint is exactly inverted from
+    // what the test wants to verify.
+    #[allow(clippy::reversed_empty_ranges)]
     async fn test_defensive_get_log_entries_start_gt_end_panics() {
         std::env::set_var("RR_STORE_DEFENSIVE", "on");
         let mut storage = RrLogStorage::default();

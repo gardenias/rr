@@ -487,7 +487,7 @@ mod tests {
 
         let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
         assert!(
-            leader_id >= 1 && leader_id <= 3,
+            (1..=3).contains(&leader_id),
             "leader must be one of the 3 nodes"
         );
 
@@ -711,7 +711,7 @@ mod tests {
         // Wait for group 2 leader election
         let leader2 = wait_for_cluster_ready(&nodes, 2, 8_000).await.unwrap();
         assert!(
-            leader2 >= 1 && leader2 <= 3,
+            (1..=3).contains(&leader2),
             "group 2 leader must be one of the 3 nodes"
         );
 
@@ -751,7 +751,7 @@ mod tests {
         // Cluster should still have a stable leader after add_learner attempts
         let leader_after = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
         assert!(
-            leader_after >= 1 && leader_after <= 3,
+            (1..=3).contains(&leader_after),
             "leader must still be among original 3 nodes after NodeAdded"
         );
 
@@ -764,7 +764,7 @@ mod tests {
         // Cluster should remain stable
         let leader_final = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
         assert!(
-            leader_final >= 1 && leader_final <= 3,
+            (1..=3).contains(&leader_final),
             "leader must still be among original 3 nodes after NodeRemoved"
         );
 
@@ -1029,7 +1029,7 @@ mod tests {
         // Cluster must still elect a leader after membership change
         let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
         assert!(
-            final_leader >= 1 && final_leader <= 3,
+            (1..=3).contains(&final_leader),
             "cluster must still have a leader after membership change"
         );
 
@@ -1161,7 +1161,7 @@ mod tests {
         // Cluster must still have a healthy leader after snapshot + purge
         let final_leader = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
         assert!(
-            final_leader >= 1 && final_leader <= 3,
+            (1..=3).contains(&final_leader),
             "cluster must still have a leader after snapshot + log purge"
         );
 
@@ -1416,7 +1416,7 @@ mod tests {
         let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
             .await
             .expect("cluster must have a leader after packet loss cleared");
-        assert!(final_leader >= 1 && final_leader <= 3, "leader must be a valid node id");
+        assert!((1..=3).contains(&final_leader), "leader must be a valid node id");
 
         shutdown_all(&nodes).await;
     }
@@ -1451,7 +1451,7 @@ mod tests {
         let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
             .await
             .expect("cluster must still have a leader after latency cleared");
-        assert!(final_leader >= 1 && final_leader <= 3, "leader must be a valid node id");
+        assert!((1..=3).contains(&final_leader), "leader must be a valid node id");
 
         shutdown_all(&nodes).await;
     }

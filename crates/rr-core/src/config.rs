@@ -63,7 +63,7 @@ mod tests {
             config: PartitionConfig::SingleId(1),
             group_id: 42,
         };
-        let s = format!("{:?}", change);
+        let s = format!("{change:?}");
         assert!(s.contains("PartitionAdded"));
     }
 
