@@ -20,17 +20,17 @@ The networking layer of the rr framework is built on gRPC, handling both inter-n
 
 rr 的网络通信建立在 `tonic` (Rust gRPC 框架) 和 `prost` (Protocol Buffers 生成工具) 之上。
 
-- **双服务体系**：定义了两个核心 proto 服务：`RaftService`（用于内部 Raft RPC）和 `ClientService`（用于处理客户端请求）。
+- **三个 proto 服务**：`RaftService`（内部 Raft RPC）、`ClientService`（客户端请求）、`AdminService`（运维操作）。
 - **二进制负载**：为了解耦网络层与 Raft 核心逻辑，Raft 消息（如 `AppendEntries`）使用 `bincode` 序列化为二进制字节流，并封装在 proto 消息的 `bytes` 字段中。
-- **服务端实现**：`RrGrpcServer` 统一封装了这两个服务，提供单一的网络入口。
+- **双 server 拓扑**：`RrNode::start()` 直接调用 `tonic::transport::Server::builder()`：`RaftService` + `ClientService` + tonic-health 注册到 `listen_addr` 上的主 server；`AdminService` 在配置 `admin_port` 时启动独立 `tonic::Server`，避免管理流量挤占共识带宽。
 
 ---
 
 rr's network communication is built on `tonic` (a Rust gRPC framework) and `prost` (a Protocol Buffers code generation tool).
 
-- **Dual Service Architecture**: Two core proto services are defined: `RaftService` (for internal Raft RPCs) and `ClientService` (for handling client requests).
+- **Three proto services**: `RaftService` (internal Raft RPCs), `ClientService` (client requests), and `AdminService` (operator commands).
 - **Binary Payloads**: To decouple the network layer from Raft core logic, Raft messages (e.g., `AppendEntries`) are serialized with `bincode` into binary byte streams and wrapped in the `bytes` fields of proto messages.
-- **Server Implementation**: `RrGrpcServer` wraps both tonic services, providing a single network entry point.
+- **Dual-server topology**: `RrNode::start()` calls `tonic::transport::Server::builder()` directly. The main server (bound to `listen_addr`) hosts `RaftService` + `ClientService` + tonic-health. When `admin_port` is configured, a **separate** `tonic::Server` hosts `AdminService` so admin traffic cannot starve consensus bandwidth.
 
 ## 架构图 / Architecture Diagram
 
@@ -45,9 +45,10 @@ Container_Boundary(client_side, "Client Side") {
 }
 
 Container_Boundary(server_side, "Server Side") {
-  Component(grpc_server, "RrGrpcServer", "rr-network", "Hosts all gRPC services")
+  Component(rr_node, "RrNode::start", "rr-server::node", "Owns gRPC server lifecycle: main tonic::Server on listen_addr, optional admin tonic::Server on admin_port")
   Component(raft_svc_impl, "RaftServiceImpl", "rr-network", "gRPC handler")
   Component(client_svc_impl, "ClientServiceImpl", "rr-network", "gRPC handler")
+  Component(admin_svc_impl, "AdminServiceImpl", "rr-server::admin", "gRPC handler (separate port)")
   Component(raft_mgr, "RaftGroupManager", "rr-raft", "Multi-group manager")
   Component(dispatch, "ClientDispatchImpl", "rr-server", "Request dispatcher")
 }
@@ -61,8 +62,9 @@ Container_Ext(remote_node, "Remote Node", "rr-server", "Peer in same Raft group"
 Component(channel_pool, "ChannelPool", "rr-network", "Shared tonic Channel cache")
 
 Rel(rr_client, client_svc_impl, "gRPC ClientRequest")
-Rel(grpc_server, raft_svc_impl, "dispatches")
-Rel(grpc_server, client_svc_impl, "dispatches")
+Rel(rr_node, raft_svc_impl, "registers on listen_addr")
+Rel(rr_node, client_svc_impl, "registers on listen_addr")
+Rel(rr_node, admin_svc_impl, "registers on admin_port (optional)")
 Rel(raft_svc_impl, raft_mgr, "via RaftGroupLookup trait")
 Rel(client_svc_impl, dispatch, "via ClientDispatch trait")
 

@@ -4,11 +4,11 @@ sidebar_position: 6
 
 # Level 3 — rr-network 组件图 / rr-network Components
 
-`rr-network` 是所有 RPC 的统一传输层：客户端请求、节点间 Raft 共识、管理员操作——都通过 tonic (gRPC) + 自定义连接池。本图展示三个独立的 gRPC 服务如何共享一个端口，以及客户端如何复用连接。
+`rr-network` 是所有 RPC 的统一传输层：客户端请求、节点间 Raft 共识、管理员操作——都通过 tonic (gRPC) + 自定义连接池。本图展示 rr-network 提供的三个 gRPC 服务实现以及 ChannelPool。`RaftService` 与 `ClientService` 由 `RrNode::start()` 注册到同一个 `tonic::Server` (绑定 `listen_addr`)；`AdminService` 在配置 `admin_port` 时由 `RrNode::start()` 注册到独立的 `tonic::Server`（详见 [components-server.md](./components-server.md)）。
 
 ---
 
-`rr-network` is the unified transport layer for all RPCs: client requests, inter-node Raft consensus, and admin operations — all via tonic (gRPC) + a custom connection pool. This diagram shows how three independent gRPC services share one port, and how clients reuse connections.
+`rr-network` is the unified transport layer for all RPCs: client requests, inter-node Raft consensus, and admin operations — all via tonic (gRPC) + a custom connection pool. This diagram shows the three gRPC service implementations and the ChannelPool. `RaftService` and `ClientService` are registered together on a single `tonic::Server` bound to `listen_addr` by `RrNode::start()`; `AdminService` is registered on a separate `tonic::Server` bound to `admin_port` when configured (see [components-server.md](./components-server.md)).
 
 ## 图示 / Diagram
 
@@ -30,12 +30,10 @@ Container_Boundary(rr_network, "rr-network") {
   Component(proto_client, "client.proto → ClientService", "tonic-generated", "Request(ClientRequest), GetClusterInfo(Empty)")
   Component(proto_admin, "admin.proto → AdminService", "tonic-generated", "GetNodeStatus, GetGroupStatus, TriggerSnapshot, TransferLeader, GetMetricsSummary")
 
-  Component(rr_grpc_server, "RrGrpcServer", "rr-network::server", "Builds a tonic Server registering Raft + Client + Admin + Health on one bind addr")
   Component(raft_svc_impl, "RaftServiceImpl", "rr-network::raft_service", "gRPC handler. Delegates to injected RaftGroupLookup trait")
   Component(client_svc_impl, "ClientServiceImpl", "rr-network::client_service", "gRPC handler. Delegates to injected ClientDispatch trait")
 
   Component(channel_pool, "ChannelPool", "rr-network::channel_pool", "DashMap<NodeId, tonic::Channel>. Lazy creation; drops unhealthy channels")
-  Component(rr_grpc_client, "RrGrpcClient", "rr-network::client", "Wraps tonic clients for RaftService + ClientService. Retrieves channels from pool")
 
   Component(err_convert, "error_convert", "rr-network::error_convert", "Converts between gRPC Status ↔ RrError ↔ openraft errors. Preserves ForwardToLeader info")
 }
@@ -44,16 +42,10 @@ Rel(rr_client, client_svc_impl, "Client RPCs", "gRPC")
 Rel(rr_admin, proto_admin, "Admin RPCs", "gRPC")
 Rel(peer_node, raft_svc_impl, "Raft RPCs", "gRPC")
 
-Rel(rr_grpc_server, raft_svc_impl, "Registers")
-Rel(rr_grpc_server, client_svc_impl, "Registers")
-Rel(rr_grpc_server, proto_admin, "Registers")
-
 Rel(raft_svc_impl, raft_mgr, "Via RaftGroupLookup trait")
 Rel(client_svc_impl, dispatch, "Via ClientDispatch trait")
 Rel(proto_admin, admin_hdl, "Delegates to handlers")
 
-Rel(rr_grpc_client, channel_pool, "Get channel for NodeId")
-Rel(rr_grpc_client, peer_node, "RPC", "gRPC over HTTP/2")
 Rel(channel_pool, peer_node, "TCP + HTTP/2 connection", "Lazy + reused")
 
 Rel(raft_svc_impl, err_convert, "On error")

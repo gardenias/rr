@@ -34,22 +34,24 @@ Container_Boundary(node, "rr-server Node (process)") {
 
   Component(metrics_exp, "Metrics Exporter", "metrics-exporter-prometheus", "Binds HTTP /metrics endpoint when metrics_port is configured")
 
-  Component(grpc_server, "RrGrpcServer", "rr-network::server", "Hosts RaftService + ClientService + AdminService + tonic-health on the same tonic Server")
+  Component(main_server, "tonic::Server (listen_addr)", "rr-server::node::start", "Hosts RaftServiceImpl + ClientServiceImpl + tonic-health on the main bind addr")
+  Component(admin_server, "tonic::Server (admin_port)", "rr-server::node::start", "Hosts AdminService on a separate bind addr (only spawned when admin_port is set)")
   Component(raft_mgr, "RaftGroupManager", "rr-raft::group_manager", "Owns all local Raft groups; handles start/stop/init/membership")
   Component(router, "ShardRouter", "rr-router::router", "Resolves partition_id → group_id → leader address via ConfigProvider")
   Component(cfg_provider, "ConfigProvider", "rr-config (trait impl)", "Watches routing table; broadcasts RoutingTableChange events")
   Component(storage, "StorageEngine", "rr-storage::mem | rr-storage::rocks", "CF-scoped KV store. Used by Raft log & state machine")
 }
 
-Rel(user_app, grpc_server, "ClientRequest / GetClusterInfo", "gRPC")
-Rel(peer_node, grpc_server, "AppendEntries / Vote / InstallSnapshot", "gRPC")
-Rel(admin_cli, grpc_server, "Admin RPCs", "gRPC")
+Rel(user_app, main_server, "ClientRequest / GetClusterInfo", "gRPC")
+Rel(peer_node, main_server, "AppendEntries / Vote / InstallSnapshot", "gRPC")
+Rel(admin_cli, admin_server, "Admin RPCs", "gRPC")
 
-Rel(grpc_server, client_dispatch, "Dispatches client writes")
-Rel(grpc_server, raft_lookup, "Dispatches Raft RPCs")
-Rel(grpc_server, admin_impl, "Dispatches admin RPCs")
+Rel(main_server, client_dispatch, "Dispatches client writes")
+Rel(main_server, raft_lookup, "Dispatches Raft RPCs")
+Rel(admin_server, admin_impl, "Dispatches admin RPCs")
 
-Rel(rr_node, grpc_server, "Starts on listen_addr")
+Rel(rr_node, main_server, "Starts on listen_addr")
+Rel(rr_node, admin_server, "Starts on admin_port (optional)")
 Rel(rr_node, raft_mgr, "Creates & supervises")
 Rel(rr_node, router, "Creates & wires ConfigProvider")
 Rel(rr_node, cfg_provider, "Subscribes to changes")
@@ -80,8 +82,8 @@ LAYOUT_WITH_LEGEND()
 1. 创建 `ShardRouter`，绑定到 `ConfigProvider` 并订阅变更。
 2. 创建 `RaftGroupManager`，注入 `StorageEngine` 和 Raft 网络工厂（`GrpcNetworkFactory`）。
 3. 构造 `ClientDispatchImpl` 与 `RaftGroupLookupImpl`（trait 适配器）。
-4. 构造 `RrGrpcServer`，把三个服务注册到同一个 tonic `Server`。
-5. 在 `listen_addr` 启动 gRPC 服务；若配置则在 `admin_port` 启动独立 admin server、在 `metrics_port` 启动 Prometheus HTTP。
+4. 调用 `tonic::transport::Server::builder()`，把 `RaftServiceImpl` + `ClientServiceImpl` + tonic-health 注册到同一个 `tonic::Server`，绑定到 `listen_addr`。
+5. 若配置 `admin_port`，启动**独立**的 `tonic::Server` 仅承载 `AdminService`（不与 Raft / Client 共享端口，避免管理流量挤占共识带宽）；若配置 `metrics_port`，启动 Prometheus HTTP。
 6. 启动 config watch loop：监听 `RoutingTableChange::GroupMembershipChanged` 等事件，并调用 `raft_mgr.start_group() / stop_group()`。
 7. `serve().await` 阻塞直到收到关闭信号。
 
@@ -94,8 +96,8 @@ On startup, `RrNode::new(config, storage, state_machine_builder, config_provider
 1. Create `ShardRouter`, bind to `ConfigProvider`, subscribe to changes.
 2. Create `RaftGroupManager`, injecting the `StorageEngine` and Raft network factory (`GrpcNetworkFactory`).
 3. Build `ClientDispatchImpl` and `RaftGroupLookupImpl` (trait adapters).
-4. Build `RrGrpcServer`, registering all three services on one tonic `Server`.
-5. Start the gRPC server on `listen_addr`; if configured, start a separate admin server on `admin_port` and the Prometheus HTTP endpoint on `metrics_port`.
+4. Call `tonic::transport::Server::builder()` and register `RaftServiceImpl` + `ClientServiceImpl` + tonic-health on a single `tonic::Server` bound to `listen_addr`.
+5. If `admin_port` is configured, start a **separate** `tonic::Server` hosting only `AdminService` (kept off the main port so admin traffic cannot starve consensus bandwidth); if `metrics_port` is configured, start the Prometheus HTTP endpoint.
 6. Start the config watch loop: react to `RoutingTableChange::GroupMembershipChanged` etc. by calling `raft_mgr.start_group() / stop_group()`.
 7. `serve().await` blocks until a shutdown signal arrives.
 
@@ -142,4 +144,4 @@ These components are *constructed by* rr-server but *defined in* other crates. F
 
 - [`RaftGroupManager` 内部 / internals](./components-raft.md)
 - [`ShardRouter` + `ConfigProvider` 内部 / internals](./components-router.md)
-- [`RrGrpcServer` + `RaftService` + `ClientService` + `AdminService` / gRPC 层](./components-network.md)
+- [`RaftService` + `ClientService` + `AdminService` + `ChannelPool` / gRPC 层](./components-network.md)

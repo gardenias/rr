@@ -21,13 +21,13 @@ title Dynamic Diagram - Client PUT with Leader Redirect
 Container(user_app, "User Application", "Rust + rr-client", "Invokes RrClient.send_request")
 
 Container_Boundary(follower, "rr-server Node A (Follower for Group 7)") {
-  Component(f_grpc, "RrGrpcServer", "rr-network", "gRPC listener")
+  Component(f_grpc, "ClientServiceImpl", "rr-network", "gRPC handler on listen_addr")
   Component(f_dispatch, "ClientDispatchImpl", "rr-server", "Routes client writes")
   Component(f_router, "ShardRouter", "rr-router", "Partition → group resolver")
 }
 
 Container_Boundary(leader, "rr-server Node B (Leader for Group 7)") {
-  Component(l_grpc, "RrGrpcServer", "rr-network", "gRPC listener")
+  Component(l_grpc, "ClientServiceImpl", "rr-network", "gRPC handler on listen_addr")
   Component(l_dispatch, "ClientDispatchImpl", "rr-server", "Submits to local Raft")
   Component(l_raft, "RaftGroupManager (G7)", "rr-raft", "Holds the G7 leader Raft node")
 }
