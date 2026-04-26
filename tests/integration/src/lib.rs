@@ -6,6 +6,8 @@
 #[cfg(test)]
 mod cross_tier_ingestor;
 pub mod fault_injection;
+#[cfg(test)]
+mod tls_auth_e2e;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

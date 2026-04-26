@@ -30,3 +30,5 @@ tonic-health = "0.14"
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde_json = { workspace = true }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
