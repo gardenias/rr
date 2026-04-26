@@ -63,7 +63,100 @@ pub struct KafkaIngestor {
     group_id: u64,
 }
 
+/// Default timeout for `Consumer::fetch_watermarks`. Watermark fetch
+/// hits the broker; 5s is generous on a healthy network and keeps
+/// the seek path bounded under broker latency spikes.
+const FETCH_WATERMARKS_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl KafkaIngestor {
+    /// Validate that `target_offset` is inside the partition's
+    /// `[low, high]` watermark window before letting `assign` accept
+    /// it. Three cases:
+    ///
+    /// - Below `low`: data was retention-trimmed; rdkafka's
+    ///   `auto.offset.reset = "earliest"` would silently jump to
+    ///   `low`, **skipping** the gap. We log a warn + bump
+    ///   `rr_ingestor_seek_below_watermark_total{group_id}` so
+    ///   operators see the data loss; we don't return an error
+    ///   because the rr supervisor's only recovery is to restart
+    ///   from `low`, which is what auto.offset.reset already does.
+    /// - Above `high`: seeking past the end of the topic. rdkafka
+    ///   will block forever waiting for new messages — this is
+    ///   acceptable for tailing but suggests a stale persisted
+    ///   offset, so we emit a warn + metric.
+    /// - Otherwise: clean.
+    ///
+    /// Watermark-fetch errors are logged but non-fatal: if the
+    /// broker is reachable enough to serve the next `poll`, the
+    /// validation simply degrades to a no-op for this seek.
+    async fn validate_seek_target(&self, target_offset: i64) {
+        let topic = self.topic.clone();
+        let partition = self.partition;
+        let consumer = Arc::clone(&self.consumer);
+        let group_id_label = self.group_id.to_string();
+
+        let watermarks = tokio::task::spawn_blocking(move || {
+            consumer.fetch_watermarks(&topic, partition, FETCH_WATERMARKS_TIMEOUT)
+        })
+        .await;
+        let (low, high) = match watermarks {
+            Ok(Ok(wm)) => wm,
+            Ok(Err(e)) => {
+                debug!(
+                    group_id = self.group_id,
+                    topic = %self.topic,
+                    error = %e,
+                    "fetch_watermarks failed; skipping seek-range validation"
+                );
+                return;
+            }
+            Err(e) => {
+                debug!(
+                    group_id = self.group_id,
+                    topic = %self.topic,
+                    error = %e,
+                    "fetch_watermarks task join failed; skipping seek-range validation"
+                );
+                return;
+            }
+        };
+
+        if target_offset < low {
+            warn!(
+                group_id = self.group_id,
+                topic = %self.topic,
+                partition = self.partition,
+                target = target_offset,
+                low,
+                high,
+                "kafka seek target below low watermark — auto.offset.reset will jump to {low}, \
+                 skipping {} entries; investigate retention vs rr's persisted offset",
+                low - target_offset
+            );
+            metrics::counter!(
+                "rr_ingestor_seek_below_watermark_total",
+                "group_id" => group_id_label.clone()
+            )
+            .increment(1);
+        } else if target_offset > high {
+            warn!(
+                group_id = self.group_id,
+                topic = %self.topic,
+                partition = self.partition,
+                target = target_offset,
+                low,
+                high,
+                "kafka seek target above high watermark — poll will block until new messages \
+                 arrive; check that the persisted offset matches the topic"
+            );
+            metrics::counter!(
+                "rr_ingestor_seek_above_watermark_total",
+                "group_id" => group_id_label
+            )
+            .increment(1);
+        }
+    }
+
     /// Construct a `KafkaIngestor` bound to `group_id`'s topic.
     ///
     /// Resolves env-var-backed security settings, builds a
@@ -200,6 +293,9 @@ impl CommandIngestor for KafkaIngestor {
             offset = ?target,
             "kafka ingestor seek"
         );
+        if let Some(target_offset) = offset.map(|o| o + 1) {
+            self.validate_seek_target(target_offset).await;
+        }
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(&self.topic, self.partition, target)
             .map_err(KafkaIngestorError::Kafka)?;

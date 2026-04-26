@@ -2702,6 +2702,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "futures",
+ "metrics",
  "proptest",
  "serde",
  "thiserror 2.0.18",

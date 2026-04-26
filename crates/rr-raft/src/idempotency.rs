@@ -156,31 +156,37 @@ impl IdempotencyLayer {
         };
         let bytes = bincode::serde::encode_to_vec(&internal, bincode::config::standard())
             .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))?;
-        Ok(IdempotencyState { reserved: bytes })
+        Ok(IdempotencyState { data: bytes })
     }
 
     /// Hydrate this layer from the framework-snapshot envelope's
     /// `IdempotencyState` slot. After this call:
     ///
     /// - `watermarks` are wholly replaced with the captured values,
-    /// - cache is **merged** with the captured entries (existing
-    ///   entries that aren't in the snapshot are kept; LRU eviction
-    ///   may drop some if the union exceeds capacity).
+    /// - cache is wholly replaced too: any pre-existing entries in
+    ///   `self.cache` are dropped so the post-restore state matches
+    ///   the snapshot exactly. (Earlier versions merged, which made
+    ///   double-restore non-idempotent and produced cache contents
+    ///   that no single snapshot could explain — the replace
+    ///   semantic is what operators expect.)
     ///
-    /// An empty `state.reserved` is treated as "no captured state" and
+    /// An empty `state.data` is treated as "no captured state" and
     /// leaves the layer untouched.
     pub fn restore(&mut self, state: IdempotencyState) -> Result<(), RrError> {
-        if state.reserved.is_empty() {
+        if state.data.is_empty() {
             return Ok(());
         }
         let (decoded, _): (IdempotencyStateInternal, _) =
-            bincode::serde::decode_from_slice(&state.reserved, bincode::config::standard())
-                .map_err(|e| {
+            bincode::serde::decode_from_slice(&state.data, bincode::config::standard()).map_err(
+                |e| {
                     RrError::Codec(CodecError::DeserializeFailed(format!(
                         "idempotency state decode failed: {e}"
                     )))
-                })?;
+                },
+            )?;
         self.watermarks = decoded.watermarks;
+        let cap = self.cache.cap();
+        self.cache = LruCache::new(cap);
         for (k, v) in decoded.cache {
             self.cache.put(k, v);
         }
@@ -340,6 +346,37 @@ mod tests {
         let empty = IdempotencyState::default();
         layer.restore(empty).unwrap();
         assert_eq!(layer.watermark_for("transfer"), Some(5));
+    }
+
+    #[test]
+    fn restore_replaces_existing_cache_entries_not_merge() {
+        let mut original = IdempotencyLayer::new(10);
+        original.record(&key("a", 1), b"snapshot-resp".to_vec());
+        let captured = original.capture().unwrap();
+
+        let mut layer = IdempotencyLayer::new(10);
+        layer.record(&key("a", 99), b"pre-restore-resp".to_vec());
+        layer.record(&key("b", 7), b"another-pre-restore".to_vec());
+        layer.restore(captured).unwrap();
+
+        match layer.decide(&key("a", 1)) {
+            IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"snapshot-resp"),
+            other => panic!("expected captured key in cache, got {other:?}"),
+        }
+        match layer.decide(&key("a", 99)) {
+            IdempotencyDecision::New => {}
+            other => panic!(
+                "post-restore the pre-existing key 99 must be gone (replace-not-merge); \
+                 got {other:?}"
+            ),
+        }
+        match layer.decide(&key("b", 7)) {
+            IdempotencyDecision::New => {}
+            other => panic!(
+                "post-restore pre-existing key in different request_type must be gone; \
+                 got {other:?}"
+            ),
+        }
     }
 
     #[test]

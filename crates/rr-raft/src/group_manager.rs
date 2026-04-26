@@ -328,10 +328,10 @@ impl RaftGroupManager {
         ingestor: Box<dyn rr_core::ingestor::DynCommandIngestor>,
         auto_idem: Option<crate::ingestor_runner::AutoIdempotency>,
     ) -> Result<(), RrError> {
+        let mut guard = self.ingestor_handles.write().await;
         if self.get_raft(group_id).await.is_none() {
             return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
         }
-        let mut guard = self.ingestor_handles.write().await;
         if guard.contains_key(&group_id) {
             return Err(RrError::Application(format!(
                 "ingestor already attached to group {group_id}"

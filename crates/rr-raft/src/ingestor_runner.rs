@@ -234,6 +234,7 @@ async fn seed_offset(
     group_id: GroupId,
     ingestor: &mut dyn DynCommandIngestor,
 ) -> Result<(), RrError> {
+    refresh_snapshot_if_stale(mgr, group_id).await;
     let snapshot_bytes = mgr.fetch_snapshot_bytes(group_id).await?;
     let offset = match snapshot_bytes
         .as_deref()
@@ -254,6 +255,83 @@ async fn seed_offset(
     .increment(1);
     ingestor.seek_bytes(offset.as_deref()).await
 }
+
+/// If the latest snapshot lags `last_applied`, trigger a fresh
+/// snapshot and wait up to [`SNAPSHOT_REFRESH_DEADLINE`] for it to
+/// catch up. Closes the P0-1 perf gap from the Wave 4d Oracle review:
+/// without this, a newly-promoted leader whose snapshot lags applied
+/// state by N entries re-fetches those N Kafka messages (auto-idem
+/// dedups them at apply, so it's only wasted I/O, but on large lags
+/// this is meaningful).
+///
+/// Errors are logged at debug and the supervisor proceeds with
+/// whatever snapshot already exists — non-blocking so a transient
+/// broker hiccup doesn't stall the leader's recovery.
+async fn refresh_snapshot_if_stale(mgr: &RaftGroupManager, group_id: GroupId) {
+    let Some(raft) = mgr.get_raft(group_id).await else {
+        return;
+    };
+    let metrics = raft.metrics().borrow().clone();
+    let target_index = match metrics.last_applied.as_ref().map(|l| l.index) {
+        Some(0) | None => return,
+        Some(idx) => idx,
+    };
+    let current_snap_index = metrics
+        .snapshot
+        .as_ref()
+        .map(|l| l.index)
+        .unwrap_or(0);
+    if current_snap_index >= target_index {
+        return;
+    }
+    debug!(
+        group_id,
+        target_index,
+        current_snap_index,
+        lag = target_index - current_snap_index,
+        "snapshot lags last_applied; triggering refresh before ingestor seek"
+    );
+    if let Err(e) = raft.trigger().snapshot().await {
+        debug!(
+            group_id,
+            error = %e,
+            "trigger snapshot failed; falling back to existing snapshot bytes"
+        );
+        return;
+    }
+    let deadline = std::time::Instant::now() + SNAPSHOT_REFRESH_DEADLINE;
+    while std::time::Instant::now() < deadline {
+        let curr = raft
+            .metrics()
+            .borrow()
+            .snapshot
+            .as_ref()
+            .map(|l| l.index)
+            .unwrap_or(0);
+        if curr >= target_index {
+            metrics::counter!(
+                "rr_ingestor_seed_snapshot_refreshes_total",
+                "group_id" => group_id.to_string()
+            )
+            .increment(1);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    warn!(
+        group_id,
+        target_index,
+        "snapshot refresh did not catch up within deadline; \
+         seeding from stale snapshot — auto-idempotency will dedup any duplicate fetches"
+    );
+}
+
+/// How long [`refresh_snapshot_if_stale`] waits for a triggered
+/// snapshot to materialise before giving up. Chosen to bound the
+/// leader-promotion latency: 30s is generous enough for snapshot
+/// generation on a typical state machine yet won't deadlock a
+/// node that has a deeper problem.
+const SNAPSHOT_REFRESH_DEADLINE: Duration = Duration::from_secs(30);
 
 async fn run_poll_loop(
     mgr: &RaftGroupManager,
@@ -327,7 +405,16 @@ async fn run_poll_loop(
                 }
             };
             match mgr.write(group_id, bytes).await {
-                Ok(_) => {}
+                Ok(_) => {
+                    if let Err(e) = ingestor.commit_applied_bytes(&cmd.offset).await {
+                        debug!(
+                            group_id,
+                            error = %e,
+                            "ingestor: commit_applied failed (non-fatal — Raft log is the \
+                             authoritative offset; this only affects upstream observability)"
+                        );
+                    }
+                }
                 Err(e) => {
                     let dropped = (batch_len - idx) as u64;
                     metrics::counter!(

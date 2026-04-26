@@ -75,17 +75,19 @@ pub struct FrameworkState {
     pub ingestor: Option<IngestorState>,
 }
 
-/// Placeholder for the idempotency layer's serialized state. The layer
-/// itself ships in Wave 4 Tier 2; the schema slot is reserved here so
-/// snapshots written today remain forward-compatible.
+/// Idempotency layer's serialized state, populated by
+/// `rr_raft::idempotency::IdempotencyLayer::capture`. `data` is an
+/// opaque bincode blob owned by the layer (not the framing layer);
+/// readers must round-trip through the layer's `restore` to get
+/// usable state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IdempotencyState {
-    /// Reserved for `watermarks: HashMap<request_type, u64>` and the
-    /// LRU response cache. Wire format will be defined when Tier 2
-    /// lands; until then any encoded `IdempotencyState` is `None` at
-    /// the `framework_state.idempotency` level.
-    #[serde(default)]
-    pub reserved: Vec<u8>,
+    /// Bincode-encoded `(watermarks: HashMap<request_type, u64>,
+    /// cache: Vec<…>)`. Empty `Vec` means "no captured state" and
+    /// `IdempotencyLayer::restore` treats it as a no-op (used by
+    /// `Default`).
+    #[serde(default, alias = "reserved")]
+    pub data: Vec<u8>,
 }
 
 /// Placeholder for the command-ingestor's serialized state.
@@ -145,11 +147,21 @@ impl FramedSnapshot {
             bincode::config::standard(),
         )
         .map_err(|e| {
+            metrics::counter!(
+                "rr_framing_decode_failures_total",
+                "kind" => "framed_snapshot_body"
+            )
+            .increment(1);
             RrError::Codec(CodecError::DeserializeFailed(format!(
                 "framed snapshot decode failed: {e}"
             )))
         })?;
         if framed.version > FRAMED_SNAPSHOT_VERSION {
+            metrics::counter!(
+                "rr_framing_decode_failures_total",
+                "kind" => "framed_snapshot_future_version"
+            )
+            .increment(1);
             return Err(RrError::Codec(CodecError::DeserializeFailed(format!(
                 "framed snapshot version {} is newer than this binary supports ({})",
                 framed.version, FRAMED_SNAPSHOT_VERSION

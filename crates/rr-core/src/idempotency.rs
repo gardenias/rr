@@ -173,21 +173,91 @@ pub enum ApplyOutcome {
     IdempotencyExpired(IdempotencyError),
 }
 
+/// Tag byte prefixed to `ApplyOutcome` bytes. Identifies the bytes as
+/// a framework-wrapped apply response so a mistakenly-decoded raw
+/// user payload fails fast rather than silently producing a
+/// `Success(garbage)` result. Distinct from
+/// [`crate::framed_snapshot::FRAMED_SNAPSHOT_MAGIC`] /
+/// [`crate::framed_entry::FRAMED_ENTRY_MAGIC`] (one byte vs eight)
+/// because the response wire path is single-source — the dispatch
+/// layer is the only encoder/decoder, so a short tag is enough to
+/// catch type errors without the cost of a full magic header.
+pub const APPLY_OUTCOME_TAG: u8 = 0xAA;
+
+/// Schema version for the `ApplyOutcome` envelope. Bumped if a new
+/// variant is added with non-backward-compatible semantics.
+pub const APPLY_OUTCOME_VERSION: u8 = 1;
+
 impl ApplyOutcome {
-    /// Encode the outcome as bincode bytes for `apply`'s `Vec<u8>` return.
+    /// Encode the outcome as `[tag][version][bincode body]` bytes for
+    /// `apply`'s `Vec<u8>` return.
     pub fn encode(&self) -> Result<Vec<u8>, crate::error::RrError> {
-        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|e| {
-            crate::error::RrError::Codec(crate::error::CodecError::SerializeFailed(e.to_string()))
-        })
+        let body = bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(
+            |e| {
+                crate::error::RrError::Codec(crate::error::CodecError::SerializeFailed(
+                    e.to_string(),
+                ))
+            },
+        )?;
+        let mut out = Vec::with_capacity(2 + body.len());
+        out.push(APPLY_OUTCOME_TAG);
+        out.push(APPLY_OUTCOME_VERSION);
+        out.extend_from_slice(&body);
+        Ok(out)
     }
 
     /// Decode bytes returned from `apply`. Caller MUST only invoke this
     /// for entries that were submitted with an `IdempotencyKey`;
-    /// unkeyed responses are raw user bytes and would fail here.
+    /// unkeyed responses are raw user bytes and will fail the tag
+    /// check at the head of the decode rather than silently
+    /// mis-interpreting the bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::error::RrError> {
+        if bytes.len() < 2 {
+            metrics::counter!(
+                "rr_framing_decode_failures_total",
+                "kind" => "apply_outcome_too_short"
+            )
+            .increment(1);
+            return Err(crate::error::RrError::Codec(
+                crate::error::CodecError::DeserializeFailed(
+                    "apply outcome bytes shorter than the 2-byte header".to_string(),
+                ),
+            ));
+        }
+        if bytes[0] != APPLY_OUTCOME_TAG {
+            metrics::counter!(
+                "rr_framing_decode_failures_total",
+                "kind" => "apply_outcome_bad_tag"
+            )
+            .increment(1);
+            return Err(crate::error::RrError::Codec(
+                crate::error::CodecError::DeserializeFailed(format!(
+                    "apply outcome tag mismatch: expected {APPLY_OUTCOME_TAG:#x}, got {:#x}",
+                    bytes[0]
+                )),
+            ));
+        }
+        if bytes[1] > APPLY_OUTCOME_VERSION {
+            metrics::counter!(
+                "rr_framing_decode_failures_total",
+                "kind" => "apply_outcome_future_version"
+            )
+            .increment(1);
+            return Err(crate::error::RrError::Codec(
+                crate::error::CodecError::DeserializeFailed(format!(
+                    "apply outcome version {} is newer than this binary supports ({APPLY_OUTCOME_VERSION})",
+                    bytes[1]
+                )),
+            ));
+        }
         let (decoded, _) =
-            bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map_err(
+            bincode::serde::decode_from_slice(&bytes[2..], bincode::config::standard()).map_err(
                 |e| {
+                    metrics::counter!(
+                        "rr_framing_decode_failures_total",
+                        "kind" => "apply_outcome_body"
+                    )
+                    .increment(1);
                     crate::error::RrError::Codec(crate::error::CodecError::DeserializeFailed(
                         format!("apply outcome decode failed: {e}"),
                     ))
