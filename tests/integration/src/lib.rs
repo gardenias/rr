@@ -1461,6 +1461,145 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    // ── E3: Network-partition pathology cases (Theme C.3) ────────────────────
+
+    /// E3a — Flapping isolation. Rapidly isolate then restore the leader 5
+    /// times in a row. Verifies the cluster doesn't get stuck in an
+    /// election storm and a stable leader emerges after the dust settles.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_flapping_partition_no_election_storm() {
+        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+        let initial_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("initial leader");
+
+        for _ in 0..5 {
+            injector.isolate(initial_leader);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            injector.restore(initial_leader);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        injector.clear_all();
+        let final_leader = wait_for_cluster_ready(&nodes, 1, 12_000)
+            .await
+            .expect("cluster must converge to a stable leader after flapping stops");
+        assert!((1..=3).contains(&final_leader));
+
+        let leader_node = nodes
+            .iter()
+            .find(|n| n.node_id() == final_leader)
+            .unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        raft.client_write(b"post-flapping".to_vec())
+            .await
+            .expect("post-flapping write must succeed");
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// E3b — Minority-partition split-brain prevention. In a 5-node cluster,
+    /// isolate the leader's side (2 nodes including the leader). The
+    /// resulting 2-node minority must NOT accept writes (no quorum), while
+    /// the 3-node majority elects a new leader and DOES accept writes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_minority_partition_blocks_writes() {
+        let (builder, injector) = ClusterBuilder::new(5, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+        let original_leader = wait_for_cluster_ready(&nodes, 1, 10_000)
+            .await
+            .expect("initial leader");
+
+        let mut other_minority_id = 0;
+        for n in &nodes {
+            if n.node_id() != original_leader {
+                other_minority_id = n.node_id();
+                break;
+            }
+        }
+        injector.isolate(original_leader);
+        injector.isolate(other_minority_id);
+
+        let new_leader = wait_for_new_leader(&nodes, 1, original_leader, 15_000)
+            .await
+            .expect("3-node majority must elect a new leader");
+        assert_ne!(new_leader, original_leader);
+        assert_ne!(new_leader, other_minority_id);
+
+        let new_leader_node = nodes.iter().find(|n| n.node_id() == new_leader).unwrap();
+        let raft = new_leader_node.group_manager().get_raft(1).await.unwrap();
+        raft.client_write(b"majority-write".to_vec())
+            .await
+            .expect("3-node majority must accept writes");
+
+        let isolated_leader_node = nodes
+            .iter()
+            .find(|n| n.node_id() == original_leader)
+            .unwrap();
+        if let Some(orig_raft) = isolated_leader_node.group_manager().get_raft(1).await {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(2_000),
+                orig_raft.client_write(b"minority-attempt".to_vec()),
+            )
+            .await;
+            if let Ok(Ok(_)) = result {
+                panic!("minority partition must NOT commit writes; this is a split-brain");
+            }
+        }
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// E3c — Two simultaneous followers isolated. In a 3-node cluster
+    /// (quorum = 2), isolating both followers leaves only the leader; the
+    /// leader becomes a minority of one and must NOT commit any further
+    /// writes. After restoring one follower, quorum returns and writes
+    /// resume.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_double_follower_isolation_blocks_then_recovers() {
+        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("initial leader");
+
+        let followers: Vec<u64> = nodes
+            .iter()
+            .map(|n| n.node_id())
+            .filter(|id| *id != leader_id)
+            .collect();
+        assert_eq!(followers.len(), 2);
+        injector.isolate(followers[0]);
+        injector.isolate(followers[1]);
+
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(2_000),
+            raft.client_write(b"no-quorum".to_vec()),
+        )
+        .await;
+        if let Ok(Ok(_)) = blocked {
+            panic!(
+                "leader without quorum must NOT commit writes; saw a successful client_write"
+            );
+        }
+
+        injector.restore(followers[0]);
+
+        let restored = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            raft.client_write(b"quorum-restored".to_vec()),
+        )
+        .await;
+        assert!(
+            matches!(restored, Ok(Ok(_))),
+            "write must succeed once quorum is restored, got {restored:?}"
+        );
+
+        shutdown_all(&nodes).await;
+    }
+
     /// Verify HTTP /health, /ready, /metrics endpoints work end-to-end.
     ///
     /// Spawns a single-node `RrNode` with `metrics_port` set, sends real HTTP
