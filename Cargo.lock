@@ -1328,6 +1328,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bincode",
  "dashmap",
  "openraft",
  "rand 0.8.5",
@@ -1335,6 +1336,7 @@ dependencies = [
  "rr-client",
  "rr-config",
  "rr-core",
+ "rr-ingestor-kafka",
  "rr-network",
  "rr-raft",
  "rr-router",

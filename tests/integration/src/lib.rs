@@ -3,6 +3,8 @@
 //! Provides an in-process multi-node cluster builder and helpers for
 //! exercising Raft leader election, fault tolerance, and multi-group routing.
 
+#[cfg(test)]
+mod cross_tier_ingestor;
 pub mod fault_injection;
 use std::collections::BTreeMap;
 use std::sync::Arc;
