@@ -39,6 +39,11 @@ pub struct RaftGroupManager {
     /// cancels and joins them.
     metrics_tickers:
         Arc<RwLock<HashMap<GroupId, crate::metrics_ticker::MetricsTickerHandle>>>,
+    /// Per-group auto-promote-learner supervisors. Optional; populated
+    /// by [`Self::start_learner_promoter`]; stop_group + Drop both
+    /// clean these up.
+    learner_promoters:
+        Arc<RwLock<HashMap<GroupId, crate::learner_promoter::LearnerPromoterHandle>>>,
     /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
@@ -57,6 +62,7 @@ impl RaftGroupManager {
             channel_pool: None,
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
+            learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -79,6 +85,7 @@ impl RaftGroupManager {
             channel_pool: Some(channel_pool),
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
+            learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -216,6 +223,9 @@ impl RaftGroupManager {
         }
         if let Some(ticker) = self.metrics_tickers.write().await.remove(&group_id) {
             ticker.stop().await;
+        }
+        if let Some(promoter) = self.learner_promoters.write().await.remove(&group_id) {
+            promoter.stop().await;
         }
 
         let mut guard = self.groups.write().await;
@@ -359,6 +369,46 @@ impl RaftGroupManager {
         Ok(())
     }
 
+    /// Spawn the per-group [`crate::learner_promoter`] supervisor that
+    /// watches replication metrics and auto-promotes caught-up
+    /// learners to voters via [`Self::change_membership`].
+    ///
+    /// Idempotent on the same group: a second call replaces the
+    /// previous promoter with the new config (so operators can tune
+    /// thresholds without restarting the group). Returns an error if
+    /// the group has not been started.
+    pub async fn start_learner_promoter(
+        self: &Arc<Self>,
+        group_id: GroupId,
+        config: crate::learner_promoter::AutoPromoteConfig,
+    ) -> Result<(), RrError> {
+        if self.get_raft(group_id).await.is_none() {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
+        let mut guard = self.learner_promoters.write().await;
+        if let Some(prev) = guard.remove(&group_id) {
+            prev.stop().await;
+        }
+        let handle = crate::learner_promoter::spawn_for_group(self.clone(), group_id, config);
+        guard.insert(group_id, handle);
+        info!(group_id, "started learner-promoter");
+        Ok(())
+    }
+
+    /// Stop the learner-promoter for `group_id` if one is running.
+    /// Returns `Ok(false)` if none was running.
+    pub async fn stop_learner_promoter(&self, group_id: GroupId) -> Result<bool, RrError> {
+        let handle = self.learner_promoters.write().await.remove(&group_id);
+        match handle {
+            Some(h) => {
+                h.stop().await;
+                info!(group_id, "stopped learner-promoter");
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Stop the ingestor supervisor for `group_id` if one is attached.
     /// Returns `Ok(false)` if no supervisor was running. The Raft group
     /// itself remains active.
@@ -448,6 +498,7 @@ impl RaftGroupManager {
             channel_pool: None,
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
+            learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             rocks_base_path: Some(base_path),
         }
     }

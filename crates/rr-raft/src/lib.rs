@@ -5,6 +5,7 @@
 pub mod group_manager;
 pub mod idempotency;
 pub mod ingestor_runner;
+pub mod learner_promoter;
 pub mod log_storage;
 pub mod metrics_ticker;
 pub mod network_factory;
