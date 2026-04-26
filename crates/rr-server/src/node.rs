@@ -704,6 +704,7 @@ mod tests {
             &self,
             _: u64,
             _: Vec<u8>,
+            _: Option<rr_core::IdempotencyKey>,
         ) -> Result<ClientWriteResult, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }

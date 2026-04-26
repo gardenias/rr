@@ -15,16 +15,39 @@
 //! transparently. After the next `snapshot()` call the on-disk format
 //! is the new framed envelope.
 //!
+//! # Per-entry framing + idempotency
+//!
+//! `apply` decodes each entry as a [`FramedEntry`]. If the envelope
+//! carries an `IdempotencyKey`, the adapter consults its
+//! [`IdempotencyLayer`] before invoking `Service::handle`:
+//!
+//! - **Replay** / **Collision** → returns the cached response, never
+//!   calls the user service.
+//! - **Expired** → returns an [`ApplyOutcome::IdempotencyExpired`]
+//!   wrapping the watermark info; the dispatch layer surfaces it as
+//!   `ClientResponse.idem_error`.
+//! - **New** → calls the user service, records the response, and wraps
+//!   it as [`ApplyOutcome::Success`] so the dispatch layer can decode
+//!   it back to raw bytes.
+//!
+//! Entries without an `IdempotencyKey` (legacy v0.2.x payloads or
+//! opt-out new clients) skip the layer entirely and return raw
+//! response bytes — preserving wire compatibility.
+//!
 //! `Service::handle` / `Service::snapshot` / `Service::restore` see
 //! only the user's raw bytes — the framing is invisible to them.
 
 use async_trait::async_trait;
 
 use rr_core::error::RrError;
+use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::FramedSnapshot;
+use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
 use rr_core::service::Service;
 use rr_core::state_machine::StateMachine;
 use rr_core::types::{GroupId, LogIndex};
+
+use crate::idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
 
 /// Adapter that bridges a high-level [`Service`] to the low-level [`StateMachine`] trait.
 ///
@@ -43,15 +66,93 @@ pub struct ServiceStateMachineAdapter<S: Service> {
     group_id: GroupId,
     service: S,
     applied_count: u64,
+    idempotency: IdempotencyLayer,
 }
 
 impl<S: Service> ServiceStateMachineAdapter<S> {
-    /// Create a new adapter wrapping the given service for `group_id`.
+    /// Create a new adapter wrapping the given service for `group_id`,
+    /// using the framework default idempotency cache capacity
+    /// ([`DEFAULT_IDEMPOTENCY_CACHE_SIZE`]).
     pub fn new(group_id: GroupId, service: S) -> Self {
+        Self::with_idempotency_capacity(group_id, service, DEFAULT_IDEMPOTENCY_CACHE_SIZE)
+    }
+
+    /// Create an adapter with an explicit idempotency cache capacity.
+    /// Use this in tests or when memory constraints differ from the
+    /// default 10 000 entries.
+    pub fn with_idempotency_capacity(group_id: GroupId, service: S, capacity: usize) -> Self {
         Self {
             group_id,
             service,
             applied_count: 0,
+            idempotency: IdempotencyLayer::new(capacity),
+        }
+    }
+
+    async fn apply_keyed(
+        &mut self,
+        key: rr_core::idempotency::IdempotencyKey,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RrError> {
+        let group_id_label = self.group_id.to_string();
+        match self.idempotency.decide(&key) {
+            IdempotencyDecision::Replay(cached) => {
+                metrics::counter!(
+                    "rr_idempotency_replays_total",
+                    "group_id" => group_id_label
+                )
+                .increment(1);
+                ApplyOutcome::Success(cached).encode()
+            }
+            IdempotencyDecision::Expired {
+                request_type,
+                request_id,
+                watermark,
+            } => {
+                metrics::counter!(
+                    "rr_idempotency_expired_total",
+                    "group_id" => group_id_label
+                )
+                .increment(1);
+                ApplyOutcome::IdempotencyExpired(rr_core::idempotency::IdempotencyError {
+                    request_type,
+                    request_id,
+                    watermark,
+                })
+                .encode()
+            }
+            IdempotencyDecision::Collision {
+                cached_client_id,
+                incoming_client_id,
+                cached_response,
+            } => {
+                metrics::counter!(
+                    "rr_idempotency_collisions_total",
+                    "group_id" => group_id_label
+                )
+                .increment(1);
+                tracing::warn!(
+                    target: "rr::audit",
+                    op = "idempotency_collision",
+                    group_id = self.group_id,
+                    request_type = %key.request_type,
+                    request_id = key.request_id,
+                    cached_client_id = ?cached_client_id,
+                    incoming_client_id = ?incoming_client_id,
+                    "idempotency key reused with different client_id"
+                );
+                ApplyOutcome::Success(cached_response).encode()
+            }
+            IdempotencyDecision::New => {
+                let response = self.service.handle(payload).await?;
+                self.idempotency.record(&key, response.clone());
+                metrics::gauge!(
+                    "rr_idempotency_cache_size",
+                    "group_id" => group_id_label
+                )
+                .set(self.idempotency.cache_len() as f64);
+                ApplyOutcome::Success(response).encode()
+            }
         }
     }
 }
@@ -59,14 +160,29 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
 #[async_trait]
 impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
-        let result = self.service.handle(entry.to_vec()).await?;
-        self.applied_count += 1;
-        Ok(result)
+        let (idem_key, payload) = match FramedEntry::decode(entry)? {
+            Some(framed) => (framed.idem_key, framed.payload),
+            None => (None, entry.to_vec()),
+        };
+
+        let result = match idem_key {
+            None => self.service.handle(payload).await,
+            Some(key) => self.apply_keyed(key, payload).await,
+        };
+
+        if result.is_ok() {
+            self.applied_count += 1;
+        }
+        result
     }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
         let user_snapshot = self.service.snapshot().await?;
-        FramedSnapshot::new(user_snapshot).encode()
+        let mut framed = FramedSnapshot::new(user_snapshot);
+        if !self.idempotency.is_empty() {
+            framed.framework_state.idempotency = Some(self.idempotency.capture()?);
+        }
+        framed.encode()
     }
 
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError> {
@@ -80,6 +196,9 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
                     user_bytes = framed.user_snapshot.len(),
                     "restoring from framed snapshot envelope"
                 );
+                if let Some(idem_state) = framed.framework_state.idempotency {
+                    self.idempotency.restore(idem_state)?;
+                }
                 framed.user_snapshot
             }
             None => {
@@ -261,6 +380,126 @@ mod tests {
         assert!(
             msg.contains("framed snapshot decode failed") || msg.contains("decode"),
             "expected decode error, got: {msg}"
+        );
+    }
+
+    fn keyed_entry(payload: &[u8], key: rr_core::idempotency::IdempotencyKey) -> Vec<u8> {
+        rr_core::framed_entry::FramedEntry::from_payload(payload.to_vec())
+            .with_idem_key(key)
+            .encode()
+            .unwrap()
+    }
+
+    fn unkeyed_entry(payload: &[u8]) -> Vec<u8> {
+        rr_core::framed_entry::FramedEntry::from_payload(payload.to_vec())
+            .encode()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn apply_unkeyed_framed_entry_returns_raw_user_bytes() {
+        let svc = MockService::new(b"resp".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let entry = unkeyed_entry(b"req");
+        let result = adapter.apply(&entry).await.unwrap();
+
+        assert_eq!(
+            result, b"resp",
+            "unkeyed framed entries must return raw service bytes (not ApplyOutcome-wrapped)"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_keyed_first_call_records_and_wraps_success() {
+        let svc = MockService::new(b"resp1".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let key = rr_core::idempotency::IdempotencyKey::new("transfer", 42);
+        let entry = keyed_entry(b"req", key);
+        let bytes = adapter.apply(&entry).await.unwrap();
+
+        match rr_core::idempotency::ApplyOutcome::decode(&bytes).unwrap() {
+            rr_core::idempotency::ApplyOutcome::Success(payload) => {
+                assert_eq!(payload, b"resp1");
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_keyed_replay_returns_cached_without_calling_service() {
+        let svc = MockService::new(b"first-response".to_vec());
+        let calls = Arc::clone(&svc.calls);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let key = rr_core::idempotency::IdempotencyKey::new("transfer", 42);
+        let entry = keyed_entry(b"req", key);
+
+        let first = adapter.apply(&entry).await.unwrap();
+        let second = adapter.apply(&entry).await.unwrap();
+
+        assert_eq!(
+            first, second,
+            "second apply with same key must return cached response"
+        );
+        assert_eq!(
+            calls.lock().await.len(),
+            1,
+            "service.handle must run exactly once across two keyed retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_keyed_expired_returns_idempotency_expired_outcome() {
+        let svc = MockService::new(b"resp".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::with_idempotency_capacity(7, svc, 2);
+
+        let k1 = rr_core::idempotency::IdempotencyKey::new("transfer", 1);
+        let k2 = rr_core::idempotency::IdempotencyKey::new("transfer", 2);
+        let k3 = rr_core::idempotency::IdempotencyKey::new("transfer", 3);
+        adapter.apply(&keyed_entry(b"a", k1.clone())).await.unwrap();
+        adapter.apply(&keyed_entry(b"b", k2)).await.unwrap();
+        adapter.apply(&keyed_entry(b"c", k3)).await.unwrap();
+
+        let bytes = adapter.apply(&keyed_entry(b"a-retry", k1)).await.unwrap();
+        match rr_core::idempotency::ApplyOutcome::decode(&bytes).unwrap() {
+            rr_core::idempotency::ApplyOutcome::IdempotencyExpired(err) => {
+                assert_eq!(err.request_type, "transfer");
+                assert_eq!(err.request_id, 1);
+                assert_eq!(err.watermark, 3);
+            }
+            other => panic!("expected IdempotencyExpired, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_restore_preserves_idempotency_replay_behaviour() {
+        let svc1 = MockService::new(b"first-response".to_vec());
+        let mut adapter1 = ServiceStateMachineAdapter::new(7, svc1);
+        let key = rr_core::idempotency::IdempotencyKey::new("transfer", 42);
+        adapter1.apply(&keyed_entry(b"req", key.clone())).await.unwrap();
+        let snapshot_bytes = adapter1.snapshot().await.unwrap();
+
+        let svc2 = MockService::new(b"second-response".to_vec());
+        let calls2 = Arc::clone(&svc2.calls);
+        let mut adapter2 = ServiceStateMachineAdapter::new(7, svc2);
+        adapter2.restore(&snapshot_bytes).await.unwrap();
+
+        let bytes = adapter2.apply(&keyed_entry(b"req-retry", key)).await.unwrap();
+        match rr_core::idempotency::ApplyOutcome::decode(&bytes).unwrap() {
+            rr_core::idempotency::ApplyOutcome::Success(payload) => {
+                assert_eq!(
+                    payload, b"first-response",
+                    "post-restore replay must return the ORIGINAL adapter's cached response"
+                );
+            }
+            other => panic!("expected Success, got {other:?}"),
+        }
+        assert_eq!(
+            calls2.lock().await.len(),
+            0,
+            "post-restore replay must not invoke the new service.handle"
         );
     }
 

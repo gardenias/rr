@@ -3,6 +3,7 @@
 //! Part of the `rr` distributed framework.
 
 pub mod group_manager;
+pub mod idempotency;
 pub mod log_storage;
 pub mod network_factory;
 pub mod raft_node;
@@ -16,6 +17,7 @@ pub mod rocks_log_storage;
 pub use rocks_log_storage::RocksLogStorage;
 
 pub use group_manager::RaftGroupManager;
+pub use idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
 pub use log_storage::RrLogStorage;
 pub use network_factory::GrpcNetworkFactory;
 pub use network_factory::GrpcRaftNetwork;

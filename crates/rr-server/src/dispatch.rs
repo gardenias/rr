@@ -1,9 +1,19 @@
 //! Production implementation of [`ClientDispatch`] for routing client writes.
+//!
+//! Threads idempotency keys end-to-end: when the gRPC layer surfaces an
+//! `IdempotencyKey`, the dispatch wraps the user payload as a
+//! [`FramedEntry`] so the state-machine adapter's idempotency layer can
+//! act on it; on the response side it decodes the
+//! [`ApplyOutcome`] envelope and surfaces an Expired result via
+//! [`ClientWriteResult::idem_error`]. Unkeyed requests pass through
+//! verbatim for v0.2.x wire compatibility.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use openraft::BasicNode;
+use rr_core::framed_entry::FramedEntry;
+use rr_core::idempotency::{ApplyOutcome, IdempotencyKey};
 use rr_core::types::GroupId;
 use rr_network::client_service::{ClientDispatch, ClientWriteResult};
 use rr_network::proto::client::GroupInfo;
@@ -33,11 +43,12 @@ impl ClientDispatchImpl {
 
 #[async_trait]
 impl ClientDispatch for ClientDispatchImpl {
-    #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
+    #[instrument(skip(self, payload, idem_key), fields(payload_len = payload.len(), keyed = idem_key.is_some()))]
     async fn submit_write(
         &self,
         partition_id: u64,
         payload: Vec<u8>,
+        idem_key: Option<IdempotencyKey>,
     ) -> Result<ClientWriteResult, tonic::Status> {
         let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
             tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
@@ -49,13 +60,59 @@ impl ClientDispatch for ClientDispatchImpl {
             .await
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
-        match raft.client_write(payload).await {
-            Ok(resp) => Ok(ClientWriteResult {
-                success: true,
-                payload: resp.data,
-                leader_node_id: None,
-                leader_addr: None,
-            }),
+        let keyed = idem_key.is_some();
+        let entry_bytes = if let Some(key) = idem_key {
+            FramedEntry {
+                offset: None,
+                idem_key: Some(key),
+                payload,
+            }
+            .encode()
+            .map_err(|e| {
+                tracing::error!(group_id, error = %e, "framed entry encode failed");
+                tonic::Status::internal("internal encode error")
+            })?
+        } else {
+            payload
+        };
+
+        match raft.client_write(entry_bytes).await {
+            Ok(resp) => {
+                if keyed {
+                    match ApplyOutcome::decode(&resp.data) {
+                        Ok(ApplyOutcome::Success(bytes)) => Ok(ClientWriteResult {
+                            success: true,
+                            payload: bytes,
+                            leader_node_id: None,
+                            leader_addr: None,
+                            idem_error: None,
+                        }),
+                        Ok(ApplyOutcome::IdempotencyExpired(err)) => Ok(ClientWriteResult {
+                            success: false,
+                            payload: vec![],
+                            leader_node_id: None,
+                            leader_addr: None,
+                            idem_error: Some(err),
+                        }),
+                        Err(e) => {
+                            tracing::error!(
+                                group_id,
+                                error = %e,
+                                "apply outcome decode failed (keyed request, expected wrapped response)"
+                            );
+                            Err(tonic::Status::internal("internal decode error"))
+                        }
+                    }
+                } else {
+                    Ok(ClientWriteResult {
+                        success: true,
+                        payload: resp.data,
+                        leader_node_id: None,
+                        leader_addr: None,
+                        idem_error: None,
+                    })
+                }
+            }
             Err(ref e) => {
                 if let Some(fwd) = e.forward_to_leader::<BasicNode>() {
                     Ok(ClientWriteResult {
@@ -63,6 +120,7 @@ impl ClientDispatch for ClientDispatchImpl {
                         payload: vec![],
                         leader_node_id: fwd.leader_id,
                         leader_addr: fwd.leader_node.as_ref().map(|n: &BasicNode| n.addr.clone()),
+                        idem_error: None,
                     })
                 } else {
                     tracing::error!(
@@ -141,7 +199,7 @@ mod tests {
         let router = Arc::new(ShardRouter::new(config));
         let dispatch = ClientDispatchImpl::new(Arc::clone(&mgr), router);
 
-        let result = dispatch.submit_write(999, vec![1, 2, 3]).await;
+        let result = dispatch.submit_write(999, vec![1, 2, 3], None).await;
         assert!(result.is_err());
         let status = result.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);

@@ -7,13 +7,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rr_core::error::{NetworkError, RrError};
+use rr_core::idempotency::IdempotencyKey;
 use rr_core::types::{GroupId, NodeId};
 use rr_network::proto::client::client_service_client::ClientServiceClient;
-use rr_network::proto::client::{ClientRequest, ClusterInfo, Empty};
+use rr_network::proto::client::{
+    ClientRequest, ClusterInfo, Empty, IdempotencyKey as ProtoIdemKey,
+};
 use rr_network::ChannelPool;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::instrument;
+
+fn idem_key_to_proto(key: IdempotencyKey) -> ProtoIdemKey {
+    ProtoIdemKey {
+        request_type: key.request_type,
+        request_id: key.request_id,
+        client_id: key.client_id,
+    }
+}
 
 /// Configuration for retry behavior on transient failures and leader redirects.
 #[derive(Debug, Clone)]
@@ -141,6 +152,43 @@ impl RrClient {
         group_id: GroupId,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, RrError> {
+        self.send_request_inner(group_id, payload, None).await
+    }
+
+    /// Send an *idempotent* request: the framework deduplicates retries
+    /// of the same `(request_type, request_id)` and returns the cached
+    /// response from the first apply.
+    ///
+    /// Behavior beyond [`send_request`](Self::send_request):
+    ///
+    /// - The retry loop is safe to run any number of times — duplicates
+    ///   are absorbed by the framework's idempotency layer.
+    /// - If the framework rejects the request because its `request_id`
+    ///   has fallen below the watermark and been evicted from the LRU
+    ///   cache, this method returns
+    ///   [`RrError::IdempotencyExpired`](rr_core::error::RrError::IdempotencyExpired)
+    ///   with the watermark info. The caller should pick a fresh
+    ///   `request_id` greater than the returned `watermark`.
+    ///
+    /// `client_id` on the key is diagnostic-only — collisions with a
+    /// different `client_id` still return the cached response (the
+    /// dedup identity is `(request_type, request_id)`).
+    #[instrument(skip(self, payload, key), fields(group_id, payload_len = payload.len(), request_type = %key.request_type, request_id = key.request_id))]
+    pub async fn send_request_idempotent(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+        key: IdempotencyKey,
+    ) -> Result<Vec<u8>, RrError> {
+        self.send_request_inner(group_id, payload, Some(key)).await
+    }
+
+    async fn send_request_inner(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+        idem_key: Option<IdempotencyKey>,
+    ) -> Result<Vec<u8>, RrError> {
         let max_attempts = self.retry_config.max_retries + 1;
         let mut bootstrap_index: usize = 0;
         let mut last_error: Option<RrError> = None;
@@ -208,14 +256,27 @@ impl RrClient {
             let request = ClientRequest {
                 partition_id: group_id,
                 payload: payload.clone(),
-                idem_key: None,
+                idem_key: idem_key.clone().map(idem_key_to_proto),
             };
 
             match grpc_client.request(tonic::Request::new(request)).await {
                 Ok(response) => {
                     let resp = response.into_inner();
 
-                    // Check for leader redirect
+                    if let Some(idem_err) = resp.idem_error {
+                        metrics::histogram!(
+                            "rr_client_request_duration_seconds",
+                            "group_id" => gid_label.clone(),
+                            "outcome" => "idempotency_expired",
+                        )
+                        .record(request_start.elapsed().as_secs_f64());
+                        return Err(RrError::IdempotencyExpired {
+                            request_type: idem_err.request_type,
+                            request_id: idem_err.request_id,
+                            watermark: idem_err.watermark,
+                        });
+                    }
+
                     if let Some(leader_info) = resp.leader_info {
                         tracing::info!(
                             group_id,
@@ -226,7 +287,6 @@ impl RrClient {
                         self.update_leader_cache(group_id, leader_info.node_id, leader_info.addr)
                             .await;
 
-                        // If the response was not successful, retry with the new leader
                         if !resp.success && attempt + 1 < max_attempts {
                             let delay_ms = self.retry_config.retry_delay_ms * 2u64.pow(attempt);
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;

@@ -65,7 +65,7 @@ pub use framed_snapshot::{
     FramedSnapshot, FrameworkState, IdempotencyState, IngestorState, FRAMED_SNAPSHOT_MAGIC,
     FRAMED_SNAPSHOT_VERSION,
 };
-pub use idempotency::{IdempotencyDecision, IdempotencyError, IdempotencyKey};
+pub use idempotency::{ApplyOutcome, IdempotencyDecision, IdempotencyError, IdempotencyKey};
 pub use ingestor::{CommandIngestor, DynCommandIngestor, DynIngressCommand, IngressCommand};
 pub use service::Service;
 pub use state_machine::StateMachine;

@@ -11,9 +11,12 @@
 
 use std::sync::Arc;
 
+use rr_core::idempotency::{IdempotencyError, IdempotencyKey};
+
 use crate::proto::client::client_service_server;
 use crate::proto::client::{
-    ClientRequest, ClientResponse, ClusterInfo, Empty, GroupInfo, LeaderInfo,
+    ClientRequest, ClientResponse, ClusterInfo, Empty, GroupInfo, IdempotencyError as ProtoIdemErr,
+    IdempotencyKey as ProtoIdemKey, LeaderInfo,
 };
 
 /// Result of submitting a client write request.
@@ -26,6 +29,10 @@ pub struct ClientWriteResult {
     pub payload: Vec<u8>,
     pub leader_node_id: Option<u64>,
     pub leader_addr: Option<String>,
+    /// Set when the framework rejected an idempotent request because its
+    /// `request_id` is below the watermark and has been evicted from the
+    /// LRU cache. Mutually exclusive with non-empty `payload`.
+    pub idem_error: Option<IdempotencyError>,
 }
 
 /// Trait for dispatching client RPCs to the application layer.
@@ -40,18 +47,39 @@ pub struct ClientWriteResult {
 pub trait ClientDispatch: Send + Sync {
     /// Submit a write request to the given partition.
     ///
-    /// Returns a [`ClientWriteResult`] with the response payload and optional
-    /// leader redirect information.
+    /// `idem_key` is the optional [`IdempotencyKey`] from the
+    /// `ClientRequest.idem_key` proto field. When `Some`, the dispatch
+    /// implementation wraps the payload as a `FramedEntry` so the
+    /// state-machine adapter consults its idempotency layer; when
+    /// `None`, the payload is forwarded as raw bytes for v0.2.x
+    /// compatibility.
     async fn submit_write(
         &self,
         partition_id: u64,
         payload: Vec<u8>,
+        idem_key: Option<IdempotencyKey>,
     ) -> Result<ClientWriteResult, tonic::Status>;
 
     /// Get cluster topology information.
     ///
     /// Returns a list of [`GroupInfo`] describing the current cluster state.
     async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status>;
+}
+
+fn proto_to_idem_key(p: ProtoIdemKey) -> IdempotencyKey {
+    IdempotencyKey {
+        request_type: p.request_type,
+        request_id: p.request_id,
+        client_id: p.client_id,
+    }
+}
+
+fn idem_err_to_proto(err: IdempotencyError) -> ProtoIdemErr {
+    ProtoIdemErr {
+        request_type: err.request_type,
+        request_id: err.request_id,
+        watermark: err.watermark,
+    }
 }
 
 /// gRPC service implementation that receives client RPCs and forwards them
@@ -75,15 +103,17 @@ impl client_service_server::ClientService for ClientServiceImpl {
     ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
         let traceparent = crate::tracing::extract_traceparent(&request);
         let req = request.into_inner();
+        let idem_key = req.idem_key.map(proto_to_idem_key);
         tracing::debug!(
             partition_id = req.partition_id,
+            keyed = idem_key.is_some(),
             traceparent = traceparent.as_deref().unwrap_or(""),
             "client request received"
         );
 
         let result = self
             .dispatch
-            .submit_write(req.partition_id, req.payload)
+            .submit_write(req.partition_id, req.payload, idem_key)
             .await?;
 
         let leader_info = match (result.leader_node_id, result.leader_addr) {
@@ -95,7 +125,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
             success: result.success,
             payload: result.payload,
             leader_info,
-            idem_error: None,
+            idem_error: result.idem_error.map(idem_err_to_proto),
         }))
     }
 
@@ -133,6 +163,7 @@ mod tests {
                     payload: vec![1, 2, 3],
                     leader_node_id: None,
                     leader_addr: None,
+                    idem_error: None,
                 }),
                 cluster_info: Ok(vec![GroupInfo {
                     group_id: 1,
@@ -149,6 +180,7 @@ mod tests {
                     payload: vec![],
                     leader_node_id: Some(42),
                     leader_addr: Some("127.0.0.1:50051".to_string()),
+                    idem_error: None,
                 }),
                 cluster_info: Ok(vec![]),
             }
@@ -168,6 +200,7 @@ mod tests {
             &self,
             _partition_id: u64,
             _payload: Vec<u8>,
+            _idem_key: Option<IdempotencyKey>,
         ) -> Result<ClientWriteResult, tonic::Status> {
             self.write_result.clone()
         }

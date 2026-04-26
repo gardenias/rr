@@ -133,6 +133,53 @@ impl std::fmt::Display for IdempotencyError {
     }
 }
 
+/// Wire-level outcome of applying a *keyed* request through the idempotency
+/// layer.
+///
+/// The variant tag exists because openraft's `client_write` returns
+/// `Result<Vec<u8>, RaftError>` and the framework needs a way to distinguish
+/// "the keyed request returned expired" from "the keyed request returned
+/// these bytes" without going through openraft's error channel (which would
+/// lose the structured `IdempotencyError`).
+///
+/// Only entries that carry an `IdempotencyKey` are wrapped in this envelope;
+/// unkeyed v0.2.x-style entries continue to return raw `Vec<u8>` from
+/// `apply` to preserve wire compatibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApplyOutcome {
+    /// User-service response (normal Replay / New / Collision paths all
+    /// land here — Collision returns the cached response so the client
+    /// can't tell it apart from a legitimate Replay).
+    Success(Vec<u8>),
+    /// The request_id was below the watermark and had been evicted from
+    /// the LRU cache. Client must pick a fresh ID.
+    IdempotencyExpired(IdempotencyError),
+}
+
+impl ApplyOutcome {
+    /// Encode the outcome as bincode bytes for `apply`'s `Vec<u8>` return.
+    pub fn encode(&self) -> Result<Vec<u8>, crate::error::RrError> {
+        bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|e| {
+            crate::error::RrError::Codec(crate::error::CodecError::SerializeFailed(e.to_string()))
+        })
+    }
+
+    /// Decode bytes returned from `apply`. Caller MUST only invoke this
+    /// for entries that were submitted with an `IdempotencyKey`;
+    /// unkeyed responses are raw user bytes and would fail here.
+    pub fn decode(bytes: &[u8]) -> Result<Self, crate::error::RrError> {
+        let (decoded, _) =
+            bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map_err(
+                |e| {
+                    crate::error::RrError::Codec(crate::error::CodecError::DeserializeFailed(
+                        format!("apply outcome decode failed: {e}"),
+                    ))
+                },
+            )?;
+        Ok(decoded)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
