@@ -6,7 +6,20 @@
 //! - `GET /health` — liveness probe. Returns 200 iff the process is up.
 //! - `GET /ready`  — readiness probe. Returns 200 iff the node finished
 //!   `start()` successfully; 503 otherwise (e.g. during startup or after
-//!   `shutdown()`).
+//!   `shutdown()`). Body is JSON:
+//!
+//!   ```json
+//!   {"ready": true,  "reason": "ready",    "since_unix_secs": 1714128000}
+//!   {"ready": false, "reason": "starting", "since_unix_secs": 1714127990}
+//!   ```
+//!
+//!   The `reason` field is free-form and operator-readable
+//!   (`"starting"`, `"ready"`, `"shutting_down"`, `"degraded:<detail>"`,
+//!   etc.). Tools that only care about the boolean should consume the
+//!   HTTP status code; tools that want richer state should parse the
+//!   body. K8s readinessProbe falls into the former bucket — the status
+//!   code alone gates traffic.
+//!
 //! - `GET /metrics` — Prometheus scrape endpoint (text format).
 //!
 //! K8s `readinessProbe` / `livenessProbe` should use HTTP on this port
@@ -15,37 +28,83 @@
 //! progress".
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::PrometheusHandle;
+use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use rr_core::error::{ConfigError, RrError};
 
-/// Readiness signal — flipped to `true` when `RrNode::start()` completes,
-/// back to `false` on `shutdown()`. Shared (via `Arc`) between the node
-/// and the HTTP server task.
+/// Readiness signal with a free-form `reason` and the wall-clock time
+/// the current state was last set. Flipped by [`Self::set`] (boolean
+/// shorthand) or [`Self::set_with_reason`] (full transition).
+/// Shared (via `Arc`) between the node and the HTTP server task.
+///
+/// Internally a `std::sync::RwLock` — the read/write is microsecond-scale
+/// and not a hot path (only touched on startup, shutdown, and on each
+/// `/ready` HTTP request).
 #[derive(Clone, Debug)]
-pub struct ReadinessFlag(Arc<AtomicBool>);
+pub struct ReadinessFlag(Arc<RwLock<ReadinessState>>);
+
+#[derive(Clone, Debug, Serialize)]
+struct ReadinessState {
+    ready: bool,
+    reason: String,
+    since_unix_secs: u64,
+}
 
 impl ReadinessFlag {
     pub fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
+        Self(Arc::new(RwLock::new(ReadinessState {
+            ready: false,
+            reason: "starting".to_string(),
+            since_unix_secs: now_unix_secs(),
+        })))
     }
 
+    /// Boolean shorthand: flip readiness, default the reason to
+    /// `"ready"` (when becoming ready) or `"shutting_down"` (when
+    /// becoming not-ready). Preserves backwards compatibility with
+    /// the v0.2 API.
     pub fn set(&self, ready: bool) {
-        self.0.store(ready, Ordering::Release);
+        let reason = if ready { "ready" } else { "shutting_down" };
+        self.set_with_reason(ready, reason);
     }
 
+    /// Full state transition with a free-form reason. Use this for
+    /// richer signals like `"degraded:lost_quorum"` or
+    /// `"draining_for_decommission"` that operators query via
+    /// `GET /ready`.
+    pub fn set_with_reason(&self, ready: bool, reason: impl Into<String>) {
+        if let Ok(mut guard) = self.0.write() {
+            guard.ready = ready;
+            guard.reason = reason.into();
+            guard.since_unix_secs = now_unix_secs();
+        }
+    }
+
+    /// Synchronous boolean read. Cheap, safe in any context.
     pub fn is_ready(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.read().map(|g| g.ready).unwrap_or(false)
+    }
+
+    fn snapshot(&self) -> ReadinessState {
+        self.0
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| ReadinessState {
+                ready: false,
+                reason: "lock_poisoned".to_string(),
+                since_unix_secs: 0,
+            })
     }
 }
 
@@ -53,6 +112,13 @@ impl Default for ReadinessFlag {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Spawn the HTTP observability server. Returns a `JoinHandle` the caller
@@ -116,13 +182,7 @@ async fn handle_request(
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let resp = match (req.method(), req.uri().path()) {
         (&hyper::Method::GET, "/health") => text_response(StatusCode::OK, "ok\n"),
-        (&hyper::Method::GET, "/ready") => {
-            if readiness.is_ready() {
-                text_response(StatusCode::OK, "ready\n")
-            } else {
-                text_response(StatusCode::SERVICE_UNAVAILABLE, "starting\n")
-            }
-        }
+        (&hyper::Method::GET, "/ready") => ready_response(&readiness),
         (&hyper::Method::GET, "/metrics") => {
             let body = prom_handle.render();
             Response::builder()
@@ -137,6 +197,23 @@ async fn handle_request(
         _ => text_response(StatusCode::NOT_FOUND, "not found\n"),
     };
     Ok(resp)
+}
+
+fn ready_response(readiness: &ReadinessFlag) -> Response<Full<Bytes>> {
+    let state = readiness.snapshot();
+    let status = if state.ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = serde_json::to_vec(&state).unwrap_or_else(|_| {
+        br#"{"ready":false,"reason":"json_encode_failed","since_unix_secs":0}"#.to_vec()
+    });
+    Response::builder()
+        .status(status)
+        .header(hyper::header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .body(Full::new(Bytes::from(body)))
+        .expect("valid response")
 }
 
 fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
@@ -177,5 +254,75 @@ mod tests {
         let r2 = r1.clone();
         r1.set(true);
         assert!(r2.is_ready());
+    }
+
+    #[test]
+    fn readiness_default_state_is_starting() {
+        let r = ReadinessFlag::new();
+        let snap = r.snapshot();
+        assert!(!snap.ready);
+        assert_eq!(snap.reason, "starting");
+    }
+
+    #[test]
+    fn readiness_set_true_updates_reason_to_ready() {
+        let r = ReadinessFlag::new();
+        r.set(true);
+        let snap = r.snapshot();
+        assert!(snap.ready);
+        assert_eq!(snap.reason, "ready");
+    }
+
+    #[test]
+    fn readiness_set_false_updates_reason_to_shutting_down() {
+        let r = ReadinessFlag::new();
+        r.set(true);
+        r.set(false);
+        let snap = r.snapshot();
+        assert!(!snap.ready);
+        assert_eq!(snap.reason, "shutting_down");
+    }
+
+    #[test]
+    fn readiness_set_with_reason_carries_custom_reason() {
+        let r = ReadinessFlag::new();
+        r.set_with_reason(false, "degraded:lost_quorum");
+        let snap = r.snapshot();
+        assert!(!snap.ready);
+        assert_eq!(snap.reason, "degraded:lost_quorum");
+    }
+
+    #[test]
+    fn readiness_snapshot_serializes_to_documented_json_shape() {
+        let r = ReadinessFlag::new();
+        r.set_with_reason(true, "ready");
+        let snap = r.snapshot();
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(json["ready"], serde_json::Value::Bool(true));
+        assert_eq!(json["reason"], "ready");
+        assert!(json.get("since_unix_secs").is_some());
+    }
+
+    #[test]
+    fn ready_response_returns_503_when_not_ready() {
+        let r = ReadinessFlag::new();
+        let resp = ready_response(&r);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(hyper::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/json; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn ready_response_returns_200_when_ready() {
+        let r = ReadinessFlag::new();
+        r.set(true);
+        let resp = ready_response(&r);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

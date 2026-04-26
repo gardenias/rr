@@ -27,6 +27,7 @@ futures.workspace = true
 tonic-health = "0.14"
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

@@ -1509,16 +1509,25 @@ mod tests {
             "/health body"
         );
 
-        // /ready → 200 "ready\n" (readiness flag flipped at end of start())
+        // /ready → 200 with JSON body (readiness flag flipped at end of start())
         let resp = reqwest::get(format!("{base}/ready"))
             .await
             .expect("/ready request");
         assert_eq!(resp.status(), reqwest::StatusCode::OK, "/ready status");
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         assert_eq!(
-            resp.text().await.expect("/ready body"),
-            "ready\n",
-            "/ready body"
+            content_type.as_deref(),
+            Some("application/json; charset=utf-8"),
+            "/ready content-type"
         );
+        let body: serde_json::Value = resp.json().await.expect("/ready JSON body");
+        assert_eq!(body["ready"], serde_json::Value::Bool(true), "/ready.ready");
+        assert_eq!(body["reason"], "ready", "/ready.reason");
+        assert!(body.get("since_unix_secs").is_some(), "/ready.since_unix_secs");
 
         // /metrics → 200 + Prometheus exposition format
         let resp = reqwest::get(format!("{base}/metrics"))
