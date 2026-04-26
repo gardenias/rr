@@ -32,81 +32,374 @@
       "description": "Number of nodes reporting rr_raft_is_leader=1 per group. Healthy = 1.",
       "fieldConfig": {
         "defaults": {
-          "color": {"mode": "palette-classic"},
-          "custom": {"axisLabel": "leaders", "drawStyle": "line", "fillOpacity": 10}
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "leaders",
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
         }
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
       "title": "Leaders per group",
       "type": "timeseries",
-      "targets": [{"expr": "sum by (group_id) (rr_raft_is_leader)", "legendFormat": "group {{group_id}}"}]
+      "targets": [
+        {
+          "expr": "sum by (group_id) (rr_raft_is_leader)",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
     },
     {
       "datasource": "${DS_PROMETHEUS}",
       "description": "Max replication lag (leader.last_log - follower.matched). Spikes = follower stall or partition.",
-      "fieldConfig": {"defaults": {"unit": "short"}},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "id": 2,
       "title": "Max replication lag (entries)",
       "type": "timeseries",
-      "targets": [{"expr": "rr:replication_lag_max:by_group", "legendFormat": "group {{group_id}}"}]
+      "targets": [
+        {
+          "expr": "rr:replication_lag_max:by_group",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
     },
     {
       "datasource": "${DS_PROMETHEUS}",
       "description": "Server-side proposal latency p99.",
-      "fieldConfig": {"defaults": {"unit": "s"}},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
       "id": 3,
       "title": "Proposal latency p99",
       "type": "timeseries",
-      "targets": [{"expr": "rr:proposal_duration_seconds:p99_5m", "legendFormat": "group {{group_id}}"}]
+      "targets": [
+        {
+          "expr": "rr:proposal_duration_seconds:p99_5m",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
     },
     {
       "datasource": "${DS_PROMETHEUS}",
       "description": "Idempotency Replay rate (cache hits — duplicate retries).",
-      "fieldConfig": {"defaults": {"unit": "ops"}},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
       "id": 4,
       "title": "Idempotency replay rate",
       "type": "timeseries",
-      "targets": [{"expr": "rr:idempotency_replay_rate_5m", "legendFormat": "group {{group_id}}"}]
+      "targets": [
+        {
+          "expr": "rr:idempotency_replay_rate_5m",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
     },
     {
       "datasource": "${DS_PROMETHEUS}",
       "description": "Ingestor poll duration p99 — high values indicate Kafka broker pressure.",
-      "fieldConfig": {"defaults": {"unit": "s"}},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
       "id": 5,
       "title": "Ingestor poll p99",
       "type": "timeseries",
-      "targets": [{
-        "expr": "histogram_quantile(0.99, sum by (group_id, le) (rate(rr_ingestor_poll_duration_seconds_bucket[5m])))",
-        "legendFormat": "group {{group_id}}"
-      }]
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (group_id, le) (rate(rr_ingestor_poll_duration_seconds_bucket[5m])))",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
     },
     {
       "datasource": "${DS_PROMETHEUS}",
       "description": "Auth rejects per service — sustained nonzero = credential abuse.",
-      "fieldConfig": {"defaults": {"unit": "ops"}},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
       "id": 6,
       "title": "Auth reject rate",
       "type": "timeseries",
-      "targets": [{
-        "expr": "sum by (service) (rate(rr_auth_rejects_total[5m]))",
-        "legendFormat": "{{service}}"
-      }]
+      "targets": [
+        {
+          "expr": "sum by (service) (rate(rr_auth_rejects_total[5m]))",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Per-follower replication lag heatmap. Query is explicitly predicated on rr_raft_is_leader==1 because non-leaders expose no meaningful lag and can otherwise appear as misleading zeroes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-RdYlGr"
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "title": "Replication lag by follower (leader-only)",
+      "type": "heatmap",
+      "targets": [
+        {
+          "expr": "rr_raft_replication_lag{group_id=~\"$group_id\",follower_node_id=~\"$follower_node_id\"} and on (group_id, instance) (rr_raft_is_leader{group_id=~\"$group_id\"} == 1)",
+          "legendFormat": "{{group_id}}/{{follower_node_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Idempotency layer event rates (replays, collisions, expirations).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "title": "Idempotency rates (replay/collision/expired)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (rate(rr_idempotency_replays_total{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "replays {{group_id}}"
+        },
+        {
+          "expr": "sum by (group_id) (rate(rr_idempotency_collisions_total{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "collisions {{group_id}}"
+        },
+        {
+          "expr": "sum by (group_id) (rate(rr_idempotency_expired_total{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "expired {{group_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Current idempotency cache occupancy as percentage of configurable max (${IDEMPOTENCY_CACHE_MAX}).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "title": "Idempotency cache usage (%)",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "100 * rr_idempotency_cache_size{group_id=~\"$group_id\"} / ${IDEMPOTENCY_CACHE_MAX}",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Leader promotion outcomes in the last hour (successful promotions vs failures).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 32
+      },
+      "id": 12,
+      "title": "Learner promotion outcomes (1h)",
+      "type": "bargauge",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (increase(rr_learner_promotions_total{group_id=~\"$group_id\"}[1h]))",
+          "legendFormat": "promoted {{group_id}}"
+        },
+        {
+          "expr": "sum by (group_id) (increase(rr_learner_promotion_failures_total{group_id=~\"$group_id\"}[1h]))",
+          "legendFormat": "failed {{group_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Kafka ingestor health counters. Spikes indicate leader step-down drops, seed failures, or out-of-watermark seeks.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "title": "Ingestor health event rates",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (rate(rr_ingestor_step_down_drops_total{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "step-down drops {{group_id}}"
+        },
+        {
+          "expr": "sum by (group_id) (rate(rr_ingestor_seed_failures_total{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "seed failures {{group_id}}"
+        },
+        {
+          "expr": "sum by (group_id) (rate(rr_ingestor_seek_below_watermark_total{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "seek below watermark {{group_id}}"
+        },
+        {
+          "expr": "sum by (group_id) (rate(rr_ingestor_seek_above_watermark_total{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "seek above watermark {{group_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Framing decode failures by failure kind. Any sustained non-zero rate is a correctness signal.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "id": 11,
+      "title": "Framing decode failure rate by kind",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (kind) (rate(rr_framing_decode_failures_total{kind=~\"$decode_kind\"}[5m]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
     }
   ],
   "refresh": "30s",
   "schemaVersion": 36,
   "style": "dark",
-  "tags": ["rr", "raft"],
+  "tags": [
+    "rr",
+    "raft"
+  ],
   "templating": {
     "list": [
       {
-        "current": {"selected": false, "text": "Prometheus", "value": "Prometheus"},
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
         "hide": 0,
         "includeAll": false,
         "label": "Prometheus",
@@ -117,10 +410,92 @@
         "regex": "",
         "skipUrlSync": false,
         "type": "datasource"
+      },
+      {
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": "${DS_PROMETHEUS}",
+        "definition": "label_values(rr_raft_is_leader, group_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Group",
+        "multi": true,
+        "name": "group_id",
+        "options": [],
+        "query": "label_values(rr_raft_is_leader, group_id)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": "${DS_PROMETHEUS}",
+        "definition": "label_values(rr_raft_replication_lag{group_id=~\"$group_id\"}, follower_node_id)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Follower",
+        "multi": true,
+        "name": "follower_node_id",
+        "options": [],
+        "query": "label_values(rr_raft_replication_lag{group_id=~\"$group_id\"}, follower_node_id)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": "${DS_PROMETHEUS}",
+        "definition": "label_values(rr_framing_decode_failures_total, kind)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Decode kind",
+        "multi": true,
+        "name": "decode_kind",
+        "options": [],
+        "query": "label_values(rr_framing_decode_failures_total, kind)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "50000",
+          "value": "50000"
+        },
+        "hide": 0,
+        "label": "Idempotency cache max",
+        "name": "IDEMPOTENCY_CACHE_MAX",
+        "query": "50000",
+        "skipUrlSync": false,
+        "type": "textbox"
       }
     ]
   },
-  "time": {"from": "now-1h", "to": "now"},
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "",
   "title": "rr — Cluster Overview",

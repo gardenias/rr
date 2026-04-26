@@ -49,6 +49,48 @@ groups:
             offset in the latest snapshot. See docs/guide/kafka-input.md
             §Failure modes.
 
+      - alert: RrIdempotencyCacheNearFull
+        expr: rr_idempotency_cache_size > 45000
+        for: 10m
+        labels:
+          severity: warning
+          rr_component: framework
+        annotations:
+          summary: "Idempotency cache near full on group {{ $labels.group_id }}"
+          description: |
+            Idempotency cache approaching its eviction threshold; idempotency_expired
+            errors will start firing if growth continues. Consider increasing cache
+            size or reducing client TTL.
+
+      - alert: RrIngestorOffsetDrift
+        expr: |
+          (
+            rate(rr_ingestor_seek_above_watermark_total[10m])
+            + rate(rr_ingestor_seek_below_watermark_total[10m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+          rr_component: ingestor
+        annotations:
+          summary: "Ingestor offset drift detected on group {{ $labels.group_id }}"
+          description: |
+            Ingestor is repeatedly seeking outside known Kafka watermarks.
+            Operator must investigate broker / topic state.
+
+      - alert: RrFramingDecodeFailures
+        expr: rate(rr_framing_decode_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          rr_component: framework
+        annotations:
+          summary: "Framing decode failures observed ({{ $labels.instance }})"
+          description: |
+            Frame decode is failing — possible wire-format incompatibility or
+            storage corruption. Check ingestion side and snapshot fidelity.
+            Refer to docs/docs/operations/runbooks/snapshot-corruption.md.
+
   - name: rr_availability
     rules:
       - alert: RrLeaderFlapping

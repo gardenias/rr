@@ -44,3 +44,28 @@ groups:
       # spurious alerts on followers (which never emit the gauge).
       - record: rr:replication_lag_max:by_group
         expr: max by (group_id) (rr_raft_replication_lag)
+
+      # Maximum per-group replication lag, explicitly restricted to
+      # leader samples to avoid non-leader ambiguity.
+      - record: cluster:rr_replication_lag:max_per_group
+        expr: |
+          max by (group_id) (
+            rr_raft_replication_lag
+            and on (group_id, instance)
+            (rr_raft_is_leader == 1)
+          )
+
+      # Raw replay rate (no pre-aggregation) for drill-down panels.
+      - record: rr:idempotency_replay_rate_5m_raw
+        expr: rate(rr_idempotency_replays_total[5m])
+
+      # Combined offset skew signal: seeks below+above watermark.
+      - record: rr:ingestor_offset_skew_total
+        expr: |
+          sum by (group_id) (rate(rr_ingestor_seek_above_watermark_total[5m]))
+          +
+          sum by (group_id) (rate(rr_ingestor_seek_below_watermark_total[5m]))
+
+      # Decode failure rate split by failure kind.
+      - record: rr:framing_decode_failure_rate_5m
+        expr: sum by (kind) (rate(rr_framing_decode_failures_total[5m]))

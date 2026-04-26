@@ -34,6 +34,26 @@ rule_files:
 
 The dashboard uses the recording rules above, so import them into Prometheus first; otherwise some panels render empty until enough raw data accumulates.
 
+## Panels
+
+Existing `rr-cluster-overview.json` panels are preserved. Added panels:
+
+- `Replication lag by follower (leader-only)` — heatmap of `rr_raft_replication_lag` per `(group_id, follower_node_id)`, explicitly predicated on `rr_raft_is_leader==1`.
+- `Idempotency rates (replay/collision/expired)` — 5m rates for replay, collision, and expired idempotency outcomes.
+- `Idempotency cache usage (%)` — `rr_idempotency_cache_size` normalized by `${IDEMPOTENCY_CACHE_MAX}` with 50%/90% warning thresholds.
+- `Ingestor health event rates` — stacked rates for step-down drops, seed failures, and seek below/above watermark events.
+- `Framing decode failure rate by kind` — stacked decode failure rates grouped by `kind` label.
+- `Learner promotion outcomes (1h)` — bar gauge for successful vs failed learner promotions over 1h.
+
+## Recording rules
+
+Existing recording rules are preserved. Added rules:
+
+- `cluster:rr_replication_lag:max_per_group` — max follower lag per group, filtered with `rr_raft_is_leader == 1`.
+- `rr:idempotency_replay_rate_5m_raw` — raw 5m replay rate series for per-instance drill-down.
+- `rr:ingestor_offset_skew_total` — per-group combined 5m rate of seek-above + seek-below watermark events.
+- `rr:framing_decode_failure_rate_5m` — 5m decode failure rate aggregated by `kind`.
+
 ## Alert thresholds
 
 The defaults in `rr-alerts.yml` are tuned for a healthy 3-5 node cluster on a stable network:
@@ -47,7 +67,17 @@ The defaults in `rr-alerts.yml` are tuned for a healthy 3-5 node cluster on a st
 
 Adjust to your SLOs. The recording-rules + alerts split lets you tune thresholds without rewriting the queries.
 
+## Alerts
+
+Existing alert rules are preserved. Added alerts:
+
+- `RrIdempotencyCacheNearFull` (`warning`) — idempotency cache stayed above 45k entries for 10m; near eviction pressure.
+- `RrIngestorOffsetDrift` (`warning`) — ingestor repeatedly seeks outside Kafka watermark range for 10m.
+- `RrFramingDecodeFailures` (`critical`) — non-zero framing decode failure rate for 5m; possible wire-format incompatibility or corruption.
+
 ## See also
 
 - [`docs/docs/reference/metrics-reference.md`](../../docs/docs/reference/metrics-reference.md) — full per-metric reference.
 - [`docs/docs/operations/runbooks/`](../../docs/docs/operations/runbooks/) — runbooks for triggered alerts.
+
+Last updated: 2026-04-27
