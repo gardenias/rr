@@ -1,0 +1,27 @@
+[package]
+name = "rr-config-etcd"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+description = "etcd-backed ConfigProvider for the rr distributed Multi-Raft consensus framework"
+license = "MIT"
+repository = "https://github.com/gardenias/rr"
+keywords = ["raft", "etcd", "config", "rr"]
+categories = ["network-programming", "database-implementations"]
+
+[dependencies]
+rr-core = { path = "../rr-core" }
+etcd-client.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio-stream.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["full"] }
+testcontainers = "0.22"

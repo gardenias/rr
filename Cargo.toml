@@ -3,6 +3,7 @@ members = [
     "crates/rr-core",
     "crates/rr-storage",
     "crates/rr-config",
+    "crates/rr-config-etcd",
     "crates/rr-raft",
     "crates/rr-network",
     "crates/rr-router",
@@ -11,6 +12,7 @@ members = [
     "crates/rr-ingestor-kafka",
     "examples/kv-store",
     "examples/kv-store-kafka",
+    "examples/etcd-config-quickstart",
     "examples/counter",
     "examples/otel-client",
     "tests/integration",
@@ -35,10 +37,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 futures = "0.3"
+tokio-stream = "0.1"
 bytes = "1"
 anyhow = "1"
 dashmap = "6"
 metrics = "0.24"
+etcd-client = "0.14"
 rocksdb = { version = "0.24.0", features = ["multi-threaded-cf"] }
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }

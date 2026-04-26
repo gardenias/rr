@@ -22,6 +22,7 @@
 | [A-0001](./A-0001-command-ingestor-abstraction.md) | `CommandIngestor` trait + `rr-ingestor-kafka` reference impl | proposed | 2026-04-24 |
 | [A-0002](./A-0002-snapshot-consistency-and-recovery.md) | Snapshot consistency contract + disaster recovery path | proposed | 2026-04-24 |
 | [A-0003](./A-0003-framework-idempotency-layer.md) | Framework-level idempotency via `(request_type, request_id)` | proposed | 2026-04-24 |
+| [A-0004](./A-0004-etcd-config-schema.md) | etcd key schema for ConfigProvider routing state | proposed | 2026-04-27 |
 
 ## Relationship
 

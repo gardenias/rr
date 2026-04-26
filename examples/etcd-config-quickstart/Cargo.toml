@@ -1,0 +1,15 @@
+[package]
+name = "etcd-config-quickstart"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal quickstart for rr-config-etcd"
+
+[dependencies]
+rr-config-etcd = { path = "../../crates/rr-config-etcd" }
+tokio.workspace = true
+tokio-stream.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "etcd-config-quickstart"
+path = "src/main.rs"
