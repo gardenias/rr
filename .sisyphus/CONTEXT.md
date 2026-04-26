@@ -5,11 +5,11 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-04-26 (later session)
+**Last updated**: 2026-04-26 (后段 session 收尾)
 **Current phase**: Phase 4 + Phase 3.1 — **all planned framework features implemented**
 **Active plan**: `.sisyphus/plans/rr-phase4-v030.md` + `.sisyphus/plans/rr-phase3.1-hardening.md`
 **Latest tag**: `v0.2.0-rc1` (current `main` HEAD has all features beyond v0.2)
-**Main branch HEAD**: 25 commits ahead of `origin/main` since 2026-04-25 — UNPUSHED
+**Main branch HEAD**: 26 commits ahead of `origin/main` since 2026-04-25 — UNPUSHED（按用户指示暂不做版本管理）
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`) — Wave 4d cleared all P0 ship-blockers; Wave 13 closed 8 of 9 P1/P2 follow-ups
 
 ---
@@ -537,6 +537,26 @@ cross-partition transactions、partition split/merge 等。
   implementer 的 typed 体验；framework-internal 类型擦除 trait（例如用
   `Vec<u8>` 代替 `Self::Assoc`）提供 object-safety。ADR A-0001 的
   `CommandIngestor` + `DynCommandIngestor` 是例子。
+
+### 测试基础设施陷阱（Phase 3.1 Theme C waves）
+
+- **RocksDB process-global LOCK 不在 Drop 时即时释放**。in-process 测试
+  drop manager → reopen 同 path 的 RocksDB 时遇 "lock hold by current
+  process"。需要 sleep ~500ms 让 RocksDB 内部 lock 状态清空。Wave 17
+  `test_crash_during_write_preserves_acked_entries` 学到。
+- **`rcgen 0.13` 默认 features 不含 crypto**。`KeyPair::generate()` 需要
+  `features = ["crypto", "ring"]`。新版 rcgen 把所有加密 backend 设成 opt-in。
+- **`tonic` 0.14 的 `Channel::connect()` 可能不在 TLS 失败时立即报错**——
+  握手延迟到第一个 RPC。所以 mTLS 缺 client cert 的测试要在 `connect_result`
+  成功时也尝试 issue 一个 RPC，确保 fallback 检查触发。
+- **`cargo-fuzz` 必须是独立 workspace**——它要 `panic = "abort"` profile +
+  nightly toolchain + libfuzzer-sys（链 C++ runtime），跟主 workspace 的
+  stable/unwind 配置冲突。`fuzz/Cargo.toml` 用 `[workspace]` 自包含。
+- **clippy `single_match` 在测试 panic 路径上很烦**——`match Result { Ok(_)
+  => panic!(...), _ => {} }` 必须改 `if let Ok(_) = result { panic!(...) }`。
+  虽然语义等价，clippy 死磕。
+- **clippy `uninlined_format_args` 触发于 assert! 的 message 里 `{:?}`** —
+  修：`assert!(..., "got {:?}", err)` → `assert!(..., "got {err:?}")`。
 
 ### 原有陷阱（Phase 3）
 
