@@ -1,0 +1,95 @@
+# Prometheus alert rules for rr.
+#
+# Pair with `rr-recording-rules.yml`. Adjust thresholds to your
+# cluster's SLOs — values below are reasonable defaults for a
+# typical 3-5 node cluster on healthy networking.
+
+groups:
+  - name: rr_correctness
+    rules:
+      - alert: RrInsecureModeInProduction
+        expr: rr_security_insecure_mode == 1
+        for: 30s
+        labels:
+          severity: critical
+          rr_component: security
+        annotations:
+          summary: "rr running with allow_insecure=true ({{ $labels.instance }})"
+          description: |
+            Node {{ $labels.instance }} is running without TLS+mTLS+admin_token
+            enforcement. This is dev-only mode and MUST NOT run in production.
+            See docs/deployment/tls.md.
+
+      - alert: RrIdempotencyCollisionsObserved
+        expr: rr:idempotency_collision_rate_5m > 0
+        for: 5m
+        labels:
+          severity: warning
+          rr_component: framework
+        annotations:
+          summary: "Idempotency collisions on group {{ $labels.group_id }}"
+          description: |
+            Two different client_ids reused the same (request_type, request_id)
+            for at least 5m. The framework still dedups correctly but this
+            indicates uncoordinated request_id allocation between writers.
+            See docs/guide/idempotency.md.
+
+      - alert: RrIngestorSeedFailures
+        expr: increase(rr_ingestor_seed_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          rr_component: ingestor
+        annotations:
+          summary: "Kafka ingestor seed_offset failed on group {{ $labels.group_id }}"
+          description: |
+            The supervisor exited rather than running the ingestor with an
+            unseeked consumer (which would replay from offset 0 under
+            auto.offset.reset). Check broker reachability and the persisted
+            offset in the latest snapshot. See docs/guide/kafka-input.md
+            §Failure modes.
+
+  - name: rr_availability
+    rules:
+      - alert: RrLeaderFlapping
+        expr: rr:leader_churn_5m:rate > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          rr_component: raft
+        annotations:
+          summary: "Leader flapping on group {{ $labels.group_id }}"
+          description: |
+            > 1 election every 2 minutes for 2m. Likely network instability,
+            disk I/O contention, or undersized election timeout. See
+            docs/operations/runbooks/leader-flapping.md.
+
+      - alert: RrNoLeader
+        expr: max by (group_id) (rr_raft_is_leader) == 0
+        for: 30s
+        labels:
+          severity: critical
+          rr_component: raft
+        annotations:
+          summary: "No leader for group {{ $labels.group_id }}"
+          description: |
+            No node reports rr_raft_is_leader=1 for this group. Writes are
+            blocked. Check quorum (>= ceil((N+1)/2) replicas reachable).
+
+      - alert: RrReplicationLagHigh
+        expr: |
+          (
+            rr:replication_lag_max:by_group > 1000
+          )
+          and on (group_id, instance)
+          (rr_raft_is_leader == 1)
+        for: 5m
+        labels:
+          severity: warning
+          rr_component: raft
+        annotations:
+          summary: "Replication lag > 1000 entries on group {{ $labels.group_id }}"
+          description: |
+            Follower {{ $labels.follower_node_id }} is > 1000 entries behind
+            the leader for at least 5m. Possible follower disk-stall or
+            network partition.

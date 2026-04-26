@@ -1,0 +1,129 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [],
+          "type": "dashboard"
+        },
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "rr cluster overview — leadership, replication lag, proposal latency, idempotency, ingestor.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "iteration": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Number of nodes reporting rr_raft_is_leader=1 per group. Healthy = 1.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "leaders", "drawStyle": "line", "fillOpacity": 10}
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "title": "Leaders per group",
+      "type": "timeseries",
+      "targets": [{"expr": "sum by (group_id) (rr_raft_is_leader)", "legendFormat": "group {{group_id}}"}]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Max replication lag (leader.last_log - follower.matched). Spikes = follower stall or partition.",
+      "fieldConfig": {"defaults": {"unit": "short"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "title": "Max replication lag (entries)",
+      "type": "timeseries",
+      "targets": [{"expr": "rr:replication_lag_max:by_group", "legendFormat": "group {{group_id}}"}]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Server-side proposal latency p99.",
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "title": "Proposal latency p99",
+      "type": "timeseries",
+      "targets": [{"expr": "rr:proposal_duration_seconds:p99_5m", "legendFormat": "group {{group_id}}"}]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Idempotency Replay rate (cache hits — duplicate retries).",
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "title": "Idempotency replay rate",
+      "type": "timeseries",
+      "targets": [{"expr": "rr:idempotency_replay_rate_5m", "legendFormat": "group {{group_id}}"}]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Ingestor poll duration p99 — high values indicate Kafka broker pressure.",
+      "fieldConfig": {"defaults": {"unit": "s"}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 5,
+      "title": "Ingestor poll p99",
+      "type": "timeseries",
+      "targets": [{
+        "expr": "histogram_quantile(0.99, sum by (group_id, le) (rate(rr_ingestor_poll_duration_seconds_bucket[5m])))",
+        "legendFormat": "group {{group_id}}"
+      }]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Auth rejects per service — sustained nonzero = credential abuse.",
+      "fieldConfig": {"defaults": {"unit": "ops"}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 6,
+      "title": "Auth reject rate",
+      "type": "timeseries",
+      "targets": [{
+        "expr": "sum by (service) (rate(rr_auth_rejects_total[5m]))",
+        "legendFormat": "{{service}}"
+      }]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 36,
+  "style": "dark",
+  "tags": ["rr", "raft"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "Prometheus", "value": "Prometheus"},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "rr — Cluster Overview",
+  "uid": "rr-cluster-overview",
+  "version": 1
+}

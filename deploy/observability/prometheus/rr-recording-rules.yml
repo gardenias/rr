@@ -1,0 +1,46 @@
+# Prometheus recording rules for rr.
+#
+# Drop into your scrape config under `rule_files:` and reload:
+#   rule_files:
+#     - /etc/prometheus/rr/recording-rules.yml
+#
+# These rules pre-compute the most-queried aggregations so dashboards
+# and alerts don't pay the cost on every evaluation.
+
+groups:
+  - name: rr_aggregations
+    interval: 30s
+    rules:
+      # Cluster-level leadership stability — number of distinct leaders
+      # observed for each group over the last 5m. Should stay at 1
+      # for healthy clusters; > 1 indicates flapping.
+      - record: rr:leaders_observed_5m:count
+        expr: count(count by (group_id, instance) (rr_raft_is_leader == 1)) by (group_id)
+
+      # Leader churn (transitions per minute, per group). Computed
+      # from `rr_raft_current_term` increases — every term bump on
+      # the current leader implies an election just happened.
+      - record: rr:leader_churn_5m:rate
+        expr: sum by (group_id) (rate(rr_raft_current_term[5m]))
+
+      # P99 client request latency by group (server-side, not the
+      # client SDK's outbound histogram).
+      - record: rr:proposal_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (group_id, le) (rate(rr_proposal_duration_seconds_bucket[5m]))
+          )
+
+      # P50 / P95 / P99 idempotency replay rate per group.
+      - record: rr:idempotency_replay_rate_5m
+        expr: sum by (group_id) (rate(rr_idempotency_replays_total[5m]))
+
+      - record: rr:idempotency_collision_rate_5m
+        expr: sum by (group_id) (rate(rr_idempotency_collisions_total[5m]))
+
+      # Maximum lag across all followers per group. Use this for
+      # SLO alerts; predicate on rr_raft_is_leader == 1 to avoid
+      # spurious alerts on followers (which never emit the gauge).
+      - record: rr:replication_lag_max:by_group
+        expr: max by (group_id) (rr_raft_replication_lag)

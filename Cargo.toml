@@ -12,6 +12,7 @@ members = [
     "examples/kv-store",
     "examples/kv-store-kafka",
     "examples/counter",
+    "examples/otel-client",
     "tests/integration",
     "benches",
     "crates/rr-admin",

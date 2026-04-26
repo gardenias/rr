@@ -1,0 +1,53 @@
+# rr — Prometheus & Grafana
+
+Drop-in observability artifacts for an rr cluster.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `prometheus/rr-recording-rules.yml` | Pre-computed aggregations (max lag, leader count, p99 latency, idempotency rates) |
+| `prometheus/rr-alerts.yml` | Alert rules (insecure mode, idempotency collisions, leader flap, no leader, high lag, ingestor seed failures) |
+| `grafana/rr-cluster-overview.json` | Six-panel dashboard: leaders / replication lag / proposal latency / idempotency replays / ingestor poll / auth rejects |
+
+## Prometheus integration
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: rr
+    static_configs:
+      - targets: ['rr-1:9090', 'rr-2:9090', 'rr-3:9090']
+
+rule_files:
+  - /etc/prometheus/rr/recording-rules.yml
+  - /etc/prometheus/rr/alerts.yml
+```
+
+`9090` is the default `metrics_port` from `NodeConfig`. Change to your value.
+
+## Grafana import
+
+1. Grafana → Dashboards → Import.
+2. Upload `grafana/rr-cluster-overview.json` (or paste).
+3. Pick your Prometheus data source when prompted.
+
+The dashboard uses the recording rules above, so import them into Prometheus first; otherwise some panels render empty until enough raw data accumulates.
+
+## Alert thresholds
+
+The defaults in `rr-alerts.yml` are tuned for a healthy 3-5 node cluster on a stable network:
+
+- `RrLeaderFlapping`: > 0.5 elections/min for 2m → warning.
+- `RrReplicationLagHigh`: max follower lag > 1000 entries for 5m → warning.
+- `RrNoLeader`: no node has `is_leader=1` for 30s → critical.
+- `RrInsecureModeInProduction`: `allow_insecure=1` ever → critical.
+- `RrIdempotencyCollisionsObserved`: any collision rate > 0 for 5m → warning (indicates uncoordinated request_id allocation).
+- `RrIngestorSeedFailures`: any seed failure → critical (supervisor exited; ingestor offline).
+
+Adjust to your SLOs. The recording-rules + alerts split lets you tune thresholds without rewriting the queries.
+
+## See also
+
+- [`docs/docs/reference/metrics-reference.md`](../../docs/docs/reference/metrics-reference.md) — full per-metric reference.
+- [`docs/docs/operations/runbooks/`](../../docs/docs/operations/runbooks/) — runbooks for triggered alerts.

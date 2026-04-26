@@ -1,0 +1,22 @@
+[package]
+name = "otel-client"
+version = "0.1.0"
+edition = "2021"
+description = "rr example: OpenTelemetry trace context propagation through rr-client"
+
+[dependencies]
+rr-client = { path = "../../crates/rr-client" }
+rr-network = { path = "../../crates/rr-network" }
+rr-core = { path = "../../crates/rr-core" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-opentelemetry = "0.27"
+opentelemetry = "0.26"
+opentelemetry_sdk = { version = "0.26", features = ["rt-tokio"] }
+opentelemetry-stdout = { version = "0.26", features = ["trace"] }
+anyhow.workspace = true
+
+[[bin]]
+name = "otel-client"
+path = "src/main.rs"
