@@ -14,7 +14,9 @@ use anyhow::Result;
 use bincode::config::standard;
 use clap::{Parser, Subcommand, ValueEnum};
 use rr_network::proto::admin::admin_service_client::AdminServiceClient;
-use rr_network::proto::admin::{Empty, GroupId, TransferLeaderRequest};
+use rr_network::proto::admin::{
+    AddLearnerRequest, ChangeMembershipRequest, Empty, GroupId, TransferLeaderRequest,
+};
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::ClientRequest;
 use std::path::PathBuf;
@@ -155,6 +157,39 @@ enum GroupCommands {
         /// Target node ID to transfer leadership to.
         #[arg(long)]
         to: u64,
+    },
+    /// Add a learner node to a Raft group.
+    ///
+    /// Learner replicates logs but does not vote. Run
+    /// `change-membership` afterwards to promote it to voter.
+    AddLearner {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+        /// Node ID of the learner to add.
+        #[arg(long = "node-id")]
+        node_id: u64,
+        /// gRPC address of the learner (`host:port`).
+        #[arg(long)]
+        addr: String,
+    },
+    /// Replace the voter set of a Raft group.
+    ///
+    /// Members not listed in `--voters` are kept as learners
+    /// (`retain = true`). Must be called on the current leader.
+    ChangeMembership {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+        /// Comma-separated list of voter node IDs (e.g. `1,2,3`).
+        #[arg(long)]
+        voters: String,
+    },
+    /// Show the current voter + learner membership of a Raft group.
+    Membership {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
     },
 }
 
@@ -314,6 +349,102 @@ async fn main() -> Result<()> {
                         }
                         OutputFormat::Human => {
                             println!("TransferLeader: success={} message={}", resp.success, resp.message);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::AddLearner { group, node_id, addr },
+                } => {
+                    let resp = client
+                        .add_learner(AddLearnerRequest {
+                            group_id: *group,
+                            node_id: *node_id,
+                            addr: addr.clone(),
+                        })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "success": resp.success,
+                                "message": resp.message,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("AddLearner: success={} message={}", resp.success, resp.message);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::ChangeMembership { group, voters },
+                } => {
+                    let voter_node_ids: Vec<u64> = voters
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.parse::<u64>())
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| anyhow::anyhow!("invalid --voters: {e}"))?;
+                    if voter_node_ids.is_empty() {
+                        anyhow::bail!("--voters must list at least one node id");
+                    }
+                    let resp = client
+                        .change_membership(ChangeMembershipRequest {
+                            group_id: *group,
+                            voter_node_ids,
+                        })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "success": resp.success,
+                                "message": resp.message,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("ChangeMembership: success={} message={}", resp.success, resp.message);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::Membership { group },
+                } => {
+                    let resp = client
+                        .get_group_membership(GroupId { group_id: *group })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "group_id": resp.group_id,
+                                "voters": resp.voters.iter().map(|m| serde_json::json!({
+                                    "node_id": m.node_id,
+                                    "addr": m.addr,
+                                })).collect::<Vec<_>>(),
+                                "learners": resp.learners.iter().map(|m| serde_json::json!({
+                                    "node_id": m.node_id,
+                                    "addr": m.addr,
+                                })).collect::<Vec<_>>(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("Group {} Membership", resp.group_id);
+                            println!("  Voters:");
+                            for m in &resp.voters {
+                                println!("    {:>4}  {}", m.node_id, m.addr);
+                            }
+                            println!("  Learners:");
+                            if resp.learners.is_empty() {
+                                println!("    (none)");
+                            } else {
+                                for m in &resp.learners {
+                                    println!("    {:>4}  {}", m.node_id, m.addr);
+                                }
+                            }
                         }
                     }
                 }
@@ -571,6 +702,62 @@ mod tests {
             Commands::Group {
                 cmd: GroupCommands::TransferLeader { group: 1, to: 3 }
             }
+        ));
+    }
+
+    #[test]
+    fn test_parse_group_add_learner() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "group",
+            "add-learner",
+            "--group",
+            "1",
+            "--node-id",
+            "4",
+            "--addr",
+            "127.0.0.1:51004",
+        ])
+        .expect("should parse add-learner");
+        assert!(matches!(
+            cli.command,
+            Commands::Group {
+                cmd: GroupCommands::AddLearner { group: 1, node_id: 4, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_group_change_membership() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "group",
+            "change-membership",
+            "--group",
+            "1",
+            "--voters",
+            "1,2,3",
+        ])
+        .expect("should parse change-membership");
+        match cli.command {
+            Commands::Group {
+                cmd: GroupCommands::ChangeMembership { group, voters },
+            } => {
+                assert_eq!(group, 1);
+                assert_eq!(voters, "1,2,3");
+            }
+            other => panic!("expected ChangeMembership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_group_membership() {
+        let cli =
+            Cli::try_parse_from(["rr-admin", "group", "membership", "--group", "7"])
+                .expect("should parse group membership");
+        assert!(matches!(
+            cli.command,
+            Commands::Group { cmd: GroupCommands::Membership { group: 7 } }
         ));
     }
 

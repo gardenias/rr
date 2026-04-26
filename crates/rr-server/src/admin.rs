@@ -17,10 +17,12 @@ use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
-    Empty, GroupId, GroupStatus, MetricsSummary, NodeStatus, TransferLeaderRequest,
-    TransferLeaderResponse, TriggerSnapshotResponse,
+    AddLearnerRequest, AddLearnerResponse, ChangeMembershipRequest, ChangeMembershipResponse,
+    Empty, GroupId, GroupMembership, GroupStatus, MetricsSummary, NodeMember, NodeStatus,
+    TransferLeaderRequest, TransferLeaderResponse, TriggerSnapshotResponse,
 };
 use rr_raft::group_manager::RaftGroupManager;
+use std::collections::BTreeSet;
 
 fn peer_from_request<T>(req: &Request<T>) -> String {
     req.remote_addr()
@@ -216,6 +218,151 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(response))
     }
 
+    async fn add_learner(
+        &self,
+        request: Request<AddLearnerRequest>,
+    ) -> Result<Response<AddLearnerResponse>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        info!(
+            target: AUDIT_TARGET,
+            op = "AddLearner",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            target_node_id = req.node_id,
+            target_addr = %req.addr,
+            result = "started",
+            "admin rpc — mutation"
+        );
+        let outcome = self
+            .group_manager
+            .add_learner(req.group_id, req.node_id, req.addr.clone())
+            .await;
+        let response = match &outcome {
+            Ok(()) => AddLearnerResponse {
+                success: true,
+                message: "learner added".to_string(),
+            },
+            Err(e) => AddLearnerResponse {
+                success: false,
+                message: e.to_string(),
+            },
+        };
+        info!(
+            target: AUDIT_TARGET,
+            op = "AddLearner",
+            peer = %peer,
+            group_id = req.group_id,
+            target_node_id = req.node_id,
+            success = response.success,
+            result = if response.success { "succeeded" } else { "failed" },
+            message = %response.message,
+            "admin rpc result"
+        );
+        Ok(Response::new(response))
+    }
+
+    async fn change_membership(
+        &self,
+        request: Request<ChangeMembershipRequest>,
+    ) -> Result<Response<ChangeMembershipResponse>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        let voters: BTreeSet<NodeId> = req.voter_node_ids.iter().copied().collect();
+        info!(
+            target: AUDIT_TARGET,
+            op = "ChangeMembership",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            voter_count = voters.len(),
+            result = "started",
+            "admin rpc — mutation"
+        );
+        if voters.is_empty() {
+            let msg = "voter_node_ids must not be empty";
+            info!(
+                target: AUDIT_TARGET,
+                op = "ChangeMembership",
+                peer = %peer,
+                group_id = req.group_id,
+                success = false,
+                result = "failed",
+                reason = %msg,
+                "admin rpc result"
+            );
+            return Err(Status::invalid_argument(msg));
+        }
+        let outcome = self
+            .group_manager
+            .change_membership(req.group_id, voters)
+            .await;
+        let response = match &outcome {
+            Ok(()) => ChangeMembershipResponse {
+                success: true,
+                message: "membership changed".to_string(),
+            },
+            Err(e) => ChangeMembershipResponse {
+                success: false,
+                message: e.to_string(),
+            },
+        };
+        info!(
+            target: AUDIT_TARGET,
+            op = "ChangeMembership",
+            peer = %peer,
+            group_id = req.group_id,
+            success = response.success,
+            result = if response.success { "succeeded" } else { "failed" },
+            message = %response.message,
+            "admin rpc result"
+        );
+        Ok(Response::new(response))
+    }
+
+    async fn get_group_membership(
+        &self,
+        request: Request<GroupId>,
+    ) -> Result<Response<GroupMembership>, Status> {
+        let peer = peer_from_request(&request);
+        let group_id = request.into_inner().group_id;
+        info!(
+            target: AUDIT_TARGET,
+            op = "GetGroupMembership",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id,
+            "admin rpc"
+        );
+        let raft = self
+            .group_manager
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
+        let metrics = raft.metrics().borrow().clone();
+        let cfg = metrics.membership_config.membership();
+        let voter_ids: BTreeSet<NodeId> = cfg.voter_ids().collect();
+        let mut voters = Vec::new();
+        let mut learners = Vec::new();
+        for (nid, node) in cfg.nodes() {
+            let member = NodeMember {
+                node_id: *nid,
+                addr: node.addr.clone(),
+            };
+            if voter_ids.contains(nid) {
+                voters.push(member);
+            } else {
+                learners.push(member);
+            }
+        }
+        Ok(Response::new(GroupMembership {
+            group_id,
+            voters,
+            learners,
+        }))
+    }
+
     async fn get_metrics_summary(
         &self,
         request: Request<Empty>,
@@ -325,5 +472,63 @@ mod tests {
         assert_eq!(resp.total_proposals, 0);
         assert_eq!(resp.total_applied, 0);
         assert_eq!(resp.total_snapshots, 0);
+    }
+
+    #[tokio::test]
+    async fn test_add_learner_unknown_group_returns_failure() {
+        let svc = make_admin_service();
+        let resp = svc
+            .add_learner(Request::new(AddLearnerRequest {
+                group_id: 99,
+                node_id: 2,
+                addr: "127.0.0.1:5001".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resp.success);
+        assert!(
+            resp.message.contains("group not found") || resp.message.contains("group 99"),
+            "unexpected message: {}",
+            resp.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_empty_voters_rejected() {
+        let svc = make_admin_service();
+        let result = svc
+            .change_membership(Request::new(ChangeMembershipRequest {
+                group_id: 1,
+                voter_node_ids: vec![],
+            }))
+            .await;
+        assert!(result.is_err());
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_unknown_group_returns_failure() {
+        let svc = make_admin_service();
+        let resp = svc
+            .change_membership(Request::new(ChangeMembershipRequest {
+                group_id: 99,
+                voter_node_ids: vec![1, 2, 3],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!resp.success);
+    }
+
+    #[tokio::test]
+    async fn test_get_group_membership_unknown_group() {
+        let svc = make_admin_service();
+        let result = svc
+            .get_group_membership(Request::new(GroupId { group_id: 99 }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
     }
 }

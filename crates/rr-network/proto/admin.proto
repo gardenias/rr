@@ -12,6 +12,14 @@ service AdminService {
     rpc TriggerSnapshot(GroupId) returns (TriggerSnapshotResponse);
     /// Transfer leadership to another node.
     rpc TransferLeader(TransferLeaderRequest) returns (TransferLeaderResponse);
+    /// Add a learner node to a Raft group. Learner replicates logs but
+    /// does not vote — call ChangeMembership next to promote to voter.
+    rpc AddLearner(AddLearnerRequest) returns (AddLearnerResponse);
+    /// Replace the voter set of a Raft group. Removed voters are kept
+    /// as learners (`retain = true`). Must be called on the leader.
+    rpc ChangeMembership(ChangeMembershipRequest) returns (ChangeMembershipResponse);
+    /// Get the current Raft group membership (voters + learners).
+    rpc GetGroupMembership(GroupId) returns (GroupMembership);
     /// Get a top-level metrics summary.
     rpc GetMetricsSummary(Empty) returns (MetricsSummary);
 }
@@ -56,4 +64,36 @@ message MetricsSummary {
     uint64 total_proposals = 1;
     uint64 total_applied = 2;
     uint64 total_snapshots = 3;
+}
+
+message AddLearnerRequest {
+    uint64 group_id = 1;
+    uint64 node_id = 2;
+    string addr = 3;
+}
+
+message AddLearnerResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ChangeMembershipRequest {
+    uint64 group_id = 1;
+    repeated uint64 voter_node_ids = 2;
+}
+
+message ChangeMembershipResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message NodeMember {
+    uint64 node_id = 1;
+    string addr = 2;
+}
+
+message GroupMembership {
+    uint64 group_id = 1;
+    repeated NodeMember voters = 2;
+    repeated NodeMember learners = 3;
 }
