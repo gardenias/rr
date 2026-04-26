@@ -31,6 +31,9 @@ pub struct RaftGroupManager {
     /// multi-node networking.  When `None`, `NoopNetworkFactory` is used
     /// (single-node / test mode).
     channel_pool: Option<Arc<dyn ChannelPoolLike>>,
+    /// Per-group ingestor supervisor handles. Populated by
+    /// [`Self::attach_ingestor`]; stop_group + drop both clean these up.
+    ingestor_handles: Arc<RwLock<HashMap<GroupId, crate::ingestor_runner::IngestorHandle>>>,
     /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
@@ -47,6 +50,7 @@ impl RaftGroupManager {
             groups: Arc::new(RwLock::new(HashMap::new())),
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
+            ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -67,6 +71,7 @@ impl RaftGroupManager {
             groups: Arc::new(RwLock::new(HashMap::new())),
             sm_factory: Arc::new(sm_factory),
             channel_pool: Some(channel_pool),
+            ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -193,9 +198,15 @@ impl RaftGroupManager {
 
     /// Stop and remove a Raft group from this node.
     ///
-    /// Calls `raft.shutdown()` and removes from the map.
+    /// Calls `raft.shutdown()` and removes from the map. Any attached
+    /// [`crate::ingestor_runner`] supervisor is stopped first so the
+    /// background poll loop cannot observe a torn-down raft instance.
     #[instrument(skip(self))]
     pub async fn stop_group(&self, group_id: GroupId) -> Result<(), RrError> {
+        if let Some(handle) = self.ingestor_handles.write().await.remove(&group_id) {
+            handle.stop().await;
+        }
+
         let mut guard = self.groups.write().await;
 
         let node = guard
@@ -211,6 +222,76 @@ impl RaftGroupManager {
         let node_id = self.node_id;
         counter!("raft.group.stop", "node_id" => node_id.to_string()).increment(1);
         Ok(())
+    }
+
+    /// Fetch the most recent snapshot bytes for `group_id`, if any.
+    ///
+    /// Returned bytes are whatever the state machine emitted from
+    /// `StateMachine::snapshot()` — for `ServiceStateMachineAdapter`
+    /// that is a [`rr_core::framed_snapshot::FramedSnapshot`] envelope.
+    /// `Ok(None)` means no snapshot has been taken yet on this group.
+    ///
+    /// Used by the ingestor lifecycle hook to seed `ingestor.seek()`
+    /// on leader promotion without exposing adapter internals.
+    pub async fn fetch_snapshot_bytes(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Option<Vec<u8>>, RrError> {
+        let raft = self
+            .get_raft(group_id)
+            .await
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+
+        let snap = raft
+            .get_snapshot()
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+        Ok(snap.map(|s| s.snapshot.into_inner()))
+    }
+
+    /// Attach a [`rr_core::ingestor::DynCommandIngestor`] to `group_id`.
+    ///
+    /// Spawns an [`crate::ingestor_runner`] supervisor that runs the
+    /// ingestor's poll loop only while this node is the leader of
+    /// `group_id`. The handle is owned by the manager and torn down by
+    /// [`Self::stop_group`] / [`Self::stop_ingestor`].
+    ///
+    /// Returns an error if the group has not been started, or if an
+    /// ingestor is already attached. To replace an attached ingestor,
+    /// call [`Self::stop_ingestor`] first.
+    pub async fn attach_ingestor(
+        self: &Arc<Self>,
+        group_id: GroupId,
+        ingestor: Box<dyn rr_core::ingestor::DynCommandIngestor>,
+    ) -> Result<(), RrError> {
+        if self.get_raft(group_id).await.is_none() {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
+        let mut guard = self.ingestor_handles.write().await;
+        if guard.contains_key(&group_id) {
+            return Err(RrError::Application(format!(
+                "ingestor already attached to group {group_id}"
+            )));
+        }
+        let handle = crate::ingestor_runner::spawn(self.clone(), group_id, ingestor);
+        guard.insert(group_id, handle);
+        info!(group_id, "attached ingestor supervisor");
+        Ok(())
+    }
+
+    /// Stop the ingestor supervisor for `group_id` if one is attached.
+    /// Returns `Ok(false)` if no supervisor was running. The Raft group
+    /// itself remains active.
+    pub async fn stop_ingestor(&self, group_id: GroupId) -> Result<bool, RrError> {
+        let handle = self.ingestor_handles.write().await.remove(&group_id);
+        match handle {
+            Some(h) => {
+                h.stop().await;
+                info!(group_id, "stopped ingestor supervisor");
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Propose a client write to the Raft group, recording proposal duration
@@ -285,6 +366,7 @@ impl RaftGroupManager {
             groups: Arc::new(RwLock::new(HashMap::new())),
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
+            ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             rocks_base_path: Some(base_path),
         }
     }

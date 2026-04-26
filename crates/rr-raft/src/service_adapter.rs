@@ -41,7 +41,7 @@ use async_trait::async_trait;
 
 use rr_core::error::RrError;
 use rr_core::framed_entry::FramedEntry;
-use rr_core::framed_snapshot::FramedSnapshot;
+use rr_core::framed_snapshot::{FramedSnapshot, IngestorState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
 use rr_core::service::Service;
 use rr_core::state_machine::StateMachine;
@@ -67,6 +67,13 @@ pub struct ServiceStateMachineAdapter<S: Service> {
     service: S,
     applied_count: u64,
     idempotency: IdempotencyLayer,
+    /// Most recent ingestor offset observed via [`FramedEntry::offset`].
+    /// Bytes are bincode-encoded `CommandIngestor::Offset` (opaque to
+    /// the framework). Captured into [`IngestorState`] on `snapshot()`
+    /// so a new leader can call `ingestor.seek()` after restore.
+    /// `None` if no ingestor-sourced entry has been applied yet on
+    /// this adapter instance.
+    latest_ingestor_offset: Option<Vec<u8>>,
 }
 
 impl<S: Service> ServiceStateMachineAdapter<S> {
@@ -86,7 +93,16 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             service,
             applied_count: 0,
             idempotency: IdempotencyLayer::new(capacity),
+            latest_ingestor_offset: None,
         }
+    }
+
+    /// Latest ingestor offset (bincode-encoded `CommandIngestor::Offset`)
+    /// observed via [`FramedEntry::offset`]. Used by the framework's
+    /// ingestor lifecycle hook on leader promotion to seed
+    /// `ingestor.seek()` without needing to decode the full snapshot.
+    pub fn latest_ingestor_offset(&self) -> Option<&[u8]> {
+        self.latest_ingestor_offset.as_deref()
     }
 
     async fn apply_keyed(
@@ -160,9 +176,9 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
 #[async_trait]
 impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
-        let (idem_key, payload) = match FramedEntry::decode(entry)? {
-            Some(framed) => (framed.idem_key, framed.payload),
-            None => (None, entry.to_vec()),
+        let (offset, idem_key, payload) = match FramedEntry::decode(entry)? {
+            Some(framed) => (framed.offset, framed.idem_key, framed.payload),
+            None => (None, None, entry.to_vec()),
         };
 
         let result = match idem_key {
@@ -172,6 +188,9 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
 
         if result.is_ok() {
             self.applied_count += 1;
+            if let Some(off) = offset {
+                self.latest_ingestor_offset = Some(off);
+            }
         }
         result
     }
@@ -181,6 +200,11 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
         let mut framed = FramedSnapshot::new(user_snapshot);
         if !self.idempotency.is_empty() {
             framed.framework_state.idempotency = Some(self.idempotency.capture()?);
+        }
+        if self.latest_ingestor_offset.is_some() {
+            framed.framework_state.ingestor = Some(IngestorState {
+                last_applied_offset: self.latest_ingestor_offset.clone(),
+            });
         }
         framed.encode()
     }
@@ -198,6 +222,9 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
                 );
                 if let Some(idem_state) = framed.framework_state.idempotency {
                     self.idempotency.restore(idem_state)?;
+                }
+                if let Some(ing_state) = framed.framework_state.ingestor {
+                    self.latest_ingestor_offset = ing_state.last_applied_offset;
                 }
                 framed.user_snapshot
             }
@@ -553,5 +580,118 @@ mod tests {
         let svc = MockService::new(vec![]);
         let adapter = ServiceStateMachineAdapter::new(42, svc);
         assert_eq!(adapter.group_id, 42);
+    }
+
+    fn entry_with_offset(payload: &[u8], offset: Vec<u8>) -> Vec<u8> {
+        rr_core::framed_entry::FramedEntry::from_payload(payload.to_vec())
+            .with_offset(offset)
+            .encode()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn apply_records_ingestor_offset_when_framed_entry_carries_one() {
+        let svc = MockService::new(b"ok".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+        assert!(adapter.latest_ingestor_offset().is_none());
+
+        adapter
+            .apply(&entry_with_offset(b"req", vec![0, 0, 0, 1]))
+            .await
+            .unwrap();
+        assert_eq!(adapter.latest_ingestor_offset(), Some(&[0u8, 0, 0, 1][..]));
+
+        adapter
+            .apply(&entry_with_offset(b"req", vec![0, 0, 0, 2]))
+            .await
+            .unwrap();
+        assert_eq!(adapter.latest_ingestor_offset(), Some(&[0u8, 0, 0, 2][..]));
+    }
+
+    #[tokio::test]
+    async fn failed_apply_does_not_advance_ingestor_offset() {
+        let svc = MockService::new(vec![]).with_error("boom");
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let _ = adapter
+            .apply(&entry_with_offset(b"req", vec![0, 0, 0, 9]))
+            .await;
+        assert!(
+            adapter.latest_ingestor_offset().is_none(),
+            "failed apply must not commit the offset"
+        );
+    }
+
+    #[tokio::test]
+    async fn unkeyed_unframed_apply_leaves_offset_untouched() {
+        let svc = MockService::new(b"ok".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        adapter
+            .apply(&entry_with_offset(b"req", vec![0, 0, 0, 5]))
+            .await
+            .unwrap();
+        adapter.apply(b"raw v0.2.x bytes").await.unwrap();
+
+        assert_eq!(
+            adapter.latest_ingestor_offset(),
+            Some(&[0u8, 0, 0, 5][..]),
+            "raw legacy entries must not clobber the latest offset"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_emits_ingestor_state_when_offset_present() {
+        let svc = MockService::new(b"ok".to_vec()).with_snapshot(b"user-snap".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+        adapter
+            .apply(&entry_with_offset(b"req", vec![0, 0, 0, 42]))
+            .await
+            .unwrap();
+
+        let bytes = adapter.snapshot().await.unwrap();
+        let framed = rr_core::framed_snapshot::FramedSnapshot::decode(&bytes)
+            .unwrap()
+            .unwrap();
+        let ingestor = framed
+            .framework_state
+            .ingestor
+            .expect("ingestor state should be populated after offset apply");
+        assert_eq!(ingestor.last_applied_offset, Some(vec![0u8, 0, 0, 42]));
+    }
+
+    #[tokio::test]
+    async fn snapshot_omits_ingestor_state_when_no_offset_seen() {
+        let svc = MockService::new(b"ok".to_vec());
+        let adapter = ServiceStateMachineAdapter::new(7, svc);
+        let bytes = adapter.snapshot().await.unwrap();
+        let framed = rr_core::framed_snapshot::FramedSnapshot::decode(&bytes)
+            .unwrap()
+            .unwrap();
+        assert!(
+            framed.framework_state.ingestor.is_none(),
+            "ingestor state must be None when no offset has been seen"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_rehydrates_ingestor_offset_for_lifecycle_hook() {
+        let svc1 = MockService::new(b"ok".to_vec()).with_snapshot(b"state".to_vec());
+        let mut adapter1 = ServiceStateMachineAdapter::new(7, svc1);
+        adapter1
+            .apply(&entry_with_offset(b"req", vec![0, 0, 0, 99]))
+            .await
+            .unwrap();
+        let snap_bytes = adapter1.snapshot().await.unwrap();
+
+        let svc2 = MockService::new(vec![]);
+        let mut adapter2 = ServiceStateMachineAdapter::new(7, svc2);
+        adapter2.restore(&snap_bytes).await.unwrap();
+
+        assert_eq!(
+            adapter2.latest_ingestor_offset(),
+            Some(&[0u8, 0, 0, 99][..]),
+            "restored adapter must surface the persisted offset so the runner can seek"
+        );
     }
 }

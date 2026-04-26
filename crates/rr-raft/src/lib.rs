@@ -4,6 +4,7 @@
 
 pub mod group_manager;
 pub mod idempotency;
+pub mod ingestor_runner;
 pub mod log_storage;
 pub mod network_factory;
 pub mod raft_node;
