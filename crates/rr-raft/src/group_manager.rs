@@ -34,6 +34,11 @@ pub struct RaftGroupManager {
     /// Per-group ingestor supervisor handles. Populated by
     /// [`Self::attach_ingestor`]; stop_group + drop both clean these up.
     ingestor_handles: Arc<RwLock<HashMap<GroupId, crate::ingestor_runner::IngestorHandle>>>,
+    /// Per-group metrics tickers (replication_lag etc). Populated by
+    /// [`Self::start_group`] / [`Self::start_group_rocks`]; stop_group
+    /// cancels and joins them.
+    metrics_tickers:
+        Arc<RwLock<HashMap<GroupId, crate::metrics_ticker::MetricsTickerHandle>>>,
     /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
@@ -51,6 +56,7 @@ impl RaftGroupManager {
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
+            metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -72,6 +78,7 @@ impl RaftGroupManager {
             sm_factory: Arc::new(sm_factory),
             channel_pool: Some(channel_pool),
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
+            metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -199,12 +206,16 @@ impl RaftGroupManager {
     /// Stop and remove a Raft group from this node.
     ///
     /// Calls `raft.shutdown()` and removes from the map. Any attached
-    /// [`crate::ingestor_runner`] supervisor is stopped first so the
-    /// background poll loop cannot observe a torn-down raft instance.
+    /// [`crate::ingestor_runner`] supervisor and [`crate::metrics_ticker`]
+    /// are stopped first so background tasks cannot observe a torn-down
+    /// raft instance.
     #[instrument(skip(self))]
     pub async fn stop_group(&self, group_id: GroupId) -> Result<(), RrError> {
         if let Some(handle) = self.ingestor_handles.write().await.remove(&group_id) {
             handle.stop().await;
+        }
+        if let Some(ticker) = self.metrics_tickers.write().await.remove(&group_id) {
+            ticker.stop().await;
         }
 
         let mut guard = self.groups.write().await;
@@ -322,6 +333,32 @@ impl RaftGroupManager {
         Ok(())
     }
 
+    /// Spawn the per-group [`crate::metrics_ticker`] supervisor that
+    /// periodically emits `rr_raft_replication_lag` and the other
+    /// gauge metrics that need an active leader's view (replication
+    /// state, term, log index).
+    ///
+    /// Idempotent on the same group: a second call returns `Ok(())`
+    /// without spawning a duplicate ticker. Production wiring through
+    /// `RrNode::start()` calls this automatically after each
+    /// `start_group`; standalone tests usually skip it.
+    pub async fn start_metrics_ticker(
+        self: &Arc<Self>,
+        group_id: GroupId,
+    ) -> Result<(), RrError> {
+        if self.get_raft(group_id).await.is_none() {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
+        let mut guard = self.metrics_tickers.write().await;
+        if guard.contains_key(&group_id) {
+            return Ok(());
+        }
+        let handle = crate::metrics_ticker::spawn_for_group(self.clone(), group_id);
+        guard.insert(group_id, handle);
+        debug!(group_id, "started metrics ticker");
+        Ok(())
+    }
+
     /// Stop the ingestor supervisor for `group_id` if one is attached.
     /// Returns `Ok(false)` if no supervisor was running. The Raft group
     /// itself remains active.
@@ -410,6 +447,7 @@ impl RaftGroupManager {
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
+            metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             rocks_base_path: Some(base_path),
         }
     }

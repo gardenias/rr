@@ -131,7 +131,31 @@ Index of the most recent log entry.
 | :--- | :--- |
 | 类型 / Type | Gauge |
 | 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `write()` |
+| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `write()` 和 `rr-raft/src/metrics_ticker.rs` — 周期性发射 / `write()` and periodic ticker |
+
+---
+
+#### `rr_raft_replication_lag`
+
+每个 follower 相对 leader 的 log index 差距（`leader.last_log_index -
+follower.matched.index`）。**仅在 leader 上发射**——follower 不会发射
+该指标，避免 Prometheus 误以为"lag = 0"。告警时务必 predicate 在
+`rr_raft_is_leader{group_id} == 1`。
+
+---
+
+For each follower, the gap between leader's `last_log_index` and the
+follower's matched index. **Emitted only on the leader** —
+followers do NOT emit this gauge to avoid Prometheus reading the
+absence as "lag is 0". Always predicate alerts on
+`rr_raft_is_leader{group_id} == 1`.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Gauge |
+| 标签 / Labels | `group_id`, `follower_node_id` |
+| 记录位置 / Recorded in | `rr-raft/src/metrics_ticker.rs` — 5s 周期性发射 / 5s periodic ticker |
+| 可用版本 / Available since | v0.3.0 |
 
 ---
 

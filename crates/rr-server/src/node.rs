@@ -257,6 +257,9 @@ impl RrNode {
         for (group_id, meta) in &table.groups {
             if meta.replicas.contains(&self.node_id) {
                 self.group_manager.start_group(*group_id).await?;
+                self.group_manager
+                    .start_metrics_ticker(*group_id)
+                    .await?;
                 info!(node_id = self.node_id, group_id, "started Raft group");
                 counter!("node.group.started").increment(1);
             }
@@ -285,10 +288,20 @@ impl RrNode {
                                 if let Some(meta) = table.groups.get(&group_id) {
                                     if meta.replicas.contains(&node_id) {
                                         match gm.start_group(group_id).await {
-                                            Ok(()) => info!(
-                                                group_id,
-                                                "watch: started group on PartitionAdded"
-                                            ),
+                                            Ok(()) => {
+                                                if let Err(e) =
+                                                    gm.start_metrics_ticker(group_id).await
+                                                {
+                                                    warn!(
+                                                        group_id,
+                                                        "watch: failed to start metrics ticker: {e}"
+                                                    );
+                                                }
+                                                info!(
+                                                    group_id,
+                                                    "watch: started group on PartitionAdded"
+                                                );
+                                            }
                                             Err(e)
                                                 if e.to_string().contains("already exists") => {}
                                             Err(e) => warn!(
@@ -371,10 +384,18 @@ impl RrNode {
                         if replicas.contains(&node_id) {
                             // This node is (now) in the group's replica set — start if needed.
                             match gm.start_group(group_id).await {
-                                Ok(()) => info!(
-                                    group_id,
-                                    "watch: started group on GroupMembershipChanged"
-                                ),
+                                Ok(()) => {
+                                    if let Err(e) = gm.start_metrics_ticker(group_id).await {
+                                        warn!(
+                                            group_id,
+                                            "watch: failed to start metrics ticker: {e}"
+                                        );
+                                    }
+                                    info!(
+                                        group_id,
+                                        "watch: started group on GroupMembershipChanged"
+                                    );
+                                }
                                 Err(e) if e.to_string().contains("already exists") => {}
                                 Err(e) => warn!(
                                     group_id,

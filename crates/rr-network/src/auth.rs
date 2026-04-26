@@ -123,15 +123,14 @@ impl Interceptor for BearerInterceptor {
             .map(|a| a.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        let presented_token = request
+            .metadata()
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+
         let outcome = (|| -> Result<(), &'static str> {
-            let header = request
-                .metadata()
-                .get("authorization")
-                .ok_or("missing_credential")?;
-            let header_str = header.to_str().map_err(|_| "missing_credential")?;
-            let token = header_str
-                .strip_prefix("Bearer ")
-                .ok_or("missing_credential")?;
+            let token = presented_token.ok_or("missing_credential")?;
             if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
                 return Err("invalid_credential");
             }
@@ -141,11 +140,15 @@ impl Interceptor for BearerInterceptor {
         match outcome {
             Ok(()) => Ok(request),
             Err(reason) => {
+                let fingerprint = presented_token
+                    .map(token_fingerprint)
+                    .unwrap_or_else(|| "none".to_string());
                 tracing::warn!(
                     target: AUDIT_TARGET,
                     op = "auth",
                     service = self.service.as_str(),
                     peer = %peer,
+                    caller_token_fp = %fingerprint,
                     result = "rejected",
                     reason,
                     "auth rejected"
@@ -154,6 +157,27 @@ impl Interceptor for BearerInterceptor {
             }
         }
     }
+}
+
+/// Compute a short, **non-cryptographic** fingerprint of a presented
+/// bearer token, suitable for audit-log correlation across reject
+/// events from the same caller.
+///
+/// The output is the lower 8 hex characters of a `DefaultHasher`
+/// (siphash-1-3) over the token bytes — collision-resistant enough
+/// to discriminate attackers within a session without leaking the
+/// token itself. NOT a security primitive: do NOT use this for
+/// authentication, only for grouping log lines.
+///
+/// Empty input returns `"empty"` so log lines stay greppable.
+pub fn token_fingerprint(token: &str) -> String {
+    if token.is_empty() {
+        return "empty".to_string();
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    token.as_bytes().hash(&mut hasher);
+    format!("{:08x}", (hasher.finish() & 0xFFFF_FFFF))
 }
 
 /// Attach a bearer token to an outbound gRPC request's metadata.
@@ -274,6 +298,36 @@ mod tests {
         };
         assert!(cfg.admin_required());
         assert!(!cfg.client_required());
+    }
+
+    #[test]
+    fn token_fingerprint_is_stable_across_calls() {
+        let a = token_fingerprint("alice-secret");
+        let b = token_fingerprint("alice-secret");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 8);
+    }
+
+    #[test]
+    fn token_fingerprint_distinguishes_distinct_tokens() {
+        let a = token_fingerprint("alice-secret");
+        let b = token_fingerprint("bob-secret");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn token_fingerprint_empty_returns_sentinel() {
+        assert_eq!(token_fingerprint(""), "empty");
+    }
+
+    #[test]
+    fn token_fingerprint_does_not_reveal_token_content() {
+        let secret = "supersecret-1234567890";
+        let fp = token_fingerprint(secret);
+        assert!(
+            !fp.contains("super") && !fp.contains("secret") && !fp.contains("123"),
+            "fingerprint must not embed any prefix of the token"
+        );
     }
 
     #[test]

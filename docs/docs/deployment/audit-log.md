@@ -96,11 +96,43 @@ Layered defenses:
 4. **审计日志** — 检测 + 事后取证（本文档）
 5. **immutable log sink** — 防止攻击者抹掉痕迹
 
+## 调用者身份 / Caller identity (since v0.3.0)
+
+Auth reject 事件携带 `caller_token_fp` 字段——一个**非密码学**的 8-hex
+fingerprint（基于 siphash），用于在多个 reject 之间关联同一调用者，
+不暴露 token 本身。`peer` 字段继续提供网络层身份。
+
+```json
+{"op":"auth","service":"client","peer":"10.0.1.23:51234","caller_token_fp":"7f3e9a02","result":"rejected","reason":"invalid_credential"}
+```
+
+调查 spray 攻击或撞库尝试时，按 `caller_token_fp` group-by 即可看到
+同一 token（无论正确或错误）多次试探的全貌。
+
+完整 subject claim（mTLS 证书 CN、JWT subject 等）propagation 仍是
+**future work**——当前只在 reject 事件中携带 fingerprint。
+
+---
+
+Auth reject events carry a `caller_token_fp` field — a
+**non-cryptographic** 8-hex fingerprint (siphash) that lets operators
+correlate multiple reject events from the same caller without
+exposing the token itself. `peer` still provides network-layer
+identity.
+
+```json
+{"op":"auth","service":"client","peer":"10.0.1.23:51234","caller_token_fp":"7f3e9a02","result":"rejected","reason":"invalid_credential"}
+```
+
+When investigating spray or credential-stuffing attempts, group-by
+`caller_token_fp` to see all attempts (correct or wrong) from the
+same token.
+
+Full subject-claim propagation (mTLS cert CN, JWT subject, etc.)
+remains future work — only reject events carry the fingerprint today.
+
 ## 已知限制 / Known limitations
 
-- 审计事件目前**不含调用者身份**（除 peer IP）。Auth interceptor 校验 token 但
-  不 forward 身份到 handler。未来计划在 gRPC metadata extension 里透传
-  subject claim，让 audit 事件携带 `caller_subject` 字段。
 - Auth / rate-limit reject 事件以 `warn!` 级别发，AdminService RPC
   事件以 `info!` 级别发——确保 EnvFilter 至少包含两者：
   `RUST_LOG="warn,rr::audit=info"`。
@@ -110,10 +142,6 @@ Layered defenses:
 
 ---
 
-- Audit events currently **do not include caller identity** beyond the
-  peer IP. The Phase 3 auth interceptor validates tokens but does not
-  forward identity to handlers. Future work: propagate subject via gRPC
-  metadata extension into a `caller_subject` field.
 - Audit events **share the subscriber with app logs** — if operators set
   `RUST_LOG=warn` the audit info level is filtered out. Recommended:
   `RUST_LOG="warn,rr::audit=info"`.
