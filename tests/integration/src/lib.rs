@@ -1600,6 +1600,88 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// E4 — Crash-during-write durability. Spawn a rocks-backed
+    /// single-node cluster, write 20 entries sequentially (each
+    /// `Ok` confirms the leader has fsynced + applied), then drop
+    /// the manager WITHOUT calling `stop_group` — i.e. no
+    /// `raft.shutdown()`. This is the closest in-process simulation
+    /// of `kill -9` mid-write that still reuses the production code
+    /// path. Reopen the same data dir and verify all 20 acked entries
+    /// are still in the log.
+    ///
+    /// `DurabilityPolicy::Strict` (the v0.3 production default)
+    /// fsyncs on every write before `client_write` returns `Ok`, so
+    /// any acked write MUST survive an abrupt termination.
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_crash_during_write_preserves_acked_entries() {
+        use openraft::storage::RaftLogStorage;
+        use rr_raft::group_manager::RaftGroupManager;
+        use rr_raft::rocks_log_storage::RocksLogStorage;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().to_str().unwrap().to_string();
+        let mut acked_indices: Vec<u64> = Vec::new();
+
+        {
+            let mgr = Arc::new(RaftGroupManager::new_with_rocks(
+                1,
+                echo_factory(),
+                base.clone(),
+            ));
+            mgr.start_group_rocks(1).await.unwrap();
+            let mut members = BTreeMap::new();
+            members.insert(1u64, openraft::BasicNode::default());
+            let raft = mgr.get_raft(1).await.unwrap();
+            let _ = raft.initialize(members).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+            for i in 0u8..20 {
+                let resp = raft
+                    .client_write(vec![i, b'!'])
+                    .await
+                    .expect("client_write must succeed in single-node cluster");
+                let metrics = raft.metrics().borrow().clone();
+                let idx = metrics
+                    .last_log_index
+                    .expect("last_log_index after Ok client_write");
+                acked_indices.push(idx);
+                assert_eq!(
+                    resp.data,
+                    vec![i, b'!'],
+                    "EchoSM must echo {i}"
+                );
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let rocks_path = format!("{base}/1");
+        let mut log = RocksLogStorage::open(&rocks_path)
+            .expect("rocks reopen must succeed after abrupt drop");
+        let state = log.get_log_state().await.unwrap();
+        let last_index = state
+            .last_log_id
+            .expect("last_log_id must be Some after abrupt drop")
+            .index;
+        let max_acked = *acked_indices.iter().max().unwrap();
+        assert!(
+            last_index >= max_acked,
+            "all {} acked writes must survive abrupt drop; \
+             last_log_index={last_index} but max acked = {max_acked}",
+            acked_indices.len()
+        );
+
+        let vote = log
+            .read_vote()
+            .await
+            .expect("vote must be readable after abrupt drop");
+        assert!(
+            vote.is_some(),
+            "vote must persist across abrupt drop (durability invariant)"
+        );
+    }
+
     /// Verify HTTP /health, /ready, /metrics endpoints work end-to-end.
     ///
     /// Spawns a single-node `RrNode` with `metrics_port` set, sends real HTTP
