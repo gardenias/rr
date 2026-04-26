@@ -20,6 +20,11 @@ service AdminService {
     rpc ChangeMembership(ChangeMembershipRequest) returns (ChangeMembershipResponse);
     /// Get the current Raft group membership (voters + learners).
     rpc GetGroupMembership(GroupId) returns (GroupMembership);
+    /// Stream a non-disruptive snapshot of a Raft group to the caller.
+    /// First chunk carries metadata; subsequent chunks carry data.
+    /// Server may trigger a fresh snapshot before streaming if
+    /// `force_fresh_snapshot=true` or no snapshot exists yet.
+    rpc OnlineBackup(OnlineBackupRequest) returns (stream OnlineBackupChunk);
     /// Get a top-level metrics summary.
     rpc GetMetricsSummary(Empty) returns (MetricsSummary);
 }
@@ -96,4 +101,24 @@ message GroupMembership {
     uint64 group_id = 1;
     repeated NodeMember voters = 2;
     repeated NodeMember learners = 3;
+}
+
+message OnlineBackupRequest {
+    uint64 group_id = 1;
+    bool force_fresh_snapshot = 2;
+}
+
+message OnlineBackupChunk {
+    oneof body {
+        OnlineBackupMetadata metadata = 1;
+        bytes data = 2;
+    }
+}
+
+message OnlineBackupMetadata {
+    uint64 group_id = 1;
+    uint64 last_log_index = 2;
+    uint64 last_log_term = 3;
+    uint64 size_bytes = 4;
+    string rr_version = 5;
 }

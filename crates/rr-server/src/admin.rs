@@ -17,17 +17,59 @@ use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
-    AddLearnerRequest, AddLearnerResponse, ChangeMembershipRequest, ChangeMembershipResponse,
-    Empty, GroupId, GroupMembership, GroupStatus, MetricsSummary, NodeMember, NodeStatus,
-    TransferLeaderRequest, TransferLeaderResponse, TriggerSnapshotResponse,
+    online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, AddLearnerResponse,
+    ChangeMembershipRequest, ChangeMembershipResponse, Empty, GroupId, GroupMembership,
+    GroupStatus, MetricsSummary, NodeMember, NodeStatus, OnlineBackupChunk, OnlineBackupMetadata,
+    OnlineBackupRequest, TransferLeaderRequest, TransferLeaderResponse, TriggerSnapshotResponse,
 };
 use rr_raft::group_manager::RaftGroupManager;
 use std::collections::BTreeSet;
+use std::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
+
+/// Per-chunk byte budget for [`AdminServiceImpl::online_backup`].
+/// Matches the InstallSnapshot streaming chunk size used elsewhere
+/// in rr so one tonic transport can handle either direction.
+const ONLINE_BACKUP_CHUNK_BYTES: usize = 64 * 1024;
+
+/// How long the server is willing to wait for a freshly-triggered
+/// snapshot to materialise before giving up. Generous default because
+/// snapshot generation can be slow on large state machines; tune via
+/// future config if needed.
+const ONLINE_BACKUP_SNAPSHOT_WAIT: Duration = Duration::from_secs(60);
 
 fn peer_from_request<T>(req: &Request<T>) -> String {
     req.remote_addr()
         .map(|a| a.to_string())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+async fn wait_for_snapshot(
+    raft: &openraft::Raft<rr_raft::type_config::RrTypeConfig>,
+    mgr: &Arc<RaftGroupManager>,
+    group_id: u64,
+) -> Result<Vec<u8>, Status> {
+    let deadline = std::time::Instant::now() + ONLINE_BACKUP_SNAPSHOT_WAIT;
+    loop {
+        if let Some(bytes) = mgr
+            .fetch_snapshot_bytes(group_id)
+            .await
+            .map_err(|e| Status::internal(format!("fetch_snapshot_bytes: {e}")))?
+        {
+            return Ok(bytes);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(Status::deadline_exceeded(
+                "no snapshot materialised within ONLINE_BACKUP_SNAPSHOT_WAIT; \
+                 retry with force_fresh_snapshot=true if the group has no prior snapshot",
+            ));
+        }
+        if raft.metrics().borrow().snapshot.is_some() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// Implementation of the AdminService gRPC interface.
@@ -363,6 +405,113 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
+    type OnlineBackupStream =
+        std::pin::Pin<Box<dyn futures::Stream<Item = Result<OnlineBackupChunk, Status>> + Send>>;
+
+    async fn online_backup(
+        &self,
+        request: Request<OnlineBackupRequest>,
+    ) -> Result<Response<Self::OnlineBackupStream>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        let group_id = req.group_id;
+        info!(
+            target: AUDIT_TARGET,
+            op = "OnlineBackup",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id,
+            force_fresh_snapshot = req.force_fresh_snapshot,
+            result = "started",
+            "admin rpc — read"
+        );
+
+        let raft = self
+            .group_manager
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
+
+        if req.force_fresh_snapshot {
+            raft.trigger()
+                .snapshot()
+                .await
+                .map_err(|e| Status::internal(format!("trigger snapshot failed: {e}")))?;
+        }
+
+        let snapshot_bytes = wait_for_snapshot(&raft, &self.group_manager, group_id).await?;
+
+        let metadata_metrics = raft.metrics().borrow().clone();
+        let metadata = OnlineBackupMetadata {
+            group_id,
+            last_log_index: metadata_metrics
+                .snapshot
+                .as_ref()
+                .map(|l| l.index)
+                .unwrap_or(0),
+            last_log_term: metadata_metrics
+                .snapshot
+                .as_ref()
+                .map(|l| l.leader_id.term)
+                .unwrap_or(0),
+            size_bytes: snapshot_bytes.len() as u64,
+            rr_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let peer_for_audit = peer.clone();
+        let node_id = self.node_id;
+        tokio::spawn(async move {
+            let total = snapshot_bytes.len();
+            let metadata_chunk = OnlineBackupChunk {
+                body: Some(OnlineBackupBody::Metadata(metadata)),
+            };
+            if tx.send(Ok(metadata_chunk)).await.is_err() {
+                return;
+            }
+            let mut sent = 0usize;
+            for chunk in snapshot_bytes.chunks(ONLINE_BACKUP_CHUNK_BYTES) {
+                let data = chunk.to_vec();
+                sent += data.len();
+                let msg = OnlineBackupChunk {
+                    body: Some(OnlineBackupBody::Data(data)),
+                };
+                if tx.send(Ok(msg)).await.is_err() {
+                    info!(
+                        target: AUDIT_TARGET,
+                        op = "OnlineBackup",
+                        peer = %peer_for_audit,
+                        node_id,
+                        group_id,
+                        sent_bytes = sent,
+                        total_bytes = total,
+                        success = false,
+                        result = "failed",
+                        reason = "client_disconnected",
+                        "admin rpc result"
+                    );
+                    return;
+                }
+            }
+            info!(
+                target: AUDIT_TARGET,
+                op = "OnlineBackup",
+                peer = %peer_for_audit,
+                node_id,
+                group_id,
+                sent_bytes = sent,
+                total_bytes = total,
+                success = true,
+                result = "succeeded",
+                "admin rpc result"
+            );
+        });
+
+        Ok(Response::new(
+            Box::pin(ReceiverStream::new(rx)) as Self::OnlineBackupStream
+        ))
+    }
+
     async fn get_metrics_summary(
         &self,
         request: Request<Empty>,
@@ -530,5 +679,26 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_online_backup_unknown_group_returns_not_found() {
+        let svc = make_admin_service();
+        let result = svc
+            .online_backup(Request::new(OnlineBackupRequest {
+                group_id: 99,
+                force_fresh_snapshot: false,
+            }))
+            .await;
+        let err = match result {
+            Ok(_) => panic!("expected NotFound, got Ok"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[test]
+    fn online_backup_chunk_size_matches_install_snapshot_convention() {
+        assert_eq!(ONLINE_BACKUP_CHUNK_BYTES, 64 * 1024);
     }
 }

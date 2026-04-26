@@ -15,7 +15,8 @@ use bincode::config::standard;
 use clap::{Parser, Subcommand, ValueEnum};
 use rr_network::proto::admin::admin_service_client::AdminServiceClient;
 use rr_network::proto::admin::{
-    AddLearnerRequest, ChangeMembershipRequest, Empty, GroupId, TransferLeaderRequest,
+    online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
+    Empty, GroupId, OnlineBackupRequest, TransferLeaderRequest,
 };
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::ClientRequest;
@@ -212,6 +213,21 @@ enum GroupCommands {
         /// Raft group ID.
         #[arg(long)]
         group: u64,
+    },
+    /// Stream a non-disruptive snapshot of a Raft group to a local
+    /// file. Unlike `rr-admin backup` (offline), this works against a
+    /// running node by fetching the latest committed snapshot.
+    OnlineBackup {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+        /// Path to write the snapshot bytes to (binary file).
+        #[arg(long)]
+        output: PathBuf,
+        /// Trigger a fresh snapshot before streaming. Use when the
+        /// group has never produced a snapshot yet.
+        #[arg(long)]
+        force_fresh: bool,
     },
 }
 
@@ -452,6 +468,70 @@ async fn main() -> Result<()> {
                         }
                         OutputFormat::Human => {
                             println!("ChangeMembership: success={} message={}", resp.success, resp.message);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::OnlineBackup { group, output, force_fresh },
+                } => {
+                    use std::io::Write;
+                    let mut stream = client
+                        .online_backup(OnlineBackupRequest {
+                            group_id: *group,
+                            force_fresh_snapshot: *force_fresh,
+                        })
+                        .await?
+                        .into_inner();
+                    let mut file = std::fs::File::create(output)?;
+                    let mut received_bytes: u64 = 0;
+                    let mut metadata_seen: Option<rr_network::proto::admin::OnlineBackupMetadata> =
+                        None;
+                    use futures::StreamExt;
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk?;
+                        match chunk.body {
+                            Some(OnlineBackupBody::Metadata(m)) => {
+                                metadata_seen = Some(m);
+                            }
+                            Some(OnlineBackupBody::Data(bytes)) => {
+                                file.write_all(&bytes)?;
+                                received_bytes += bytes.len() as u64;
+                            }
+                            None => {}
+                        }
+                    }
+                    file.sync_all()?;
+                    drop(file);
+                    let meta = metadata_seen.ok_or_else(|| {
+                        anyhow::anyhow!("server stream ended without metadata chunk")
+                    })?;
+                    if received_bytes != meta.size_bytes {
+                        anyhow::bail!(
+                            "byte-count mismatch: header said {} bytes, received {}",
+                            meta.size_bytes,
+                            received_bytes
+                        );
+                    }
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "group_id": meta.group_id,
+                                "last_log_index": meta.last_log_index,
+                                "last_log_term": meta.last_log_term,
+                                "size_bytes": meta.size_bytes,
+                                "rr_version": meta.rr_version,
+                                "output": output.display().to_string(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("Online Backup OK");
+                            println!("  output         : {}", output.display());
+                            println!("  group_id       : {}", meta.group_id);
+                            println!("  last_log_index : {}", meta.last_log_index);
+                            println!("  last_log_term  : {}", meta.last_log_term);
+                            println!("  size_bytes     : {}", meta.size_bytes);
+                            println!("  rr_version     : {}", meta.rr_version);
                         }
                     }
                 }
@@ -794,6 +874,31 @@ mod tests {
                 assert_eq!(voters, "1,2,3");
             }
             other => panic!("expected ChangeMembership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_group_online_backup() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "group",
+            "online-backup",
+            "--group",
+            "1",
+            "--output",
+            "/tmp/snap.bin",
+            "--force-fresh",
+        ])
+        .expect("should parse online-backup");
+        match cli.command {
+            Commands::Group {
+                cmd: GroupCommands::OnlineBackup { group, output, force_fresh },
+            } => {
+                assert_eq!(group, 1);
+                assert_eq!(output.to_str(), Some("/tmp/snap.bin"));
+                assert!(force_fresh);
+            }
+            other => panic!("expected OnlineBackup, got {other:?}"),
         }
     }
 

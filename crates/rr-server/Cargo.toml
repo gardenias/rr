@@ -24,6 +24,7 @@ metrics-exporter-prometheus = { version = "0.16", features = ["http-listener"] }
 bincode.workspace = true
 openraft.workspace = true
 futures.workspace = true
+tokio-stream = "0.1"
 tonic-health = "0.14"
 anyhow.workspace = true
 serde.workspace = true
