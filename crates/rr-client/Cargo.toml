@@ -2,6 +2,15 @@
 name = "rr-client"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
+description = "Async Rust client SDK for the rr distributed Multi-Raft consensus framework. Auto leader-redirect, exponential-backoff retry, framework-level idempotency, TLS/mTLS, and bearer-token auth."
+license = "MIT"
+repository = "https://github.com/gardenias/rr"
+homepage = "https://github.com/gardenias/rr"
+documentation = "https://docs.rs/rr-client"
+readme = "README.md"
+keywords = ["raft", "consensus", "distributed", "grpc", "openraft"]
+categories = ["network-programming", "asynchronous", "database-implementations"]
 
 [dependencies]
 rr-core = { path = "../rr-core" }

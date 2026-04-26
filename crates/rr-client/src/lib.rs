@@ -1,7 +1,34 @@
 //! `rr-client` — User-facing client for the rr distributed framework.
 //!
-//! Provides [`RrClient`] with automatic leader-redirect and retry logic
-//! for communicating with an rr cluster over gRPC.
+//! Provides [`RrClient`] with automatic leader-redirect, retry logic,
+//! framework-level idempotency, TLS/mTLS, and bearer-token auth — all
+//! over gRPC.
+//!
+//! # Quick start
+//!
+//! For dev / loopback (no TLS, no auth) use [`RrClient::connect`]:
+//!
+//! ```rust,ignore
+//! let client = RrClient::connect(vec!["127.0.0.1:51001".into()]).await?;
+//! let resp = client.send_request(group_id, payload).await?;
+//! ```
+//!
+//! For production (TLS + auth) use [`RrClientBuilder`]:
+//!
+//! ```rust,ignore
+//! use rr_network::tls::TlsConfig;
+//! let tls = TlsConfig {
+//!     cert_path: "/etc/rr/client.crt".into(),
+//!     key_path: "/etc/rr/client.key".into(),
+//!     ca_path: Some("/etc/rr/ca.crt".into()),
+//!     require_client_cert: false, // ignored on client side
+//!     domain_name: Some("rr.example.com".into()),
+//! };
+//! let client = RrClientBuilder::new(vec!["rr.example.com:51001".into()])
+//!     .with_tls(tls)
+//!     .with_bearer_token(std::env::var("RR_CLIENT_TOKEN")?)
+//!     .build().await?;
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,10 +36,12 @@ use std::sync::Arc;
 use rr_core::error::{NetworkError, RrError};
 use rr_core::idempotency::IdempotencyKey;
 use rr_core::types::{GroupId, NodeId};
+use rr_network::auth::attach_bearer_token;
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::{
     ClientRequest, ClusterInfo, Empty, IdempotencyKey as ProtoIdemKey,
 };
+use rr_network::tls::TlsConfig;
 use rr_network::ChannelPool;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
@@ -47,47 +76,155 @@ impl Default for RetryConfig {
 /// User-facing client for the rr distributed framework.
 ///
 /// Connects to an rr cluster and provides methods to send requests with
-/// automatic leader-redirect and exponential-backoff retry logic.
+/// automatic leader-redirect and exponential-backoff retry logic. Supports
+/// optional TLS/mTLS and bearer-token authentication via [`RrClientBuilder`].
+///
+/// For dev / loopback use [`RrClient::connect`]. For production deployments
+/// that enable TLS or bearer auth on rr-server, use [`RrClientBuilder`].
 pub struct RrClient {
-    /// Initial node addresses for bootstrapping.
     bootstrap_addrs: Vec<String>,
-    /// Reusable gRPC channel pool.
     channel_pool: ChannelPool,
-    /// Cached leader locations: group_id → (node_id, addr).
     leader_cache: Arc<RwLock<HashMap<GroupId, (NodeId, String)>>>,
-    /// Retry configuration.
     retry_config: RetryConfig,
+    tls_config: Option<TlsConfig>,
+    bearer_token: Option<String>,
+}
+
+/// Builder for [`RrClient`] with optional TLS and bearer-token configuration.
+///
+/// Use this when the rr cluster has TLS or bearer auth enabled. For
+/// no-TLS no-auth dev clusters, [`RrClient::connect`] is sufficient.
+///
+/// # Security
+///
+/// Bearer tokens are sent in plaintext over the wire inside the gRPC
+/// metadata `authorization` header. Pairing [`Self::with_bearer_token`]
+/// without [`Self::with_tls`] is therefore equivalent to no authentication
+/// against an active network attacker. By default this combination logs a
+/// `tracing::warn!` (matching the server-side `allow_insecure` opt-in
+/// pattern). Call [`Self::with_strict_security`] to instead reject the
+/// configuration at [`Self::build`] time.
+pub struct RrClientBuilder {
+    bootstrap_addrs: Vec<String>,
+    retry_config: RetryConfig,
+    tls_config: Option<TlsConfig>,
+    bearer_token: Option<String>,
+    strict_security: bool,
+}
+
+impl RrClientBuilder {
+    /// Create a new builder with the given bootstrap addresses.
+    pub fn new(addrs: Vec<String>) -> Self {
+        Self {
+            bootstrap_addrs: addrs,
+            retry_config: RetryConfig::default(),
+            tls_config: None,
+            bearer_token: None,
+            strict_security: false,
+        }
+    }
+
+    /// Attach TLS / mTLS configuration. The connection scheme switches
+    /// from `http://` to `https://` and `endpoint.tls_config(...)` is
+    /// applied to every channel built by the resulting [`RrClient`].
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls_config = Some(tls);
+        self
+    }
+
+    /// Attach a bearer token. The token is added to every outbound
+    /// request's `authorization: Bearer <token>` metadata header.
+    ///
+    /// Pair with [`Self::with_tls`] in production: bearer tokens are
+    /// transmitted in plaintext. See [`Self`] type-level docs for the
+    /// strict-mode opt-in.
+    pub fn with_bearer_token(mut self, token: String) -> Self {
+        self.bearer_token = Some(token);
+        self
+    }
+
+    /// Override the default retry configuration.
+    pub fn with_retry_config(mut self, cfg: RetryConfig) -> Self {
+        self.retry_config = cfg;
+        self
+    }
+
+    /// Reject configurations with `bearer_token` set but no `tls_config`
+    /// at [`Self::build`] time, instead of warning. Default is `false`
+    /// (warn-only) for parity with rr-server's `allow_insecure` opt-in.
+    pub fn with_strict_security(mut self, enabled: bool) -> Self {
+        self.strict_security = enabled;
+        self
+    }
+
+    /// Validate the configuration and produce an [`RrClient`].
+    ///
+    /// Returns `RrError::Network(NetworkError::ConnectionFailed)` if:
+    /// - No bootstrap addresses were provided.
+    /// - Strict security is on and a bearer token was set without TLS.
+    pub async fn build(self) -> Result<RrClient, RrError> {
+        if self.bootstrap_addrs.is_empty() {
+            return Err(RrError::Network(NetworkError::ConnectionFailed {
+                addr: "<none>".to_string(),
+                reason: "no bootstrap addresses provided".to_string(),
+            }));
+        }
+
+        let token_without_tls = self.bearer_token.is_some() && self.tls_config.is_none();
+        if token_without_tls {
+            if self.strict_security {
+                return Err(RrError::Network(NetworkError::ConnectionFailed {
+                    addr: "<config>".to_string(),
+                    reason: "strict security: bearer token set without TLS — \
+                             enable with_tls() or disable with_strict_security(false) for dev"
+                        .to_string(),
+                }));
+            }
+            tracing::warn!(
+                "rr-client: bearer token configured without TLS — token will travel in plaintext. \
+                 This is acceptable only for loopback / mTLS-elsewhere setups. \
+                 In production, attach with_tls(...) or enable with_strict_security(true)."
+            );
+        }
+
+        tracing::info!(
+            bootstrap_count = self.bootstrap_addrs.len(),
+            tls = self.tls_config.is_some(),
+            bearer = self.bearer_token.is_some(),
+            "RrClient connecting"
+        );
+        Ok(RrClient {
+            bootstrap_addrs: self.bootstrap_addrs,
+            channel_pool: ChannelPool::new(),
+            leader_cache: Arc::new(RwLock::new(HashMap::new())),
+            retry_config: self.retry_config,
+            tls_config: self.tls_config,
+            bearer_token: self.bearer_token,
+        })
+    }
 }
 
 impl RrClient {
     /// Connect to an rr cluster using the given bootstrap addresses.
     ///
     /// Does not immediately open connections — channels are created lazily
-    /// on first request.
+    /// on first request. No TLS, no bearer auth. For TLS or auth, use
+    /// [`RrClientBuilder`] instead.
     pub async fn connect(addrs: Vec<String>) -> Result<Self, RrError> {
-        if addrs.is_empty() {
-            return Err(RrError::Network(NetworkError::ConnectionFailed {
-                addr: "<none>".to_string(),
-                reason: "no bootstrap addresses provided".to_string(),
-            }));
-        }
-        tracing::info!(bootstrap_count = addrs.len(), "RrClient connecting");
-        Ok(Self {
-            bootstrap_addrs: addrs,
-            channel_pool: ChannelPool::new(),
-            leader_cache: Arc::new(RwLock::new(HashMap::new())),
-            retry_config: RetryConfig::default(),
-        })
+        RrClientBuilder::new(addrs).build().await
     }
 
-    /// Connect with a custom retry configuration.
+    /// Connect with a custom retry configuration. No TLS, no bearer auth.
+    /// For TLS or auth, use [`RrClientBuilder::with_tls`] /
+    /// [`RrClientBuilder::with_bearer_token`].
     pub async fn connect_with_config(
         addrs: Vec<String>,
         retry_config: RetryConfig,
     ) -> Result<Self, RrError> {
-        let mut client = Self::connect(addrs).await?;
-        client.retry_config = retry_config;
-        Ok(client)
+        RrClientBuilder::new(addrs)
+            .with_retry_config(retry_config)
+            .build()
+            .await
     }
 
     /// Returns a reference to the bootstrap addresses.
@@ -123,19 +260,47 @@ impl RrClient {
         cache.remove(&group_id);
     }
 
-    /// Create a gRPC client stub connected to the given address.
     async fn connect_to_addr(&self, addr: &str) -> Result<ClientServiceClient<Channel>, RrError> {
-        let channel = Channel::from_shared(format!("http://{addr}"))
-            .expect("valid uri")
-            .connect()
-            .await
-            .map_err(|e| {
+        let scheme = if self.tls_config.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let mut endpoint = Channel::from_shared(format!("{scheme}://{addr}")).map_err(|e| {
+            RrError::Network(NetworkError::ConnectionFailed {
+                addr: addr.to_string(),
+                reason: format!("invalid uri: {e}"),
+            })
+        })?;
+        if let Some(tls) = &self.tls_config {
+            let client_tls = tls.build_client_tls().map_err(RrError::Network)?;
+            endpoint = endpoint.tls_config(client_tls).map_err(|e| {
                 RrError::Network(NetworkError::ConnectionFailed {
                     addr: addr.to_string(),
-                    reason: e.to_string(),
+                    reason: format!("tls config rejected by tonic: {e}"),
                 })
             })?;
+        }
+        let channel = endpoint.connect().await.map_err(|e| {
+            RrError::Network(NetworkError::ConnectionFailed {
+                addr: addr.to_string(),
+                reason: e.to_string(),
+            })
+        })?;
         Ok(ClientServiceClient::new(channel))
+    }
+
+    fn build_request<T>(&self, body: T) -> Result<tonic::Request<T>, RrError> {
+        let mut req = tonic::Request::new(body);
+        if let Some(token) = &self.bearer_token {
+            attach_bearer_token(&mut req, token).map_err(|status| {
+                RrError::Network(NetworkError::RpcFailed(format!(
+                    "failed to attach bearer token: {}",
+                    status.message()
+                )))
+            })?;
+        }
+        Ok(req)
     }
 
     /// Send a request to a specific group with automatic leader-redirect and retry.
@@ -259,7 +424,12 @@ impl RrClient {
                 idem_key: idem_key.clone().map(idem_key_to_proto),
             };
 
-            match grpc_client.request(tonic::Request::new(request)).await {
+            let tonic_req = match self.build_request(request) {
+                Ok(req) => req,
+                Err(e) => return Err(e),
+            };
+
+            match grpc_client.request(tonic_req).await {
                 Ok(response) => {
                     let resp = response.into_inner();
 
@@ -369,10 +539,12 @@ impl RrClient {
                 }
             };
 
-            match grpc_client
-                .get_cluster_info(tonic::Request::new(Empty {}))
-                .await
-            {
+            let tonic_req = match self.build_request(Empty {}) {
+                Ok(req) => req,
+                Err(e) => return Err(e),
+            };
+
+            match grpc_client.get_cluster_info(tonic_req).await {
                 Ok(response) => {
                     return Ok(response.into_inner());
                 }
@@ -535,6 +707,104 @@ mod tests {
         assert!(
             result.is_err(),
             "send_request_with_partition to invalid addr should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_default_no_tls_no_token() {
+        let client = RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+            .build()
+            .await
+            .expect("build should succeed");
+        assert!(client.tls_config.is_none());
+        assert!(client.bearer_token.is_none());
+        assert_eq!(client.bootstrap_addrs(), &["127.0.0.1:9000".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_bearer_token_stores_token() {
+        let client = RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+            .with_bearer_token("secret-test-token".to_string())
+            .build()
+            .await
+            .expect("build should succeed (warn-only by default)");
+        assert_eq!(client.bearer_token.as_deref(), Some("secret-test-token"));
+        assert!(client.tls_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_builder_strict_security_rejects_token_without_tls() {
+        let result = RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+            .with_bearer_token("secret-test-token".to_string())
+            .with_strict_security(true)
+            .build()
+            .await;
+        let Err(err) = result else {
+            panic!("strict mode should reject token-without-tls");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("strict security") || msg.contains("bearer token"),
+            "error should mention strict security or bearer token, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_builder_with_retry_config_overrides_default() {
+        let client = RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+            .with_retry_config(RetryConfig {
+                max_retries: 7,
+                retry_delay_ms: 250,
+            })
+            .build()
+            .await
+            .expect("build should succeed");
+        assert_eq!(client.retry_config().max_retries, 7);
+        assert_eq!(client.retry_config().retry_delay_ms, 250);
+    }
+
+    #[tokio::test]
+    async fn test_builder_empty_addrs_rejected() {
+        let result = RrClientBuilder::new(vec![]).build().await;
+        assert!(result.is_err(), "empty addrs should fail");
+    }
+
+    #[tokio::test]
+    async fn test_build_request_attaches_bearer_token_when_configured() {
+        let client = RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+            .with_bearer_token("test-token-xyz".to_string())
+            .build()
+            .await
+            .expect("build should succeed");
+
+        let req = client
+            .build_request(Empty {})
+            .expect("build_request should succeed");
+        let auth_header = req
+            .metadata()
+            .get("authorization")
+            .expect("authorization header must be present");
+        assert_eq!(
+            auth_header
+                .to_str()
+                .expect("authorization header must be ASCII"),
+            "Bearer test-token-xyz"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_request_omits_metadata_when_no_token() {
+        let client = RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+            .build()
+            .await
+            .expect("build should succeed");
+
+        let req = client
+            .build_request(Empty {})
+            .expect("build_request should succeed");
+        assert!(
+            req.metadata().get("authorization").is_none(),
+            "authorization header must NOT be present without bearer token"
         );
     }
 }
