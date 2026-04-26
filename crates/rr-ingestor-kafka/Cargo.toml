@@ -1,0 +1,38 @@
+[package]
+name = "rr-ingestor-kafka"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Kafka CommandIngestor backend for the rr distributed Multi-Raft framework"
+license = "MIT"
+repository = "https://github.com/gardenias/rr"
+
+[features]
+# Default keeps the crate buildable without librdkafka / cmake — only the
+# config types + the in-memory `MockKafkaIngestor` test helper are
+# included. Add the `rdkafka` feature for the real backend.
+default = []
+# Real librdkafka-backed ingestor. Pulls `rdkafka` with `cmake-build`,
+# which builds librdkafka from source — `cmake` must be on the build host.
+# See `crates/rr-ingestor-kafka/README.md` for prerequisites.
+rdkafka = ["dep:rdkafka", "dep:futures"]
+
+[dependencies]
+rr-core = { path = "../rr-core" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true, optional = true }
+
+[dependencies.rdkafka]
+version = "0.36"
+default-features = false
+features = ["cmake-build", "tokio", "ssl-vendored", "sasl"]
+optional = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util", "macros"] }
+serde_json = { workspace = true }

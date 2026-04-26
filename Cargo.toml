@@ -8,6 +8,7 @@ members = [
     "crates/rr-router",
     "crates/rr-server",
     "crates/rr-client",
+    "crates/rr-ingestor-kafka",
     "examples/kv-store",
     "examples/counter",
     "tests/integration",
