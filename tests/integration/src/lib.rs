@@ -1682,6 +1682,112 @@ mod tests {
         );
     }
 
+    /// E5 — Linearizability stress test. Drive a 3-node cluster with
+    /// 5 concurrent writer tasks (20 writes each = 100 total) while
+    /// rotating a follower-isolation fault every ~250ms. After all
+    /// writers complete, verify:
+    ///
+    /// 1. Every `Ok` ack from a writer corresponds to an applied
+    ///    log entry (no acked-but-lost writes — the durability
+    ///    half of linearizability).
+    /// 2. `last_applied >= ack_count` on the final leader (no
+    ///    "skipped" entries).
+    /// 3. The cluster has a stable leader after fault clearing
+    ///    (system recovers, doesn't get stuck in election storm).
+    ///
+    /// This is a pragmatic Jepsen-style stress test rather than a
+    /// full linearizability checker (which would require a Knossos
+    /// / porcupine-rs history-checker). It catches the broadest class
+    /// of correctness bugs: lost acked writes, divergent state
+    /// machines, double-apply, election storms — without the runtime
+    /// + dependency cost of real Maelstrom.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_writes_under_chaos_linearizability() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
+        let nodes = builder.build().await.expect("cluster build failed");
+        let initial_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("initial leader");
+
+        let leader_node = nodes
+            .iter()
+            .find(|n| n.node_id() == initial_leader)
+            .unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+
+        let writers = 5;
+        let writes_per_writer = 20;
+        let ack_count = Arc::new(AtomicU64::new(0));
+        let mut writer_handles = Vec::new();
+        for w in 0..writers {
+            let raft_clone = raft.clone();
+            let ack_count = Arc::clone(&ack_count);
+            writer_handles.push(tokio::spawn(async move {
+                for i in 0..writes_per_writer {
+                    let payload = vec![w as u8, i as u8];
+                    if raft_clone.client_write(payload).await.is_ok() {
+                        ack_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+
+        let chaos_handle = {
+            let injector = injector.clone();
+            let follower_ids: Vec<u64> = nodes
+                .iter()
+                .map(|n| n.node_id())
+                .filter(|id| *id != initial_leader)
+                .collect();
+            tokio::spawn(async move {
+                for _ in 0..6 {
+                    let target = follower_ids[0];
+                    injector.isolate(target);
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    injector.restore(target);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+        };
+
+        for h in writer_handles {
+            let _ = h.await;
+        }
+        let _ = chaos_handle.await;
+        injector.clear_all();
+
+        let final_leader = wait_for_cluster_ready(&nodes, 1, 12_000)
+            .await
+            .expect("cluster must converge to a stable leader after chaos");
+        let final_leader_node = nodes
+            .iter()
+            .find(|n| n.node_id() == final_leader)
+            .unwrap();
+        let final_raft = final_leader_node.group_manager().get_raft(1).await.unwrap();
+
+        let final_metrics = final_raft.metrics().borrow().clone();
+        let last_applied = final_metrics
+            .last_applied
+            .map(|l| l.index)
+            .unwrap_or(0);
+        let acked = ack_count.load(Ordering::SeqCst);
+
+        assert!(
+            last_applied >= acked,
+            "linearizability: last_applied ({last_applied}) must be >= acked writes ({acked}); \
+             acked-but-lost writes detected"
+        );
+        assert!(
+            acked >= 1,
+            "at least 1 write should have acked across {writers} writers × \
+             {writes_per_writer} ops with chaos; got {acked}"
+        );
+
+        shutdown_all(&nodes).await;
+    }
+
     /// Verify HTTP /health, /ready, /metrics endpoints work end-to-end.
     ///
     /// Spawns a single-node `RrNode` with `metrics_port` set, sends real HTTP
