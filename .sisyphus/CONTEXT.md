@@ -5,12 +5,12 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-04-26
-**Current phase**: Phase 4 v0.3.0 — feature-complete, awaiting tag/release
+**Last updated**: 2026-04-26 (later session)
+**Current phase**: Phase 4 + Phase 3.1 — **all planned framework features implemented**
 **Active plan**: `.sisyphus/plans/rr-phase4-v030.md` + `.sisyphus/plans/rr-phase3.1-hardening.md`
-**Latest tag**: `v0.2.0-rc1` (v0.3.0 candidate is current `main` HEAD)
-**Main branch HEAD**: 13 commits ahead of `origin/main` since 2026-04-25 — UNPUSHED
-**Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`) — Wave 4d cleared all P0 ship-blockers
+**Latest tag**: `v0.2.0-rc1` (current `main` HEAD has all features beyond v0.2)
+**Main branch HEAD**: 25 commits ahead of `origin/main` since 2026-04-25 — UNPUSHED
+**Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`) — Wave 4d cleared all P0 ship-blockers; Wave 13 closed 8 of 9 P1/P2 follow-ups
 
 ---
 
@@ -26,7 +26,112 @@ otel-client 自 v0.3**），完整的集成测试 + chaos framework + Docusaurus
 
 ## 已完成的工作 / Completed Work
 
-### Phase 4 v0.3.0 candidate (2026-04-25 ~ 2026-04-26, 13 commits, unpushed)
+### Continuation session (2026-04-26 later, 11 commits, Phase 3.1 + Oracle follow-ups + test hardening)
+
+完成所有 Phase 3.1 Theme B 运维自动化、Oracle review P1/P2 跟进、Phase 3.1 Theme C 测试加固。
+
+**Wave 8 — admin add_learner + change_membership** (`89abdf3`)
+- proto: AddLearner / ChangeMembership / GetGroupMembership RPCs + types
+- rr-server: AdminServiceImpl 实现，含空 voter 拒绝、quorum-loss check
+- rr-admin: `group add-learner / change-membership / membership` 命令
+- 4 unit + 3 CLI parse tests
+
+**Wave 9 — T0.3 rr-admin node-reset** (`0ab0918`)
+- 新模块 `crates/rr-admin/src/node_reset.rs`：3 步前置检查（路径存在 + 看着像 rr 数据
+  目录 + RocksDB LOCK 未被持有）+ 必须 `--force`，防止 `--data-dir /` 类拍脑袋
+- CLI `rr-admin node-reset --data-dir <path> [--force]`，输出后续 add-learner +
+  change-membership 步骤说明
+- 8 unit + 2 CLI parse tests
+
+**Wave 10 — B.2 auto-promote learner** (`917c113`)
+- 新模块 `crates/rr-raft/src/learner_promoter.rs`：tokio task 监听
+  `raft.metrics()`，仅 leader 时扫 membership，per-learner 跟踪 stability ticks
+  （连续 3 次 `lag <= max_lag=50` → promote）
+- 步下台清空 stability counter；可在运行时 hot-reload config
+- audit-log 配对 started/succeeded|failed 事件，新指标
+  `rr_learner_promotions_total{group_id}` + `rr_learner_promotion_failures_total`
+- `RaftGroupManager::start_learner_promoter` / `stop_learner_promoter` 公开 API
+
+**Wave 11 — B.1 online backup streaming RPC** (`2f03e4a`)
+- proto: `OnlineBackup(OnlineBackupRequest) returns (stream OnlineBackupChunk)`
+  with `OnlineBackupMetadata { group_id, last_log_index, last_log_term, size_bytes,
+  rr_version }`
+- rr-server: tokio_stream + 64 KiB chunks，匹配 InstallSnapshot 的 chunk 大小；
+  `force_fresh_snapshot=true` 触发新 snapshot；wait-up-to-60s 让 snapshot
+  materialize；client-disconnect 在 audit log 中可见
+- rr-admin: `group online-backup --group <ID> --output <FILE> [--force-fresh]`，
+  byte-count 校验 + JSON/human 输出
+
+**Wave 12 — B.3 DecommissionNode workflow** (`7d42363`)
+- 新模块 `crates/rr-admin/src/decommission.rs`：5-step orchestrator（inspect →
+  refuse on quorum loss → drain via TransferLeader → ChangeMembership → confirm）
+- `MIN_VOTERS_AFTER_REMOVAL = 2`：拒绝把任何 group 留到 < 2 voters；操作员需先
+  add 一个新 voter 或用 node-reset
+- CLI `rr-admin node decommission --node-id <ID> [--dry-run]`，per-group action
+  enum 区分 Skipped/AbortedQuorumLoss/WouldRemove/DrainedAndRemoved/Removed/Failed
+- 8 unit + 2 CLI parse tests
+
+**Wave 13 — Oracle P1/P2 review 跟进** (`d97f2b3`)
+- **P0-1**（降级 perf）：`refresh_snapshot_if_stale` 在 seed_offset 前触发
+  `raft.trigger().snapshot()` if `snapshot_index < last_applied`，bound
+  leader-promotion re-fetch 浪费到 ≤ 30s 而非"全部 post-snapshot 条目"
+- **P1-3**：`rr_framing_decode_failures_total{kind}` 在 FramedSnapshot /
+  FramedEntry / ApplyOutcome decode 错误路径
+- **P1-4**：Kafka seek 用 `Consumer::fetch_watermarks` 校验 [low, high]，
+  out-of-range 发 `rr_ingestor_seek_below_watermark_total` /
+  `rr_ingestor_seek_above_watermark_total`
+- **P2-1**：runner 调用 `commit_applied_bytes` 让 Kafka `__consumer_offsets`
+  反映 rr 进度（仅 observability，rr 自身不依赖）
+- **P2-2**：`IdempotencyLayer::restore` 改 replace（不 merge）→ 双重 restore
+  幂等
+- **P2-3**：`ApplyOutcome` 加 `[0xAA][0x01]` magic+version header，防止 raw
+  user bytes 被误 decode 成 Success(garbage)
+- **P2-4**：`attach_ingestor` TOCTOU fix（先取 ingestor_handles 写锁，再
+  check get_raft，与 stop_group 的取锁顺序一致）
+- **P2-5**：`IdempotencyState.reserved` → `data` 重命名，`#[serde(alias =
+  "reserved")]` 保后向兼容（bincode v2 标准配置是 positional 编码，wire 不变）
+- P2-6（reset-ingestor-offset CLI）defer 到 follow-up — 罕见用例，需独立设计
+
+**Wave 14 — Theme C.1 TLS+mTLS+auth e2e** (`c1d0d41`)
+- `tests/integration/src/tls_auth_e2e.rs`：`rcgen 0.13` 生成内存中 CA + server
+  cert + client cert，spawn 真实 tonic Server（mTLS required + bearer auth），
+  客户端 4 种凭据状态全测：valid / wrong-token / no-token / no-client-cert
+- 一个 async test 函数承载 4 个 scenario，cert+server 开销摊销
+
+**Wave 15 — Theme C.2 cargo-fuzz** (`a4c8fe6`)
+- 新 `fuzz/` sub-crate（独立 workspace，避免 panic=abort + nightly 污染主 workspace）
+- 4 个 fuzz target：FramedSnapshot / FramedEntry / ApplyOutcome decode +
+  ClientRequest proto decode
+- `fuzz/README.md` 含 nightly + cargo-fuzz install + run-all snippets +
+  CI workflow 模板（建议作为 nightly cron 而非 per-PR）
+
+**Wave 16 — Theme C.3 网络分区病理 case** (`b9f53ef`)
+- 3 个新 chaos test（用现有 `FaultAwareChannelPool` 而非真 iptables — 双向隔离
+  在 channel 层等价于 kernel packet drop）：
+  - **E3a flapping**：5 次快速 isolate/restore leader，断言无 election storm
+  - **E3b minority partition**：5 节点中隔离 leader+1 follower，断言 3-node
+    majority 选新 leader 且 minority NOT 接受 writes（防 split-brain）
+  - **E3c double-follower isolation**：3 节点中隔离 2 followers，断言
+    leader-of-minority NOT commit；restore 一个后 quorum 恢复
+
+**Wave 17 — Theme C.4 crash-during-write 持久性** (`eea3988`)
+- `test_crash_during_write_preserves_acked_entries`（`rocks` feature gated）
+- Phase 1 写 20 条记录每个 ack 的 last_log_index，Drop manager **不调用
+  stop_group**（最近似 in-process kill -9）
+- 500ms settle delay 让 RocksDB process-global LOCK 状态释放
+- Phase 2 用 fresh `RocksLogStorage::open` 读，断言 `last_log_id.index >=
+  max(acked_indices)` + vote 持久化
+
+**Wave 18 — Theme C.5 linearizability stress** (`e27a8f8`)
+- `test_concurrent_writes_under_chaos_linearizability`：3 节点，5 并发 writers ×
+  20 writes（100 总）+ 6 cycles of (isolate-follower 150ms + restore 100ms)
+  叠加进行
+- 断言 3 不变量：`last_applied >= ack_count`（无 acked-but-lost）+ `acked >= 1`
+  （非 trivial）+ stable leader after chaos clears
+- Pragmatic Jepsen-style stress（不引入 Maelstrom / porcupine-rs 重依赖），
+  catches lost ack / divergent SM / election storm 三大类 bug
+
+### Phase 4 v0.3.0 base (2026-04-25 ~ 2026-04-26 早段, 14 commits)
 
 **Wave 1 — Security hardening** (`7db26ec`)
 - F1/F2 完整：audit module, ServiceLabel, BearerInterceptor + RateLimitInterceptor reject 事件,
@@ -309,45 +414,25 @@ Oracle review (`bg_1d8162f6`) 找到 3 P0 + 5 P1。本 wave 修了 P0-2/P0-3/P1-
 
 ## 未完成 / 需要重做 / Open Work
 
-### v0.3.0 release operations（next session）
+### 框架功能开发：**全部完成** ✓
 
-- **Push 13 unpushed commits 到 origin/main**（Wave 1 ~ Wave 7）。
-- **打 `v0.3.0` 标签**（或先 `v0.3.0-rc1`，validate release workflow，再 final）。
-  Release notes 可从 11 个 wave commit messages 拼出来；CHANGELOG.md 需更新。
-- **F1-F4 独立评审**（如仍要做，建议在 push 前由 oracle agent 跑）。
-  Wave 4d 已经过 Oracle review (`bg_1d8162f6`)，全部 P0 ship-blockers 已 cleared，
-  P1 部分有遗留（详见下方 v0.3.x 跟进列表）。
+Phase 4 (v0.3 核心) + Phase 3.1 (Theme A 可观测性 / Theme B 运维自动化 /
+Theme C 测试加固) + Oracle review P0/P1/P2 跟进 — 全部 implemented，仅以下小残留：
 
-### v0.3.x 跟进（patch 版本，无 ship 阻塞）
+- **P2-6** `rr-admin reset-ingestor-offset` CLI — Oracle review 项中唯一未做。
+  **罕见用例**（操作员手动修复 corrupt 持久 offset）+ 需独立 admin RPC 设计；
+  defer 到后续 minor version。所有现实用例可由 Wave 9 的 `node-reset` 替代。
 
-**来自 Wave 4d Oracle review 的 P1 / P2 遗留**：
-- **P0-1（降级到 P1）** — `seed_offset` 只读 snapshot 而非 live state machine；
-  leader 转换时如 snapshot 滞后于 applied state，会重新拉取消息。
-  现在由 auto-idempotency dedup 保证正确性，仅是性能 issue。修复路径：
-  (a) 通过 side-channel registry 暴露 live offset，或 (b) 在 seek 前触发 snapshot。
-- **P1-3** — Magic-prefix collision on legitimate raw payloads：~2^-64 概率但应加
-  `rr_framing_decode_failures_total{kind}` metric 让 ops 看见。
-- **P1-4** — Out-of-range seek 静默 reset 到 earliest（auto.offset.reset 行为）；
-  应在 seek 前用 `Consumer::fetch_watermarks` 验证 target ∈ [low, high]，超界则报错。
-- **P2-1 ~ P2-6** — `commit_applied` 在 runner 中从未调用、`IdempotencyLayer.restore`
-  merge 而非 replace、`ApplyOutcome::decode` 无运行时 guard、`attach_ingestor` TOCTOU
-  smell、`IdempotencyState.reserved` 字段名混淆、缺 `rr-admin reset-ingestor-offset`
-  admin 命令。
+### 跨 session 的非紧迫待办（来自原 Phase 3 计划）
 
-**来自 Wave 7 范围缩减的 deferred 项目**（Phase 3.1 Theme B + T0.3）：
-- **T0.3** `rr-admin node-reset` 单节点灾难恢复 CLI（依赖 add_learner / change_membership
-  RPCs 的 admin 层暴露——底层 `RaftGroupManager` 方法在 Wave 1 已有）。
-- **B.1** Online backup via snapshot-fetch RPC（当前只有 offline `rr-admin backup`）。
-- **B.2** Auto-promote learner → voter after caught-up（当前需手动 change_membership）。
-- **B.3** `DecommissionNode` workflow（drain → remove → confirm three-step ops procedure）。
-- **add_learner / change_membership 暴露成 admin gRPC + `rr-admin` CLI**。
-
-**Wave 8 — Phase 3.1 Theme C test hardening**（全部 deferred 到 v0.3.x）：
-- C.1 TLS+auth e2e integration test
-- C.2 Proto fuzzing via cargo-fuzz
-- C.3 iptables-level network partition chaos test
-- C.4 Crash-during-write durability test (kill -9 mid-fsync)
-- C.5 Jepsen / Maelstrom-style linearizability testing
+- **多语言 client SDK**（Go / Python / Java）—— proto-first 设计已让这件事
+  tractable，待社区驱动。
+- **etcd ConfigProvider**（在 contrib 独立 crate）。
+- **Per-caller rate limiting**（依赖 caller identity）—— Wave 6.1 的
+  `caller_token_fp` 是基础。
+- **Raft LogStorage 的 RocksDB CF 单独调优**——分离 raft_log / state_machine 的
+  block_cache_size / write_buffer。
+- **Prometheus recording rules / dashboard 持续打磨**——已有 baseline（Wave 6.2）。
 
 ### 覆盖率维度的后续（基于最新的报告）
 
@@ -373,21 +458,14 @@ Oracle review (`bg_1d8162f6`) 找到 3 P0 + 5 P1。本 wave 修了 P0-2/P0-3/P1-
 
 ## 下一步工作 / Next Session's Candidate Work
 
-**第一优先级 — 切 v0.3.0**：
-1. Push 13 unpushed commits 到 origin/main
-2. 更新 CHANGELOG.md 用 wave commit messages（v0.3.0 是 v0.2.0-rc1 之后第一个 minor）
-3. 打 `v0.3.0-rc1` 标签 → validate GitHub Actions release workflow 跑通
-4. （可选）多打 1-2 个 rc 修发现的 release 问题
-5. 打 `v0.3.0` final + crates.io 发布
+**所有规划框架功能已完成**。剩下的是用户决定何时进行版本管理 / 发布
+（明确暂不处理，见前述 user directive 2026-04-26）。
 
-**第二优先级 — 上面的 v0.3.x deferred 项目**（按需拣选）：
-- 修 P0-1 的性能 issue
-- 把 admin RPCs (add_learner / change_membership) 暴露到 `rr-admin` CLI
-- T0.3 `rr-admin node-reset`
-- 上面 P1-3 / P1-4 / P2-* 的可观测性 + hardening
-
-**第三优先级 — Wave 8 测试加固**：
-按照 Phase 3.1 Theme C 计划逐项实施。这些都不是 ship 阻塞，但提升信心。
+**可选 follow-up（按用户指示再启动）**:
+- P2-6 `rr-admin reset-ingestor-offset` CLI（Oracle review 唯一 deferred 项）
+- 多语言 client SDK（Go/Python/Java）
+- etcd ConfigProvider（contrib）
+- Prometheus dashboard 持续打磨
 
 ---
 
@@ -588,27 +666,42 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 
 ## Git 状态
 
-- `main` 当前 HEAD 比 `origin/main` 超前 **13 个 commit**（**全部未 push**）。
+- `main` 当前 HEAD 比 `origin/main` 超前 **25 个 commit**（**全部未 push**）。
   按时间顺序：
+
+  **Phase 4 v0.3 核心（前一段 session）**:
   - `c760efe` docs(evidence) — F1-F4 review report
-  - `7db26ec` feat(security) — Wave 1
-  - `02bfbe2` feat(core,storage) — Wave 2
+  - `7db26ec` feat(security) — Wave 1 F1/F2 hardening
+  - `02bfbe2` feat(core,storage) — Wave 2 Tier 0 docs
   - `c341bd5` feat(core,raft) — Wave 3 FramedSnapshot
-  - `7ff6526` feat(core,network) — Wave 4a 共享类型
-  - `4852448` feat(raft,server,client) — Wave 4b idempotency
+  - `7ff6526` feat(core,network) — Wave 4a Tier 2/3 shared types
+  - `4852448` feat(raft,server,client) — Wave 4b IdempotencyLayer
   - `8938114` feat(raft) — Wave 4c.1+4c.2 ingestor lifecycle
   - `bfa0d37` feat(ingestor) — Wave 4c.3 rr-ingestor-kafka crate
   - `6949356` test(integration) — Wave 4 verify cross-tier
-  - `e0a8d1e` feat(raft,core,ingestor) — Wave 4d Oracle P0/P1 fixes
+  - `e0a8d1e` feat(raft,core,ingestor) — Wave 4d Oracle P0 fixes
   - `e0a0337` docs(guide,deployment) — Wave 5 Tier 4 docs + example
   - `e5fdb48` feat(raft,network) — Wave 6.1 Theme A.1+A.2
   - `b9776cc` feat(observability,examples) — Wave 6.2 Theme A.3+A.4
   - `582cc6d` feat(server) — Wave 7 Theme B.4 /ready JSON
-  （加这次 CONTEXT 更新 commit = 14 个）
-- `v0.2.0-rc1` 标签已 push（指向 `a9edbb9`）；当前 main HEAD 是 v0.3.0 候选。
-- 工作树干净（仅 CONTEXT.md 当前 session 的更新待 commit）。
+  - `c6ec8cd` docs(context) — handoff CONTEXT update
 
-**下一步**：见 "下一步工作"。第一件事是 push + 切 v0.3.0。
+  **Phase 3.1 Theme B + Oracle 跟进 + Theme C（本 session）**:
+  - `89abdf3` feat(admin) — Wave 8 add_learner/change_membership
+  - `0ab0918` feat(admin) — Wave 9 T0.3 rr-admin node-reset
+  - `917c113` feat(raft) — Wave 10 B.2 auto-promote learner
+  - `2f03e4a` feat(admin,server) — Wave 11 B.1 online backup streaming
+  - `7d42363` feat(admin) — Wave 12 B.3 DecommissionNode
+  - `d97f2b3` feat(core,raft,ingestor) — Wave 13 Oracle P1/P2 follow-ups
+  - `c1d0d41` test(integration) — Wave 14 C.1 TLS+mTLS+auth e2e
+  - `a4c8fe6` test(fuzz) — Wave 15 C.2 cargo-fuzz proto fuzzer
+  - `b9f53ef` test(integration) — Wave 16 C.3 partition pathology
+  - `eea3988` test(integration) — Wave 17 C.4 crash-during-write durability
+  - `e27a8f8` test(integration) — Wave 18 C.5 linearizability stress
+
+  （加本次 CONTEXT 更新 = 26 个）
+
+- 工作树干净（CONTEXT.md 当前 session 的更新待 commit）。
 
 ---
 
