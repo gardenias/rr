@@ -62,12 +62,9 @@ impl ClientDispatch for ClientDispatchImpl {
 
         let keyed = idem_key.is_some();
         let entry_bytes = if let Some(key) = idem_key {
-            FramedEntry {
-                offset: None,
-                idem_key: Some(key),
-                payload,
-            }
-            .encode()
+            FramedEntry::from_payload(payload)
+                .with_idem_key(key)
+                .encode()
             .map_err(|e| {
                 tracing::error!(group_id, error = %e, "framed entry encode failed");
                 tonic::Status::internal("internal encode error")

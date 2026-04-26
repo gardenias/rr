@@ -22,13 +22,15 @@ use serde::{Deserialize, Serialize};
 /// treated as the **same** logical request: the second one returns the
 /// cached response from the first instead of re-applying.
 ///
-/// `client_id` is recorded for diagnostics only — if two different
-/// `client_id` values share a `(request_type, request_id)`, the framework
-/// emits an `op="idempotency_collision"` warning to the audit log but
-/// still returns the cached response (the request_id space is shared
-/// across clients by design — multiple writers MUST coordinate ID
-/// allocation).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `client_id` is recorded for diagnostics only and is **explicitly not
+/// part of the dedup identity** — `PartialEq` / `Eq` / `Hash` are
+/// hand-implemented to compare only `(request_type, request_id)` so
+/// that `==` matches the layer's behaviour. If two different `client_id`
+/// values share a `(request_type, request_id)`, the framework emits an
+/// `op="idempotency_collision"` warning to the audit log but still
+/// returns the cached response (the request_id space is shared across
+/// clients by design — multiple writers MUST coordinate ID allocation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdempotencyKey {
     /// User-defined namespace (e.g. `"transfer"`, `"create_user"`). The
     /// `(request_type, request_id)` pair is the dedup identity.
@@ -41,6 +43,21 @@ pub struct IdempotencyKey {
     /// Optional client identifier for diagnostic logging only. Not part
     /// of the dedup identity. `None` is acceptable.
     pub client_id: Option<String>,
+}
+
+impl PartialEq for IdempotencyKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.request_type == other.request_type && self.request_id == other.request_id
+    }
+}
+
+impl Eq for IdempotencyKey {}
+
+impl std::hash::Hash for IdempotencyKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.request_type.hash(state);
+        self.request_id.hash(state);
+    }
 }
 
 impl IdempotencyKey {
@@ -188,15 +205,42 @@ mod tests {
     fn key_equality_ignores_client_id() {
         let a = IdempotencyKey::with_client_id("transfer", 42, "alice");
         let b = IdempotencyKey::with_client_id("transfer", 42, "bob");
-        // The dedup identity is (request_type, request_id); client_id
-        // is metadata. Equality follows derive(PartialEq), which DOES
-        // include client_id — but the layer's hashing for dedup
-        // intentionally uses only (request_type, request_id). This
-        // test pins the current Eq impl so a future change is
-        // deliberate.
+        assert_eq!(
+            a, b,
+            "PartialEq must compare only (request_type, request_id); \
+             client_id is diagnostic-only metadata"
+        );
+    }
+
+    #[test]
+    fn key_equality_distinguishes_request_id() {
+        let a = IdempotencyKey::new("transfer", 42);
+        let b = IdempotencyKey::new("transfer", 43);
         assert_ne!(a, b);
-        assert_eq!(a.request_type, b.request_type);
-        assert_eq!(a.request_id, b.request_id);
+    }
+
+    #[test]
+    fn key_equality_distinguishes_request_type() {
+        let a = IdempotencyKey::new("transfer", 42);
+        let b = IdempotencyKey::new("withdraw", 42);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn key_hash_ignores_client_id() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let a = IdempotencyKey::with_client_id("transfer", 42, "alice");
+        let b = IdempotencyKey::with_client_id("transfer", 42, "bob");
+        let mut ha = DefaultHasher::new();
+        let mut hb = DefaultHasher::new();
+        a.hash(&mut ha);
+        b.hash(&mut hb);
+        assert_eq!(
+            ha.finish(),
+            hb.finish(),
+            "Hash must mirror PartialEq; client_id must not change the hash"
+        );
     }
 
     #[test]

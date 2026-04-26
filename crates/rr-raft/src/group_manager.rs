@@ -249,7 +249,15 @@ impl RaftGroupManager {
         Ok(snap.map(|s| s.snapshot.into_inner()))
     }
 
-    /// Attach a [`rr_core::ingestor::DynCommandIngestor`] to `group_id`.
+    /// Attach a [`rr_core::ingestor::DynCommandIngestor`] to `group_id`
+    /// without auto-idempotency. Re-fetched messages on leader
+    /// transitions or step-down recovery will reach the user
+    /// `Service::handle()` MORE THAN ONCE — only use this when your
+    /// service is itself idempotent or driven from a strictly
+    /// non-replayed source.
+    ///
+    /// Most users wanting Kafka semantics should call
+    /// [`Self::attach_ingestor_with_auto_idempotency`] instead.
     ///
     /// Spawns an [`crate::ingestor_runner`] supervisor that runs the
     /// ingestor's poll loop only while this node is the leader of
@@ -264,6 +272,41 @@ impl RaftGroupManager {
         group_id: GroupId,
         ingestor: Box<dyn rr_core::ingestor::DynCommandIngestor>,
     ) -> Result<(), RrError> {
+        self.attach_ingestor_inner(group_id, ingestor, None).await
+    }
+
+    /// Attach an ingestor with framework-managed deduplication.
+    ///
+    /// The runner derives an [`rr_core::idempotency::IdempotencyKey`]
+    /// from each command's offset using `auto_idem.offset_to_request_id`
+    /// and tags `auto_idem.request_type` as the watermark namespace.
+    /// The framework's idempotency layer then dedups any re-fetched
+    /// commands (after step-down, snapshot-driven seek lag, or
+    /// poll-retry-after-error) so `Service::handle()` runs at most
+    /// once per logical Kafka offset — completing the
+    /// "Kafka at-least-once + framework dedup = exactly-once apply"
+    /// contract from ADR A-0001.
+    ///
+    /// `request_type` MUST be unique per ingestor stream (recommended:
+    /// the topic name). `offset_to_request_id` MUST be monotone in
+    /// offset order — see [`crate::ingestor_runner::OffsetToRequestId`]
+    /// for why hash-based mappings break the watermark.
+    pub async fn attach_ingestor_with_auto_idempotency(
+        self: &Arc<Self>,
+        group_id: GroupId,
+        ingestor: Box<dyn rr_core::ingestor::DynCommandIngestor>,
+        auto_idem: crate::ingestor_runner::AutoIdempotency,
+    ) -> Result<(), RrError> {
+        self.attach_ingestor_inner(group_id, ingestor, Some(auto_idem))
+            .await
+    }
+
+    async fn attach_ingestor_inner(
+        self: &Arc<Self>,
+        group_id: GroupId,
+        ingestor: Box<dyn rr_core::ingestor::DynCommandIngestor>,
+        auto_idem: Option<crate::ingestor_runner::AutoIdempotency>,
+    ) -> Result<(), RrError> {
         if self.get_raft(group_id).await.is_none() {
             return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
         }
@@ -273,7 +316,7 @@ impl RaftGroupManager {
                 "ingestor already attached to group {group_id}"
             )));
         }
-        let handle = crate::ingestor_runner::spawn(self.clone(), group_id, ingestor);
+        let handle = crate::ingestor_runner::spawn(self.clone(), group_id, ingestor, auto_idem);
         guard.insert(group_id, handle);
         info!(group_id, "attached ingestor supervisor");
         Ok(())

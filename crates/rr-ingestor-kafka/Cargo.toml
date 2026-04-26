@@ -20,6 +20,7 @@ rdkafka = ["dep:rdkafka", "dep:futures"]
 [dependencies]
 rr-core = { path = "../rr-core" }
 async-trait = { workspace = true }
+bincode = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

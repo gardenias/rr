@@ -23,8 +23,9 @@ use rr_core::framed_snapshot::FramedSnapshot;
 use rr_core::ingestor::DynCommandIngestor;
 use rr_core::service::Service;
 use rr_core::state_machine::StateMachine;
-use rr_ingestor_kafka::MockKafkaIngestor;
+use rr_ingestor_kafka::{kafka_offset_to_request_id, MockKafkaIngestor};
 use rr_raft::group_manager::{RaftGroupManager, StateMachineFactory};
+use rr_raft::ingestor_runner::AutoIdempotency;
 use rr_raft::ServiceStateMachineAdapter;
 
 /// Service that records the order in which payloads were applied.
@@ -194,6 +195,65 @@ async fn snapshot_after_ingestor_apply_carries_offset_into_framework_state() {
     );
 
     mgr.stop_group(2).await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_idempotency_dedups_replayed_kafka_offsets() {
+    let svc = RecordingService::default();
+    let applied_handle = svc.applied.clone();
+    let mgr = make_single_node_leader(svc, 4).await;
+
+    let (ingestor, h) = MockKafkaIngestor::new();
+    for i in 0..3_i64 {
+        h.push(i, format!("evt-{i}").into_bytes()).await;
+    }
+
+    let auto_idem = AutoIdempotency {
+        request_type: "test_topic_4".into(),
+        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+    };
+    let dyn_ingestor: Box<dyn DynCommandIngestor> = Box::new(ingestor);
+    mgr.attach_ingestor_with_auto_idempotency(4, dyn_ingestor, auto_idem)
+        .await
+        .unwrap();
+
+    wait_for_applied(
+        &RecordingService {
+            applied: applied_handle.clone(),
+        },
+        3,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    mgr.stop_ingestor(4).await.unwrap();
+
+    let (replay_ingestor, h2) = MockKafkaIngestor::new();
+    for i in 0..3_i64 {
+        h2.push(i, format!("evt-{i}").into_bytes()).await;
+    }
+    let replay_auto_idem = AutoIdempotency {
+        request_type: "test_topic_4".into(),
+        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+    };
+    let dyn_replay: Box<dyn DynCommandIngestor> = Box::new(replay_ingestor);
+    mgr.attach_ingestor_with_auto_idempotency(4, dyn_replay, replay_auto_idem)
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let recorded = applied_handle.lock().await.clone();
+    assert_eq!(
+        recorded.len(),
+        3,
+        "auto-idempotency must dedup replayed offsets — expected 3 applied total, got {}: {:?}",
+        recorded.len(),
+        recorded
+    );
+
+    mgr.stop_ingestor(4).await.unwrap();
+    mgr.stop_group(4).await.unwrap();
 }
 
 #[tokio::test]

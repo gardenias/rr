@@ -29,9 +29,21 @@ use crate::idempotency::IdempotencyKey;
 /// envelopes can never be mistaken for each other.
 pub const FRAMED_ENTRY_MAGIC: [u8; 8] = *b"\0rrENT01";
 
+/// Current envelope schema version. Bumped when [`FramedEntry`] adds a
+/// non-optional field or changes the semantics of an existing one.
+/// Decoders reject entries with `version > FRAMED_ENTRY_VERSION`
+/// rather than guess at an unknown layout. Existing optional fields
+/// can be added/extended within the same version because bincode
+/// preserves field-order positional encoding for additive `Option<…>`
+/// trailers (followers tolerate trailing bytes from future minor
+/// changes; non-optional adds force a version bump).
+pub const FRAMED_ENTRY_VERSION: u8 = 1;
+
 /// Per-entry envelope wrapping user payload + framework metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FramedEntry {
+    /// Schema version; readers reject `version > FRAMED_ENTRY_VERSION`.
+    pub version: u8,
     /// Bincode-encoded ingestor offset, opaque to the framework. `Some`
     /// iff this entry was produced by a `CommandIngestor`.
     pub offset: Option<Vec<u8>>,
@@ -47,6 +59,7 @@ impl FramedEntry {
     /// the most common shape, equivalent to v0.2.x semantics.
     pub fn from_payload(payload: Vec<u8>) -> Self {
         Self {
+            version: FRAMED_ENTRY_VERSION,
             offset: None,
             idem_key: None,
             payload,
@@ -76,12 +89,15 @@ impl FramedEntry {
     }
 
     /// Decode an envelope. Returns:
-    /// - `Ok(Some(framed))` for bytes with a valid magic prefix and
-    ///   well-formed body,
-    /// - `Ok(None)` for bytes lacking the prefix (legacy / unframed
-    ///   user payloads — caller treats the input as the raw payload),
-    /// - `Err` for bytes with the prefix but a malformed body
-    ///   (failing-loud here prevents silent state corruption).
+    /// - `Ok(Some(framed))` for bytes with a valid magic prefix, a
+    ///   recognised version, and a well-formed body,
+    /// - `Ok(None)` for bytes lacking the magic prefix (legacy /
+    ///   unframed user payloads — caller treats the input as the raw
+    ///   payload),
+    /// - `Err` for bytes with the prefix but a malformed body OR a
+    ///   `version > FRAMED_ENTRY_VERSION` (failing-loud here prevents
+    ///   silent state corruption from a future-version peer or a
+    ///   bit-flipped log entry).
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, RrError> {
         if bytes.len() < FRAMED_ENTRY_MAGIC.len() {
             return Ok(None);
@@ -99,6 +115,12 @@ impl FramedEntry {
                 "framed entry decode failed: {e}"
             )))
         })?;
+        if framed.version > FRAMED_ENTRY_VERSION {
+            return Err(RrError::Codec(CodecError::DeserializeFailed(format!(
+                "framed entry version {} is newer than this binary supports ({})",
+                framed.version, FRAMED_ENTRY_VERSION
+            ))));
+        }
         Ok(Some(framed))
     }
 }
@@ -159,11 +181,39 @@ mod tests {
 
     #[test]
     fn entry_magic_is_distinct_from_snapshot_magic() {
-        // Belt-and-suspenders: ensure the two envelope formats can
-        // never be confused at decode time.
         assert_ne!(
             FRAMED_ENTRY_MAGIC,
             crate::framed_snapshot::FRAMED_SNAPSHOT_MAGIC
         );
+    }
+
+    #[test]
+    fn future_entry_version_is_rejected() {
+        let future = FramedEntry {
+            version: 99,
+            offset: None,
+            idem_key: None,
+            payload: vec![],
+        };
+        let mut bytes = Vec::from(FRAMED_ENTRY_MAGIC);
+        bytes.extend_from_slice(
+            &bincode::serde::encode_to_vec(&future, bincode::config::standard()).unwrap(),
+        );
+        let err = FramedEntry::decode(&bytes).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("version") && msg.contains("99"),
+            "expected version-mismatch error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn current_version_decodes_without_error() {
+        let entry = FramedEntry::from_payload(b"hello".to_vec());
+        assert_eq!(entry.version, FRAMED_ENTRY_VERSION);
+        let bytes = entry.encode().unwrap();
+        let decoded = FramedEntry::decode(&bytes).unwrap().unwrap();
+        assert_eq!(decoded.version, FRAMED_ENTRY_VERSION);
+        assert_eq!(decoded.payload, b"hello");
     }
 }

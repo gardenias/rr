@@ -46,12 +46,40 @@ use tracing::{debug, info, warn};
 use rr_core::error::RrError;
 use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::FramedSnapshot;
+use rr_core::idempotency::IdempotencyKey;
 use rr_core::ingestor::DynCommandIngestor;
 use rr_core::types::{GroupId, NodeId};
 
 use crate::group_manager::RaftGroupManager;
 
 type RrRaftMetrics = openraft::RaftMetrics<NodeId, BasicNode>;
+
+/// Closure that converts an opaque ingestor offset (bincode bytes) to
+/// a monotonic `u64` for use as an [`IdempotencyKey::request_id`].
+/// The framework requires monotonicity: hash-derived IDs would let new
+/// offsets fall below the watermark and be wrongly rejected as
+/// `Expired`. For Kafka, see
+/// `rr_ingestor_kafka::kafka_offset_to_request_id`.
+pub type OffsetToRequestId = Box<dyn Fn(&[u8]) -> u64 + Send + Sync>;
+
+/// Auto-idempotency configuration for an ingestor attached via
+/// [`RaftGroupManager::attach_ingestor_with_auto_idempotency`].
+///
+/// When set, the runner derives an [`IdempotencyKey`] for every
+/// command pulled from the ingestor and the framework's idempotency
+/// layer dedups re-fetched messages on leader transitions or
+/// retry-after-step-down. Without this, replayed Kafka messages would
+/// re-execute `Service::handle()` on the new leader.
+pub struct AutoIdempotency {
+    /// Stable namespace identifying this ingestor's request stream.
+    /// Recommended: the topic name (e.g. `"input_42"`). All commands
+    /// pulled from one ingestor instance MUST share one
+    /// `request_type` because the watermark is per-type.
+    pub request_type: String,
+    /// Maps the bincode offset bytes to a `u64`. MUST be monotone in
+    /// offset order (hash-based mappings break the watermark).
+    pub offset_to_request_id: OffsetToRequestId,
+}
 
 /// Default number of commands fetched per `ingestor.poll_bytes` call.
 /// Matches ADR A-0001 §"Open questions" #2 default.
@@ -88,16 +116,23 @@ impl IngestorHandle {
 
 /// Spawn a supervisor task that runs `ingestor` whenever this node is
 /// the leader of `group_id`. The supervisor exits when the cancellation
-/// flag is set or when `mgr` is dropped (any of its `Weak` upgrades
-/// will return `None` from inside the task).
+/// flag is set or when `mgr` is dropped.
+///
+/// `auto_idem`, if `Some`, derives a per-entry [`IdempotencyKey`] from
+/// each ingestor offset so that re-fetched commands (after step-down,
+/// stale-snapshot seek, or transient errors) are deduped by the
+/// framework's idempotency layer instead of double-applied. See
+/// [`AutoIdempotency`] for the contract on `request_type` and
+/// `offset_to_request_id`.
 ///
 /// Returns immediately; the actual ingestor work runs in the background.
 pub fn spawn(
     mgr: Arc<RaftGroupManager>,
     group_id: GroupId,
     ingestor: Box<dyn DynCommandIngestor>,
+    auto_idem: Option<AutoIdempotency>,
 ) -> IngestorHandle {
-    spawn_with_batch_size(mgr, group_id, ingestor, DEFAULT_POLL_BATCH_SIZE)
+    spawn_with_batch_size(mgr, group_id, ingestor, auto_idem, DEFAULT_POLL_BATCH_SIZE)
 }
 
 /// Variant of [`spawn`] that accepts an explicit batch size. Tests pin
@@ -106,11 +141,13 @@ pub fn spawn_with_batch_size(
     mgr: Arc<RaftGroupManager>,
     group_id: GroupId,
     ingestor: Box<dyn DynCommandIngestor>,
+    auto_idem: Option<AutoIdempotency>,
     batch_size: usize,
 ) -> IngestorHandle {
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let join = tokio::spawn(async move {
-        if let Err(e) = supervise(mgr, group_id, ingestor, batch_size, cancel_rx).await {
+        if let Err(e) = supervise(mgr, group_id, ingestor, auto_idem, batch_size, cancel_rx).await
+        {
             warn!(group_id, error = %e, "ingestor supervisor exited with error");
         }
     });
@@ -124,6 +161,7 @@ async fn supervise(
     mgr: Arc<RaftGroupManager>,
     group_id: GroupId,
     mut ingestor: Box<dyn DynCommandIngestor>,
+    auto_idem: Option<AutoIdempotency>,
     batch_size: usize,
     mut cancel_rx: watch::Receiver<bool>,
 ) -> Result<(), RrError> {
@@ -161,17 +199,22 @@ async fn supervise(
 
         info!(group_id, "ingestor became leader; seeking + polling");
         if let Err(e) = seed_offset(&mgr, group_id, ingestor.as_mut()).await {
-            warn!(
-                group_id,
-                error = %e,
-                "ingestor seed_offset failed; will retry next leadership tenure"
-            );
+            metrics::counter!(
+                "rr_ingestor_seed_failures_total",
+                "group_id" => group_id.to_string()
+            )
+            .increment(1);
+            return Err(RrError::Application(format!(
+                "ingestor seed_offset failed: {e}; supervisor exiting to prevent silent \
+                 replay-from-earliest under auto.offset.reset"
+            )));
         }
 
         run_poll_loop(
             &mgr,
             group_id,
             ingestor.as_mut(),
+            auto_idem.as_ref(),
             batch_size,
             &mut metrics_rx,
             &mut cancel_rx,
@@ -216,6 +259,7 @@ async fn run_poll_loop(
     mgr: &RaftGroupManager,
     group_id: GroupId,
     ingestor: &mut dyn DynCommandIngestor,
+    auto_idem: Option<&AutoIdempotency>,
     batch_size: usize,
     metrics_rx: &mut watch::Receiver<RrRaftMetrics>,
     cancel_rx: &mut watch::Receiver<bool>,
@@ -265,11 +309,17 @@ async fn run_poll_loop(
             continue;
         }
 
-        for cmd in batch {
-            let envelope = FramedEntry::from_payload(cmd.payload)
-                .with_offset(cmd.offset)
-                .encode();
-            let bytes = match envelope {
+        let batch_len = batch.len();
+        for (idx, cmd) in batch.into_iter().enumerate() {
+            let mut entry = FramedEntry::from_payload(cmd.payload).with_offset(cmd.offset.clone());
+            if let Some(cfg) = auto_idem {
+                let request_id = (cfg.offset_to_request_id)(&cmd.offset);
+                entry = entry.with_idem_key(IdempotencyKey::new(
+                    cfg.request_type.clone(),
+                    request_id,
+                ));
+            }
+            let bytes = match entry.encode() {
                 Ok(b) => b,
                 Err(e) => {
                     warn!(group_id, error = %e, "ingestor: framed entry encode failed; skipping batch");
@@ -279,7 +329,18 @@ async fn run_poll_loop(
             match mgr.write(group_id, bytes).await {
                 Ok(_) => {}
                 Err(e) => {
-                    debug!(group_id, error = %e, "ingestor: write failed; likely stepped down");
+                    let dropped = (batch_len - idx) as u64;
+                    metrics::counter!(
+                        "rr_ingestor_step_down_drops_total",
+                        "group_id" => group_id.to_string()
+                    )
+                    .increment(dropped);
+                    debug!(
+                        group_id,
+                        error = %e,
+                        dropped,
+                        "ingestor: write failed; likely stepped down"
+                    );
                     return;
                 }
             }
@@ -431,7 +492,7 @@ mod tests {
     async fn supervisor_calls_seek_and_polls_when_leader() {
         let mgr = make_single_node_leader().await;
         let (ingestor, poll_called) = ScriptedIngestor::new(3);
-        let handle = spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), 1);
+        let handle = spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), None, 1);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !poll_called.load(Ordering::SeqCst) {
@@ -447,7 +508,7 @@ mod tests {
     async fn supervisor_stops_on_explicit_cancel() {
         let mgr = make_single_node_leader().await;
         let (ingestor, _poll_called) = ScriptedIngestor::new(1000);
-        let handle = spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), 1);
+        let handle = spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), None, 1);
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(handle.is_running());
         handle.stop().await;
@@ -460,7 +521,7 @@ mod tests {
         let ingestor = AlwaysErrIngestor {
             poll_attempts: Arc::clone(&attempts),
         };
-        let handle = spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), 1);
+        let handle = spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), None, 1);
 
         tokio::time::sleep(Duration::from_millis(500)).await;
         let n = attempts.load(Ordering::SeqCst);
@@ -475,12 +536,72 @@ mod tests {
     async fn supervisor_exits_when_group_unknown() {
         let mgr = Arc::new(RaftGroupManager::new(1, echo_factory()));
         let (ingestor, _poll_called) = ScriptedIngestor::new(1);
-        let handle = spawn_with_batch_size(Arc::clone(&mgr), 999, Box::new(ingestor), 1);
+        let handle = spawn_with_batch_size(Arc::clone(&mgr), 999, Box::new(ingestor), None, 1);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !handle.is_running(),
             "supervisor must exit promptly when group is missing"
         );
         handle.stop().await;
+    }
+
+    struct SeedFailIngestor;
+
+    #[async_trait]
+    impl CommandIngestor for SeedFailIngestor {
+        type Offset = u64;
+
+        async fn seek(&mut self, _offset: Option<u64>) -> Result<(), RrError> {
+            Err(RrError::Application("seed failure".to_string()))
+        }
+
+        async fn poll(&mut self, _max: usize) -> Result<Vec<IngressCommand<u64>>, RrError> {
+            panic!("poll must not be called when seek fails — supervisor must abort first")
+        }
+
+        async fn commit_applied(&mut self, _offset: u64) -> Result<(), RrError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_exits_when_seed_offset_fails() {
+        let mgr = make_single_node_leader().await;
+        let handle = spawn_with_batch_size(
+            Arc::clone(&mgr),
+            1,
+            Box::new(SeedFailIngestor),
+            None,
+            1,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while handle.is_running() {
+            if std::time::Instant::now() > deadline {
+                panic!("supervisor must exit on seed_offset failure (P0-2)");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_idempotency_attaches_request_id_via_extractor() {
+        let auto_idem = AutoIdempotency {
+            request_type: "test_topic".into(),
+            offset_to_request_id: Box::new(|bytes| {
+                let (i, _): (u64, _) =
+                    bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+                        .unwrap_or((0, 0));
+                i
+            }),
+        };
+        assert_eq!(auto_idem.request_type, "test_topic");
+        let mut buf = Vec::new();
+        bincode::serde::encode_into_std_write(
+            42_u64,
+            &mut buf,
+            bincode::config::standard(),
+        )
+        .unwrap();
+        assert_eq!((auto_idem.offset_to_request_id)(&buf), 42);
     }
 }

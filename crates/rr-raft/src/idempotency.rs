@@ -25,12 +25,17 @@
 //! 2. **Cache hit + different client_id** →
 //!    [`IdempotencyDecision::Collision`] (still return cached response;
 //!    audit log records the ambiguity for forensics).
-//! 3. **Cache miss + `request_id <= watermark`** →
+//! 3. **Cache miss + watermark exists + `request_id <= watermark`** →
 //!    [`IdempotencyDecision::Expired`] (the entry was applied AND
 //!    evicted; replaying is unsafe, client must pick a fresh ID).
-//! 4. **Cache miss + `request_id > watermark`** →
-//!    [`IdempotencyDecision::New`] (proceed; caller MUST follow up with
-//!    `record(key, response)` once the service produces output).
+//! 4. **Cache miss + (no watermark OR `request_id > watermark`)** →
+//!    [`IdempotencyDecision::New`] (proceed; caller MUST follow up
+//!    with `record(key, response)` once the service produces output).
+//!
+//! Watermark presence — the existence of a `watermarks[type]` entry —
+//! distinguishes "never applied" from "applied id 0 then forgotten",
+//! so Kafka-style streams whose first offset is 0 don't have their
+//! initial entry rejected as Expired.
 //!
 //! Watermark advancement happens in `record`, not `decide`, so out-of-order
 //! ID submissions don't accidentally Expire valid IDs.
@@ -112,17 +117,14 @@ impl IdempotencyLayer {
             return IdempotencyDecision::Replay(response.clone());
         }
 
-        let watermark = self
-            .watermarks
-            .get(&key.request_type)
-            .copied()
-            .unwrap_or(0);
-        if key.request_id <= watermark {
-            return IdempotencyDecision::Expired {
-                request_type: key.request_type.clone(),
-                request_id: key.request_id,
-                watermark,
-            };
+        if let Some(watermark) = self.watermarks.get(&key.request_type).copied() {
+            if key.request_id <= watermark {
+                return IdempotencyDecision::Expired {
+                    request_type: key.request_type.clone(),
+                    request_id: key.request_id,
+                    watermark,
+                };
+            }
         }
 
         IdempotencyDecision::New
@@ -338,6 +340,41 @@ mod tests {
         let empty = IdempotencyState::default();
         layer.restore(empty).unwrap();
         assert_eq!(layer.watermark_for("transfer"), Some(5));
+    }
+
+    #[test]
+    fn first_request_id_zero_is_new_not_expired() {
+        let mut layer = IdempotencyLayer::new(10);
+        match layer.decide(&key("kafka_topic", 0)) {
+            IdempotencyDecision::New => {}
+            other => panic!(
+                "request_id 0 with no prior record must be New, not {other:?} \
+                 (regression: Kafka offsets start at 0)"
+            ),
+        }
+    }
+
+    #[test]
+    fn replayed_request_id_zero_after_record_is_replay() {
+        let mut layer = IdempotencyLayer::new(10);
+        let k = key("kafka_topic", 0);
+        layer.record(&k, b"first-response".to_vec());
+        match layer.decide(&k) {
+            IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"first-response"),
+            other => panic!("expected Replay for re-applied id=0, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evicted_request_id_zero_after_record_is_expired() {
+        let mut layer = IdempotencyLayer::new(2);
+        layer.record(&key("kafka", 0), vec![]);
+        layer.record(&key("kafka", 1), vec![]);
+        layer.record(&key("kafka", 2), vec![]);
+        match layer.decide(&key("kafka", 0)) {
+            IdempotencyDecision::Expired { watermark, .. } => assert_eq!(watermark, 2),
+            other => panic!("expected Expired for evicted id=0, got {other:?}"),
+        }
     }
 
     #[test]
