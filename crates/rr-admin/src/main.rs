@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use tonic::transport::Channel;
 
 mod backup;
+mod decommission;
 mod node_reset;
 
 // ── KV wire types (mirrors kv-store's KvRequest/KvResponse) ────────────────
@@ -156,6 +157,18 @@ enum Commands {
 enum NodeCommands {
     /// Get node status (node_id, listen_addr, groups, uptime).
     Status,
+    /// Drain + remove a node from every Raft group it participates
+    /// in. The orchestrator transfers leadership away if needed,
+    /// then calls `change_membership` to remove the target. Refuses
+    /// to leave any group with fewer than 2 voters.
+    Decommission {
+        /// Node ID to decommission.
+        #[arg(long = "node-id")]
+        node_id: u64,
+        /// Print the planned changes without making them.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -327,6 +340,49 @@ async fn main() -> Result<()> {
             let mut client = AdminServiceClient::new(channel);
 
             match &cli.command {
+                Commands::Node {
+                    cmd: NodeCommands::Decommission { node_id, dry_run },
+                } => {
+                    let report =
+                        decommission::decommission_node(&mut client, *node_id, *dry_run).await?;
+                    match cli.output {
+                        OutputFormat::Json => {
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        }
+                        OutputFormat::Human => {
+                            println!(
+                                "Decommission Report (target_node_id={}, dry_run={})",
+                                report.target_node_id, report.dry_run
+                            );
+                            for g in &report.groups {
+                                let action = serde_json::to_value(&g.action)
+                                    .ok()
+                                    .and_then(|v| v.as_str().map(str::to_owned))
+                                    .unwrap_or_else(|| format!("{:?}", g.action));
+                                println!("  group {}: {} — {}", g.group_id, action, g.message);
+                            }
+                            if report.has_failures() {
+                                println!();
+                                println!(
+                                    "FAILURES present — investigate and re-run; \
+                                     change_membership is idempotent so partial progress is safe"
+                                );
+                            } else if report.made_progress() {
+                                println!();
+                                if report.dry_run {
+                                    println!("(dry-run) re-run without --dry-run to apply.");
+                                } else {
+                                    println!("All eligible groups processed successfully.");
+                                }
+                            } else {
+                                println!();
+                                println!(
+                                    "No-op: target node was not a voter in any reported group."
+                                );
+                            }
+                        }
+                    }
+                }
                 Commands::Node { cmd: NodeCommands::Status } => {
                     let resp = client.get_node_status(Empty {}).await?.into_inner();
                     match cli.output {
@@ -830,6 +886,49 @@ mod tests {
                 cmd: GroupCommands::TransferLeader { group: 1, to: 3 }
             }
         ));
+    }
+
+    #[test]
+    fn test_parse_node_decommission() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "node",
+            "decommission",
+            "--node-id",
+            "4",
+        ])
+        .expect("should parse decommission");
+        match cli.command {
+            Commands::Node {
+                cmd: NodeCommands::Decommission { node_id, dry_run },
+            } => {
+                assert_eq!(node_id, 4);
+                assert!(!dry_run);
+            }
+            other => panic!("expected Decommission, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_node_decommission_dry_run() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "node",
+            "decommission",
+            "--node-id",
+            "5",
+            "--dry-run",
+        ])
+        .expect("should parse decommission --dry-run");
+        match cli.command {
+            Commands::Node {
+                cmd: NodeCommands::Decommission { node_id, dry_run },
+            } => {
+                assert_eq!(node_id, 5);
+                assert!(dry_run);
+            }
+            other => panic!("expected Decommission, got {other:?}"),
+        }
     }
 
     #[test]
