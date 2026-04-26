@@ -38,6 +38,8 @@ const sidebars: SidebarsConfig = {
         'guide/storage-engines',
         'guide/client-sdk',
         'guide/consumer-guide',
+        'guide/idempotency',
+        'guide/kafka-input',
       ],
     },
     {
@@ -62,6 +64,7 @@ const sidebars: SidebarsConfig = {
         'deployment/audit-log',
         'deployment/kubernetes',
         'deployment/upgrading',
+        'deployment/v0.2-to-v0.3-migration',
       ],
     },
   ],

@@ -1457,6 +1457,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "kv-store-kafka"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "kv-store",
+ "openraft",
+ "rr-core",
+ "rr-ingestor-kafka",
+ "rr-raft",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

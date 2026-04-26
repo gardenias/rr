@@ -1,0 +1,30 @@
+[package]
+name = "kv-store-kafka"
+version = "0.1.0"
+edition = "2021"
+description = "rr example: KV store driven by a (mock) Kafka topic with auto-idempotency"
+
+[dependencies]
+rr-core = { path = "../../crates/rr-core" }
+rr-raft = { path = "../../crates/rr-raft" }
+rr-ingestor-kafka = { path = "../../crates/rr-ingestor-kafka" }
+kv-store = { path = "../kv-store" }
+tokio.workspace = true
+serde.workspace = true
+bincode.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+openraft = { version = "0.9", features = ["serde"] }
+
+[features]
+# Default uses the in-memory MockKafkaIngestor so the example compiles
+# everywhere — no cmake / librdkafka required. Add the `rdkafka`
+# feature for a real broker (see README).
+default = []
+rdkafka = ["rr-ingestor-kafka/rdkafka"]
+
+[[bin]]
+name = "kv-store-kafka"
+path = "src/main.rs"
