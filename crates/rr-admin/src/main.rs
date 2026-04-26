@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use tonic::transport::Channel;
 
 mod backup;
+mod node_reset;
 
 // ── KV wire types (mirrors kv-store's KvRequest/KvResponse) ────────────────
 
@@ -126,6 +127,27 @@ enum Commands {
         /// Path to the backup `.tar.gz` file.
         #[arg(long)]
         input: PathBuf,
+    },
+    /// Reset a stopped node's `data_dir` so it can be re-added as a
+    /// fresh learner.
+    ///
+    /// **DESTRUCTIVE** — wipes all files in `--data-dir`. Use only when:
+    /// (a) the node is stopped, AND (b) you've confirmed the path is
+    /// correct. Pre-flight checks reject non-rr directories, paths
+    /// holding a live RocksDB lock, and non-existent paths. Pass
+    /// `--force` to skip the safety prompt after manual confirmation.
+    ///
+    /// After reset: start the node and have another cluster member
+    /// re-add it via `rr-admin group add-learner --node-id <ID>
+    /// --addr <HOST:PORT>` then promote via `rr-admin group
+    /// change-membership` once it has caught up.
+    NodeReset {
+        /// Path to the node's `data_dir` (contains RocksDB files).
+        #[arg(long)]
+        data_dir: PathBuf,
+        /// Skip the safety prompt. Required to actually wipe.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -257,6 +279,30 @@ async fn main() -> Result<()> {
                     if let Some(c) = &meta.comment {
                         println!("  comment        : {c}");
                     }
+                }
+            }
+        }
+        Commands::NodeReset { data_dir, force } => {
+            let report = node_reset::reset_node_data_dir(data_dir, *force)?;
+            match cli.output {
+                OutputFormat::Json => {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                OutputFormat::Human => {
+                    println!("Node Reset OK");
+                    println!("  data_dir         : {}", report.data_dir);
+                    println!("  files_removed    : {}", report.files_removed);
+                    println!("  dirs_removed     : {}", report.dirs_removed);
+                    println!("  bytes_reclaimed  : {}", report.bytes_reclaimed);
+                    println!();
+                    println!("Next steps:");
+                    println!("  1. Start the node fresh.");
+                    println!("  2. From another cluster member, run:");
+                    println!("       rr-admin --addr <leader-host:port> group add-learner \\");
+                    println!("           --group <ID> --node-id <this-node-id> --addr <this-host:port>");
+                    println!("  3. Wait for replication to catch up, then promote with:");
+                    println!("       rr-admin --addr <leader-host:port> group change-membership \\");
+                    println!("           --group <ID> --voters <new-voter-set>");
                 }
             }
         }
@@ -470,7 +516,8 @@ async fn main() -> Result<()> {
                 Commands::Repl { .. }
                 | Commands::Backup { .. }
                 | Commands::Restore { .. }
-                | Commands::InspectBackup { .. } => unreachable!("handled above"),
+                | Commands::InspectBackup { .. }
+                | Commands::NodeReset { .. } => unreachable!("handled above"),
             }
         }
     }
@@ -759,6 +806,40 @@ mod tests {
             cli.command,
             Commands::Group { cmd: GroupCommands::Membership { group: 7 } }
         ));
+    }
+
+    #[test]
+    fn test_parse_node_reset_requires_force() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "node-reset",
+            "--data-dir",
+            "/tmp/rr/data",
+        ])
+        .expect("should parse node-reset without --force");
+        match cli.command {
+            Commands::NodeReset { force, .. } => assert!(!force),
+            other => panic!("expected NodeReset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_node_reset_with_force() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "node-reset",
+            "--data-dir",
+            "/tmp/rr/data",
+            "--force",
+        ])
+        .expect("should parse node-reset --force");
+        match cli.command {
+            Commands::NodeReset { data_dir, force } => {
+                assert_eq!(data_dir.to_str(), Some("/tmp/rr/data"));
+                assert!(force);
+            }
+            other => panic!("expected NodeReset, got {other:?}"),
+        }
     }
 
     /// Verify metrics subcommand parses correctly.
