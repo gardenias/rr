@@ -5,11 +5,11 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-04-26 (后段 session 收尾)
-**Current phase**: Phase 4 + Phase 3.1 — **all planned framework features implemented**
+**Last updated**: 2026-04-27 (multi-language SDK + etcd ConfigProvider + dashboard wave)
+**Current phase**: Phase 4 + Phase 3.1 done; v0.3 ecosystem build-out（SDK / contrib / observability polish）
 **Active plan**: `.sisyphus/plans/rr-phase4-v030.md` + `.sisyphus/plans/rr-phase3.1-hardening.md`
-**Latest tag**: `v0.2.0-rc1` (current `main` HEAD has all features beyond v0.2)
-**Main branch HEAD**: 26 commits ahead of `origin/main` since 2026-04-25 — UNPUSHED（按用户指示暂不做版本管理）
+**Latest tag**: `v0.2.0-rc1` (current `main` HEAD has all features beyond v0.2 + 本 session 的 Java SDK / etcd contrib / dashboard 增量)
+**Main branch HEAD**: 26 commits ahead of `origin/main` UNPUSHED + 本 session 工作树未 commit（按用户指示暂不做版本管理）
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`) — Wave 4d cleared all P0 ship-blockers; Wave 13 closed 8 of 9 P1/P2 follow-ups
 
 ---
@@ -25,6 +25,87 @@ otel-client 自 v0.3**），完整的集成测试 + chaos framework + Docusaurus
 ---
 
 ## 已完成的工作 / Completed Work
+
+### Session 2026-04-27 — multi-language SDK + etcd contrib + dashboard polish（4 个并行交付，未 commit）
+
+用户指示：做"java&rust sdk + etcd ConfigProvider + dashboard 持续打磨"，跳过 P2-6 reset-ingestor-offset CLI。Phase A 串行（先 review Rust SDK 找 gap），Phase B/C/D 并行委派给 deep-类目 subagent。
+
+**Phase A — rr-client (Rust SDK) 审查 + 优化** (`crates/rr-client/`, 自己做)
+- 审查报告：`.sisyphus/evidence/rr-client-sdk-review-2026-04-27.md`。结论：核心 API（retry / leader cache / idempotency / metrics / tracing）合格保持原状，但 3 个 P0 阻塞 + 1 个 P2 polish 必修。
+- **F1 修复 — TLS/mTLS**：新 `RrClientBuilder::with_tls(TlsConfig)`，`connect_to_addr` 按 `tls_config` 选 `https`/`http` scheme，wire `endpoint.tls_config(tls.build_client_tls()?)`。
+- **F2 修复 — bearer token**：`with_bearer_token(String)` + 内部 `build_request<T>` helper 调 `rr_network::auth::attach_bearer_token` 给所有 outbound（`send_request_inner` + `get_cluster_info`）。
+- **F3 修复 — Cargo.toml metadata**：description / license=MIT / repository / homepage / documentation / readme / keywords / categories 全补齐，`rust-version.workspace = true`。`cargo publish --dry-run` 仅卡 rr-core/rr-network path-dep version（workspace-wide 问题，与"暂不做版本管理"对齐，不阻塞 SDK 改动）。
+- **F4 修复 — README**：`crates/rr-client/README.md`（quick start dev / production TLS+auth / idempotency / cluster discovery / metrics / security notes / license / links），~140 行。
+- **安全语义**：TLS-less bearer 默认 `tracing::warn!`（与 server `allow_insecure` opt-in 对齐）；`with_strict_security(true)` 时 build 拒绝（`NetworkError::ConnectionFailed`）。
+- **向后兼容**：`RrClient::connect` / `connect_with_config` 保留为 builder 薄包装，无 `#[deprecated]`。
+- **测试**：8 原有 + 7 新增 = 15 unit tests 全绿（builder defaults / with_bearer_token_stores_token / strict_security_rejects_token_without_tls / with_retry_config_overrides / empty_addrs_rejected / build_request_attaches_bearer_token / build_request_omits_metadata_when_no_token）。
+- **L1 验证**：cargo check workspace clean / clippy `-D warnings` clean / cargo doc clean。
+- **版本**：仍 `0.1.0`（用户决定保持，等 workspace 统一发版时再 bump）。
+
+**Phase B — Java SDK** (`sdks/java/`, 委派 `bg_af216421` 21min, 已独立验证)
+- 完整 Gradle Kotlin DSL 项目骨架：`build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, Gradle wrapper, JDK 17 toolchain。
+- Maven groupId `io.github.gardenias`，Java root package `io.github.gardenias.rr.client`。
+- protos 通过 `protobuf-gradle-plugin` 直接消费 `crates/rr-network/proto/*.proto` —— **不复制 proto 到 Java 树，single source of truth**。
+- 公开类：`RrClient` / `RrClientBuilder` / `RetryConfig` / `TlsConfig` / `IdempotencyKey` / `LeaderCache` / `BearerTokenInterceptor` + 异常族（`RrClientException` → `NetworkException` → `RpcFailedException` + `IdempotencyExpiredException`）。
+- 公开方法用 Java 命名：`sendRequest` / `sendRequestIdempotent` / `sendRequestWithPartition` / `getClusterInfo`，全部返 `CompletableFuture`（async idiom 对齐 Rust `async fn`）。
+- Builder 方法：`newBuilder(List<String>)`（Java keyword `new` 不能作方法名，README 已说明） / `withTls(TlsConfig)` / `withBearerToken(String)` / `withRetryConfig(RetryConfig)` / `withStrictSecurity(boolean)` / `build() -> CompletableFuture<RrClient>`。
+- 依赖（轻量）：grpc-netty-shaded 1.66 + grpc-protobuf + grpc-stub + protobuf-java + Micrometer 1.13（必选）+ slf4j-api 2.0（必选）。**无** OpenTelemetry / Resilience4j / Lombok / Guava / Apache Commons / Spring。
+- **bearer auth**：`io.grpc.ClientInterceptor` 实现，`Metadata.Key.of("authorization", ASCII)` 注入 `"Bearer " + token`，与 Rust SDK 同 wire shape。
+- **TLS**：`NettyChannelBuilder.useTransportSecurity()` + `GrpcSslContexts.forClient().keyManager().trustManager().build()`，`domainName` 切 SNI override authority。
+- **strict security**：`build()` 时 token+tls=null+strict 抛 `IllegalStateException`，与 Rust SDK 同语义；warn-only mode 用 slf4j WARN。
+- **Metrics**：Micrometer `MeterRegistry`（默认 `Metrics.globalRegistry`，可 builder 覆盖）。Timer `rr.client.request.duration`{group_id, outcome} + Counter `rr.client.retries` / `rr.client.leader_cache.hits|misses`。Prometheus 导出后是 `rr_client_*`，与 Rust SDK 指标 surface 对齐。
+- **测试**：9/9 unit tests pass（`BearerTokenInterceptorTest` 2 + `LeaderCacheTest` 3 + `RrClientBuilderTest` 4），0 failures/errors/skipped。
+- **集成测试**：`RrClientIntegrationTest` 在独立 source set，gated by `RR_TEST_DOCKER=1`，本环境 ghcr.io 镜像不可达 → fallback 到 `InProcessChannelBuilder` 假 service（happy path 验证）。
+- **CI**：`.github/workflows/sdks-java.yml` —— `actions/setup-java@v4 (temurin 17)` + `gradle test build`，tag publish 到 GitHub Packages（不发 Maven Central）。
+- **GH Packages publish**：wired in `build.gradle.kts` via `maven-publish`，仅配置不真发。
+- **Verification**：`./gradlew test build check javadoc --warning-mode all` 全绿，`build/libs/rr-client-0.1.0.jar` 产出。
+- 主分支独立 re-run `./gradlew test --rerun-tasks`：BUILD SUCCESSFUL 9 tasks executed。
+
+**Phase C — etcd ConfigProvider** (`crates/rr-config-etcd/`, 委派 `bg_f2d7a2de` 14min, 已独立验证)
+- 新 workspace crate `rr-config-etcd v0.1.0`，依赖 `etcd-client 0.14`（加到 `[workspace.dependencies]`）+ `tokio-stream 0.1`。
+- `EtcdConfigProvider::new(endpoints: Vec<String>, cluster_id: String)` async constructor。
+- 实现 `ConfigProvider` trait 三方法：`get_routing_table`（prefix 扫 + 装配 RoutingTable）、`watch_changes`（3 个 etcd watcher → mpsc → Stream<RoutingTableChange>）、`get_node_addr`（直 Get）。
+- **read-only**：trait surface 不暴露写入。测试 setup 用 raw `etcd_client::Client` 写 key（非公共 API）。
+- **ETCD KEY SCHEMA**（`.sisyphus/adr/A-0004-etcd-config-schema.md` 文档化）：
+  - `/rr/{cluster_id}/nodes/{node_id}` → JSON `NodeAddr { addr }`
+  - `/rr/{cluster_id}/partitions/{partition_id}` → JSON `{ config, group_id }`
+  - `/rr/{cluster_id}/groups/{group_id}/replicas` → JSON `[node_id, ...]`
+  - cluster_id 默认 `"default"`，构造器可改
+  - 用 JSON 而非 bincode：操作员可 `etcdctl get --prefix /rr/` 直接看
+- **Cargo metadata**：description / license=MIT / repository / keywords / categories 完整。
+- **测试**：9/9 unit tests pass（serde wire shapes / key path generation / 5 个 watch event variants 解析 / etcd 错误映射），1 个 integration test ignored（gated `RR_TEST_ETCD=1` + Docker，跟 rr-ingestor-kafka 的 `RR_TEST_KAFKA_BOOTSTRAP` 同 pattern）。
+- **示例 crate**：`examples/etcd-config-quickstart/`（连 localhost:2379, fetch table, await one watch event）。
+- **L1 验证**：`cargo check -p rr-config-etcd` clean / `cargo clippy --all-targets -D warnings` clean / `cargo doc` clean / `cargo build -p etcd-config-quickstart` clean / **`cargo check --workspace` 全绿**。
+- **ADR A-0004**：`proposed` 状态，登记到 `.sisyphus/adr/README.md`。
+
+**Phase D — Prometheus / Grafana 持续打磨** (`deploy/observability/`, 委派 `bg_bbc98e7c` 6min, 已独立验证)
+- **Dashboard `rr-cluster-overview.json`**：6 → 12 panels（保留原 6，新增 6）：
+  1. `rr_raft_replication_lag` heatmap（`{{group_id}}/{{follower_node_id}}`）+ 强制 `rr_raft_is_leader == 1` predicate（panel 描述强调 follower lag=0 是误读）
+  2. Idempotency rates（replays/collisions/expired）3 条 rate
+  3. `rr_idempotency_cache_size` gauge stat（按 `${IDEMPOTENCY_CACHE_MAX}` 模板变量归一化，阈值 50/90）
+  4. Ingestor health（step_down_drops + seed_failures + seek_below/above_watermark）stacked timeseries
+  5. `rr_framing_decode_failures_total{kind}` 按 kind stacked
+  6. Learner promotion outcomes（success/failure）bargauge
+- **新增模板变量**：`group_id` / `follower_node_id` / `decode_kind`（multi-value）+ `IDEMPOTENCY_CACHE_MAX`（textbox，默认 50000）。
+- **Recording rules**：6 → 10：`cluster:rr_replication_lag:max_per_group`, `rr:idempotency_replay_rate_5m_raw`（旧名占用，后缀 `_raw`）, `rr:ingestor_offset_skew_total`, `rr:framing_decode_failure_rate_5m`。
+- **Alerts**：6 → 9：`RrIdempotencyCacheNearFull`(warn) / `RrIngestorOffsetDrift`(warn) / `RrFramingDecodeFailures`(critical)。
+- **Datasource**：所有 panel 用 `${DS_PROMETHEUS}` 变量，不硬编码 UID。
+- **指标存在性 grep 验证**：12 个引用的 metric 全部 `grep -r "rr_<name>" crates/` 命中代码；列表见 `bg_bbc98e7c` task output。
+- **README 更新**：`deploy/observability/README.md` Panels/Recording rules/Alerts 三段全更新 + 文末 `Last updated: 2026-04-27`。
+- **未拆 dashboard**：12 panels 在 14 阈值下，未创建独立 `rr-ingestor.json`。
+- **JSON/YAML 校验**：`json.load` + `yaml.safe_load` 双 parse 通过；总计 12 panels / 10 rules / 9 alerts (rr_correctness=6 + rr_availability=3)。
+
+**未 commit**：四个 phase 全部工作树挂着，按用户"暂不做版本管理"约束。
+
+**关键决策记录**：
+- 跳过 P2-6 `rr-admin reset-ingestor-offset` CLI（用户明确 deprioritize）
+- Java SDK groupId `io.github.gardenias`（GitHub-hosted org 标准 reverse-DNS）
+- Java 发 GitHub Packages 不发 Maven Central（避免 GPG / Sonatype 流程）
+- etcd Provider read-only（仅 ConfigProvider trait）
+- rr-client 保持 0.1.0（不与 framework v0.3 同步 bump）
+- 所有"轻量"约束严格执行（Java 无 OpenTelemetry/Resilience4j/Lombok）
+
+---
 
 ### Continuation session (2026-04-26 later, 11 commits, Phase 3.1 + Oracle follow-ups + test hardening)
 
@@ -425,14 +506,14 @@ Theme C 测试加固) + Oracle review P0/P1/P2 跟进 — 全部 implemented，�
 
 ### 跨 session 的非紧迫待办（来自原 Phase 3 计划）
 
-- **多语言 client SDK**（Go / Python / Java）—— proto-first 设计已让这件事
-  tractable，待社区驱动。
-- **etcd ConfigProvider**（在 contrib 独立 crate）。
+- ✅ **多语言 client SDK** — Java SDK done (`sdks/java/` 2026-04-27)；Rust SDK polished (`crates/rr-client/` 同期)。Go / Python 仍 deferred 待社区驱动。
+- ✅ **etcd ConfigProvider** — done (`crates/rr-config-etcd/` 2026-04-27, ADR A-0004)。
+- ✅ **Prometheus recording rules / dashboard 持续打磨** — done (2026-04-27, 6 → 12 panels / 6 → 10 rules / 6 → 9 alerts)。
 - **Per-caller rate limiting**（依赖 caller identity）—— Wave 6.1 的
   `caller_token_fp` 是基础。
 - **Raft LogStorage 的 RocksDB CF 单独调优**——分离 raft_log / state_machine 的
   block_cache_size / write_buffer。
-- **Prometheus recording rules / dashboard 持续打磨**——已有 baseline（Wave 6.2）。
+- **rr-client / rr-core / rr-network 的 workspace 级 publish metadata 补齐** —— 当前 rr-client 自身 metadata 已齐，但 path-deps 缺 version，`cargo publish` 阻塞。等用户决定整体发版时一起做。
 
 ### 覆盖率维度的后续（基于最新的报告）
 
@@ -449,10 +530,10 @@ Theme C 测试加固) + Oracle review P0/P1/P2 跟进 — 全部 implemented，�
 
 ### 已知跨 session 的待办（非本 session 引入）
 
-- Online backup via snapshot-fetch RPC（当前只有 offline）
-- ChangeMembership RPC 自动化（当前 join learner 后需要手动提升 voter）
-- 多语言 client SDK（Go/Python/Java）— proto-first 设计让这个 tractable
-- Jepsen-style linearizability testing
+- ✅ Online backup via snapshot-fetch RPC（已 done — Wave 11 `OnlineBackup` streaming RPC）
+- ✅ ChangeMembership RPC 自动化（已 done — Wave 8 `change_membership` + Wave 10 auto-promote learner）
+- ✅ 多语言 client SDK — Java SDK + Rust SDK polish done（2026-04-27）；Go/Python 仍 deferred
+- Jepsen-style linearizability testing（pragmatic stress 已 done Wave 18，full porcupine-rs / Maelstrom 仍 deferred）
 
 ---
 
@@ -462,10 +543,9 @@ Theme C 测试加固) + Oracle review P0/P1/P2 跟进 — 全部 implemented，�
 （明确暂不处理，见前述 user directive 2026-04-26）。
 
 **可选 follow-up（按用户指示再启动）**:
-- P2-6 `rr-admin reset-ingestor-offset` CLI（Oracle review 唯一 deferred 项）
-- 多语言 client SDK（Go/Python/Java）
-- etcd ConfigProvider（contrib）
-- Prometheus dashboard 持续打磨
+- P2-6 `rr-admin reset-ingestor-offset` CLI（Oracle review 唯一 deferred 项；2026-04-27 user 跳过本轮）
+- 多语言 client SDK Go / Python（Java + Rust 已于 2026-04-27 完成）
+- workspace 级发版准备：rr-core / rr-network / rr-client / rr-config / rr-config-etcd / rr-admin 全 crate publish metadata + 版本统一
 
 ---
 
@@ -660,6 +740,10 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 - `crates/rr-raft/src/group_manager.rs` — Multi-Raft 核心
 - `crates/rr-network/src/{auth,tls,rate_limit,tracing}.rs` — 安全/可观测性中间件
 - `crates/rr-admin/src/backup.rs` — 备份/恢复
+- `crates/rr-client/src/lib.rs` — Rust client SDK（Builder + TLS + bearer auth + retry + idempotency, 2026-04-27 polished）
+- `crates/rr-config-etcd/src/lib.rs` — etcd-backed ConfigProvider, read-only, ADR A-0004 schema (2026-04-27)
+- `sdks/java/src/main/java/io/github/gardenias/rr/client/` — Java SDK, JDK 17, Gradle Kotlin DSL, lightweight deps (2026-04-27)
+- `deploy/observability/{grafana,prometheus}/` — 12 panels / 10 rules / 9 alerts (2026-04-27 polish)
 
 ### 本次 session 的计划
 - `.sisyphus/plans/rr-phase3-prodready.md` — Phase 3 完整 roadmap（~30 任务 × 5 wave）
@@ -669,6 +753,10 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 - `.sisyphus/adr/A-0001-command-ingestor-abstraction.md` — Kafka 输入
 - `.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md` — 快照契约 + 灾难恢复
 - `.sisyphus/adr/A-0003-framework-idempotency-layer.md` — 框架幂等
+- `.sisyphus/adr/A-0004-etcd-config-schema.md` — etcd ConfigProvider 的 key 布局 + JSON wire shape（2026-04-27）
+
+### 本次 session 评审
+- `.sisyphus/evidence/rr-client-sdk-review-2026-04-27.md` — rr-client SDK 审查报告（F1/F2/F3 P0 阻塞 + F4 polish，全部已修）
 
 ### Phase 4 执行计划
 - `.sisyphus/plans/rr-phase4-v030.md` — v0.3.0 I/O enhancements 执行计划
