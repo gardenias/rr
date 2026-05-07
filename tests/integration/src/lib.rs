@@ -415,6 +415,147 @@ pub async fn wait_for_new_leader(
 mod tests {
     use super::*;
     use rr_client::{RetryConfig, RrClient};
+    use rr_core::framed_entry::FramedEntry;
+    use rr_core::idempotency::{ApplyOutcome, IdempotencyKey};
+    use rr_core::service::Service;
+    use rr_raft::ServiceStateMachineAdapter;
+    use std::time::Duration;
+
+    // ── CountingService ───────────────────────────────────────────────────────
+    #[derive(Clone)]
+    struct CountingService {
+        applied: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl CountingService {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+            let applied = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    applied: Arc::clone(&applied),
+                },
+                applied,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Service for CountingService {
+        async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, rr_core::error::RrError> {
+            self.applied.lock().unwrap().push(request.clone());
+            Ok(request)
+        }
+
+        fn name(&self) -> &str {
+            "counting"
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, rr_core::error::RrError> {
+            Ok(vec![])
+        }
+
+        async fn restore(&mut self, _data: &[u8]) -> Result<(), rr_core::error::RrError> {
+            Ok(())
+        }
+    }
+
+    fn counting_factory(applied: Arc<std::sync::Mutex<Vec<Vec<u8>>>>) -> StateMachineFactory {
+        Box::new(move |gid| {
+            let svc = CountingService {
+                applied: Arc::clone(&applied),
+            };
+            Box::new(ServiceStateMachineAdapter::new(gid, svc))
+        })
+    }
+
+    async fn build_3node_cluster_with_factory(
+        factory: StateMachineFactory,
+        group_id: GroupId,
+    ) -> Result<(Vec<Arc<RrNode>>, Arc<fault_injection::FaultInjector>)> {
+        let node_ids: Vec<NodeId> = vec![1, 2, 3];
+        let config_provider = Arc::new(MemConfigProvider::new());
+
+        config_provider
+            .add_partition(
+                group_id,
+                PartitionConfig::SingleId(group_id),
+                group_id,
+                node_ids.clone(),
+            )
+            .await;
+
+        let mut node_addrs: Vec<(NodeId, String)> = Vec::with_capacity(node_ids.len());
+        for &node_id in &node_ids {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let port = listener.local_addr()?.port();
+            drop(listener);
+            node_addrs.push((node_id, format!("127.0.0.1:{port}")));
+        }
+
+        for (node_id, addr) in &node_addrs {
+            config_provider
+                .add_node(*node_id, rr_core::types::NodeAddr { addr: addr.clone() })
+                .await;
+        }
+
+        let injector = Arc::new(fault_injection::FaultInjector::new());
+        let factory = Arc::new(factory);
+        let mut nodes = Vec::with_capacity(node_ids.len());
+
+        for (node_id, addr) in &node_addrs {
+            let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
+            let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
+            let pool_for_node: Arc<dyn ChannelPoolLike> = injector.new_pool_for_node(*node_id);
+            let factory_for_node: StateMachineFactory = {
+                let factory = Arc::clone(&factory);
+                Box::new(move |gid| (**factory)(gid))
+            };
+
+            let mgr = Arc::new(RaftGroupManager::new_with_network(
+                *node_id,
+                factory_for_node,
+                pool_for_node,
+            ));
+
+            let router = Arc::new(ShardRouter::new(Arc::clone(&provider)));
+            let lookup = Arc::new(RaftGroupLookupImpl::new(Arc::clone(&mgr)));
+            let dispatch = Arc::new(ClientDispatchImpl::new(Arc::clone(&mgr), router));
+
+            let config = NodeConfig::new(*node_id, addr.clone(), storage, provider, echo_factory())
+                .with_group_manager(Arc::clone(&mgr))
+                .with_raft_lookup(lookup)
+                .with_client_dispatch(dispatch)
+                .with_allow_insecure(true);
+
+            let node = Arc::new(RrNode::new(config)?);
+            node.start().await?;
+            nodes.push(node);
+        }
+
+        let mut members = BTreeMap::new();
+        for (node_id, addr) in &node_addrs {
+            members.insert(*node_id, BasicNode { addr: addr.clone() });
+        }
+
+        let raft = nodes[0]
+            .group_manager()
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("node 1 missing group {group_id}"))?;
+        let _ = raft.initialize(members).await;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok((nodes, injector))
+    }
+
+    fn decode_apply_success(bytes: &[u8]) -> Vec<u8> {
+        match ApplyOutcome::decode(bytes).expect("keyed response should decode as ApplyOutcome") {
+            ApplyOutcome::Success(payload) => payload,
+            ApplyOutcome::IdempotencyExpired(err) => {
+                panic!("expected Success for keyed replay, got IdempotencyExpired: {err}")
+            }
+        }
+    }
 
     /// A single-node cluster must elect itself as leader immediately after
     /// initialization.
@@ -597,6 +738,75 @@ mod tests {
                     "forward must point to current leader"
                 );
             }
+        }
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T-002 — Two followers that have applied the same log entries independently
+    /// should produce bit-for-bit identical snapshots.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_snapshot_state_digest_consistent_across_nodes() {
+        let nodes = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000)
+            .await
+            .expect("leader must be elected");
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+
+        // Write 10 entries via the leader
+        for i in 0u8..10 {
+            raft.client_write(vec![i]).await.expect("client_write must succeed");
+        }
+
+        // Allow followers to catch up
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Trigger snapshot on the leader
+        raft.trigger()
+            .snapshot()
+            .await
+            .expect("trigger snapshot on leader must succeed");
+
+        // Give snapshot time to materialise and replicate
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Collect snapshot bytes from all 3 nodes; trigger on followers if absent
+        let mut snapshots: Vec<Option<Vec<u8>>> = Vec::with_capacity(3);
+        for (idx, node) in nodes.iter().enumerate() {
+            let mut snap = node.group_manager().fetch_snapshot_bytes(1).await.unwrap();
+            if snap.is_none() {
+                // Follower may not have taken a snapshot yet — trigger one
+                if let Some(r) = node.group_manager().get_raft(1).await {
+                    let _ = r.trigger().snapshot().await;
+                }
+                // Poll with timeout
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while snap.is_none() && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    snap = node.group_manager().fetch_snapshot_bytes(1).await.unwrap();
+                }
+                assert!(
+                    snap.is_some(),
+                    "node {idx} did not produce a snapshot within 5s after trigger"
+                );
+            }
+            snapshots.push(snap);
+        }
+
+        // All snapshot byte vectors must be identical (EchoSM produces empty bytes)
+        let first = snapshots[0].as_ref().expect("first node must have snapshot");
+        for (i, snap) in snapshots.iter().enumerate().skip(1) {
+            let bytes = snap.as_ref().expect("node {i} must have snapshot");
+            assert_eq!(
+                first, bytes,
+                "snapshot bytes must be identical across all nodes; mismatch at node {i}"
+            );
         }
 
         shutdown_all(&nodes).await;
@@ -1786,6 +1996,138 @@ mod tests {
         );
 
         shutdown_all(&nodes).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_idempotency_dedup_survives_leader_switch() {
+        let group_id = 101;
+        let (_svc, applied) = CountingService::new();
+        let (nodes, injector) = build_3node_cluster_with_factory(
+            counting_factory(Arc::clone(&applied)),
+            group_id,
+        )
+        .await
+        .unwrap();
+
+        let original_leader_id = wait_for_cluster_ready(&nodes, group_id, 8_000).await.unwrap();
+        let original_leader_node = nodes
+            .iter()
+            .find(|n| n.node_id() == original_leader_id)
+            .unwrap();
+        let raft = original_leader_node
+            .group_manager()
+            .get_raft(group_id)
+            .await
+            .unwrap();
+
+        let idem_key = IdempotencyKey::with_client_id("idempotency-test", 1, "test-client-1");
+        let entry_bytes = FramedEntry::from_payload(b"hello-idempotent".to_vec())
+            .with_idem_key(idem_key)
+            .encode()
+            .unwrap();
+
+        let first_resp = raft.client_write(entry_bytes.clone()).await.unwrap();
+        let first_payload = decode_apply_success(&first_resp.data);
+        assert_eq!(first_payload, b"hello-idempotent".to_vec());
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            applied.lock().unwrap().len(),
+            3,
+            "first keyed write should apply once per node"
+        );
+
+        injector.isolate(original_leader_id);
+        let new_leader_id = wait_for_new_leader(&nodes, group_id, original_leader_id, 12_000)
+            .await
+            .unwrap();
+        assert_ne!(new_leader_id, original_leader_id);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let new_leader_node = nodes.iter().find(|n| n.node_id() == new_leader_id).unwrap();
+        let new_leader_raft = new_leader_node
+            .group_manager()
+            .get_raft(group_id)
+            .await
+            .unwrap();
+        let second_resp = new_leader_raft.client_write(entry_bytes).await.unwrap();
+        let second_payload = decode_apply_success(&second_resp.data);
+        assert_eq!(second_payload, first_payload, "replay should return cached bytes");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            applied.lock().unwrap().len(),
+            3,
+            "retry after leader switch must not trigger additional service.handle calls"
+        );
+
+        shutdown_all(&nodes).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_committed_entry_applies_exactly_once_after_leader_crash() {
+        let group_id = 102;
+        let (_svc, applied) = CountingService::new();
+        let (nodes, _injector) = build_3node_cluster_with_factory(
+            counting_factory(Arc::clone(&applied)),
+            group_id,
+        )
+        .await
+        .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, group_id, 8_000).await.unwrap();
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let leader_raft = leader_node.group_manager().get_raft(group_id).await.unwrap();
+
+        let idem_key = IdempotencyKey::with_client_id("idempotency-test", 1, "test-client-1");
+        let entry_bytes = FramedEntry::from_payload(b"hello-idempotent".to_vec())
+            .with_idem_key(idem_key)
+            .encode()
+            .unwrap();
+
+        let first_resp = leader_raft.client_write(entry_bytes.clone()).await.unwrap();
+        let first_payload = decode_apply_success(&first_resp.data);
+        assert_eq!(first_payload, b"hello-idempotent".to_vec());
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            applied.lock().unwrap().len(),
+            3,
+            "committed keyed entry should apply once per node"
+        );
+
+        leader_node.shutdown().await.unwrap();
+        let survivors: Vec<_> = nodes
+            .iter()
+            .filter(|n| n.node_id() != leader_id)
+            .cloned()
+            .collect();
+
+        let new_leader_id = wait_for_new_leader(&survivors, group_id, leader_id, 12_000)
+            .await
+            .unwrap();
+        let new_leader_node = survivors
+            .iter()
+            .find(|n| n.node_id() == new_leader_id)
+            .unwrap();
+        let new_leader_raft = new_leader_node
+            .group_manager()
+            .get_raft(group_id)
+            .await
+            .unwrap();
+
+        let second_resp = new_leader_raft.client_write(entry_bytes).await.unwrap();
+        let second_payload = decode_apply_success(&second_resp.data);
+        assert_eq!(second_payload, first_payload, "retry should return cached bytes");
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            applied.lock().unwrap().len(),
+            3,
+            "retry after leader crash must not re-apply already committed request"
+        );
+
+        shutdown_all(&survivors).await;
     }
 
     /// Verify HTTP /health, /ready, /metrics endpoints work end-to-end.

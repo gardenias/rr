@@ -285,3 +285,84 @@ async fn restored_adapter_seeds_new_ingestor_with_persisted_offset() {
         .await
         .expect("the persisted bytes must round-trip back through DynCommandIngestor::seek_bytes");
 }
+
+/// T-003 — Ingestor restart with overlapping offsets must not lose or duplicate
+/// messages. Simulates leader-switch recovery where the new ingestor re-seeks
+/// from last_applied_offset and replays a partially-overlapping stream.
+#[tokio::test]
+async fn test_ingestor_survives_leader_switch_no_message_loss() {
+    let svc = RecordingService::default();
+    let applied_handle = svc.applied.clone();
+    let mgr = make_single_node_leader(svc, 5).await;
+
+    // Phase 1 — ingest offsets 0..5
+    let (ingestor, h) = MockKafkaIngestor::new();
+    for i in 0..5_i64 {
+        h.push(i, format!("evt-{i}").into_bytes()).await;
+    }
+
+    let auto_idem = AutoIdempotency {
+        request_type: "test_topic_5".into(),
+        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+    };
+    let dyn_ingestor: Box<dyn DynCommandIngestor> = Box::new(ingestor);
+    mgr.attach_ingestor_with_auto_idempotency(5, dyn_ingestor, auto_idem)
+        .await
+        .unwrap();
+
+    wait_for_applied(
+        &RecordingService {
+            applied: applied_handle.clone(),
+        },
+        5,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    // Stop ingestor (simulates leader step-down / ingestor teardown)
+    mgr.stop_ingestor(5).await.unwrap();
+
+    // Phase 2 — new ingestor with overlapping stream: offsets 0..10
+    // Offsets 0..4 are duplicates, 5..9 are new. Auto-idempotency must dedup
+    // the overlap so the service sees exactly 10 unique entries total.
+    let (replay_ingestor, h2) = MockKafkaIngestor::new();
+    for i in 0..10_i64 {
+        h2.push(i, format!("evt-{i}").into_bytes()).await;
+    }
+
+    let replay_auto_idem = AutoIdempotency {
+        request_type: "test_topic_5".into(),
+        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+    };
+    let dyn_replay: Box<dyn DynCommandIngestor> = Box::new(replay_ingestor);
+    mgr.attach_ingestor_with_auto_idempotency(5, dyn_replay, replay_auto_idem)
+        .await
+        .unwrap();
+
+    wait_for_applied(
+        &RecordingService {
+            applied: applied_handle.clone(),
+        },
+        10,
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let recorded = applied_handle.lock().await.clone();
+    assert_eq!(
+        recorded.len(),
+        10,
+        "auto-idempotency must dedup replayed offsets — expected 10 applied total, got {}: {:?}",
+        recorded.len(),
+        recorded
+    );
+
+    // Verify ordering: first 5 should be evt-0..evt-4, next 5 evt-5..evt-9
+    for (i, payload) in recorded.iter().enumerate() {
+        let expected = format!("evt-{i}").into_bytes();
+        assert_eq!(*payload, expected, "message at index {i} must match expected payload");
+    }
+
+    mgr.stop_ingestor(5).await.unwrap();
+    mgr.stop_group(5).await.unwrap();
+}
