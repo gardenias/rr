@@ -4,13 +4,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Instant;
 use std::sync::Arc;
 
+use bincode::config::standard;
 use metrics::{counter, gauge, histogram};
 use openraft::BasicNode;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
 
 use rr_core::error::{RaftError, RrError};
-use rr_core::state_machine::StateMachine;
+use rr_core::state_machine::{IngestorOffsetControl, StateMachine};
 use rr_core::types::{GroupId, NodeId};
 
 use crate::network_factory::{ChannelPoolLike, GrpcNetworkFactory};
@@ -39,6 +40,10 @@ pub struct RaftGroupManager {
     /// cancels and joins them.
     metrics_tickers:
         Arc<RwLock<HashMap<GroupId, crate::metrics_ticker::MetricsTickerHandle>>>,
+    /// Per-group optional control handle for directly overriding the
+    /// state machine's persisted ingestor offset.
+    ingestor_offset_controls:
+        Arc<RwLock<HashMap<GroupId, Arc<dyn IngestorOffsetControl>>>>,
     /// Per-group auto-promote-learner supervisors. Optional; populated
     /// by [`Self::start_learner_promoter`]; stop_group + Drop both
     /// clean these up.
@@ -62,6 +67,7 @@ impl RaftGroupManager {
             channel_pool: None,
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
+            ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
@@ -85,6 +91,7 @@ impl RaftGroupManager {
             channel_pool: Some(channel_pool),
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
+            ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
@@ -107,6 +114,7 @@ impl RaftGroupManager {
         }
 
         let sm = (self.sm_factory)(group_id);
+        let ingestor_offset_control = sm.ingestor_offset_control();
 
         let node = if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
@@ -123,6 +131,13 @@ impl RaftGroupManager {
         let node_id = self.node_id;
         counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
         guard.insert(group_id, node);
+        drop(guard);
+        if let Some(control) = ingestor_offset_control {
+            self.ingestor_offset_controls
+                .write()
+                .await
+                .insert(group_id, control);
+        }
         Ok(())
     }
 
@@ -221,6 +236,7 @@ impl RaftGroupManager {
         if let Some(handle) = self.ingestor_handles.write().await.remove(&group_id) {
             handle.stop().await;
         }
+        self.ingestor_offset_controls.write().await.remove(&group_id);
         if let Some(ticker) = self.metrics_tickers.write().await.remove(&group_id) {
             ticker.stop().await;
         }
@@ -458,6 +474,64 @@ impl RaftGroupManager {
         Ok(result.data)
     }
 
+    /// Override the state machine's latest ingestor offset for `group_id`.
+    ///
+    /// The offset is persisted in the adapter-level ingestor state and then
+    /// emitted in subsequent snapshots. `None` clears/unsets the value.
+    pub async fn set_ingestor_offset(
+        &self,
+        group_id: GroupId,
+        offset: Option<i64>,
+    ) -> Result<(), RrError> {
+        if self.get_raft(group_id).await.is_none() {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
+
+        let control = self
+            .ingestor_offset_controls
+            .read()
+            .await
+            .get(&group_id)
+            .cloned()
+            .ok_or_else(|| {
+                RrError::Application(format!(
+                    "group {group_id} state machine does not support ingestor offset override"
+                ))
+            })?;
+
+        let encoded = match offset {
+            Some(v) => Some(
+                bincode::serde::encode_to_vec(v, standard())
+                    .map_err(|e| RrError::Application(format!("encode ingestor offset: {e}")))?,
+            ),
+            None => None,
+        };
+        control.set_offset(encoded);
+        Ok(())
+    }
+
+    /// Read current ingestor offset bytes from state-machine adapter control.
+    pub async fn latest_ingestor_offset(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Option<Vec<u8>>, RrError> {
+        if self.get_raft(group_id).await.is_none() {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
+        let control = self
+            .ingestor_offset_controls
+            .read()
+            .await
+            .get(&group_id)
+            .cloned()
+            .ok_or_else(|| {
+                RrError::Application(format!(
+                    "group {group_id} state machine does not support ingestor offset override"
+                ))
+            })?;
+        Ok(control.get_offset())
+    }
+
     /// Get a reference to a Raft group's `openraft::Raft` instance.
     ///
     /// Returns `None` if the group does not exist.
@@ -498,6 +572,7 @@ impl RaftGroupManager {
             channel_pool: None,
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
+            ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             rocks_base_path: Some(base_path),
         }
@@ -522,6 +597,7 @@ impl RaftGroupManager {
             )));
         }
         let sm = (self.sm_factory)(group_id);
+        let ingestor_offset_control = sm.ingestor_offset_control();
         let node =
             RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
                 .await
@@ -535,6 +611,13 @@ impl RaftGroupManager {
         let node_id = self.node_id;
         counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
         guard.insert(group_id, node);
+        drop(guard);
+        if let Some(control) = ingestor_offset_control {
+            self.ingestor_offset_controls
+                .write()
+                .await
+                .insert(group_id, control);
+        }
         Ok(())
     }
 }
@@ -543,11 +626,36 @@ impl RaftGroupManager {
 mod tests {
     use super::*;
     use crate::network_factory::ChannelPool;
+    use crate::service_adapter::ServiceStateMachineAdapter;
     use async_trait::async_trait;
+    use bincode::config::standard;
     use rr_core::error::RrError;
+    use rr_core::service::Service;
     use rr_core::types::LogIndex;
 
     struct NoopSM;
+
+    #[derive(Clone)]
+    struct NoopService;
+
+    #[async_trait]
+    impl Service for NoopService {
+        async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+            Ok(request)
+        }
+
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(Vec::new())
+        }
+
+        async fn restore(&mut self, _data: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+    }
 
     #[async_trait]
     impl StateMachine for NoopSM {
@@ -570,6 +678,10 @@ mod tests {
 
     fn noop_factory() -> StateMachineFactory {
         Box::new(|_group_id| Box::new(NoopSM))
+    }
+
+    fn offset_capable_factory() -> StateMachineFactory {
+        Box::new(|group_id| Box::new(ServiceStateMachineAdapter::new(group_id, NoopService)))
     }
 
     #[tokio::test]
@@ -787,6 +899,25 @@ mod tests {
         // Write should succeed and record metrics without panic
         let result = mgr.write(1, vec![1, 2, 3]).await;
         assert!(result.is_ok(), "write failed: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_set_ingestor_offset_updates_adapter_control() {
+        let mgr = RaftGroupManager::new(1, offset_capable_factory());
+        mgr.start_group(1).await.unwrap();
+
+        mgr.set_ingestor_offset(1, Some(123)).await.unwrap();
+        let raw = mgr
+            .latest_ingestor_offset(1)
+            .await
+            .unwrap()
+            .expect("offset should be present");
+        let (decoded, _): (i64, usize) =
+            bincode::serde::decode_from_slice(&raw, standard()).unwrap();
+        assert_eq!(decoded, 123);
+
+        mgr.set_ingestor_offset(1, None).await.unwrap();
+        assert!(mgr.latest_ingestor_offset(1).await.unwrap().is_none());
     }
 
 }

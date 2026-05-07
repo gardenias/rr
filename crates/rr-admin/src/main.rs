@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rr_network::proto::admin::admin_service_client::AdminServiceClient;
 use rr_network::proto::admin::{
     online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
-    Empty, GroupId, OnlineBackupRequest, TransferLeaderRequest,
+    Empty, GroupId, OnlineBackupRequest, ResetIngestorOffsetRequest, TransferLeaderRequest,
 };
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::ClientRequest;
@@ -220,6 +220,17 @@ enum GroupCommands {
         /// Comma-separated list of voter node IDs (e.g. `1,2,3`).
         #[arg(long)]
         voters: String,
+    },
+    /// Override persisted ingestor offset for disaster recovery.
+    ///
+    /// Use `--offset -1` to clear/unset the persisted offset.
+    ResetIngestorOffset {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+        /// New ingestor offset to persist. `-1` means clear/unset.
+        #[arg(long, allow_hyphen_values = true)]
+        offset: i64,
     },
     /// Show the current voter + learner membership of a Raft group.
     Membership {
@@ -524,6 +535,34 @@ async fn main() -> Result<()> {
                         }
                         OutputFormat::Human => {
                             println!("ChangeMembership: success={} message={}", resp.success, resp.message);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::ResetIngestorOffset { group, offset },
+                } => {
+                    let resp = client
+                        .reset_ingestor_offset(ResetIngestorOffsetRequest {
+                            group_id: *group,
+                            offset: *offset,
+                        })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "success": resp.success,
+                                "message": resp.message,
+                                "group_id": group,
+                                "offset": offset,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!(
+                                "ResetIngestorOffset: success={} group={} offset={} message={}",
+                                resp.success, group, offset, resp.message
+                            );
                         }
                     }
                 }
@@ -973,6 +1012,52 @@ mod tests {
                 assert_eq!(voters, "1,2,3");
             }
             other => panic!("expected ChangeMembership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_group_reset_ingestor_offset() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "group",
+            "reset-ingestor-offset",
+            "--group",
+            "1",
+            "--offset",
+            "100",
+        ])
+        .expect("should parse reset-ingestor-offset");
+        match cli.command {
+            Commands::Group {
+                cmd: GroupCommands::ResetIngestorOffset { group, offset },
+            } => {
+                assert_eq!(group, 1);
+                assert_eq!(offset, 100);
+            }
+            other => panic!("expected ResetIngestorOffset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_group_reset_ingestor_offset_negative_one() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "group",
+            "reset-ingestor-offset",
+            "--group",
+            "1",
+            "--offset",
+            "-1",
+        ])
+        .expect("should parse reset-ingestor-offset --offset -1");
+        match cli.command {
+            Commands::Group {
+                cmd: GroupCommands::ResetIngestorOffset { group, offset },
+            } => {
+                assert_eq!(group, 1);
+                assert_eq!(offset, -1);
+            }
+            other => panic!("expected ResetIngestorOffset, got {other:?}"),
         }
     }
 

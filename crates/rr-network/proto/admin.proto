@@ -18,6 +18,9 @@ service AdminService {
     /// Replace the voter set of a Raft group. Removed voters are kept
     /// as learners (`retain = true`). Must be called on the leader.
     rpc ChangeMembership(ChangeMembershipRequest) returns (ChangeMembershipResponse);
+    /// Override the persisted ingestor offset for disaster recovery.
+    /// `offset = -1` clears/unsets the persisted offset.
+    rpc ResetIngestorOffset(ResetIngestorOffsetRequest) returns (ActionResult);
     /// Get the current Raft group membership (voters + learners).
     rpc GetGroupMembership(GroupId) returns (GroupMembership);
     /// Stream a non-disruptive snapshot of a Raft group to the caller.
@@ -88,6 +91,16 @@ message ChangeMembershipRequest {
 }
 
 message ChangeMembershipResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+message ResetIngestorOffsetRequest {
+    uint64 group_id = 1;
+    int64 offset = 2;
+}
+
+message ActionResult {
     bool success = 1;
     string message = 2;
 }

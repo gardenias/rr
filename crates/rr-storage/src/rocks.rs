@@ -2,8 +2,6 @@
 //!
 //! Uses RocksDB for persistent, efficient key-value storage with column families.
 
-#![cfg(feature = "rocks")]
-
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DBCompressionType, Direction, IteratorMode,
     Options, ReadOptions, WriteBatch, WriteOptions, DB,
@@ -12,6 +10,19 @@ use std::sync::Arc;
 
 use rr_core::error::StorageError;
 use rr_core::storage::{BatchOp, StorageEngine};
+
+/// Per-column-family RocksDB option overrides.
+///
+/// `None` fields inherit from the global [`RocksConfig`] defaults.
+#[derive(Debug, Clone, Default)]
+pub struct CfOptions {
+    /// Write buffer size in MiB. Overrides [`RocksConfig::write_buffer_size_mb`] for this CF.
+    pub write_buffer_size_mb: Option<u64>,
+    /// Block cache size in MiB. Overrides [`RocksConfig::block_cache_size_mb`] for this CF.
+    pub block_cache_size_mb: Option<u64>,
+    /// Compression type. Overrides [`RocksConfig::compression`] for this CF.
+    pub compression: Option<DBCompressionType>,
+}
 
 /// Durability policy controlling when RocksDB syncs writes to disk.
 ///
@@ -160,6 +171,12 @@ pub struct RocksConfig {
     /// **WARNING**: weakening this below `Strict` violates Raft's durability
     /// contract. Only do so with a full understanding of the consequences.
     pub durability: DurabilityPolicy,
+    /// Per-CF tuning overrides for the `raft_log` column family.
+    /// Recommended: larger write_buffer for write-heavy log append workload.
+    pub raft_log_cf: Option<CfOptions>,
+    /// Per-CF tuning overrides for the `state_machine` column family.
+    /// Recommended: larger block_cache for read-heavy application state.
+    pub state_machine_cf: Option<CfOptions>,
 }
 
 impl Default for RocksConfig {
@@ -173,6 +190,8 @@ impl Default for RocksConfig {
             level_zero_slowdown_trigger: 20,
             level_zero_stop_trigger: 36,
             durability: DurabilityPolicy::Strict,
+            raft_log_cf: None,
+            state_machine_cf: None,
         }
     }
 }
@@ -194,6 +213,8 @@ impl RocksConfig {
             level_zero_slowdown_trigger: 20,
             level_zero_stop_trigger: 36,
             durability: DurabilityPolicy::TestOnly,
+            raft_log_cf: None,
+            state_machine_cf: None,
         }
     }
 }
@@ -207,6 +228,42 @@ impl RocksConfig {
 pub struct RocksStorage {
     db: Arc<DB>,
     durability: DurabilityPolicy,
+}
+
+fn build_cf_options(base_config: &RocksConfig, overrides: Option<&CfOptions>) -> Options {
+    let mut opts = Options::default();
+    opts.set_write_buffer_size(base_config.write_buffer_size_mb * 1024 * 1024);
+    opts.set_max_write_buffer_number(base_config.max_write_buffer_number);
+    opts.set_max_background_jobs(base_config.max_background_jobs);
+    opts.set_compression_type(base_config.compression);
+    opts.set_level_zero_slowdown_writes_trigger(base_config.level_zero_slowdown_trigger);
+    opts.set_level_zero_stop_writes_trigger(base_config.level_zero_stop_trigger);
+
+    let block_cache_size_mb = overrides
+        .and_then(|o| o.block_cache_size_mb)
+        .map(|mb| mb as usize)
+        .unwrap_or(base_config.block_cache_size_mb);
+    let cache = Cache::new_lru_cache(block_cache_size_mb * 1024 * 1024);
+    let mut bb_opts = BlockBasedOptions::default();
+    bb_opts.set_block_cache(&cache);
+    opts.set_block_based_table_factory(&bb_opts);
+
+    if let Some(overrides) = overrides {
+        if let Some(write_buffer_size_mb) = overrides.write_buffer_size_mb {
+            opts.set_write_buffer_size(write_buffer_size_mb as usize * 1024 * 1024);
+        }
+        if let Some(compression) = overrides.compression {
+            opts.set_compression_type(compression);
+        }
+        if let Some(block_cache_size_mb) = overrides.block_cache_size_mb {
+            let cache = Cache::new_lru_cache(block_cache_size_mb as usize * 1024 * 1024);
+            let mut bb_opts = BlockBasedOptions::default();
+            bb_opts.set_block_cache(&cache);
+            opts.set_block_based_table_factory(&bb_opts);
+        }
+    }
+
+    opts
 }
 
 impl RocksStorage {
@@ -252,14 +309,20 @@ impl RocksStorage {
 
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = cfs
             .iter()
-            .map(|name| ColumnFamilyDescriptor::new(*name, Options::default()))
+            .map(|name| {
+                let cf_opts = match *name {
+                    "raft_log" => build_cf_options(&config, config.raft_log_cf.as_ref()),
+                    "state_machine" => {
+                        build_cf_options(&config, config.state_machine_cf.as_ref())
+                    }
+                    _ => Options::default(),
+                };
+                ColumnFamilyDescriptor::new(*name, cf_opts)
+            })
             .collect();
 
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?;
 
         Ok(Self {
@@ -319,18 +382,12 @@ impl StorageEngine for RocksStorage {
             })?;
             let write_opts = durability.write_options();
             db.put_cf_opt(&handle, &key, &value, &write_opts).map_err(|e| {
-                StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
+                StorageError::Io(std::io::Error::other(e.to_string()))
             })
         })
         .await
         .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?
     }
 
@@ -343,18 +400,12 @@ impl StorageEngine for RocksStorage {
                 key: format!("cf:{cf}"),
             })?;
             db.get_cf(&handle, &key).map_err(|e| {
-                StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
+                StorageError::Io(std::io::Error::other(e.to_string()))
             })
         })
         .await
         .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?
     }
 
@@ -369,18 +420,12 @@ impl StorageEngine for RocksStorage {
             })?;
             let write_opts = durability.write_options();
             db.delete_cf_opt(&handle, &key, &write_opts).map_err(|e| {
-                StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
+                StorageError::Io(std::io::Error::other(e.to_string()))
             })
         })
         .await
         .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?
     }
 
@@ -408,10 +453,7 @@ impl StorageEngine for RocksStorage {
             let mut results = Vec::new();
             for item in iter {
                 let (k, v) = item.map_err(|e| {
-                    StorageError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))
+                    StorageError::Io(std::io::Error::other(e.to_string()))
                 })?;
                 results.push((k.to_vec(), v.to_vec()));
             }
@@ -419,10 +461,7 @@ impl StorageEngine for RocksStorage {
         })
         .await
         .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?
     }
 
@@ -449,18 +488,12 @@ impl StorageEngine for RocksStorage {
             }
             let write_opts = durability.write_options();
             db.write_opt(batch, &write_opts).map_err(|e| {
-                StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
+                StorageError::Io(std::io::Error::other(e.to_string()))
             })
         })
         .await
         .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?
     }
 
@@ -468,18 +501,12 @@ impl StorageEngine for RocksStorage {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
             db.flush().map_err(|e| {
-                StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
+                StorageError::Io(std::io::Error::other(e.to_string()))
             })
         })
         .await
         .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?
     }
 
@@ -489,18 +516,12 @@ impl StorageEngine for RocksStorage {
         tokio::task::spawn_blocking(move || {
             let opts = Options::default();
             db.create_cf(&name, &opts).map_err(|e| {
-                StorageError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))
+                StorageError::Io(std::io::Error::other(e.to_string()))
             })
         })
         .await
         .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
+            StorageError::Io(std::io::Error::other(e.to_string()))
         })?
     }
 }
@@ -524,6 +545,27 @@ mod tests {
         let storage =
             RocksStorage::open_default(tmp.path().to_str().unwrap()).expect("should open");
         drop(storage); // verify clean close
+    }
+
+    #[test]
+    fn cf_options_default_is_none() {
+        let opts = CfOptions::default();
+        assert!(opts.write_buffer_size_mb.is_none());
+        assert!(opts.block_cache_size_mb.is_none());
+        assert!(opts.compression.is_none());
+    }
+
+    #[test]
+    fn rocks_config_default_has_no_cf_overrides() {
+        let config = RocksConfig::default();
+        assert!(config.raft_log_cf.is_none());
+        assert!(config.state_machine_cf.is_none());
+    }
+
+    #[test]
+    fn build_cf_options_without_overrides_inherits_global() {
+        let config = RocksConfig::default();
+        let _opts = build_cf_options(&config, None);
     }
 
     #[tokio::test]
@@ -705,6 +747,26 @@ mod tests {
         assert_eq!(results[1].1, b"entry_2".to_vec());
     }
 
+    #[tokio::test]
+    async fn open_with_cf_overrides_succeeds() {
+        let tmp = TempDir::new().unwrap();
+        let config = RocksConfig {
+            raft_log_cf: Some(CfOptions {
+                write_buffer_size_mb: Some(16),
+                ..CfOptions::default()
+            }),
+            ..RocksConfig::for_testing()
+        };
+        let storage = RocksStorage::open(
+            tmp.path().to_str().unwrap(),
+            vec!["raft_log", "state_machine", "metadata"],
+            config,
+        )
+        .expect("should open with cf overrides");
+        storage.put("raft_log", b"k", b"v").await.unwrap();
+        assert_eq!(storage.get("raft_log", b"k").await.unwrap(), Some(b"v".to_vec()));
+    }
+
     #[test]
     fn test_rocks_config_default_values() {
         let config = RocksConfig::default();
@@ -751,6 +813,8 @@ mod tests {
             level_zero_slowdown_trigger: 10,
             level_zero_stop_trigger: 20,
             durability: DurabilityPolicy::ReplicatedOnly,
+            raft_log_cf: None,
+            state_machine_cf: None,
         };
         let storage = RocksStorage::open(
             tmp.path().to_str().unwrap(),

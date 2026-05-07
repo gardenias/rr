@@ -274,11 +274,11 @@ async fn restored_adapter_seeds_new_ingestor_with_persisted_offset() {
         .latest_ingestor_offset()
         .expect("restored adapter must surface the persisted offset");
     let (decoded, _): (i64, _) =
-        bincode::serde::decode_from_slice(raw, bincode::config::standard()).unwrap();
+        bincode::serde::decode_from_slice(&raw, bincode::config::standard()).unwrap();
     assert_eq!(decoded, 42);
 
     let (mut ingestor, _h) = MockKafkaIngestor::new();
-    let raw_offset = adapter2.latest_ingestor_offset().unwrap().to_vec();
+    let raw_offset = adapter2.latest_ingestor_offset().unwrap();
     let dyn_ing: &mut dyn DynCommandIngestor = &mut ingestor;
     dyn_ing
         .seek_bytes(Some(&raw_offset))

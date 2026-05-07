@@ -127,11 +127,25 @@ pub async fn spawn_http_server(
     addr: SocketAddr,
     prom_handle: PrometheusHandle,
     readiness: ReadinessFlag,
-    mut shutdown_rx: watch::Receiver<bool>,
+    shutdown_rx: watch::Receiver<bool>,
 ) -> Result<tokio::task::JoinHandle<()>, RrError> {
     let listener = TcpListener::bind(addr).await.map_err(|e| {
         RrError::Config(ConfigError::InvalidConfig(format!(
             "failed to bind HTTP observability port {addr}: {e}"
+        )))
+    })?;
+    spawn_http_server_inner(listener, prom_handle, readiness, shutdown_rx).await
+}
+
+async fn spawn_http_server_inner(
+    listener: TcpListener,
+    prom_handle: PrometheusHandle,
+    readiness: ReadinessFlag,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<tokio::task::JoinHandle<()>, RrError> {
+    let addr = listener.local_addr().map_err(|e| {
+        RrError::Config(ConfigError::InvalidConfig(format!(
+            "failed to get local addr: {e}"
         )))
     })?;
     info!(%addr, "HTTP observability server listening (/health /ready /metrics)");
@@ -324,5 +338,212 @@ mod tests {
         r.set(true);
         let resp = ready_response(&r);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    async fn http_get(port: u16, path: &str) -> (u16, String, String) {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .await
+            .unwrap();
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+            path, port
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut header_buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = stream.read(&mut byte).await.unwrap();
+            assert_eq!(n, 1);
+            header_buf.push(byte[0]);
+            let len = header_buf.len();
+            if len >= 4 && &header_buf[len - 4..] == b"\r\n\r\n" {
+                break;
+            }
+        }
+
+        let head = String::from_utf8_lossy(&header_buf);
+        let status_line = head.lines().next().unwrap_or("");
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
+
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let lower = line.to_lowercase();
+                lower
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+
+        let mut body_buf = vec![0u8; content_length];
+        if content_length > 0 {
+            stream.read_exact(&mut body_buf).await.unwrap();
+        }
+
+        (status_code, head.to_string(), String::from_utf8_lossy(&body_buf).to_string())
+    }
+
+    fn test_prom_handle() -> PrometheusHandle {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _ = metrics::set_global_recorder(recorder);
+        handle
+    }
+
+    #[tokio::test]
+    async fn http_health_returns_200_ok() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
+            .await
+            .unwrap();
+
+        let (status, _headers, body) = http_get(port, "/health").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "ok\n");
+
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn http_ready_not_ready_returns_503() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
+            .await
+            .unwrap();
+
+        let (status, _headers, body) = http_get(port, "/ready").await;
+        assert_eq!(status, 503);
+
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["ready"], serde_json::Value::Bool(false));
+
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn http_ready_when_ready_returns_200() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        readiness.set(true);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
+            .await
+            .unwrap();
+
+        let (status, _headers, body) = http_get(port, "/ready").await;
+        assert_eq!(status, 200);
+
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["ready"], serde_json::Value::Bool(true));
+
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn http_ready_body_has_correct_json_shape() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
+            .await
+            .unwrap();
+
+        let (_status, _headers, body) = http_get(port, "/ready").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert!(json.get("ready").is_some());
+        assert!(json.get("reason").is_some());
+        assert!(json.get("since_unix_secs").is_some());
+
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn http_metrics_returns_200_with_text_plain() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
+            .await
+            .unwrap();
+
+        let (status, headers, _body) = http_get(port, "/metrics").await;
+        assert_eq!(status, 200);
+        assert!(
+            headers.to_lowercase().contains("content-type: text/plain"),
+            "expected text/plain content-type, got headers:\n{}",
+            headers
+        );
+
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn http_unknown_path_returns_404() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
+            .await
+            .unwrap();
+
+        let (status, _headers, body) = http_get(port, "/xyz").await;
+        assert_eq!(status, 404);
+        assert_eq!(body, "not found\n");
+
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn http_server_stops_on_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
+            .await
+            .unwrap();
+
+        let (status, _, _) = http_get(port, "/health").await;
+        assert_eq!(status, 200);
+
+        let _ = shutdown_tx.send(true);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
+        assert!(result.is_ok(), "server should stop within 2 seconds");
     }
 }

@@ -38,13 +38,14 @@
 //! only the user's raw bytes — the framing is invisible to them.
 
 use async_trait::async_trait;
+use std::sync::{Arc, RwLock};
 
 use rr_core::error::RrError;
 use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::{FramedSnapshot, IngestorState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
 use rr_core::service::Service;
-use rr_core::state_machine::StateMachine;
+use rr_core::state_machine::{IngestorOffsetControl, StateMachine};
 use rr_core::types::{GroupId, LogIndex};
 
 use crate::idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
@@ -73,7 +74,31 @@ pub struct ServiceStateMachineAdapter<S: Service> {
     /// so a new leader can call `ingestor.seek()` after restore.
     /// `None` if no ingestor-sourced entry has been applied yet on
     /// this adapter instance.
-    latest_ingestor_offset: Option<Vec<u8>>,
+    latest_ingestor_offset: Arc<RwLock<Option<Vec<u8>>>>,
+    ingestor_offset_control: Arc<dyn IngestorOffsetControl>,
+}
+
+struct SharedIngestorOffsetControl {
+    inner: Arc<RwLock<Option<Vec<u8>>>>,
+}
+
+impl SharedIngestorOffsetControl {
+    fn new(inner: Arc<RwLock<Option<Vec<u8>>>>) -> Self {
+        Self { inner }
+    }
+}
+
+impl IngestorOffsetControl for SharedIngestorOffsetControl {
+    fn set_offset(&self, offset: Option<Vec<u8>>) {
+        *self.inner.write().expect("latest_ingestor_offset lock poisoned") = offset;
+    }
+
+    fn get_offset(&self) -> Option<Vec<u8>> {
+        self.inner
+            .read()
+            .expect("latest_ingestor_offset lock poisoned")
+            .clone()
+    }
 }
 
 impl<S: Service> ServiceStateMachineAdapter<S> {
@@ -88,12 +113,17 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
     /// Use this in tests or when memory constraints differ from the
     /// default 10 000 entries.
     pub fn with_idempotency_capacity(group_id: GroupId, service: S, capacity: usize) -> Self {
+        let latest_ingestor_offset = Arc::new(RwLock::new(None));
+        let ingestor_offset_control = Arc::new(SharedIngestorOffsetControl::new(
+            latest_ingestor_offset.clone(),
+        )) as Arc<dyn IngestorOffsetControl>;
         Self {
             group_id,
             service,
             applied_count: 0,
             idempotency: IdempotencyLayer::new(capacity),
-            latest_ingestor_offset: None,
+            latest_ingestor_offset,
+            ingestor_offset_control,
         }
     }
 
@@ -101,8 +131,20 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
     /// observed via [`FramedEntry::offset`]. Used by the framework's
     /// ingestor lifecycle hook on leader promotion to seed
     /// `ingestor.seek()` without needing to decode the full snapshot.
-    pub fn latest_ingestor_offset(&self) -> Option<&[u8]> {
-        self.latest_ingestor_offset.as_deref()
+    pub fn latest_ingestor_offset(&self) -> Option<Vec<u8>> {
+        self.latest_ingestor_offset
+            .read()
+            .expect("latest_ingestor_offset lock poisoned")
+            .clone()
+    }
+
+    /// Override the persisted ingestor offset bytes tracked by this adapter.
+    /// `None` clears/unsets the current value.
+    pub fn set_latest_ingestor_offset(&self, offset: Option<Vec<u8>>) {
+        *self
+            .latest_ingestor_offset
+            .write()
+            .expect("latest_ingestor_offset lock poisoned") = offset;
     }
 
     async fn apply_keyed(
@@ -189,7 +231,7 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
         if result.is_ok() {
             self.applied_count += 1;
             if let Some(off) = offset {
-                self.latest_ingestor_offset = Some(off);
+                self.set_latest_ingestor_offset(Some(off));
             }
         }
         result
@@ -201,9 +243,10 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
         if !self.idempotency.is_empty() {
             framed.framework_state.idempotency = Some(self.idempotency.capture()?);
         }
-        if self.latest_ingestor_offset.is_some() {
+        let latest_ingestor_offset = self.latest_ingestor_offset();
+        if latest_ingestor_offset.is_some() {
             framed.framework_state.ingestor = Some(IngestorState {
-                last_applied_offset: self.latest_ingestor_offset.clone(),
+                last_applied_offset: latest_ingestor_offset,
             });
         }
         framed.encode()
@@ -224,7 +267,7 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
                     self.idempotency.restore(idem_state)?;
                 }
                 if let Some(ing_state) = framed.framework_state.ingestor {
-                    self.latest_ingestor_offset = ing_state.last_applied_offset;
+                    self.set_latest_ingestor_offset(ing_state.last_applied_offset);
                 }
                 framed.user_snapshot
             }
@@ -253,6 +296,10 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
         } else {
             Some(self.applied_count)
         }
+    }
+
+    fn ingestor_offset_control(&self) -> Option<Arc<dyn IngestorOffsetControl>> {
+        Some(self.ingestor_offset_control.clone())
     }
 }
 
@@ -599,13 +646,13 @@ mod tests {
             .apply(&entry_with_offset(b"req", vec![0, 0, 0, 1]))
             .await
             .unwrap();
-        assert_eq!(adapter.latest_ingestor_offset(), Some(&[0u8, 0, 0, 1][..]));
+        assert_eq!(adapter.latest_ingestor_offset(), Some(vec![0u8, 0, 0, 1]));
 
         adapter
             .apply(&entry_with_offset(b"req", vec![0, 0, 0, 2]))
             .await
             .unwrap();
-        assert_eq!(adapter.latest_ingestor_offset(), Some(&[0u8, 0, 0, 2][..]));
+        assert_eq!(adapter.latest_ingestor_offset(), Some(vec![0u8, 0, 0, 2]));
     }
 
     #[tokio::test]
@@ -635,7 +682,7 @@ mod tests {
 
         assert_eq!(
             adapter.latest_ingestor_offset(),
-            Some(&[0u8, 0, 0, 5][..]),
+            Some(vec![0u8, 0, 0, 5]),
             "raw legacy entries must not clobber the latest offset"
         );
     }
@@ -690,7 +737,7 @@ mod tests {
 
         assert_eq!(
             adapter2.latest_ingestor_offset(),
-            Some(&[0u8, 0, 0, 99][..]),
+            Some(vec![0u8, 0, 0, 99]),
             "restored adapter must surface the persisted offset so the runner can seek"
         );
     }

@@ -11,16 +11,17 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 
 use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
-    online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, AddLearnerResponse,
-    ChangeMembershipRequest, ChangeMembershipResponse, Empty, GroupId, GroupMembership,
-    GroupStatus, MetricsSummary, NodeMember, NodeStatus, OnlineBackupChunk, OnlineBackupMetadata,
-    OnlineBackupRequest, TransferLeaderRequest, TransferLeaderResponse, TriggerSnapshotResponse,
+    online_backup_chunk::Body as OnlineBackupBody, ActionResult, AddLearnerRequest,
+    AddLearnerResponse, ChangeMembershipRequest, ChangeMembershipResponse, Empty, GroupId,
+    GroupMembership, GroupStatus, MetricsSummary, NodeMember, NodeStatus, OnlineBackupChunk,
+    OnlineBackupMetadata, OnlineBackupRequest, ResetIngestorOffsetRequest, TransferLeaderRequest,
+    TransferLeaderResponse, TriggerSnapshotResponse,
 };
 use rr_raft::group_manager::RaftGroupManager;
 use std::collections::BTreeSet;
@@ -363,6 +364,57 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(response))
     }
 
+    async fn reset_ingestor_offset(
+        &self,
+        request: Request<ResetIngestorOffsetRequest>,
+    ) -> Result<Response<ActionResult>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        let group_id = req.group_id;
+        let offset = req.offset;
+        let new_offset = (offset != -1).then_some(offset);
+
+        match self
+            .group_manager
+            .set_ingestor_offset(group_id, new_offset)
+            .await
+        {
+            Ok(()) => {
+                warn!(
+                    target: AUDIT_TARGET,
+                    op = "reset_ingestor_offset",
+                    peer = %peer,
+                    node_id = self.node_id,
+                    group_id,
+                    new_offset = offset,
+                    result = "ok",
+                    "admin rpc result"
+                );
+                Ok(Response::new(ActionResult {
+                    success: true,
+                    message: "ingestor offset reset".to_string(),
+                }))
+            }
+            Err(e) => {
+                warn!(
+                    target: AUDIT_TARGET,
+                    op = "reset_ingestor_offset",
+                    peer = %peer,
+                    node_id = self.node_id,
+                    group_id,
+                    new_offset = offset,
+                    result = "failed",
+                    error = %e,
+                    "admin rpc result"
+                );
+                Ok(Response::new(ActionResult {
+                    success: false,
+                    message: e.to_string(),
+                }))
+            }
+        }
+    }
+
     async fn get_group_membership(
         &self,
         request: Request<GroupId>,
@@ -536,12 +588,37 @@ impl AdminService for AdminServiceImpl {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use bincode::config::standard;
     use rr_core::error::RrError;
+    use rr_core::service::Service;
     use rr_core::state_machine::StateMachine;
     use rr_core::types::LogIndex;
     use rr_raft::group_manager::StateMachineFactory;
+    use rr_raft::service_adapter::ServiceStateMachineAdapter;
 
     struct NoopSM;
+
+    #[derive(Clone)]
+    struct NoopService;
+
+    #[async_trait]
+    impl Service for NoopService {
+        async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+            Ok(request)
+        }
+
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(Vec::new())
+        }
+
+        async fn restore(&mut self, _data: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+    }
 
     #[async_trait]
     impl StateMachine for NoopSM {
@@ -561,6 +638,10 @@ mod tests {
 
     fn noop_factory() -> StateMachineFactory {
         Box::new(|_group_id| Box::new(NoopSM))
+    }
+
+    fn offset_capable_factory() -> StateMachineFactory {
+        Box::new(|group_id| Box::new(ServiceStateMachineAdapter::new(group_id, NoopService)))
     }
 
     fn make_admin_service() -> AdminServiceImpl {
@@ -700,5 +781,42 @@ mod tests {
     #[test]
     fn online_backup_chunk_size_matches_install_snapshot_convention() {
         assert_eq!(ONLINE_BACKUP_CHUNK_BYTES, 64 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_reset_ingestor_offset_updates_group_manager_offset() {
+        let mgr = Arc::new(RaftGroupManager::new(1, offset_capable_factory()));
+        mgr.start_group(1).await.unwrap();
+        let svc = AdminServiceImpl::new(1, "127.0.0.1:9090".to_string(), mgr.clone());
+
+        let resp = svc
+            .reset_ingestor_offset(Request::new(ResetIngestorOffsetRequest {
+                group_id: 1,
+                offset: 100,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.success, "unexpected failure: {}", resp.message);
+
+        let raw = mgr
+            .latest_ingestor_offset(1)
+            .await
+            .unwrap()
+            .expect("offset bytes should be present");
+        let (decoded, _): (i64, usize) = bincode::serde::decode_from_slice(&raw, standard())
+            .expect("stored bytes should decode as i64");
+        assert_eq!(decoded, 100);
+
+        let cleared = svc
+            .reset_ingestor_offset(Request::new(ResetIngestorOffsetRequest {
+                group_id: 1,
+                offset: -1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(cleared.success, "unexpected failure: {}", cleared.message);
+        assert!(mgr.latest_ingestor_offset(1).await.unwrap().is_none());
     }
 }

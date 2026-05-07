@@ -10,9 +10,26 @@
 //! invariants every implementation must uphold.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::error::RrError;
 use crate::types::LogIndex;
+
+/// Optional runtime control surface for state machines that persist
+/// framework-level ingestor progress.
+///
+/// Implementations may expose this through
+/// [`StateMachine::ingestor_offset_control`] so operators can override
+/// a bad/corrupt persisted ingestor offset during disaster recovery.
+pub trait IngestorOffsetControl: Send + Sync {
+    /// Set the latest ingestor offset bytes.
+    ///
+    /// `None` means clear/unset the persisted offset.
+    fn set_offset(&self, offset: Option<Vec<u8>>);
+
+    /// Read the latest ingestor offset bytes.
+    fn get_offset(&self) -> Option<Vec<u8>>;
+}
 
 /// Low-level trait for implementing a Raft-backed state machine.
 ///
@@ -107,6 +124,14 @@ pub trait StateMachine: Send + Sync {
 
     /// Return the index of the last applied log entry, if any.
     async fn last_applied(&self) -> Option<LogIndex>;
+
+    /// Optional control surface for overriding persisted ingestor offset.
+    ///
+    /// Most state machines don't track ingestor offsets and should keep
+    /// the default `None` implementation.
+    fn ingestor_offset_control(&self) -> Option<Arc<dyn IngestorOffsetControl>> {
+        None
+    }
 }
 
 #[cfg(test)]
