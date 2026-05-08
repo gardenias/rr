@@ -212,9 +212,30 @@ pub struct PerCallerLimiterMap {
 
 impl PerCallerLimiterMap {
     /// Create a new map with the given per-caller rate, burst, and TTL.
+    ///
+    /// Spawns a background tokio task that evicts entries idle for longer
+    /// than `ttl` every `ttl / 2` seconds (minimum 30 s). The task stops
+    /// automatically when all `Arc` clones of this map are dropped.
     pub fn new(per_caller_rps: u32, per_caller_burst: u32, ttl: Duration) -> Self {
+        let entries: Arc<std::sync::RwLock<HashMap<String, CallerEntry>>> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let entries_weak = Arc::downgrade(&entries);
+        let gc_interval = (ttl / 2).max(Duration::from_secs(30));
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(gc_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let Some(map) = entries_weak.upgrade() else { break };
+                let now = Instant::now();
+                let mut guard = map.write().unwrap_or_else(|p| p.into_inner());
+                guard.retain(|_, entry| now.duration_since(entry.last_seen) <= ttl);
+            }
+        });
+
         Self {
-            entries: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            entries,
             per_caller_rps,
             per_caller_burst,
             ttl,
@@ -228,11 +249,11 @@ impl PerCallerLimiterMap {
     /// Returns `true` when the caller still has quota.
     pub fn try_acquire(&self, caller_fp: &str) -> bool {
         {
-            let read_guard = self.entries.read().unwrap();
+            let read_guard = self.entries.read().unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(entry) = read_guard.get(caller_fp) {
                 if entry.limiter.try_acquire() {
                     drop(read_guard);
-                    let mut write_guard = self.entries.write().unwrap();
+                    let mut write_guard = self.entries.write().unwrap_or_else(|poisoned| poisoned.into_inner());
                     if let Some(entry) = write_guard.get_mut(caller_fp) {
                         entry.last_seen = Instant::now();
                     }
@@ -242,7 +263,7 @@ impl PerCallerLimiterMap {
             }
         }
 
-        let mut write_guard = self.entries.write().unwrap();
+        let mut write_guard = self.entries.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.evict_stale(&mut write_guard);
 
         if let Some(entry) = write_guard.get_mut(caller_fp) {

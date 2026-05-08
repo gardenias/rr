@@ -102,13 +102,13 @@ impl SharedIngestorOffsetControl {
 
 impl IngestorOffsetControl for SharedIngestorOffsetControl {
     fn set_offset(&self, offset: Option<Vec<u8>>) {
-        *self.inner.write().expect("latest_ingestor_offset lock poisoned") = offset;
+        *self.inner.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = offset;
     }
 
     fn get_offset(&self) -> Option<Vec<u8>> {
         self.inner
             .read()
-            .expect("latest_ingestor_offset lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 }
@@ -146,7 +146,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
     pub fn latest_ingestor_offset(&self) -> Option<Vec<u8>> {
         self.latest_ingestor_offset
             .read()
-            .expect("latest_ingestor_offset lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
 
@@ -156,7 +156,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         *self
             .latest_ingestor_offset
             .write()
-            .expect("latest_ingestor_offset lock poisoned") = offset;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = offset;
     }
 
     async fn apply_keyed(
