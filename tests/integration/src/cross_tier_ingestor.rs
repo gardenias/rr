@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use openraft::BasicNode;
+use openraft::type_config::async_runtime::WatchReceiver;
 use tokio::sync::Mutex;
 
 use rr_core::error::RrError;
@@ -85,7 +86,7 @@ async fn make_single_node_leader(
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let raft = mgr.get_raft(group_id).await.unwrap();
     assert!(
-        raft.metrics().borrow().current_leader.is_some(),
+        raft.metrics().borrow_watched().current_leader.is_some(),
         "single-node cluster failed to elect a leader"
     );
     mgr

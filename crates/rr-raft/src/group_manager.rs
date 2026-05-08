@@ -7,6 +7,7 @@ use std::sync::Arc;
 use bincode::config::standard;
 use metrics::{counter, gauge, histogram};
 use openraft::BasicNode;
+use openraft::type_config::async_runtime::WatchReceiver;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
 
@@ -451,7 +452,7 @@ impl RaftGroupManager {
 
         let start = Instant::now();
         let result = raft
-            .client_write(payload)
+            .client_write(payload.into())
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
 
@@ -460,7 +461,7 @@ impl RaftGroupManager {
             .record(start.elapsed().as_secs_f64());
 
         // Update raft gauge metrics from the current raft state.
-        let m = raft.metrics().borrow().clone();
+        let m = raft.metrics().borrow_watched().clone();
         let is_leader = if matches!(m.state, openraft::ServerState::Leader) {
             1.0_f64
         } else {
@@ -471,7 +472,7 @@ impl RaftGroupManager {
         gauge!("rr_raft_last_log_index", "group_id" => gid)
             .set(m.last_log_index.unwrap_or(0) as f64);
 
-        Ok(result.data)
+        Ok(result.data.into())
     }
 
     /// Override the state machine's latest ingestor offset for `group_id`.
@@ -536,7 +537,10 @@ impl RaftGroupManager {
     ///
     /// Returns `None` if the group does not exist.
     #[instrument(skip(self))]
-    pub async fn get_raft(&self, group_id: GroupId) -> Option<openraft::Raft<RrTypeConfig>> {
+    pub async fn get_raft(
+        &self,
+        group_id: GroupId,
+    ) -> Option<openraft::Raft<RrTypeConfig, crate::sm_adapter::RrStateMachine>> {
         let guard = self.groups.read().await;
         guard.get(&group_id).map(|node| node.raft.clone())
     }
@@ -625,6 +629,7 @@ impl RaftGroupManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openraft::type_config::async_runtime::WatchReceiver;
     use crate::network_factory::ChannelPool;
     use crate::service_adapter::ServiceStateMachineAdapter;
     use async_trait::async_trait;
@@ -814,7 +819,7 @@ mod tests {
 
         // The raft instance should have a leader now
         let raft = mgr.get_raft(1).await.unwrap();
-        let metrics = raft.metrics().borrow().clone();
+        let metrics = raft.metrics().borrow_watched().clone();
         assert!(
             metrics.current_leader.is_some(),
             "expected a leader after init_cluster, got: {:?}",
@@ -866,7 +871,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
         let raft = mgr.get_raft(1).await.unwrap();
         assert!(
-            raft.metrics().borrow().current_leader.is_some(),
+            raft.metrics().borrow_watched().current_leader.is_some(),
             "expected a leader before change_membership"
         );
 

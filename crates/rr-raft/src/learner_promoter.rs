@@ -39,7 +39,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use openraft::{BasicNode, ServerState};
+use openraft::type_config::async_runtime::WatchReceiver;
+use openraft::ServerState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -47,6 +48,9 @@ use tracing::{debug, info, warn};
 use rr_core::types::{GroupId, NodeId};
 
 use crate::group_manager::RaftGroupManager;
+use crate::type_config::RrTypeConfig;
+
+type RrRaftMetrics = openraft::RaftMetrics<RrTypeConfig>;
 
 /// `tracing` target for audit events; mirrors `rr_network::audit::AUDIT_TARGET`.
 /// Inlined here because rr-raft cannot depend on rr-network (would
@@ -150,8 +154,7 @@ async fn run(
                 return Ok(());
             }
             _ = tick.tick() => {
-                let snapshot: openraft::RaftMetrics<NodeId, BasicNode> =
-                    metrics_rx.borrow().clone();
+                let snapshot: RrRaftMetrics = metrics_rx.borrow_watched().clone();
                 if !matches!(snapshot.state, ServerState::Leader) {
                     if !stable_ticks.is_empty() {
                         debug!(group_id, "stepped down; clearing learner stability counters");
@@ -168,7 +171,7 @@ async fn run(
 async fn evaluate_and_promote(
     mgr: &RaftGroupManager,
     group_id: GroupId,
-    metrics: &openraft::RaftMetrics<NodeId, BasicNode>,
+    metrics: &RrRaftMetrics,
     config: &AutoPromoteConfig,
     stable_ticks: &mut BTreeMap<NodeId, u32>,
 ) {

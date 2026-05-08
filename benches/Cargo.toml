@@ -12,7 +12,7 @@ criterion = { workspace = true }
 tokio = { workspace = true }
 bincode = { workspace = true }
 serde = { workspace = true }
-openraft = { workspace = true, features = ["storage-v2", "serde"] }
+openraft = { workspace = true, features = ["serde"] }
 tempfile = { workspace = true }
 
 [features]

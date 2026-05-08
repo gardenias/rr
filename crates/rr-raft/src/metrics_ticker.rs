@@ -19,14 +19,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use openraft::{BasicNode, ServerState};
+use openraft::type_config::async_runtime::WatchReceiver;
+use openraft::ServerState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use rr_core::types::{GroupId, NodeId};
+use rr_core::types::GroupId;
 
 use crate::group_manager::RaftGroupManager;
+use crate::type_config::RrTypeConfig;
+
+type RrRaftMetrics = openraft::RaftMetrics<RrTypeConfig>;
 
 /// How often the ticker reads metrics and emits the replication lag
 /// gauge. 5 seconds matches Prometheus's default scrape interval —
@@ -98,15 +102,14 @@ async fn run(
                 return Ok(());
             }
             _ = tick.tick() => {
-                let snapshot: openraft::RaftMetrics<NodeId, BasicNode> =
-                    metrics_rx.borrow().clone();
+                let snapshot: RrRaftMetrics = metrics_rx.borrow_watched().clone();
                 emit(group_id, &snapshot);
             }
         }
     }
 }
 
-fn emit(group_id: GroupId, m: &openraft::RaftMetrics<NodeId, BasicNode>) {
+fn emit(group_id: GroupId, m: &RrRaftMetrics) {
     let group_label = group_id.to_string();
     metrics::gauge!("rr_raft_current_term", "group_id" => group_label.clone())
         .set(m.current_term as f64);
@@ -142,6 +145,7 @@ fn emit(group_id: GroupId, m: &openraft::RaftMetrics<NodeId, BasicNode>) {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use openraft::BasicNode;
 
     use crate::group_manager::{RaftGroupManager, StateMachineFactory};
     use rr_core::error::RrError;

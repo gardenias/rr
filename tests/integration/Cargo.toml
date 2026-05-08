@@ -19,7 +19,7 @@ bincode = { workspace = true }
 tokio.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
-openraft = { version = "0.9", features = ["serde"] }
+openraft = { workspace = true, features = ["serde"] }
 tempfile.workspace = true
 rr-client = { path = "../../crates/rr-client" }
 dashmap = { workspace = true }

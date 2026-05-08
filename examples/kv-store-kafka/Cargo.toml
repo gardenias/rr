@@ -16,7 +16,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
-openraft = { version = "0.9", features = ["serde"] }
+openraft = { workspace = true, features = ["serde"] }
 
 [features]
 # Default uses the in-memory MockKafkaIngestor so the example compiles

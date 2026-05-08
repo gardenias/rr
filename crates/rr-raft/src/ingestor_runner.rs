@@ -38,7 +38,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use openraft::{BasicNode, ServerState};
+use openraft::type_config::async_runtime::WatchReceiver;
+use openraft::ServerState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -48,11 +49,13 @@ use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::FramedSnapshot;
 use rr_core::idempotency::IdempotencyKey;
 use rr_core::ingestor::DynCommandIngestor;
-use rr_core::types::{GroupId, NodeId};
+use rr_core::types::GroupId;
 
 use crate::group_manager::RaftGroupManager;
+use crate::type_config::RrTypeConfig;
 
-type RrRaftMetrics = openraft::RaftMetrics<NodeId, BasicNode>;
+type RrRaftMetrics = openraft::RaftMetrics<RrTypeConfig>;
+type RrMetricsRx = openraft::type_config::alias::WatchReceiverOf<RrTypeConfig, RrRaftMetrics>;
 
 /// Closure that converts an opaque ingestor offset (bincode bytes) to
 /// a monotonic `u64` for use as an [`IdempotencyKey::request_id`].
@@ -271,7 +274,7 @@ async fn refresh_snapshot_if_stale(mgr: &RaftGroupManager, group_id: GroupId) {
     let Some(raft) = mgr.get_raft(group_id).await else {
         return;
     };
-    let metrics = raft.metrics().borrow().clone();
+    let metrics = raft.metrics().borrow_watched().clone();
     let target_index = match metrics.last_applied.as_ref().map(|l| l.index) {
         Some(0) | None => return,
         Some(idx) => idx,
@@ -303,7 +306,7 @@ async fn refresh_snapshot_if_stale(mgr: &RaftGroupManager, group_id: GroupId) {
     while std::time::Instant::now() < deadline {
         let curr = raft
             .metrics()
-            .borrow()
+            .borrow_watched()
             .snapshot
             .as_ref()
             .map(|l| l.index)
@@ -339,7 +342,7 @@ async fn run_poll_loop(
     ingestor: &mut dyn DynCommandIngestor,
     auto_idem: Option<&AutoIdempotency>,
     batch_size: usize,
-    metrics_rx: &mut watch::Receiver<RrRaftMetrics>,
+    metrics_rx: &mut RrMetricsRx,
     cancel_rx: &mut watch::Receiver<bool>,
 ) {
     let mut backoff = INITIAL_POLL_BACKOFF;
@@ -435,8 +438,8 @@ async fn run_poll_loop(
     }
 }
 
-fn is_leader(metrics_rx: &watch::Receiver<RrRaftMetrics>) -> bool {
-    matches!(metrics_rx.borrow().state, ServerState::Leader)
+fn is_leader(metrics_rx: &RrMetricsRx) -> bool {
+    matches!(metrics_rx.borrow_watched().state, ServerState::Leader)
 }
 
 #[cfg(test)]
@@ -569,7 +572,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let raft = mgr.get_raft(1).await.unwrap();
         assert!(
-            raft.metrics().borrow().current_leader.is_some(),
+            raft.metrics().borrow_watched().current_leader.is_some(),
             "expected leader after init"
         );
         mgr

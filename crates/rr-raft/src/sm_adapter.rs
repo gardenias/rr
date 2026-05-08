@@ -1,18 +1,21 @@
 //! State machine adapter bridging openraft's `RaftStateMachine` to our `StateMachine` trait.
 
+use std::io;
 use std::io::Cursor;
 
+use tokio_stream::Stream;
+use tokio_stream::StreamExt;
 use openraft::storage::RaftStateMachine;
-use openraft::BasicNode;
-use openraft::Entry;
+use openraft::storage::EntryResponder;
 use openraft::EntryPayload;
-use openraft::LogId;
 use openraft::RaftSnapshotBuilder;
 use openraft::Snapshot;
 use openraft::SnapshotMeta;
-use openraft::StorageError;
-use openraft::StorageIOError;
 use openraft::StoredMembership;
+use openraft::type_config::alias::LogIdOf;
+use openraft::type_config::alias::SnapshotMetaOf;
+use openraft::type_config::alias::SnapshotOf;
+use openraft::type_config::alias::StoredMembershipOf;
 
 use rr_core::state_machine::StateMachine;
 
@@ -21,8 +24,8 @@ use crate::type_config::RrTypeConfig;
 /// Bridges openraft's `RaftStateMachine` to the user-defined `StateMachine` trait.
 pub struct RrStateMachine {
     inner: Box<dyn StateMachine>,
-    last_applied: Option<LogId<u64>>,
-    last_membership: StoredMembership<u64, BasicNode>,
+    last_applied: Option<LogIdOf<RrTypeConfig>>,
+    last_membership: StoredMembershipOf<RrTypeConfig>,
     /// Cached snapshot bytes from the inner state machine.
     snapshot_bytes: Vec<u8>,
     /// Snapshot index counter for unique IDs.
@@ -47,38 +50,40 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
     async fn applied_state(
         &mut self,
-    ) -> Result<(Option<LogId<u64>>, StoredMembership<u64, BasicNode>), StorageError<u64>> {
+    ) -> Result<(Option<LogIdOf<RrTypeConfig>>, StoredMembershipOf<RrTypeConfig>), io::Error> {
         Ok((self.last_applied, self.last_membership.clone()))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> Result<Vec<Vec<u8>>, StorageError<u64>>
+    async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
     where
-        I: IntoIterator<Item = Entry<RrTypeConfig>> + Send,
-        I::IntoIter: Send,
+        Strm: Stream<Item = Result<EntryResponder<RrTypeConfig>, io::Error>> + Send + Unpin,
     {
-        let mut results = Vec::new();
-
-        for entry in entries {
+        while let Some(item) = entries.next().await {
+            let (entry, responder) = item?;
             self.last_applied = Some(entry.log_id);
 
-            match entry.payload {
+            let response = match entry.payload {
                 EntryPayload::Blank => {
-                    results.push(Vec::new());
+                    Vec::new()
                 }
                 EntryPayload::Normal(ref data) => {
-                    let res = self.inner.apply(data).await.map_err(|e| StorageError::IO {
-                        source: StorageIOError::write_state_machine(openraft::AnyError::new(&e)),
-                    })?;
-                    results.push(res);
+                    self.inner
+                        .apply(data.as_ref())
+                        .await
+                        .map_err(|e| io::Error::other(e.to_string()))?
                 }
                 EntryPayload::Membership(ref mem) => {
                     self.last_membership = StoredMembership::new(Some(entry.log_id), mem.clone());
-                    results.push(Vec::new());
+                    Vec::new()
                 }
+            };
+
+            if let Some(responder) = responder {
+                responder.send(response.into());
             }
         }
 
-        Ok(results)
+        Ok(())
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
@@ -94,22 +99,20 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
     async fn begin_receiving_snapshot(
         &mut self,
-    ) -> Result<Box<Cursor<Vec<u8>>>, StorageError<u64>> {
-        Ok(Box::new(Cursor::new(Vec::new())))
+    ) -> Result<Cursor<Vec<u8>>, io::Error> {
+        Ok(Cursor::new(Vec::new()))
     }
 
     async fn install_snapshot(
         &mut self,
-        meta: &SnapshotMeta<u64, BasicNode>,
-        snapshot: Box<Cursor<Vec<u8>>>,
-    ) -> Result<(), StorageError<u64>> {
+        meta: &SnapshotMetaOf<RrTypeConfig>,
+        snapshot: Cursor<Vec<u8>>,
+    ) -> Result<(), io::Error> {
         let data = snapshot.into_inner();
         self.inner
             .restore(&data)
             .await
-            .map_err(|e| StorageError::IO {
-                source: StorageIOError::write_state_machine(openraft::AnyError::new(&e)),
-            })?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
         self.snapshot_bytes = data;
@@ -119,10 +122,12 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
     async fn get_current_snapshot(
         &mut self,
-    ) -> Result<Option<Snapshot<RrTypeConfig>>, StorageError<u64>> {
-        let data = self.inner.snapshot().await.map_err(|e| StorageError::IO {
-            source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
-        })?;
+    ) -> Result<Option<SnapshotOf<RrTypeConfig>>, io::Error> {
+        let data = self
+            .inner
+            .snapshot()
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         if data.is_empty() && self.last_applied.is_none() {
             return Ok(None);
@@ -136,7 +141,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
         Ok(Some(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(data)),
+            snapshot: Cursor::new(data),
         }))
     }
 }
@@ -144,13 +149,13 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 /// Snapshot builder that captures a point-in-time snapshot.
 pub struct RrSnapshotBuilder {
     data: Vec<u8>,
-    last_applied: Option<LogId<u64>>,
-    last_membership: StoredMembership<u64, BasicNode>,
+    last_applied: Option<LogIdOf<RrTypeConfig>>,
+    last_membership: StoredMembershipOf<RrTypeConfig>,
     snapshot_idx: u64,
 }
 
 impl RaftSnapshotBuilder<RrTypeConfig> for RrSnapshotBuilder {
-    async fn build_snapshot(&mut self) -> Result<Snapshot<RrTypeConfig>, StorageError<u64>> {
+    async fn build_snapshot(&mut self) -> Result<SnapshotOf<RrTypeConfig>, io::Error> {
         let meta = SnapshotMeta {
             last_log_id: self.last_applied,
             last_membership: self.last_membership.clone(),
@@ -159,18 +164,24 @@ impl RaftSnapshotBuilder<RrTypeConfig> for RrSnapshotBuilder {
 
         Ok(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(self.data.clone())),
+            snapshot: Cursor::new(self.data.clone()),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::io::Cursor;
 
+    use openraft::storage::EntryResponder;
+    use openraft::vote::leader_id_adv::CommittedLeaderId;
+    use openraft::vote::RaftLeaderId;
     use openraft::SnapshotMeta;
     use openraft::StoredMembership;
     use openraft::{Entry, EntryPayload, LogId};
+    use openraft::type_config::alias::EntryOf;
+    use openraft::type_config::alias::SnapshotMetaOf;
 
     use rr_core::error::RrError;
     use rr_core::state_machine::StateMachine;
@@ -209,11 +220,18 @@ mod tests {
         RrStateMachine::new(Box::new(VecSM { state: vec![] }))
     }
 
-    fn data_entry(index: u64, data: Vec<u8>) -> Entry<RrTypeConfig> {
+    fn data_entry(index: u64, data: Vec<u8>) -> EntryOf<RrTypeConfig> {
         Entry {
-            log_id: LogId::new(openraft::CommittedLeaderId::new(1, 1), index),
-            payload: EntryPayload::Normal(data),
+            log_id: LogId::new(CommittedLeaderId::new(1, 1), index),
+            payload: EntryPayload::Normal(data.into()),
         }
+    }
+
+    async fn apply_entries(sm: &mut RrStateMachine, entries: Vec<EntryOf<RrTypeConfig>>) {
+        let items = entries
+            .into_iter()
+            .map(|entry| Ok::<EntryResponder<RrTypeConfig>, io::Error>((entry, None)));
+        sm.apply(tokio_stream::iter(items)).await.unwrap();
     }
 
     // ── Tests ──────────────────────────────────────────────────────────────
@@ -224,12 +242,8 @@ mod tests {
         let mut sm = make_sm();
 
         // Apply some entries
-        sm.apply(vec![data_entry(1, b"hello".to_vec())])
-            .await
-            .unwrap();
-        sm.apply(vec![data_entry(2, b" world".to_vec())])
-            .await
-            .unwrap();
+        apply_entries(&mut sm, vec![data_entry(1, b"hello".to_vec())]).await;
+        apply_entries(&mut sm, vec![data_entry(2, b" world".to_vec())]).await;
 
         // Build snapshot
         let mut builder = sm.get_snapshot_builder().await;
@@ -244,7 +258,7 @@ mod tests {
         assert_eq!(snap.meta.snapshot_id, "snap-0");
         assert_eq!(
             snap.meta.last_log_id,
-            Some(LogId::new(openraft::CommittedLeaderId::new(1, 1), 2))
+            Some(LogId::new(CommittedLeaderId::new(1, 1), 2))
         );
     }
 
@@ -266,13 +280,13 @@ mod tests {
 
         // Create snapshot with known data
         let snap_data = b"restored-state".to_vec();
-        let meta = SnapshotMeta {
-            last_log_id: Some(LogId::new(openraft::CommittedLeaderId::new(1, 1), 10)),
+        let meta: SnapshotMetaOf<RrTypeConfig> = SnapshotMeta {
+            last_log_id: Some(LogId::new(CommittedLeaderId::new(1, 1), 10)),
             last_membership: StoredMembership::default(),
             snapshot_id: "snap-42".to_string(),
         };
 
-        sm.install_snapshot(&meta, Box::new(Cursor::new(snap_data.clone())))
+        sm.install_snapshot(&meta, Cursor::new(snap_data.clone()))
             .await
             .unwrap();
 
@@ -288,14 +302,8 @@ mod tests {
     async fn test_snapshot_round_trip() {
         // Source SM: apply data
         let mut source = make_sm();
-        source
-            .apply(vec![data_entry(1, b"foo".to_vec())])
-            .await
-            .unwrap();
-        source
-            .apply(vec![data_entry(2, b"bar".to_vec())])
-            .await
-            .unwrap();
+        apply_entries(&mut source, vec![data_entry(1, b"foo".to_vec())]).await;
+        apply_entries(&mut source, vec![data_entry(2, b"bar".to_vec())]).await;
 
         // Build snapshot from source
         let mut builder = source.get_snapshot_builder().await;
@@ -306,7 +314,7 @@ mod tests {
         // Target SM: fresh, then install snapshot
         let mut target = make_sm();
         target
-            .install_snapshot(&snap_meta, Box::new(Cursor::new(snap_data.clone())))
+            .install_snapshot(&snap_meta, Cursor::new(snap_data.clone()))
             .await
             .unwrap();
 
@@ -332,18 +340,18 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot_idx_increments_on_install() {
         let mut sm = make_sm();
-        let meta = SnapshotMeta {
-            last_log_id: Some(LogId::new(openraft::CommittedLeaderId::new(1, 1), 5)),
+        let meta: SnapshotMetaOf<RrTypeConfig> = SnapshotMeta {
+            last_log_id: Some(LogId::new(CommittedLeaderId::new(1, 1), 5)),
             last_membership: StoredMembership::default(),
             snapshot_id: "snap-x".to_string(),
         };
-        sm.install_snapshot(&meta, Box::new(Cursor::new(b"data1".to_vec())))
+        sm.install_snapshot(&meta, Cursor::new(b"data1".to_vec()))
             .await
             .unwrap();
         let s1 = sm.get_current_snapshot().await.unwrap().unwrap();
         assert_eq!(s1.meta.snapshot_id, "snap-1");
 
-        sm.install_snapshot(&meta, Box::new(Cursor::new(b"data2".to_vec())))
+        sm.install_snapshot(&meta, Cursor::new(b"data2".to_vec()))
             .await
             .unwrap();
         let s2 = sm.get_current_snapshot().await.unwrap().unwrap();

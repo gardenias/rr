@@ -7,22 +7,26 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::io;
 use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use openraft::storage::LogFlushed;
+use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
-use openraft::Entry;
-use openraft::LogId;
 use openraft::LogState;
 use openraft::RaftLogReader;
-use openraft::StorageError;
-use openraft::Vote;
+use openraft::RaftTypeConfig;
+use openraft::type_config::alias::LogIdOf;
+use openraft::type_config::alias::VoteOf;
 
 use crate::type_config::RrTypeConfig;
+
+type RrEntry = <RrTypeConfig as RaftTypeConfig>::Entry;
+type RrVote = VoteOf<RrTypeConfig>;
+type RrLogId = LogIdOf<RrTypeConfig>;
 
 /// Returns `true` when defensive-mode checks should be enabled.
 ///
@@ -36,11 +40,11 @@ fn is_defensive() -> bool {
 #[derive(Default)]
 struct Inner {
     /// Log entries indexed by log index.
-    entries: BTreeMap<u64, Entry<RrTypeConfig>>,
+    entries: BTreeMap<u64, RrEntry>,
     /// Current persisted vote.
-    vote: Option<Vote<u64>>,
+    vote: Option<RrVote>,
     /// The last purged log id.
-    last_purged_log_id: Option<LogId<u64>>,
+    last_purged_log_id: Option<RrLogId>,
 }
 
 /// In-memory log storage for a single Raft group.
@@ -58,7 +62,7 @@ impl RaftLogReader<RrTypeConfig> for RrLogStorage {
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
         &mut self,
         range: RB,
-    ) -> Result<Vec<Entry<RrTypeConfig>>, StorageError<u64>> {
+    ) -> Result<Vec<RrEntry>, io::Error> {
         if is_defensive() {
             let start = match range.start_bound() {
                 Bound::Included(&s) => Some(s),
@@ -80,19 +84,23 @@ impl RaftLogReader<RrTypeConfig> for RrLogStorage {
         }
 
         let inner = self.inner.read();
-        let entries: Vec<Entry<RrTypeConfig>> = inner
+        let entries: Vec<RrEntry> = inner
             .entries
             .range(range)
             .map(|(_, entry)| entry.clone())
             .collect();
         Ok(entries)
     }
+
+    async fn read_vote(&mut self) -> Result<Option<RrVote>, io::Error> {
+        Ok(self.inner.read().vote)
+    }
 }
 
 impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
     type LogReader = Self;
 
-    async fn get_log_state(&mut self) -> Result<LogState<RrTypeConfig>, StorageError<u64>> {
+    async fn get_log_state(&mut self) -> Result<LogState<RrTypeConfig>, io::Error> {
         let inner = self.inner.read();
         let last_log_id = inner
             .entries
@@ -114,22 +122,18 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
         self.clone()
     }
 
-    async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
+    async fn save_vote(&mut self, vote: &RrVote) -> Result<(), io::Error> {
         self.inner.write().vote = Some(*vote);
         Ok(())
-    }
-
-    async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
-        Ok(self.inner.read().vote)
     }
 
     async fn append<I>(
         &mut self,
         entries: I,
-        callback: LogFlushed<RrTypeConfig>,
-    ) -> Result<(), StorageError<u64>>
+        callback: IOFlushed<RrTypeConfig>,
+    ) -> Result<(), io::Error>
     where
-        I: IntoIterator<Item = Entry<RrTypeConfig>> + Send,
+        I: IntoIterator<Item = RrEntry> + Send,
         I::IntoIter: Send,
     {
         {
@@ -157,24 +161,28 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
                 }
             }
         } // lock released before callback
-        callback.log_io_completed(Ok(()));
+        callback.io_completed(Ok(()));
         Ok(())
     }
 
-    async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+    async fn truncate_after(&mut self, log_id: Option<RrLogId>) -> Result<(), io::Error> {
         let mut inner = self.inner.write();
-        let to_remove: Vec<u64> = inner
-            .entries
-            .range(log_id.index..)
-            .map(|(k, _)| *k)
-            .collect();
+        let to_remove: Vec<u64> = if let Some(log_id) = log_id {
+            inner
+                .entries
+                .range((log_id.index + 1)..)
+                .map(|(k, _)| *k)
+                .collect()
+        } else {
+            inner.entries.keys().copied().collect()
+        };
         for key in to_remove {
             inner.entries.remove(&key);
         }
         Ok(())
     }
 
-    async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+    async fn purge(&mut self, log_id: RrLogId) -> Result<(), io::Error> {
         let mut inner = self.inner.write();
         let to_remove: Vec<u64> = inner
             .entries
@@ -193,20 +201,25 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
 mod tests {
     use super::*;
     use openraft::storage::RaftLogStorageExt;
-    use openraft::CommittedLeaderId;
+    use openraft::vote::leader_id_adv::CommittedLeaderId;
+    use openraft::vote::RaftLeaderId;
+    use openraft::Entry;
     use openraft::EntryPayload;
+    use openraft::LogId;
+    use openraft::Vote;
+    use openraft::type_config::alias::EntryOf;
 
-    fn make_entry(index: u64, term: u64) -> Entry<RrTypeConfig> {
+    fn make_entry(index: u64, term: u64) -> EntryOf<RrTypeConfig> {
         Entry {
             log_id: LogId::new(CommittedLeaderId::new(term, 0), index),
             payload: EntryPayload::Blank,
         }
     }
 
-    fn make_normal_entry(index: u64, term: u64, data: Vec<u8>) -> Entry<RrTypeConfig> {
+    fn make_normal_entry(index: u64, term: u64, data: Vec<u8>) -> EntryOf<RrTypeConfig> {
         Entry {
             log_id: LogId::new(CommittedLeaderId::new(term, 0), index),
-            payload: EntryPayload::Normal(data),
+            payload: EntryPayload::Normal(data.into()),
         }
     }
 
@@ -233,12 +246,12 @@ mod tests {
     async fn test_log_storage_vote_save_read() {
         let mut storage = RrLogStorage::default();
 
-        assert_eq!(storage.read_vote().await.unwrap(), None);
+        assert_eq!(RaftLogReader::read_vote(&mut storage).await.unwrap(), None);
 
         let vote = Vote::new(1, 0);
         storage.save_vote(&vote).await.unwrap();
 
-        let read_back = storage.read_vote().await.unwrap();
+        let read_back = RaftLogReader::read_vote(&mut storage).await.unwrap();
         assert_eq!(read_back, Some(vote));
     }
 
@@ -256,16 +269,17 @@ mod tests {
 
         storage.blocking_append(entries).await.unwrap();
 
-        // Truncate from index 3 (inclusive), so entries 3, 4, 5 are removed
+        // truncate_after(Some(3)) keeps 3 and removes 4,5.
         storage
-            .truncate(LogId::new(CommittedLeaderId::new(1, 0), 3))
+            .truncate_after(Some(LogId::new(CommittedLeaderId::new(1, 0), 3)))
             .await
             .unwrap();
 
         let remaining = storage.try_get_log_entries(0..10).await.unwrap();
-        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining.len(), 3);
         assert_eq!(remaining[0].log_id.index, 1);
         assert_eq!(remaining[1].log_id.index, 2);
+        assert_eq!(remaining[2].log_id.index, 3);
     }
 
     #[tokio::test]
@@ -316,10 +330,14 @@ mod tests {
 mod defensive_tests {
     use super::*;
     use openraft::storage::RaftLogStorageExt;
-    use openraft::CommittedLeaderId;
+    use openraft::vote::leader_id_adv::CommittedLeaderId;
+    use openraft::vote::RaftLeaderId;
+    use openraft::Entry;
     use openraft::EntryPayload;
+    use openraft::LogId;
+    use openraft::type_config::alias::EntryOf;
 
-    fn make_entry(index: u64, term: u64) -> Entry<RrTypeConfig> {
+    fn make_entry(index: u64, term: u64) -> EntryOf<RrTypeConfig> {
         Entry {
             log_id: LogId::new(CommittedLeaderId::new(term, 0), index),
             payload: EntryPayload::Blank,

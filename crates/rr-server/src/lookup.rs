@@ -4,6 +4,7 @@
 //! them, forwards to the correct openraft instance, and serializes the response.
 
 use std::sync::Arc;
+use std::io::Cursor;
 
 use async_trait::async_trait;
 use tracing::instrument;
@@ -81,7 +82,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .await
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
-        let req: openraft::raft::VoteRequest<u64> =
+        let req: openraft::raft::VoteRequest<RrTypeConfig> =
             bincode::serde::decode_from_slice(&payload, bincode::config::standard())
                 .map(|(v, _)| v)
                 .map_err(|e| {
@@ -125,7 +126,10 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .await
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
-        let mut req: openraft::raft::InstallSnapshotRequest<RrTypeConfig> =
+        let (vote, meta): (
+            openraft::type_config::alias::VoteOf<RrTypeConfig>,
+            openraft::type_config::alias::SnapshotMetaOf<RrTypeConfig>,
+        ) =
             bincode::serde::decode_from_slice(&metadata, bincode::config::standard())
                 .map(|(v, _)| v)
                 .map_err(|e| {
@@ -137,9 +141,12 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
                     tonic::Status::invalid_argument("invalid request payload")
                 })?;
 
-        req.data = data;
+        let snapshot = openraft::Snapshot {
+            meta,
+            snapshot: Cursor::new(data),
+        };
 
-        let resp = raft.install_snapshot(req).await.map_err(|e| {
+        let resp = raft.install_full_snapshot(vote, snapshot).await.map_err(|e| {
             tracing::error!(
                 group_id,
                 error = %e,

@@ -73,10 +73,10 @@ impl ClientDispatch for ClientDispatchImpl {
             payload
         };
 
-        match raft.client_write(entry_bytes).await {
+        match raft.client_write(entry_bytes.into()).await {
             Ok(resp) => {
                 if keyed {
-                    match ApplyOutcome::decode(&resp.data) {
+                    match ApplyOutcome::decode(resp.data.as_ref()) {
                         Ok(ApplyOutcome::Success(bytes)) => Ok(ClientWriteResult {
                             success: true,
                             payload: bytes,
@@ -103,7 +103,7 @@ impl ClientDispatch for ClientDispatchImpl {
                 } else {
                     Ok(ClientWriteResult {
                         success: true,
-                        payload: resp.data,
+                        payload: resp.data.into(),
                         leader_node_id: None,
                         leader_addr: None,
                         idem_error: None,
@@ -111,7 +111,7 @@ impl ClientDispatch for ClientDispatchImpl {
                 }
             }
             Err(ref e) => {
-                if let Some(fwd) = e.forward_to_leader::<BasicNode>() {
+                if let Some(fwd) = e.forward_to_leader() {
                     Ok(ClientWriteResult {
                         success: false,
                         payload: vec![],

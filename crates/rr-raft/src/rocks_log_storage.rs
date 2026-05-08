@@ -6,25 +6,27 @@
 #![cfg(feature = "rocks")]
 
 use std::fmt::Debug;
+use std::io;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
-use openraft::storage::LogFlushed;
+use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
-use openraft::AnyError;
-use openraft::Entry;
-use openraft::LogId;
 use openraft::LogState;
 use openraft::RaftLogReader;
-use openraft::StorageError;
-use openraft::StorageIOError;
-use openraft::Vote;
+use openraft::RaftTypeConfig;
+use openraft::type_config::alias::LogIdOf;
+use openraft::type_config::alias::VoteOf;
 
 use rr_core::storage::BatchOp;
 use rr_core::storage::StorageEngine;
 use rr_storage::rocks::RocksStorage;
 
 use crate::type_config::RrTypeConfig;
+
+type RrEntry = <RrTypeConfig as RaftTypeConfig>::Entry;
+type RrVote = VoteOf<RrTypeConfig>;
+type RrLogId = LogIdOf<RrTypeConfig>;
 
 // ─── Column family / key constants ──────────────────────────────────────────
 
@@ -35,30 +37,23 @@ const KEY_LAST_PURGED: &[u8] = b"last_purged";
 
 // ─── Serialization helpers ───────────────────────────────────────────────────
 
-fn ser<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, StorageError<u64>> {
-    bincode::serde::encode_to_vec(val, bincode::config::standard()).map_err(|e| StorageError::IO {
-        source: StorageIOError::write_logs(AnyError::error(e.to_string())),
-    })
+fn ser<T: serde::Serialize>(val: &T) -> Result<Vec<u8>, io::Error> {
+    bincode::serde::encode_to_vec(val, bincode::config::standard())
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
-fn de<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, StorageError<u64>> {
+fn de<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
     let (val, _): (T, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-        .map_err(|e| StorageError::IO {
-            source: StorageIOError::read_logs(AnyError::error(e.to_string())),
-        })?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
     Ok(val)
 }
 
-fn to_read_err(e: rr_core::error::StorageError) -> StorageError<u64> {
-    StorageError::IO {
-        source: StorageIOError::read_logs(AnyError::error(e.to_string())),
-    }
+fn to_read_err(e: rr_core::error::StorageError) -> io::Error {
+    io::Error::other(e.to_string())
 }
 
-fn to_write_err(e: rr_core::error::StorageError) -> StorageError<u64> {
-    StorageError::IO {
-        source: StorageIOError::write_logs(AnyError::error(e.to_string())),
-    }
+fn to_write_err(e: rr_core::error::StorageError) -> io::Error {
+    io::Error::other(e.to_string())
 }
 
 // ─── Key encoding ────────────────────────────────────────────────────────────
@@ -118,7 +113,7 @@ impl RaftLogReader<RrTypeConfig> for RocksLogStorage {
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
         &mut self,
         range: RB,
-    ) -> Result<Vec<Entry<RrTypeConfig>>, StorageError<u64>> {
+    ) -> Result<Vec<RrEntry>, io::Error> {
         let start = range_start(range.start_bound());
         let end = range_end(range.end_bound());
 
@@ -130,9 +125,18 @@ impl RaftLogReader<RrTypeConfig> for RocksLogStorage {
 
         let mut entries = Vec::with_capacity(pairs.len());
         for (_, v) in pairs {
-            entries.push(de::<Entry<RrTypeConfig>>(&v)?);
+            entries.push(de::<RrEntry>(&v)?);
         }
         Ok(entries)
+    }
+
+    async fn read_vote(&mut self) -> Result<Option<RrVote>, io::Error> {
+        self.storage
+            .get(CF_META, KEY_VOTE)
+            .await
+            .map_err(to_read_err)?
+            .map(|b| de::<RrVote>(&b))
+            .transpose()
     }
 }
 
@@ -141,14 +145,14 @@ impl RaftLogReader<RrTypeConfig> for RocksLogStorage {
 impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
     type LogReader = Self;
 
-    async fn get_log_state(&mut self) -> Result<LogState<RrTypeConfig>, StorageError<u64>> {
+    async fn get_log_state(&mut self) -> Result<LogState<RrTypeConfig>, io::Error> {
         // Read last_purged from metadata CF
         let last_purged = self
             .storage
             .get(CF_META, KEY_LAST_PURGED)
             .await
             .map_err(to_read_err)?
-            .map(|b| de::<LogId<u64>>(&b))
+            .map(|b| de::<RrLogId>(&b))
             .transpose()?;
 
         // Find the last log entry by scanning all keys in the log CF
@@ -162,7 +166,7 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
 
         let last_log_id = pairs
             .last()
-            .map(|(_, v)| de::<Entry<RrTypeConfig>>(v))
+            .map(|(_, v)| de::<RrEntry>(v))
             .transpose()?
             .map(|e| e.log_id)
             .or(last_purged);
@@ -177,41 +181,21 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
         self.clone()
     }
 
-    async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
+    async fn save_vote(&mut self, vote: &RrVote) -> Result<(), io::Error> {
         let bytes = ser(vote)?;
         self.storage
             .put(CF_META, KEY_VOTE, &bytes)
             .await
-            .map_err(|e| StorageError::IO {
-                source: StorageIOError::write_vote(AnyError::error(e.to_string())),
-            })
-    }
-
-    async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
-        self.storage
-            .get(CF_META, KEY_VOTE)
-            .await
-            .map_err(|e| StorageError::IO {
-                source: StorageIOError::read_vote(AnyError::error(e.to_string())),
-            })?
-            .map(|b| {
-                // Vote is serialized as (leader_id, committed) — use `de` for consistency
-                bincode::serde::decode_from_slice::<Vote<u64>, _>(&b, bincode::config::standard())
-                    .map(|(v, _)| v)
-                    .map_err(|e| StorageError::IO {
-                        source: StorageIOError::read_vote(AnyError::error(e.to_string())),
-                    })
-            })
-            .transpose()
+            .map_err(to_write_err)
     }
 
     async fn append<I>(
         &mut self,
         entries: I,
-        callback: LogFlushed<RrTypeConfig>,
-    ) -> Result<(), StorageError<u64>>
+        callback: IOFlushed<RrTypeConfig>,
+    ) -> Result<(), io::Error>
     where
-        I: IntoIterator<Item = Entry<RrTypeConfig>> + Send,
+        I: IntoIterator<Item = RrEntry> + Send,
         I::IntoIter: Send,
     {
         let mut ops = Vec::new();
@@ -227,13 +211,17 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
         if !ops.is_empty() {
             self.storage.write_batch(ops).await.map_err(to_write_err)?;
         }
-        callback.log_io_completed(Ok(()));
+        callback.io_completed(Ok(()));
         Ok(())
     }
 
-    async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
-        // Remove all entries with index >= log_id.index
-        let start = index_key(log_id.index);
+    async fn truncate_after(&mut self, log_id: Option<RrLogId>) -> Result<(), io::Error> {
+        // Remove all entries with index > log_id.index.
+        // If None, remove all entries.
+        let start = match log_id {
+            Some(log_id) => index_key(log_id.index.saturating_add(1)),
+            None => index_key(0),
+        };
         let end = index_key(u64::MAX);
 
         let pairs = self
@@ -256,7 +244,7 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
         Ok(())
     }
 
-    async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+    async fn purge(&mut self, log_id: RrLogId) -> Result<(), io::Error> {
         // Remove all entries with index <= log_id.index, and persist last_purged
         let start = index_key(0);
         let end = index_key(log_id.index.saturating_add(1)); // exclusive end → includes log_id.index
@@ -293,21 +281,25 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
 mod tests {
     use super::*;
     use openraft::storage::RaftLogStorageExt;
-    use openraft::CommittedLeaderId;
+    use openraft::vote::leader_id_adv::CommittedLeaderId;
+    use openraft::Entry;
     use openraft::EntryPayload;
+    use openraft::LogId;
+    use openraft::Vote;
+    use openraft::type_config::alias::EntryOf;
     use tempfile::TempDir;
 
-    fn make_entry(index: u64, term: u64) -> Entry<RrTypeConfig> {
+    fn make_entry(index: u64, term: u64) -> EntryOf<RrTypeConfig> {
         Entry {
             log_id: LogId::new(CommittedLeaderId::new(term, 0), index),
             payload: EntryPayload::Blank,
         }
     }
 
-    fn make_data_entry(index: u64, term: u64, data: Vec<u8>) -> Entry<RrTypeConfig> {
+    fn make_data_entry(index: u64, term: u64, data: Vec<u8>) -> EntryOf<RrTypeConfig> {
         Entry {
             log_id: LogId::new(CommittedLeaderId::new(term, 0), index),
-            payload: EntryPayload::Normal(data),
+            payload: EntryPayload::Normal(data.into()),
         }
     }
 
@@ -341,18 +333,18 @@ mod tests {
     #[tokio::test]
     async fn test_rocks_vote_save_read() {
         let (mut s, _tmp) = open_storage();
-        assert_eq!(s.read_vote().await.unwrap(), None);
+        assert_eq!(RaftLogReader::read_vote(&mut s).await.unwrap(), None);
 
         let vote = Vote::new(1, 0);
         s.save_vote(&vote).await.unwrap();
 
-        assert_eq!(s.read_vote().await.unwrap(), Some(vote));
+        assert_eq!(RaftLogReader::read_vote(&mut s).await.unwrap(), Some(vote));
     }
 
-    // ── 3: truncate removes entries from index onwards ──────────────────────
+    // ── 3: truncate_after keeps boundary log id ─────────────────────────────
 
     #[tokio::test]
-    async fn test_rocks_truncate() {
+    async fn test_rocks_truncate_after() {
         let (mut s, _tmp) = open_storage();
         let entries = vec![
             make_entry(1, 1),
@@ -363,32 +355,33 @@ mod tests {
         ];
         s.blocking_append(entries).await.unwrap();
 
-        // truncate from index 3 → removes 3, 4, 5
-        s.truncate(LogId::new(CommittedLeaderId::new(1, 0), 3))
+        // truncate_after(Some(3)) keeps 3 and removes 4,5.
+        s.truncate_after(Some(LogId::new(CommittedLeaderId::new(1, 0), 3)))
             .await
             .unwrap();
 
         let remaining = s.try_get_log_entries(0..10).await.unwrap();
-        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining.len(), 3);
         assert_eq!(remaining[0].log_id.index, 1);
         assert_eq!(remaining[1].log_id.index, 2);
+        assert_eq!(remaining[2].log_id.index, 3);
     }
 
-    // ── 4: truncate_from_middle ─────────────────────────────────────────────
+    // ── 4: truncate_after_from_middle ───────────────────────────────────────
 
     #[tokio::test]
-    async fn test_rocks_truncate_from_middle() {
+    async fn test_rocks_truncate_after_from_middle() {
         let (mut s, _tmp) = open_storage();
         let entries = (1..=10).map(|i| make_entry(i, 1)).collect::<Vec<_>>();
         s.blocking_append(entries).await.unwrap();
 
-        s.truncate(LogId::new(CommittedLeaderId::new(1, 0), 6))
+        s.truncate_after(Some(LogId::new(CommittedLeaderId::new(1, 0), 6)))
             .await
             .unwrap();
 
         let remaining = s.try_get_log_entries(0..20).await.unwrap();
-        assert_eq!(remaining.len(), 5);
-        assert_eq!(remaining.last().unwrap().log_id.index, 5);
+        assert_eq!(remaining.len(), 6);
+        assert_eq!(remaining.last().unwrap().log_id.index, 6);
     }
 
     // ── 5: purge ────────────────────────────────────────────────────────────
@@ -469,7 +462,7 @@ mod tests {
 
         // Reopen — vote must survive
         let mut s2 = RocksLogStorage::open(&path).unwrap();
-        let recovered = s2.read_vote().await.unwrap();
+        let recovered = RaftLogReader::read_vote(&mut s2).await.unwrap();
         assert_eq!(recovered, Some(Vote::new(3, 1)));
     }
 

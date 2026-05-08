@@ -1,23 +1,27 @@
 //! `RaftNode` — wraps `openraft::Raft<RrTypeConfig>` for a single Raft group.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use openraft::error::RPCError;
-use openraft::error::RaftError as OpenRaftError;
+use openraft::error::ReplicationClosed;
+use openraft::error::StreamingError;
 use openraft::error::Unreachable;
+use openraft::network::v2::RaftNetworkV2;
 use openraft::network::RPCOption;
-use openraft::network::RaftNetwork;
 use openraft::network::RaftNetworkFactory;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
-use openraft::raft::InstallSnapshotRequest;
-use openraft::raft::InstallSnapshotResponse;
+use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
 use openraft::BasicNode;
 use openraft::Config;
+use openraft::OptionalSend;
 use openraft::Raft;
+use openraft::type_config::alias::SnapshotOf;
+use openraft::type_config::alias::VoteOf;
 
 use rr_core::error::{ConfigError, RaftError, RrError};
 use rr_core::state_machine::StateMachine;
@@ -32,7 +36,7 @@ pub struct RaftNode {
     /// The group this node belongs to.
     pub group_id: GroupId,
     /// The underlying openraft instance.
-    pub raft: Raft<RrTypeConfig>,
+    pub raft: Raft<RrTypeConfig, RrStateMachine>,
 }
 
 impl RaftNode {
@@ -178,35 +182,34 @@ impl RaftNetworkFactory<RrTypeConfig> for NoopNetworkFactory {
 
 pub struct NoopNetwork;
 
-impl RaftNetwork<RrTypeConfig> for NoopNetwork {
+impl RaftNetworkV2<RrTypeConfig> for NoopNetwork {
     async fn append_entries(
         &mut self,
         _rpc: AppendEntriesRequest<RrTypeConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, OpenRaftError<u64>>> {
+    ) -> Result<AppendEntriesResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         Err(RPCError::Unreachable(Unreachable::new(
             &std::io::Error::other("noop network"),
         )))
     }
 
-    async fn install_snapshot(
+    async fn full_snapshot(
         &mut self,
-        _rpc: InstallSnapshotRequest<RrTypeConfig>,
+        _vote: VoteOf<RrTypeConfig>,
+        _snapshot: SnapshotOf<RrTypeConfig>,
+        _cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         _option: RPCOption,
-    ) -> Result<
-        InstallSnapshotResponse<u64>,
-        RPCError<u64, BasicNode, OpenRaftError<u64, openraft::error::InstallSnapshotError>>,
-    > {
-        Err(RPCError::Unreachable(Unreachable::new(
-            &std::io::Error::other("noop network"),
+    ) -> Result<SnapshotResponse<RrTypeConfig>, StreamingError<RrTypeConfig>> {
+        Err(StreamingError::from(RPCError::Unreachable(
+            Unreachable::new(&std::io::Error::other("noop network")),
         )))
     }
 
     async fn vote(
         &mut self,
-        _rpc: VoteRequest<u64>,
+        _rpc: VoteRequest<RrTypeConfig>,
         _option: RPCOption,
-    ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, OpenRaftError<u64>>> {
+    ) -> Result<VoteResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         Err(RPCError::Unreachable(Unreachable::new(
             &std::io::Error::other("noop network"),
         )))
@@ -269,7 +272,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
         // Propose an entry
-        let result = node.raft.client_write(vec![1u8, 2, 3]).await;
+        let result = node.raft.client_write(vec![1u8, 2, 3].into()).await;
         assert!(result.is_ok(), "client_write failed: {:?}", result.err());
 
         // Verify the state machine received the entry

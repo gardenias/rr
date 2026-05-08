@@ -411,19 +411,20 @@ async fn run_node(cli: CliConfig) -> Result<()> {
 
 // ── Demo helpers ────────────────────────────────────────────────────────────
 
-type RaftInstance = openraft::Raft<rr_raft::type_config::RrTypeConfig>;
+type RaftInstance =
+    openraft::Raft<rr_raft::type_config::RrTypeConfig, rr_raft::sm_adapter::RrStateMachine>;
 
 async fn propose(raft: &RaftInstance, req: &CounterRequest) -> Result<CounterResponse> {
     let payload = bincode::serde::encode_to_vec(req, standard())
         .map_err(|e| anyhow!("encode failed: {e}"))?;
 
     let response = raft
-        .client_write(payload)
+        .client_write(payload.into())
         .await
         .map_err(|e| anyhow!("client_write failed: {e}"))?;
 
     let (resp, _): (CounterResponse, _) =
-        bincode::serde::decode_from_slice(&response.data, standard())
+        bincode::serde::decode_from_slice(response.data.as_ref(), standard())
             .map_err(|e| anyhow!("decode failed: {e}"))?;
 
     Ok(resp)

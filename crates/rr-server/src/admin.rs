@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
+use openraft::type_config::async_runtime::WatchReceiver;
 
 use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
@@ -46,7 +47,7 @@ fn peer_from_request<T>(req: &Request<T>) -> String {
 }
 
 async fn wait_for_snapshot(
-    raft: &openraft::Raft<rr_raft::type_config::RrTypeConfig>,
+    raft: &openraft::Raft<rr_raft::type_config::RrTypeConfig, rr_raft::sm_adapter::RrStateMachine>,
     mgr: &Arc<RaftGroupManager>,
     group_id: u64,
 ) -> Result<Vec<u8>, Status> {
@@ -65,7 +66,7 @@ async fn wait_for_snapshot(
                  retry with force_fresh_snapshot=true if the group has no prior snapshot",
             ));
         }
-        if raft.metrics().borrow().snapshot.is_some() {
+        if raft.metrics().borrow_watched().snapshot.is_some() {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -142,7 +143,7 @@ impl AdminService for AdminServiceImpl {
             .await
             .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
 
-        let metrics = raft.metrics().borrow().clone();
+        let metrics = raft.metrics().borrow_watched().clone();
         Ok(Response::new(GroupStatus {
             group_id,
             is_leader: metrics.current_leader == Some(self.node_id),
@@ -434,7 +435,7 @@ impl AdminService for AdminServiceImpl {
             .get_raft(group_id)
             .await
             .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
-        let metrics = raft.metrics().borrow().clone();
+        let metrics = raft.metrics().borrow_watched().clone();
         let cfg = metrics.membership_config.membership();
         let voter_ids: BTreeSet<NodeId> = cfg.voter_ids().collect();
         let mut voters = Vec::new();
@@ -458,7 +459,7 @@ impl AdminService for AdminServiceImpl {
     }
 
     type OnlineBackupStream =
-        std::pin::Pin<Box<dyn futures::Stream<Item = Result<OnlineBackupChunk, Status>> + Send>>;
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<OnlineBackupChunk, Status>> + Send>>;
 
     async fn online_backup(
         &self,
@@ -493,7 +494,7 @@ impl AdminService for AdminServiceImpl {
 
         let snapshot_bytes = wait_for_snapshot(&raft, &self.group_manager, group_id).await?;
 
-        let metadata_metrics = raft.metrics().borrow().clone();
+        let metadata_metrics = raft.metrics().borrow_watched().clone();
         let metadata = OnlineBackupMetadata {
             group_id,
             last_log_index: metadata_metrics

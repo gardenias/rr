@@ -15,21 +15,21 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use openraft::error::InstallSnapshotError;
 use openraft::error::RPCError;
-use openraft::error::RaftError;
+use openraft::error::ReplicationClosed;
+use openraft::error::StreamingError;
 use openraft::error::Unreachable;
 use openraft::network::RPCOption;
-use openraft::network::RaftNetwork;
 use openraft::network::RaftNetworkFactory;
+use openraft::network::v2::RaftNetworkV2;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
-use openraft::raft::InstallSnapshotRequest;
-use openraft::raft::InstallSnapshotResponse;
+use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
 use openraft::BasicNode;
-use openraft::Vote;
+use openraft::type_config::alias::SnapshotOf;
+use openraft::type_config::alias::VoteOf;
 use rr_core::error::NetworkError;
 use rr_core::types::NodeId;
 use tonic::transport::Channel;
@@ -107,14 +107,12 @@ struct ProtoSnapshotResp {
 // ---------------------------------------------------------------------------
 
 /// Map any `Display` error to `RPCError::Unreachable` (concrete for our types).
-fn to_unreachable_ae<E: std::fmt::Display>(e: E) -> RPCError<u64, BasicNode, RaftError<u64>> {
+fn to_unreachable<E: std::fmt::Display>(e: E) -> RPCError<RrTypeConfig> {
     RPCError::Unreachable(Unreachable::new(&std::io::Error::other(e.to_string())))
 }
 
-fn to_unreachable_snap<E: std::fmt::Display>(
-    e: E,
-) -> RPCError<u64, BasicNode, RaftError<u64, InstallSnapshotError>> {
-    RPCError::Unreachable(Unreachable::new(&std::io::Error::other(e.to_string())))
+fn to_unreachable_streaming<E: std::fmt::Display>(e: E) -> StreamingError<RrTypeConfig> {
+    StreamingError::from(to_unreachable(e))
 }
 
 // ---------------------------------------------------------------------------
@@ -401,24 +399,24 @@ impl GrpcRaftNetwork {
     }
 }
 
-impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
+impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<RrTypeConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+    ) -> Result<AppendEntriesResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         let channel = self
             .channel_pool
             .get_or_connect(self.target, &self.target_addr)
             .await
-            .map_err(to_unreachable_ae)?;
+            .map_err(to_unreachable)?;
 
         let batch_size = rpc.entries.len() as f64;
         metrics::histogram!("rr_replication_batch_entries", "group_id" => self.group_id.to_string())
             .record(batch_size);
 
         let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
-            .map_err(to_unreachable_ae)?;
+            .map_err(to_unreachable)?;
 
         let mut client = RaftGrpcClient::new(channel);
         let response = client
@@ -432,29 +430,29 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
                     self.channel_pool.remove(self.target);
                     metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
                 }
-                to_unreachable_ae(status)
+                to_unreachable(status)
             })?
             .into_inner();
 
-        let (resp, _): (AppendEntriesResponse<u64>, _) =
+        let (resp, _): (AppendEntriesResponse<RrTypeConfig>, _) =
             bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
-                .map_err(to_unreachable_ae)?;
+                .map_err(to_unreachable)?;
         Ok(resp)
     }
 
     async fn vote(
         &mut self,
-        rpc: VoteRequest<u64>,
+        rpc: VoteRequest<RrTypeConfig>,
         _option: RPCOption,
-    ) -> Result<VoteResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
+    ) -> Result<VoteResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         let channel = self
             .channel_pool
             .get_or_connect(self.target, &self.target_addr)
             .await
-            .map_err(to_unreachable_ae)?;
+            .map_err(to_unreachable)?;
 
         let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
-            .map_err(to_unreachable_ae)?;
+            .map_err(to_unreachable)?;
 
         let mut client = RaftGrpcClient::new(channel);
         let response = client
@@ -468,35 +466,37 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
                     self.channel_pool.remove(self.target);
                     metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
                 }
-                to_unreachable_ae(status)
+                to_unreachable(status)
             })?
             .into_inner();
 
-        let (resp, _): (VoteResponse<u64>, _) =
+        let (resp, _): (VoteResponse<RrTypeConfig>, _) =
             bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
-                .map_err(to_unreachable_ae)?;
+                .map_err(to_unreachable)?;
         Ok(resp)
     }
 
-    async fn install_snapshot(
+    async fn full_snapshot(
         &mut self,
-        rpc: InstallSnapshotRequest<RrTypeConfig>,
+        vote: VoteOf<RrTypeConfig>,
+        snapshot: SnapshotOf<RrTypeConfig>,
+        _cancel: impl std::future::Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
         _option: RPCOption,
-    ) -> Result<
-        InstallSnapshotResponse<u64>,
-        RPCError<u64, BasicNode, RaftError<u64, InstallSnapshotError>>,
-    > {
+    ) -> Result<SnapshotResponse<RrTypeConfig>, StreamingError<RrTypeConfig>> {
         let channel = self
             .channel_pool
             .get_or_connect(self.target, &self.target_addr)
             .await
-            .map_err(to_unreachable_snap)?;
+            .map_err(to_unreachable_streaming)?;
 
         // Serialize the entire openraft request into the metadata field.
         // Only the final chunk carries metadata; earlier chunks carry data only.
-        let snapshot_data = rpc.data.clone();
-        let metadata = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
-            .map_err(to_unreachable_snap)?;
+        let snapshot_data = snapshot.snapshot.into_inner();
+        let metadata = bincode::serde::encode_to_vec(
+            &(vote, snapshot.meta),
+            bincode::config::standard(),
+        )
+        .map_err(to_unreachable_streaming)?;
 
         // Split snapshot data into 64 KB chunks.
         const CHUNK_SIZE: usize = 65_536;
@@ -536,23 +536,23 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
                     self.channel_pool.remove(self.target);
                     metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
                 }
-                to_unreachable_snap(status)
+                to_unreachable_streaming(status)
             })?
             .into_inner();
 
         // Deserialize the payload to get the InstallSnapshotResponse.
         // For backward compatibility, if payload is empty, use a default vote.
-        let vote = if response.payload.is_empty() {
+        let follower_vote = if response.payload.is_empty() {
             tracing::warn!("snapshot response payload is empty, using default vote");
-            Vote::new(0, 0)
+            vote
         } else {
-            let (resp, _): (InstallSnapshotResponse<u64>, _) =
+            let (resp, _): (SnapshotResponse<RrTypeConfig>, _) =
                 bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
-                    .map_err(to_unreachable_snap)?;
+                    .map_err(to_unreachable_streaming)?;
             resp.vote
         };
 
-        Ok(InstallSnapshotResponse { vote })
+        Ok(SnapshotResponse::new(follower_vote))
     }
 }
 
@@ -563,6 +563,7 @@ impl RaftNetwork<RrTypeConfig> for GrpcRaftNetwork {
 mod tests {
     use super::*;
     use openraft::raft::AppendEntriesRequest as OraftAppendRequest;
+    use openraft::Vote;
     use std::time::Duration;
 
     #[test]
@@ -612,7 +613,7 @@ mod tests {
             group_id: 1,
         };
 
-        let rpc = VoteRequest::<u64> {
+        let rpc = VoteRequest::<RrTypeConfig> {
             vote: Vote::new(1, 1),
             last_log_id: None,
         };
