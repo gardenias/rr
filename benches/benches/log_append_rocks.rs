@@ -24,8 +24,7 @@ fn bench_log_append_rocks(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let tmp = tempfile::TempDir::new().unwrap();
-                let mut storage =
-                    RocksLogStorage::open(tmp.path().to_str().unwrap()).unwrap();
+                let mut storage = RocksLogStorage::open(tmp.path().to_str().unwrap()).unwrap();
                 let entries = make_entries(1000);
                 storage.blocking_append(entries).await.unwrap();
             });

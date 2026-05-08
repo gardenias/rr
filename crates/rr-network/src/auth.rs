@@ -257,7 +257,9 @@ mod tests {
     #[test]
     fn enabled_interceptor_accepts_correct_token() {
         let mut interceptor = BearerInterceptor::new(ServiceLabel::Admin, "secret".into());
-        assert!(interceptor.call(req_with_auth(Some("Bearer secret"))).is_ok());
+        assert!(interceptor
+            .call(req_with_auth(Some("Bearer secret")))
+            .is_ok());
     }
 
     #[test]
@@ -335,7 +337,11 @@ mod tests {
         let mut req = Request::new(());
         attach_bearer_token(&mut req, "hello").unwrap();
         assert_eq!(
-            req.metadata().get("authorization").unwrap().to_str().unwrap(),
+            req.metadata()
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Bearer hello"
         );
     }

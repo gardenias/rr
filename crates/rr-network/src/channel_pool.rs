@@ -55,26 +55,33 @@ impl ChannelPool {
         } else {
             format!("http://{addr}")
         };
-        let mut endpoint = Endpoint::from_shared(uri).map_err(|e| NetworkError::ConnectionFailed {
-            addr: addr.to_string(),
-            reason: e.to_string(),
-        })?;
-        if let Some(tls) = &self.tls {
-            let client_tls = tls.build_client_tls().map_err(|e| NetworkError::ConnectionFailed {
+        let mut endpoint =
+            Endpoint::from_shared(uri).map_err(|e| NetworkError::ConnectionFailed {
                 addr: addr.to_string(),
-                reason: format!("tls config: {e}"),
+                reason: e.to_string(),
             })?;
-            endpoint = endpoint
-                .tls_config(client_tls)
-                .map_err(|e| NetworkError::ConnectionFailed {
-                    addr: addr.to_string(),
-                    reason: format!("tls endpoint: {e}"),
-                })?;
+        if let Some(tls) = &self.tls {
+            let client_tls =
+                tls.build_client_tls()
+                    .map_err(|e| NetworkError::ConnectionFailed {
+                        addr: addr.to_string(),
+                        reason: format!("tls config: {e}"),
+                    })?;
+            endpoint =
+                endpoint
+                    .tls_config(client_tls)
+                    .map_err(|e| NetworkError::ConnectionFailed {
+                        addr: addr.to_string(),
+                        reason: format!("tls endpoint: {e}"),
+                    })?;
         }
-        let channel = endpoint.connect().await.map_err(|e| NetworkError::ConnectionFailed {
-            addr: addr.to_string(),
-            reason: e.to_string(),
-        })?;
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|e| NetworkError::ConnectionFailed {
+                addr: addr.to_string(),
+                reason: e.to_string(),
+            })?;
         self.channels.insert(node_id, channel.clone());
         Ok(channel)
     }

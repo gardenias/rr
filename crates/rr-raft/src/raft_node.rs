@@ -16,12 +16,12 @@ use openraft::raft::AppendEntriesResponse;
 use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
+use openraft::type_config::alias::SnapshotOf;
+use openraft::type_config::alias::VoteOf;
 use openraft::BasicNode;
 use openraft::Config;
 use openraft::OptionalSend;
 use openraft::Raft;
-use openraft::type_config::alias::SnapshotOf;
-use openraft::type_config::alias::VoteOf;
 
 use rr_core::error::{ConfigError, RaftError, RrError};
 use rr_core::state_machine::StateMachine;
@@ -145,8 +145,8 @@ impl RaftNode {
             })?,
         );
 
-        let log_storage = crate::rocks_log_storage::RocksLogStorage::open(rocks_path)
-            .map_err(|e| {
+        let log_storage =
+            crate::rocks_log_storage::RocksLogStorage::open(rocks_path).map_err(|e| {
                 RrError::Raft(RaftError::InitializationFailed {
                     reason: format!("failed to open RocksLogStorage at {rocks_path}: {e}"),
                 })

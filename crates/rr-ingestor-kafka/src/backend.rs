@@ -163,10 +163,7 @@ impl KafkaIngestor {
     /// `StreamConsumer`, and `assign()`s it to the configured
     /// `(topic, partition)`. Does NOT seek — the framework supervisor
     /// calls `seek()` first thing on leader promotion.
-    pub async fn new(
-        group_id: u64,
-        cfg: KafkaIngestorConfig,
-    ) -> Result<Self, KafkaIngestorError> {
+    pub async fn new(group_id: u64, cfg: KafkaIngestorConfig) -> Result<Self, KafkaIngestorError> {
         if cfg.bootstrap_servers.is_empty() {
             return Err(KafkaIngestorError::Config(
                 "bootstrap_servers must be non-empty".to_string(),
@@ -202,9 +199,7 @@ impl KafkaIngestor {
 
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition(&topic, cfg.partition);
-        consumer
-            .assign(&tpl)
-            .map_err(KafkaIngestorError::Kafka)?;
+        consumer.assign(&tpl).map_err(KafkaIngestorError::Kafka)?;
 
         info!(
             group_id,
@@ -305,10 +300,7 @@ impl CommandIngestor for KafkaIngestor {
         Ok(())
     }
 
-    async fn poll(
-        &mut self,
-        max_batch_size: usize,
-    ) -> Result<Vec<IngressCommand<i64>>, RrError> {
+    async fn poll(&mut self, max_batch_size: usize) -> Result<Vec<IngressCommand<i64>>, RrError> {
         let mut batch = Vec::with_capacity(max_batch_size.min(64));
         let mut stream = self.consumer.stream();
         let deadline = tokio::time::sleep(self.poll_timeout);

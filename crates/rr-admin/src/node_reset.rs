@@ -45,11 +45,11 @@ use std::path::Path;
 /// users may co-locate auxiliary files — but it MUST NOT match
 /// generic paths like `/`, `/home/foo`, etc.
 pub const RR_DATA_DIR_MARKERS: &[&str] = &[
-    "LOCK",          // RocksDB exclusive lock (only if running)
-    "CURRENT",       // RocksDB current manifest pointer
-    "MANIFEST-",     // RocksDB manifest files (prefix match)
-    "OPTIONS-",      // RocksDB options snapshot files (prefix match)
-    "IDENTITY",      // RocksDB instance identity
+    "LOCK",      // RocksDB exclusive lock (only if running)
+    "CURRENT",   // RocksDB current manifest pointer
+    "MANIFEST-", // RocksDB manifest files (prefix match)
+    "OPTIONS-",  // RocksDB options snapshot files (prefix match)
+    "IDENTITY",  // RocksDB instance identity
 ];
 
 /// Outcome of a successful node-reset, suitable for JSON / human
@@ -117,8 +117,8 @@ pub fn reset_node_data_dir(data_dir: &Path, force: bool) -> Result<NodeResetRepo
         dirs_removed: 0,
         bytes_reclaimed: 0,
     };
-    for entry in fs::read_dir(&canonical)
-        .with_context(|| format!("read_dir {}", canonical.display()))?
+    for entry in
+        fs::read_dir(&canonical).with_context(|| format!("read_dir {}", canonical.display()))?
     {
         let entry = entry?;
         let path = entry.path();
@@ -131,8 +131,7 @@ pub fn reset_node_data_dir(data_dir: &Path, force: bool) -> Result<NodeResetRepo
             report.bytes_reclaimed += bytes;
         } else {
             let bytes = meta.len();
-            fs::remove_file(&path)
-                .with_context(|| format!("remove_file {}", path.display()))?;
+            fs::remove_file(&path).with_context(|| format!("remove_file {}", path.display()))?;
             report.files_removed += 1;
             report.bytes_reclaimed += bytes;
         }
@@ -141,8 +140,8 @@ pub fn reset_node_data_dir(data_dir: &Path, force: bool) -> Result<NodeResetRepo
 }
 
 fn looks_like_rr_data_dir(data_dir: &Path) -> Result<bool> {
-    let mut entries = fs::read_dir(data_dir)
-        .with_context(|| format!("read_dir {}", data_dir.display()))?;
+    let mut entries =
+        fs::read_dir(data_dir).with_context(|| format!("read_dir {}", data_dir.display()))?;
     let mut saw_any = false;
     let mut saw_marker = false;
     for entry in entries.by_ref() {
@@ -280,7 +279,8 @@ mod tests {
     fn accepts_dir_with_only_options_marker() {
         let tmp = TempDir::new().unwrap();
         touch(tmp.path(), "OPTIONS-000007", b"x");
-        let report = reset_node_data_dir(tmp.path(), true).expect("OPTIONS- prefix marker accepted");
+        let report =
+            reset_node_data_dir(tmp.path(), true).expect("OPTIONS- prefix marker accepted");
         assert_eq!(report.files_removed, 1);
     }
 

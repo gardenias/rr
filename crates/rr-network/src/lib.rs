@@ -48,10 +48,7 @@ where
     A: tonic::service::Interceptor + Clone,
     B: tonic::service::Interceptor + Clone,
 {
-    fn call(
-        &mut self,
-        request: tonic::Request<()>,
-    ) -> Result<tonic::Request<()>, tonic::Status> {
+    fn call(&mut self, request: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
         let request = self.first.call(request)?;
         self.second.call(request)
     }

@@ -46,7 +46,9 @@ use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::{FramedSnapshot, IngestorState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
 use rr_core::service::Service;
-use rr_core::state_machine::{IngestorOffsetControl, StateMachine, StateMachineReader};
+use rr_core::state_machine::{
+    IngestorOffsetControl, StateMachine, StateMachineLifecycleHook, StateMachineReader,
+};
 use rr_core::types::{GroupId, LogIndex};
 
 use crate::idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
@@ -83,6 +85,10 @@ struct ServiceReadHandle<S: Service> {
     service: Arc<TokioRwLock<S>>,
 }
 
+struct ServiceLifecycleHook<S: Service> {
+    service: Arc<TokioRwLock<S>>,
+}
+
 #[async_trait]
 impl<S: Service + 'static> StateMachineReader for ServiceReadHandle<S> {
     async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
@@ -102,7 +108,10 @@ impl SharedIngestorOffsetControl {
 
 impl IngestorOffsetControl for SharedIngestorOffsetControl {
     fn set_offset(&self, offset: Option<Vec<u8>>) {
-        *self.inner.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = offset;
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = offset;
     }
 
     fn get_offset(&self) -> Option<Vec<u8>> {
@@ -110,6 +119,21 @@ impl IngestorOffsetControl for SharedIngestorOffsetControl {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+}
+
+#[async_trait]
+impl<S: Service + 'static> StateMachineLifecycleHook for ServiceLifecycleHook<S> {
+    async fn on_leader_elected(&self, group_id: GroupId) {
+        self.service.write().await.on_leader_elected(group_id).await;
+    }
+
+    async fn on_step_down(&self, group_id: GroupId) {
+        self.service.write().await.on_step_down(group_id).await;
+    }
+
+    async fn on_shutdown(&self) {
+        self.service.write().await.shutdown().await;
     }
 }
 
@@ -157,6 +181,21 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             .latest_ingestor_offset
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = offset;
+    }
+
+    /// Notify the wrapped service that this node became the group leader.
+    pub async fn notify_leader_elected(&self, group_id: GroupId) {
+        self.service.write().await.on_leader_elected(group_id).await;
+    }
+
+    /// Notify the wrapped service that this node stepped down.
+    pub async fn notify_step_down(&self, group_id: GroupId) {
+        self.service.write().await.on_step_down(group_id).await;
+    }
+
+    /// Notify the wrapped service to shut down.
+    pub async fn notify_shutdown(&self) {
+        self.service.write().await.shutdown().await;
     }
 
     async fn apply_keyed(
@@ -308,6 +347,24 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
         } else {
             Some(self.applied_count)
         }
+    }
+
+    async fn on_leader_elected(&mut self, group_id: GroupId) {
+        self.notify_leader_elected(group_id).await;
+    }
+
+    async fn on_step_down(&mut self, group_id: GroupId) {
+        self.notify_step_down(group_id).await;
+    }
+
+    async fn on_shutdown(&mut self) {
+        self.notify_shutdown().await;
+    }
+
+    fn lifecycle_hook(&self) -> Option<Arc<dyn StateMachineLifecycleHook>> {
+        Some(Arc::new(ServiceLifecycleHook {
+            service: Arc::clone(&self.service),
+        }))
     }
 
     fn ingestor_offset_control(&self) -> Option<Arc<dyn IngestorOffsetControl>> {
@@ -570,7 +627,10 @@ mod tests {
         let svc1 = MockService::new(b"first-response".to_vec());
         let mut adapter1 = ServiceStateMachineAdapter::new(7, svc1);
         let key = rr_core::idempotency::IdempotencyKey::new("transfer", 42);
-        adapter1.apply(&keyed_entry(b"req", key.clone())).await.unwrap();
+        adapter1
+            .apply(&keyed_entry(b"req", key.clone()))
+            .await
+            .unwrap();
         let snapshot_bytes = adapter1.snapshot().await.unwrap();
 
         let svc2 = MockService::new(b"second-response".to_vec());
@@ -578,7 +638,10 @@ mod tests {
         let mut adapter2 = ServiceStateMachineAdapter::new(7, svc2);
         adapter2.restore(&snapshot_bytes).await.unwrap();
 
-        let bytes = adapter2.apply(&keyed_entry(b"req-retry", key)).await.unwrap();
+        let bytes = adapter2
+            .apply(&keyed_entry(b"req-retry", key))
+            .await
+            .unwrap();
         match rr_core::idempotency::ApplyOutcome::decode(&bytes).unwrap() {
             rr_core::idempotency::ApplyOutcome::Success(payload) => {
                 assert_eq!(

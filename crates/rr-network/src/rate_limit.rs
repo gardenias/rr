@@ -227,7 +227,9 @@ impl PerCallerLimiterMap {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 ticker.tick().await;
-                let Some(map) = entries_weak.upgrade() else { break };
+                let Some(map) = entries_weak.upgrade() else {
+                    break;
+                };
                 let now = Instant::now();
                 let mut guard = map.write().unwrap_or_else(|p| p.into_inner());
                 guard.retain(|_, entry| now.duration_since(entry.last_seen) <= ttl);
@@ -249,11 +251,17 @@ impl PerCallerLimiterMap {
     /// Returns `true` when the caller still has quota.
     pub fn try_acquire(&self, caller_fp: &str) -> bool {
         {
-            let read_guard = self.entries.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let read_guard = self
+                .entries
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(entry) = read_guard.get(caller_fp) {
                 if entry.limiter.try_acquire() {
                     drop(read_guard);
-                    let mut write_guard = self.entries.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut write_guard = self
+                        .entries
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     if let Some(entry) = write_guard.get_mut(caller_fp) {
                         entry.last_seen = Instant::now();
                     }
@@ -263,7 +271,10 @@ impl PerCallerLimiterMap {
             }
         }
 
-        let mut write_guard = self.entries.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut write_guard = self
+            .entries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.evict_stale(&mut write_guard);
 
         if let Some(entry) = write_guard.get_mut(caller_fp) {

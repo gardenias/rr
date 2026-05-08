@@ -225,7 +225,10 @@ fn ready_response(readiness: &ReadinessFlag) -> Response<Full<Bytes>> {
     });
     Response::builder()
         .status(status)
-        .header(hyper::header::CONTENT_TYPE, "application/json; charset=utf-8")
+        .header(
+            hyper::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )
         .body(Full::new(Bytes::from(body)))
         .expect("valid response")
 }
@@ -390,7 +393,11 @@ mod tests {
             stream.read_exact(&mut body_buf).await.unwrap();
         }
 
-        (status_code, head.to_string(), String::from_utf8_lossy(&body_buf).to_string())
+        (
+            status_code,
+            head.to_string(),
+            String::from_utf8_lossy(&body_buf).to_string(),
+        )
     }
 
     fn test_prom_handle() -> PrometheusHandle {

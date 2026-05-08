@@ -106,20 +106,18 @@ impl FramedEntry {
             return Ok(None);
         }
         let body = &bytes[FRAMED_ENTRY_MAGIC.len()..];
-        let (framed, _) = bincode::serde::decode_from_slice::<FramedEntry, _>(
-            body,
-            bincode::config::standard(),
-        )
-        .map_err(|e| {
-            metrics::counter!(
-                "rr_framing_decode_failures_total",
-                "kind" => "framed_entry_body"
-            )
-            .increment(1);
-            RrError::Codec(CodecError::DeserializeFailed(format!(
-                "framed entry decode failed: {e}"
-            )))
-        })?;
+        let (framed, _) =
+            bincode::serde::decode_from_slice::<FramedEntry, _>(body, bincode::config::standard())
+                .map_err(|e| {
+                    metrics::counter!(
+                        "rr_framing_decode_failures_total",
+                        "kind" => "framed_entry_body"
+                    )
+                    .increment(1);
+                    RrError::Codec(CodecError::DeserializeFailed(format!(
+                        "framed entry decode failed: {e}"
+                    )))
+                })?;
         if framed.version > FRAMED_ENTRY_VERSION {
             metrics::counter!(
                 "rr_framing_decode_failures_total",

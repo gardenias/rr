@@ -63,10 +63,11 @@ impl Default for MockKafkaIngestor {
 impl MockKafkaHandle {
     /// Append a command to the mock's queue.
     pub async fn push(&self, offset: i64, payload: Vec<u8>) {
-        self.inner.lock().await.queue.push_back(IngressCommand {
-            offset,
-            payload,
-        });
+        self.inner
+            .lock()
+            .await
+            .queue
+            .push_back(IngressCommand { offset, payload });
     }
 
     /// Snapshot the most recent [`CommandIngestor::seek`] argument.
@@ -101,10 +102,7 @@ impl CommandIngestor for MockKafkaIngestor {
         Ok(())
     }
 
-    async fn poll(
-        &mut self,
-        max_batch_size: usize,
-    ) -> Result<Vec<IngressCommand<i64>>, RrError> {
+    async fn poll(&mut self, max_batch_size: usize) -> Result<Vec<IngressCommand<i64>>, RrError> {
         let mut g = self.inner.lock().await;
         if g.fail_next_poll {
             g.fail_next_poll = false;

@@ -72,8 +72,8 @@ pub use mock::{MockKafkaHandle, MockKafkaIngestor};
 ///
 /// [`IdempotencyKey::request_id`]: rr_core::idempotency::IdempotencyKey::request_id
 pub fn kafka_offset_to_request_id(bytes: &[u8]) -> u64 {
-    let (i, _): (i64, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-        .unwrap_or((0_i64, 0));
+    let (i, _): (i64, _) =
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard()).unwrap_or((0_i64, 0));
     i.max(0) as u64
 }
 

@@ -432,7 +432,10 @@ impl RrClient {
 
                     // Exponential backoff before retry
                     if attempt + 1 < max_attempts {
-                        let delay_ms = self.retry_config.retry_delay_ms.saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                        let delay_ms = self
+                            .retry_config
+                            .retry_delay_ms
+                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                     continue;
@@ -481,7 +484,10 @@ impl RrClient {
                             .await;
 
                         if !resp.success && attempt + 1 < max_attempts {
-                            let delay_ms = self.retry_config.retry_delay_ms.saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                            let delay_ms = self
+                                .retry_config
+                                .retry_delay_ms
+                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                             continue;
                         }
@@ -510,7 +516,10 @@ impl RrClient {
 
                     // Exponential backoff before retry
                     if attempt + 1 < max_attempts {
-                        let delay_ms = self.retry_config.retry_delay_ms.saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                        let delay_ms = self
+                            .retry_config
+                            .retry_delay_ms
+                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                 }
@@ -548,14 +557,18 @@ impl RrClient {
                 .increment(1);
             }
 
-            let addr = self.bootstrap_addrs[(attempt as usize) % self.bootstrap_addrs.len()].clone();
+            let addr =
+                self.bootstrap_addrs[(attempt as usize) % self.bootstrap_addrs.len()].clone();
 
             let mut grpc_client = match self.connect_to_addr(&addr).await {
                 Ok(client) => client,
                 Err(e) => {
                     last_error = Some(e);
                     if attempt + 1 < max_attempts {
-                        let delay_ms = self.retry_config.retry_delay_ms.saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                        let delay_ms = self
+                            .retry_config
+                            .retry_delay_ms
+                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                     continue;
@@ -606,7 +619,10 @@ impl RrClient {
             }
 
             if attempt + 1 < max_attempts {
-                let delay_ms = self.retry_config.retry_delay_ms.saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                let delay_ms = self
+                    .retry_config
+                    .retry_delay_ms
+                    .saturating_mul(2u64.saturating_pow(attempt.min(20)));
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
         }

@@ -136,9 +136,9 @@ fn parse_u64_suffix(key: &str, prefix: &str, kind: &str) -> Result<u64, ConfigEr
     let suffix = key
         .strip_prefix(prefix)
         .ok_or_else(|| ConfigError::InvalidConfig(format!("invalid {kind} key: {key}")))?;
-    suffix.parse::<u64>().map_err(|err| {
-        ConfigError::InvalidConfig(format!("invalid {kind} id in key {key}: {err}"))
-    })
+    suffix
+        .parse::<u64>()
+        .map_err(|err| ConfigError::InvalidConfig(format!("invalid {kind} id in key {key}: {err}")))
 }
 
 fn parse_node_id_from_key(cluster_id: &str, key: &str) -> Result<NodeId, ConfigError> {
@@ -162,9 +162,9 @@ fn parse_group_id_from_key(cluster_id: &str, key: &str) -> Result<GroupId, Confi
             "invalid group key suffix in {key}: expected replicas"
         )));
     }
-    group_id_raw.parse::<u64>().map_err(|err| {
-        ConfigError::InvalidConfig(format!("invalid group id in key {key}: {err}"))
-    })
+    group_id_raw
+        .parse::<u64>()
+        .map_err(|err| ConfigError::InvalidConfig(format!("invalid group id in key {key}: {err}")))
 }
 
 fn map_etcd_error(context: &str, err: etcd_client::Error) -> ConfigError {
@@ -424,7 +424,8 @@ impl ConfigProvider for EtcdConfigProvider {
     ) -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError> {
         let (sender, receiver) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
 
-        self.spawn_watcher(WatchDomain::Node, sender.clone()).await?;
+        self.spawn_watcher(WatchDomain::Node, sender.clone())
+            .await?;
         self.spawn_watcher(WatchDomain::Partition, sender.clone())
             .await?;
         self.spawn_watcher(WatchDomain::Group, sender).await?;
@@ -479,7 +480,10 @@ mod tests {
     fn key_builder_paths_match_schema() {
         assert_eq!(build_node_key("c1", 42), "/rr/c1/nodes/42");
         assert_eq!(build_partition_key("c1", 5), "/rr/c1/partitions/5");
-        assert_eq!(build_group_replicas_key("c1", 9), "/rr/c1/groups/9/replicas");
+        assert_eq!(
+            build_group_replicas_key("c1", 9),
+            "/rr/c1/groups/9/replicas"
+        );
     }
 
     #[test]

@@ -171,7 +171,10 @@ mod tests {
         let Command::Serve(args) = cli.command else {
             panic!("expected Serve");
         };
-        assert_eq!(args.config.as_deref(), Some(std::path::Path::new("/etc/rr/config.toml")));
+        assert_eq!(
+            args.config.as_deref(),
+            Some(std::path::Path::new("/etc/rr/config.toml"))
+        );
         assert_eq!(args.node_id, None);
     }
 

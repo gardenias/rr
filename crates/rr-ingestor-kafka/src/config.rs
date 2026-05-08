@@ -171,7 +171,10 @@ mod tests {
     fn security_protocol_as_rdkafka_matches_known_strings() {
         assert_eq!(SecurityProtocol::Plaintext.as_rdkafka(), "PLAINTEXT");
         assert_eq!(SecurityProtocol::Ssl.as_rdkafka(), "SSL");
-        assert_eq!(SecurityProtocol::SaslPlaintext.as_rdkafka(), "SASL_PLAINTEXT");
+        assert_eq!(
+            SecurityProtocol::SaslPlaintext.as_rdkafka(),
+            "SASL_PLAINTEXT"
+        );
         assert_eq!(SecurityProtocol::SaslSsl.as_rdkafka(), "SASL_SSL");
     }
 

@@ -98,9 +98,7 @@ impl DecommissionReport {
         self.groups.iter().any(|g| {
             matches!(
                 g.action,
-                GroupAction::Removed
-                    | GroupAction::DrainedAndRemoved
-                    | GroupAction::WouldRemove
+                GroupAction::Removed | GroupAction::DrainedAndRemoved | GroupAction::WouldRemove
             )
         })
     }
@@ -124,10 +122,7 @@ pub async fn decommission_node(
     target_node_id: u64,
     dry_run: bool,
 ) -> Result<DecommissionReport> {
-    let node_status = client
-        .get_node_status(Empty {})
-        .await?
-        .into_inner();
+    let node_status = client.get_node_status(Empty {}).await?.into_inner();
     let group_ids = node_status.group_ids;
 
     let mut report = DecommissionReport {
@@ -192,9 +187,7 @@ async fn decommission_one_group(
         return Ok(DecommissionGroupResult {
             group_id,
             action: GroupAction::WouldRemove,
-            message: format!(
-                "dry-run: would change voters from {voter_ids:?} to {remaining:?}"
-            ),
+            message: format!("dry-run: would change voters from {voter_ids:?} to {remaining:?}"),
         });
     }
 
@@ -382,16 +375,28 @@ mod tests {
     #[test]
     fn pick_new_leader_picks_first_non_target_voter() {
         let voters = vec![
-            NodeMember { node_id: 4, addr: String::new() },
-            NodeMember { node_id: 1, addr: String::new() },
-            NodeMember { node_id: 2, addr: String::new() },
+            NodeMember {
+                node_id: 4,
+                addr: String::new(),
+            },
+            NodeMember {
+                node_id: 1,
+                addr: String::new(),
+            },
+            NodeMember {
+                node_id: 2,
+                addr: String::new(),
+            },
         ];
         assert_eq!(pick_new_leader(&voters, 4), Some(1));
     }
 
     #[test]
     fn pick_new_leader_returns_none_when_only_target() {
-        let voters = vec![NodeMember { node_id: 4, addr: String::new() }];
+        let voters = vec![NodeMember {
+            node_id: 4,
+            addr: String::new(),
+        }];
         assert_eq!(pick_new_leader(&voters, 4), None);
     }
 

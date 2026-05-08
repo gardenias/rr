@@ -50,8 +50,7 @@ struct CertBundle {
 }
 
 fn generate_certs() -> CertBundle {
-    let mut ca_params = CertificateParams::new(vec!["rr-test-ca".to_string()])
-        .expect("ca params");
+    let mut ca_params = CertificateParams::new(vec!["rr-test-ca".to_string()]).expect("ca params");
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.distinguished_name = {
         let mut dn = DistinguishedName::new();
@@ -101,7 +100,10 @@ fn generate_certs() -> CertBundle {
     }
 }
 
-fn write_pem_files(dir: &std::path::Path, certs: &CertBundle) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+fn write_pem_files(
+    dir: &std::path::Path,
+    certs: &CertBundle,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
     use std::fs::write;
     let server_cert = dir.join("server.pem");
     let server_key = dir.join("server.key");
@@ -293,16 +295,14 @@ async fn tls_mtls_bearer_auth_e2e_matrix() {
     let scenario_d_failed = match connect_result {
         Err(_) => true,
         Ok(chan) => {
-            let mut client = AdminServiceClient::with_interceptor(
-                chan,
-                |mut req: tonic::Request<()>| {
+            let mut client =
+                AdminServiceClient::with_interceptor(chan, |mut req: tonic::Request<()>| {
                     req.metadata_mut().insert(
                         "authorization",
                         format!("Bearer {ADMIN_TOKEN}").parse().unwrap(),
                     );
                     Ok(req)
-                },
-            );
+                });
             client.get_node_status(Empty {}).await.is_err()
         }
     };

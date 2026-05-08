@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use openraft::BasicNode;
 use openraft::type_config::async_runtime::WatchReceiver;
+use openraft::BasicNode;
 use tokio::sync::Mutex;
 
 use rr_core::error::RrError;
@@ -49,11 +49,10 @@ impl Service for RecordingService {
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
         let guard = self.applied.lock().await;
-        Ok(bincode::serde::encode_to_vec(
-            &*guard,
-            bincode::config::standard(),
+        Ok(
+            bincode::serde::encode_to_vec(&*guard, bincode::config::standard())
+                .map_err(|e| RrError::Application(e.to_string()))?,
         )
-        .map_err(|e| RrError::Application(e.to_string()))?)
     }
 
     async fn restore(&mut self, data: &[u8]) -> Result<(), RrError> {
@@ -69,10 +68,7 @@ fn factory_from(svc: RecordingService) -> StateMachineFactory {
     Box::new(move |gid| Box::new(ServiceStateMachineAdapter::new(gid, svc.clone())))
 }
 
-async fn make_single_node_leader(
-    svc: RecordingService,
-    group_id: u64,
-) -> Arc<RaftGroupManager> {
+async fn make_single_node_leader(svc: RecordingService, group_id: u64) -> Arc<RaftGroupManager> {
     let mgr = Arc::new(RaftGroupManager::new(1, factory_from(svc)));
     mgr.start_group(group_id).await.unwrap();
     let mut members = BTreeMap::new();
@@ -100,9 +96,7 @@ async fn wait_for_applied(svc: &RecordingService, expected: usize, timeout: Dura
             return;
         }
         if std::time::Instant::now() > deadline {
-            panic!(
-                "timeout waiting for {expected} applied entries, only saw {n}"
-            );
+            panic!("timeout waiting for {expected} applied entries, only saw {n}");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -261,9 +255,7 @@ async fn auto_idempotency_dedups_replayed_kafka_offsets() {
 async fn restored_adapter_seeds_new_ingestor_with_persisted_offset() {
     let mut adapter = ServiceStateMachineAdapter::new(3, RecordingService::default());
     let entry = rr_core::framed_entry::FramedEntry::from_payload(b"x".to_vec())
-        .with_offset(
-            bincode::serde::encode_to_vec(42_i64, bincode::config::standard()).unwrap(),
-        )
+        .with_offset(bincode::serde::encode_to_vec(42_i64, bincode::config::standard()).unwrap())
         .encode()
         .unwrap();
     adapter.apply(&entry).await.unwrap();
@@ -361,7 +353,10 @@ async fn test_ingestor_survives_leader_switch_no_message_loss() {
     // Verify ordering: first 5 should be evt-0..evt-4, next 5 evt-5..evt-9
     for (i, payload) in recorded.iter().enumerate() {
         let expected = format!("evt-{i}").into_bytes();
-        assert_eq!(*payload, expected, "message at index {i} must match expected payload");
+        assert_eq!(
+            *payload, expected,
+            "message at index {i} must match expected payload"
+        );
     }
 
     mgr.stop_ingestor(5).await.unwrap();

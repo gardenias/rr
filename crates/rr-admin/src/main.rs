@@ -271,8 +271,7 @@ async fn main() -> Result<()> {
             node_id,
             comment,
         } => {
-            let meta =
-                backup::create_backup(data_dir, output, *node_id, comment.clone())?;
+            let meta = backup::create_backup(data_dir, output, *node_id, comment.clone())?;
             match cli.output {
                 OutputFormat::Json => {
                     println!("{}", serde_json::to_string_pretty(&meta)?);
@@ -339,9 +338,13 @@ async fn main() -> Result<()> {
                     println!("  1. Start the node fresh.");
                     println!("  2. From another cluster member, run:");
                     println!("       rr-admin --addr <leader-host:port> group add-learner \\");
-                    println!("           --group <ID> --node-id <this-node-id> --addr <this-host:port>");
+                    println!(
+                        "           --group <ID> --node-id <this-node-id> --addr <this-host:port>"
+                    );
                     println!("  3. Wait for replication to catch up, then promote with:");
-                    println!("       rr-admin --addr <leader-host:port> group change-membership \\");
+                    println!(
+                        "       rr-admin --addr <leader-host:port> group change-membership \\"
+                    );
                     println!("           --group <ID> --voters <new-voter-set>");
                 }
             }
@@ -394,7 +397,9 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                Commands::Node { cmd: NodeCommands::Status } => {
+                Commands::Node {
+                    cmd: NodeCommands::Status,
+                } => {
                     let resp = client.get_node_status(Empty {}).await?.into_inner();
                     match cli.output {
                         OutputFormat::Json => {
@@ -415,7 +420,9 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                Commands::Group { cmd: GroupCommands::Status { group } } => {
+                Commands::Group {
+                    cmd: GroupCommands::Status { group },
+                } => {
                     let resp = client
                         .get_group_status(GroupId { group_id: *group })
                         .await?
@@ -440,7 +447,9 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                Commands::Group { cmd: GroupCommands::Snapshot { group } } => {
+                Commands::Group {
+                    cmd: GroupCommands::Snapshot { group },
+                } => {
                     let resp = client
                         .trigger_snapshot(GroupId { group_id: *group })
                         .await?
@@ -454,7 +463,10 @@ async fn main() -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!("TriggerSnapshot: success={} message={}", resp.success, resp.message);
+                            println!(
+                                "TriggerSnapshot: success={} message={}",
+                                resp.success, resp.message
+                            );
                         }
                     }
                 }
@@ -477,12 +489,20 @@ async fn main() -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!("TransferLeader: success={} message={}", resp.success, resp.message);
+                            println!(
+                                "TransferLeader: success={} message={}",
+                                resp.success, resp.message
+                            );
                         }
                     }
                 }
                 Commands::Group {
-                    cmd: GroupCommands::AddLearner { group, node_id, addr },
+                    cmd:
+                        GroupCommands::AddLearner {
+                            group,
+                            node_id,
+                            addr,
+                        },
                 } => {
                     let resp = client
                         .add_learner(AddLearnerRequest {
@@ -501,7 +521,10 @@ async fn main() -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!("AddLearner: success={} message={}", resp.success, resp.message);
+                            println!(
+                                "AddLearner: success={} message={}",
+                                resp.success, resp.message
+                            );
                         }
                     }
                 }
@@ -534,7 +557,10 @@ async fn main() -> Result<()> {
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!("ChangeMembership: success={} message={}", resp.success, resp.message);
+                            println!(
+                                "ChangeMembership: success={} message={}",
+                                resp.success, resp.message
+                            );
                         }
                     }
                 }
@@ -567,7 +593,12 @@ async fn main() -> Result<()> {
                     }
                 }
                 Commands::Group {
-                    cmd: GroupCommands::OnlineBackup { group, output, force_fresh },
+                    cmd:
+                        GroupCommands::OnlineBackup {
+                            group,
+                            output,
+                            force_fresh,
+                        },
                 } => {
                     use std::io::Write;
                     let mut stream = client
@@ -746,7 +777,9 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                     println!("Usage: get <key>");
                     continue;
                 }
-                let req = KvRequest::Get { key: tokens[1].to_string() };
+                let req = KvRequest::Get {
+                    key: tokens[1].to_string(),
+                };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
@@ -807,7 +840,9 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                     println!("Usage: delete <key>");
                     continue;
                 }
-                let req = KvRequest::Delete { key: tokens[1].to_string() };
+                let req = KvRequest::Delete {
+                    key: tokens[1].to_string(),
+                };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
@@ -823,20 +858,21 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                     Err(e) => println!("RPC error: {e}"),
                 }
             }
-            "status" => {
-                match admin_client.get_node_status(Empty {}).await {
-                    Ok(resp) => {
-                        let s = resp.into_inner();
-                        println!("node_id    : {}", s.node_id);
-                        println!("listen_addr: {}", s.listen_addr);
-                        println!("group_ids  : {:?}", s.group_ids);
-                        println!("uptime_secs: {}", s.uptime_secs);
-                    }
-                    Err(e) => println!("RPC error: {e}"),
+            "status" => match admin_client.get_node_status(Empty {}).await {
+                Ok(resp) => {
+                    let s = resp.into_inner();
+                    println!("node_id    : {}", s.node_id);
+                    println!("listen_addr: {}", s.listen_addr);
+                    println!("group_ids  : {:?}", s.group_ids);
+                    println!("uptime_secs: {}", s.uptime_secs);
                 }
-            }
+                Err(e) => println!("RPC error: {e}"),
+            },
             "members" => {
-                match admin_client.get_group_status(GroupId { group_id: group }).await {
+                match admin_client
+                    .get_group_status(GroupId { group_id: group })
+                    .await
+                {
                     Ok(resp) => {
                         let s = resp.into_inner();
                         println!("group_id      : {}", s.group_id);
@@ -887,7 +923,12 @@ mod tests {
         let cli = Cli::try_parse_from(["rr-admin", "--addr", "127.0.0.1:52001", "node", "status"])
             .expect("should parse node status");
         assert_eq!(cli.addr, "127.0.0.1:52001");
-        assert!(matches!(cli.command, Commands::Node { cmd: NodeCommands::Status }));
+        assert!(matches!(
+            cli.command,
+            Commands::Node {
+                cmd: NodeCommands::Status
+            }
+        ));
     }
 
     /// Verify group status subcommand parses correctly.
@@ -897,7 +938,9 @@ mod tests {
             .expect("should parse group status");
         assert!(matches!(
             cli.command,
-            Commands::Group { cmd: GroupCommands::Status { group: 1 } }
+            Commands::Group {
+                cmd: GroupCommands::Status { group: 1 }
+            }
         ));
     }
 
@@ -908,7 +951,9 @@ mod tests {
             .expect("should parse group snapshot");
         assert!(matches!(
             cli.command,
-            Commands::Group { cmd: GroupCommands::Snapshot { group: 2 } }
+            Commands::Group {
+                cmd: GroupCommands::Snapshot { group: 2 }
+            }
         ));
     }
 
@@ -935,14 +980,8 @@ mod tests {
 
     #[test]
     fn test_parse_node_decommission() {
-        let cli = Cli::try_parse_from([
-            "rr-admin",
-            "node",
-            "decommission",
-            "--node-id",
-            "4",
-        ])
-        .expect("should parse decommission");
+        let cli = Cli::try_parse_from(["rr-admin", "node", "decommission", "--node-id", "4"])
+            .expect("should parse decommission");
         match cli.command {
             Commands::Node {
                 cmd: NodeCommands::Decommission { node_id, dry_run },
@@ -993,7 +1032,11 @@ mod tests {
         assert!(matches!(
             cli.command,
             Commands::Group {
-                cmd: GroupCommands::AddLearner { group: 1, node_id: 4, .. }
+                cmd: GroupCommands::AddLearner {
+                    group: 1,
+                    node_id: 4,
+                    ..
+                }
             }
         ));
     }
@@ -1082,7 +1125,12 @@ mod tests {
         .expect("should parse online-backup");
         match cli.command {
             Commands::Group {
-                cmd: GroupCommands::OnlineBackup { group, output, force_fresh },
+                cmd:
+                    GroupCommands::OnlineBackup {
+                        group,
+                        output,
+                        force_fresh,
+                    },
             } => {
                 assert_eq!(group, 1);
                 assert_eq!(output.to_str(), Some("/tmp/snap.bin"));
@@ -1094,24 +1142,20 @@ mod tests {
 
     #[test]
     fn test_parse_group_membership() {
-        let cli =
-            Cli::try_parse_from(["rr-admin", "group", "membership", "--group", "7"])
-                .expect("should parse group membership");
+        let cli = Cli::try_parse_from(["rr-admin", "group", "membership", "--group", "7"])
+            .expect("should parse group membership");
         assert!(matches!(
             cli.command,
-            Commands::Group { cmd: GroupCommands::Membership { group: 7 } }
+            Commands::Group {
+                cmd: GroupCommands::Membership { group: 7 }
+            }
         ));
     }
 
     #[test]
     fn test_parse_node_reset_requires_force() {
-        let cli = Cli::try_parse_from([
-            "rr-admin",
-            "node-reset",
-            "--data-dir",
-            "/tmp/rr/data",
-        ])
-        .expect("should parse node-reset without --force");
+        let cli = Cli::try_parse_from(["rr-admin", "node-reset", "--data-dir", "/tmp/rr/data"])
+            .expect("should parse node-reset without --force");
         match cli.command {
             Commands::NodeReset { force, .. } => assert!(!force),
             other => panic!("expected NodeReset, got {other:?}"),
@@ -1162,8 +1206,7 @@ mod tests {
     /// Verify repl subcommand parses correctly with defaults.
     #[test]
     fn test_parse_repl_subcommand() {
-        let cli = Cli::try_parse_from(["rr-admin", "repl"])
-            .expect("should parse repl");
+        let cli = Cli::try_parse_from(["rr-admin", "repl"]).expect("should parse repl");
         assert!(matches!(cli.command, Commands::Repl { group: 1, .. }));
     }
 
@@ -1178,7 +1221,10 @@ mod tests {
     /// Verify KvRequest::Put encodes and decodes correctly via bincode.
     #[test]
     fn test_encode_kv_put_roundtrip() {
-        let req = KvRequest::Put { key: "hello".to_string(), value: b"world".to_vec() };
+        let req = KvRequest::Put {
+            key: "hello".to_string(),
+            value: b"world".to_vec(),
+        };
         let bytes = bincode::serde::encode_to_vec(&req, standard()).expect("encode");
         let (decoded, _): (KvRequest, _) =
             bincode::serde::decode_from_slice(&bytes, standard()).expect("decode");
@@ -1189,7 +1235,9 @@ mod tests {
     /// Verify KvRequest::Get encodes to non-empty bytes.
     #[test]
     fn test_encode_kv_get_produces_bytes() {
-        let req = KvRequest::Get { key: "mykey".to_string() };
+        let req = KvRequest::Get {
+            key: "mykey".to_string(),
+        };
         let bytes = bincode::serde::encode_to_vec(&req, standard()).expect("encode");
         assert!(!bytes.is_empty());
     }
@@ -1197,7 +1245,9 @@ mod tests {
     /// Verify KvRequest::Delete encodes to non-empty bytes.
     #[test]
     fn test_encode_kv_delete_produces_bytes() {
-        let req = KvRequest::Delete { key: "mykey".to_string() };
+        let req = KvRequest::Delete {
+            key: "mykey".to_string(),
+        };
         let bytes = bincode::serde::encode_to_vec(&req, standard()).expect("encode");
         assert!(!bytes.is_empty());
     }

@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use openraft::BasicNode;
 use openraft::type_config::async_runtime::WatchReceiver;
+use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
 use rr_core::config::ConfigProvider;
 use rr_core::state_machine::StateMachine;
@@ -116,9 +116,7 @@ impl ClusterBuilder {
     /// Unlike [`Self::with_channel_pool`], this setup enables bidirectional
     /// isolation: `injector.isolate(n)` blocks BOTH outbound traffic from node
     /// `n` and inbound traffic to node `n`.
-    pub fn with_fault_injector(
-        mut self,
-    ) -> (Self, Arc<fault_injection::FaultInjector>) {
+    pub fn with_fault_injector(mut self) -> (Self, Arc<fault_injection::FaultInjector>) {
         let injector = Arc::new(fault_injection::FaultInjector::new());
         self.real_network = true;
         self.fault_injector = Some(Arc::clone(&injector));
@@ -584,7 +582,8 @@ mod tests {
             let payload = vec![i, i + 1, i + 2];
             let response = raft.client_write(payload.clone().into()).await.unwrap();
             assert_eq!(
-                response.data.as_ref(), payload.as_slice(),
+                response.data.as_ref(),
+                payload.as_slice(),
                 "EchoSM must return the same bytes it received"
             );
         }
@@ -672,7 +671,11 @@ mod tests {
         let raft = leader_node.group_manager().get_raft(1).await.unwrap();
         let payload = b"replicate-me".to_vec();
         let resp = raft.client_write(payload.clone().into()).await.unwrap();
-        assert_eq!(resp.data.as_ref(), payload.as_slice(), "EchoSM must return the written bytes");
+        assert_eq!(
+            resp.data.as_ref(),
+            payload.as_slice(),
+            "EchoSM must return the written bytes"
+        );
 
         // Wait for all nodes to apply the entry (polling with timeout)
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -762,7 +765,9 @@ mod tests {
 
         // Write 10 entries via the leader
         for i in 0u8..10 {
-            raft.client_write(vec![i].into()).await.expect("client_write must succeed");
+            raft.client_write(vec![i].into())
+                .await
+                .expect("client_write must succeed");
         }
 
         // Allow followers to catch up
@@ -801,7 +806,9 @@ mod tests {
         }
 
         // All snapshot byte vectors must be identical (EchoSM produces empty bytes)
-        let first = snapshots[0].as_ref().expect("first node must have snapshot");
+        let first = snapshots[0]
+            .as_ref()
+            .expect("first node must have snapshot");
         for (i, snap) in snapshots.iter().enumerate().skip(1) {
             let bytes = snap.as_ref().expect("node {i} must have snapshot");
             assert_eq!(
@@ -829,7 +836,9 @@ mod tests {
             .find(|n| n.node_id() == original_leader_id)
             .unwrap();
         let raft = leader_node.group_manager().get_raft(1).await.unwrap();
-        raft.client_write(b"pre-failover".to_vec().into()).await.unwrap();
+        raft.client_write(b"pre-failover".to_vec().into())
+            .await
+            .unwrap();
 
         // Shutdown the leader
         leader_node.shutdown().await.unwrap();
@@ -851,7 +860,9 @@ mod tests {
         // Write after failover should succeed
         let new_leader = nodes.iter().find(|n| n.node_id() == new_leader_id).unwrap();
         let raft = new_leader.group_manager().get_raft(1).await.unwrap();
-        raft.client_write(b"post-failover".to_vec().into()).await.unwrap();
+        raft.client_write(b"post-failover".to_vec().into())
+            .await
+            .unwrap();
 
         // Shutdown remaining nodes
         for node in survivors.iter() {
@@ -934,9 +945,13 @@ mod tests {
         // Write to group 2 and verify
         let leader2_node = nodes.iter().find(|n| n.node_id() == leader2).unwrap();
         let raft2 = leader2_node.group_manager().get_raft(2).await.unwrap();
-        let resp = raft2.client_write(b"group2-write".to_vec().into()).await.unwrap();
+        let resp = raft2
+            .client_write(b"group2-write".to_vec().into())
+            .await
+            .unwrap();
         assert_eq!(
-            resp.data.as_ref(), b"group2-write",
+            resp.data.as_ref(),
+            b"group2-write",
             "group 2 EchoSM must echo writes"
         );
 
@@ -1024,8 +1039,15 @@ mod tests {
             );
 
             // Write some data
-            let resp = raft.client_write(b"hello-rocks".to_vec().into()).await.unwrap();
-        assert_eq!(resp.data.as_ref(), b"hello-rocks", "EchoSM must echo written bytes");
+            let resp = raft
+                .client_write(b"hello-rocks".to_vec().into())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.data.as_ref(),
+                b"hello-rocks",
+                "EchoSM must echo written bytes"
+            );
 
             // Gracefully stop the group
             mgr.stop_group(1).await.unwrap();
@@ -1222,7 +1244,9 @@ mod tests {
         // Write pre-migration data
         let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
         let raft = leader_node.group_manager().get_raft(1).await.unwrap();
-        raft.client_write(b"pre-migration".to_vec().into()).await.unwrap();
+        raft.client_write(b"pre-migration".to_vec().into())
+            .await
+            .unwrap();
 
         // Migrate: remove node 3 from membership (or whichever node is not leader)
         let remove_id: NodeId = nodes
@@ -1252,11 +1276,13 @@ mod tests {
         // Write after migration
         let leader_node2 = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
         let raft2 = leader_node2.group_manager().get_raft(1).await.unwrap();
-        let resp = raft2.client_write(b"post-migration".to_vec().into())
+        let resp = raft2
+            .client_write(b"post-migration".to_vec().into())
             .await
             .unwrap();
         assert_eq!(
-            resp.data.as_ref(), b"post-migration",
+            resp.data.as_ref(),
+            b"post-migration",
             "must echo post-migration write"
         );
 
@@ -1299,8 +1325,12 @@ mod tests {
                 "must elect a leader before writing"
             );
 
-            raft.client_write(b"before-crash".to_vec().into()).await.unwrap();
-            raft.client_write(b"before-crash-2".to_vec().into()).await.unwrap();
+            raft.client_write(b"before-crash".to_vec().into())
+                .await
+                .unwrap();
+            raft.client_write(b"before-crash-2".to_vec().into())
+                .await
+                .unwrap();
 
             // Graceful stop (simulates controlled shutdown; state persists)
             mgr.stop_group(1).await.unwrap();
@@ -1329,8 +1359,15 @@ mod tests {
             );
 
             // Write post-restart data — verifies node is fully operational
-            let resp = raft.client_write(b"after-recovery".to_vec().into()).await.unwrap();
-        assert_eq!(resp.data.as_ref(), b"after-recovery", "must echo post-restart write");
+            let resp = raft
+                .client_write(b"after-recovery".to_vec().into())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.data.as_ref(),
+                b"after-recovery",
+                "must echo post-restart write"
+            );
 
             mgr.stop_group(1).await.unwrap();
         }
@@ -1383,8 +1420,15 @@ mod tests {
         // Write after snapshot — verifies cluster is fully operational
         let leader_node2 = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
         let raft2 = leader_node2.group_manager().get_raft(1).await.unwrap();
-        let resp = raft2.client_write(b"post-snapshot".to_vec().into()).await.unwrap();
-        assert_eq!(resp.data.as_ref(), b"post-snapshot", "must echo post-snapshot write");
+        let resp = raft2
+            .client_write(b"post-snapshot".to_vec().into())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.data.as_ref(),
+            b"post-snapshot",
+            "must echo post-snapshot write"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -1531,7 +1575,10 @@ mod tests {
         let new_leader_id = wait_for_new_leader(&nodes, 1, original_leader_id, 12_000)
             .await
             .expect("new leader not elected after isolation");
-        assert_ne!(new_leader_id, original_leader_id, "new leader must differ from isolated node");
+        assert_ne!(
+            new_leader_id, original_leader_id,
+            "new leader must differ from isolated node"
+        );
 
         // Restore the previously-isolated node
         injector.restore(original_leader_id);
@@ -1570,7 +1617,9 @@ mod tests {
         let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
         let raft = leader_node.group_manager().get_raft(1).await.unwrap();
         for i in 0u8..10 {
-            raft.client_write(vec![i].into()).await.expect("write must succeed while follower is isolated");
+            raft.client_write(vec![i].into())
+                .await
+                .expect("write must succeed while follower is isolated");
         }
 
         // Restore follower — it should now catch up
@@ -1631,7 +1680,10 @@ mod tests {
         let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
             .await
             .expect("cluster must have a leader after packet loss cleared");
-        assert!((1..=3).contains(&final_leader), "leader must be a valid node id");
+        assert!(
+            (1..=3).contains(&final_leader),
+            "leader must be a valid node id"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -1666,7 +1718,10 @@ mod tests {
         let final_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
             .await
             .expect("cluster must still have a leader after latency cleared");
-        assert!((1..=3).contains(&final_leader), "leader must be a valid node id");
+        assert!(
+            (1..=3).contains(&final_leader),
+            "leader must be a valid node id"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -1696,10 +1751,7 @@ mod tests {
             .expect("cluster must converge to a stable leader after flapping stops");
         assert!((1..=3).contains(&final_leader));
 
-        let leader_node = nodes
-            .iter()
-            .find(|n| n.node_id() == final_leader)
-            .unwrap();
+        let leader_node = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
         let raft = leader_node.group_manager().get_raft(1).await.unwrap();
         raft.client_write(b"post-flapping".to_vec().into())
             .await
@@ -1790,9 +1842,7 @@ mod tests {
         )
         .await;
         if let Ok(Ok(_)) = blocked {
-            panic!(
-                "leader without quorum must NOT commit writes; saw a successful client_write"
-            );
+            panic!("leader without quorum must NOT commit writes; saw a successful client_write");
         }
 
         injector.restore(followers[0]);
@@ -1848,7 +1898,8 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
             for i in 0u8..20 {
-                let resp = raft.client_write(vec![i, b'!'].into())
+                let resp = raft
+                    .client_write(vec![i, b'!'].into())
                     .await
                     .expect("client_write must succeed in single-node cluster");
                 let metrics = raft.metrics().borrow_watched().clone();
@@ -1856,11 +1907,7 @@ mod tests {
                     .last_log_index
                     .expect("last_log_index after Ok client_write");
                 acked_indices.push(idx);
-                assert_eq!(
-                    resp.data,
-                    vec![i, b'!'],
-                    "EchoSM must echo {i}"
-                );
+                assert_eq!(resp.data, vec![i, b'!'], "EchoSM must echo {i}");
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1970,17 +2017,11 @@ mod tests {
         let final_leader = wait_for_cluster_ready(&nodes, 1, 12_000)
             .await
             .expect("cluster must converge to a stable leader after chaos");
-        let final_leader_node = nodes
-            .iter()
-            .find(|n| n.node_id() == final_leader)
-            .unwrap();
+        let final_leader_node = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
         let final_raft = final_leader_node.group_manager().get_raft(1).await.unwrap();
 
         let final_metrics = final_raft.metrics().borrow_watched().clone();
-        let last_applied = final_metrics
-            .last_applied
-            .map(|l| l.index)
-            .unwrap_or(0);
+        let last_applied = final_metrics.last_applied.map(|l| l.index).unwrap_or(0);
         let acked = ack_count.load(Ordering::SeqCst);
 
         assert!(
@@ -2001,14 +2042,14 @@ mod tests {
     async fn test_idempotency_dedup_survives_leader_switch() {
         let group_id = 101;
         let (_svc, applied) = CountingService::new();
-        let (nodes, injector) = build_3node_cluster_with_factory(
-            counting_factory(Arc::clone(&applied)),
-            group_id,
-        )
-        .await
-        .unwrap();
+        let (nodes, injector) =
+            build_3node_cluster_with_factory(counting_factory(Arc::clone(&applied)), group_id)
+                .await
+                .unwrap();
 
-        let original_leader_id = wait_for_cluster_ready(&nodes, group_id, 8_000).await.unwrap();
+        let original_leader_id = wait_for_cluster_ready(&nodes, group_id, 8_000)
+            .await
+            .unwrap();
         let original_leader_node = nodes
             .iter()
             .find(|n| n.node_id() == original_leader_id)
@@ -2049,9 +2090,15 @@ mod tests {
             .get_raft(group_id)
             .await
             .unwrap();
-        let second_resp = new_leader_raft.client_write(entry_bytes.into()).await.unwrap();
+        let second_resp = new_leader_raft
+            .client_write(entry_bytes.into())
+            .await
+            .unwrap();
         let second_payload = decode_apply_success(second_resp.data.as_ref());
-        assert_eq!(second_payload, first_payload, "replay should return cached bytes");
+        assert_eq!(
+            second_payload, first_payload,
+            "replay should return cached bytes"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(
@@ -2067,16 +2114,20 @@ mod tests {
     async fn test_committed_entry_applies_exactly_once_after_leader_crash() {
         let group_id = 102;
         let (_svc, applied) = CountingService::new();
-        let (nodes, _injector) = build_3node_cluster_with_factory(
-            counting_factory(Arc::clone(&applied)),
-            group_id,
-        )
-        .await
-        .unwrap();
+        let (nodes, _injector) =
+            build_3node_cluster_with_factory(counting_factory(Arc::clone(&applied)), group_id)
+                .await
+                .unwrap();
 
-        let leader_id = wait_for_cluster_ready(&nodes, group_id, 8_000).await.unwrap();
+        let leader_id = wait_for_cluster_ready(&nodes, group_id, 8_000)
+            .await
+            .unwrap();
         let leader_node = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
-        let leader_raft = leader_node.group_manager().get_raft(group_id).await.unwrap();
+        let leader_raft = leader_node
+            .group_manager()
+            .get_raft(group_id)
+            .await
+            .unwrap();
 
         let idem_key = IdempotencyKey::with_client_id("idempotency-test", 1, "test-client-1");
         let entry_bytes = FramedEntry::from_payload(b"hello-idempotent".to_vec())
@@ -2084,7 +2135,10 @@ mod tests {
             .encode()
             .unwrap();
 
-        let first_resp = leader_raft.client_write(entry_bytes.clone().into()).await.unwrap();
+        let first_resp = leader_raft
+            .client_write(entry_bytes.clone().into())
+            .await
+            .unwrap();
         let first_payload = decode_apply_success(first_resp.data.as_ref());
         assert_eq!(first_payload, b"hello-idempotent".to_vec());
 
@@ -2115,9 +2169,15 @@ mod tests {
             .await
             .unwrap();
 
-        let second_resp = new_leader_raft.client_write(entry_bytes.into()).await.unwrap();
+        let second_resp = new_leader_raft
+            .client_write(entry_bytes.into())
+            .await
+            .unwrap();
         let second_payload = decode_apply_success(second_resp.data.as_ref());
-        assert_eq!(second_payload, first_payload, "retry should return cached bytes");
+        assert_eq!(
+            second_payload, first_payload,
+            "retry should return cached bytes"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(
@@ -2197,7 +2257,10 @@ mod tests {
         let body: serde_json::Value = resp.json().await.expect("/ready JSON body");
         assert_eq!(body["ready"], serde_json::Value::Bool(true), "/ready.ready");
         assert_eq!(body["reason"], "ready", "/ready.reason");
-        assert!(body.get("since_unix_secs").is_some(), "/ready.since_unix_secs");
+        assert!(
+            body.get("since_unix_secs").is_some(),
+            "/ready.since_unix_secs"
+        );
 
         // /metrics → 200 + Prometheus exposition format
         let resp = reqwest::get(format!("{base}/metrics"))

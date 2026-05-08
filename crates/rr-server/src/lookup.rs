@@ -3,8 +3,8 @@
 //! Receives serialized Raft RPC payloads from the network layer, deserializes
 //! them, forwards to the correct openraft instance, and serializes the response.
 
-use std::sync::Arc;
 use std::io::Cursor;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tracing::instrument;
@@ -129,31 +129,33 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
         let (vote, meta): (
             openraft::type_config::alias::VoteOf<RrTypeConfig>,
             openraft::type_config::alias::SnapshotMetaOf<RrTypeConfig>,
-        ) =
-            bincode::serde::decode_from_slice(&metadata, bincode::config::standard())
-                .map(|(v, _)| v)
-                .map_err(|e| {
-                    tracing::warn!(
-                        group_id,
-                        error = %e,
-                        "raft InstallSnapshot: metadata decode failed (detail sanitized for client)"
-                    );
-                    tonic::Status::invalid_argument("invalid request payload")
-                })?;
+        ) = bincode::serde::decode_from_slice(&metadata, bincode::config::standard())
+            .map(|(v, _)| v)
+            .map_err(|e| {
+                tracing::warn!(
+                    group_id,
+                    error = %e,
+                    "raft InstallSnapshot: metadata decode failed (detail sanitized for client)"
+                );
+                tonic::Status::invalid_argument("invalid request payload")
+            })?;
 
         let snapshot = openraft::Snapshot {
             meta,
             snapshot: Cursor::new(data),
         };
 
-        let resp = raft.install_full_snapshot(vote, snapshot).await.map_err(|e| {
-            tracing::error!(
-                group_id,
-                error = %e,
-                "raft InstallSnapshot failed (detail sanitized for client)"
-            );
-            tonic::Status::internal("raft rpc failed")
-        })?;
+        let resp = raft
+            .install_full_snapshot(vote, snapshot)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    group_id,
+                    error = %e,
+                    "raft InstallSnapshot failed (detail sanitized for client)"
+                );
+                tonic::Status::internal("raft rpc failed")
+            })?;
 
         bincode::serde::encode_to_vec(&resp, bincode::config::standard()).map_err(|e| {
             tracing::error!(

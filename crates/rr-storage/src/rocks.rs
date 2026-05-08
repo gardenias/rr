@@ -312,18 +312,15 @@ impl RocksStorage {
             .map(|name| {
                 let cf_opts = match *name {
                     "raft_log" => build_cf_options(&config, config.raft_log_cf.as_ref()),
-                    "state_machine" => {
-                        build_cf_options(&config, config.state_machine_cf.as_ref())
-                    }
+                    "state_machine" => build_cf_options(&config, config.state_machine_cf.as_ref()),
                     _ => Options::default(),
                 };
                 ColumnFamilyDescriptor::new(*name, cf_opts)
             })
             .collect();
 
-        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?;
+        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)
+            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
 
         Ok(Self {
             db: Arc::new(db),
@@ -381,14 +378,11 @@ impl StorageEngine for RocksStorage {
                 key: format!("cf:{cf}"),
             })?;
             let write_opts = durability.write_options();
-            db.put_cf_opt(&handle, &key, &value, &write_opts).map_err(|e| {
-                StorageError::Io(std::io::Error::other(e.to_string()))
-            })
+            db.put_cf_opt(&handle, &key, &value, &write_opts)
+                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
         })
         .await
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
@@ -399,14 +393,11 @@ impl StorageEngine for RocksStorage {
             let handle = db.cf_handle(&cf).ok_or_else(|| StorageError::NotFound {
                 key: format!("cf:{cf}"),
             })?;
-            db.get_cf(&handle, &key).map_err(|e| {
-                StorageError::Io(std::io::Error::other(e.to_string()))
-            })
+            db.get_cf(&handle, &key)
+                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
         })
         .await
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn delete(&self, cf: &str, key: &[u8]) -> Result<(), StorageError> {
@@ -419,14 +410,11 @@ impl StorageEngine for RocksStorage {
                 key: format!("cf:{cf}"),
             })?;
             let write_opts = durability.write_options();
-            db.delete_cf_opt(&handle, &key, &write_opts).map_err(|e| {
-                StorageError::Io(std::io::Error::other(e.to_string()))
-            })
+            db.delete_cf_opt(&handle, &key, &write_opts)
+                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
         })
         .await
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn scan(
@@ -452,17 +440,14 @@ impl StorageEngine for RocksStorage {
             );
             let mut results = Vec::new();
             for item in iter {
-                let (k, v) = item.map_err(|e| {
-                    StorageError::Io(std::io::Error::other(e.to_string()))
-                })?;
+                let (k, v) =
+                    item.map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
                 results.push((k.to_vec(), v.to_vec()));
             }
             Ok(results)
         })
         .await
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn write_batch(&self, ops: Vec<BatchOp>) -> Result<(), StorageError> {
@@ -487,27 +472,21 @@ impl StorageEngine for RocksStorage {
                 }
             }
             let write_opts = durability.write_options();
-            db.write_opt(batch, &write_opts).map_err(|e| {
-                StorageError::Io(std::io::Error::other(e.to_string()))
-            })
+            db.write_opt(batch, &write_opts)
+                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
         })
         .await
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn flush(&self) -> Result<(), StorageError> {
         let db = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
-            db.flush().map_err(|e| {
-                StorageError::Io(std::io::Error::other(e.to_string()))
-            })
+            db.flush()
+                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
         })
         .await
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn create_cf(&self, name: &str) -> Result<(), StorageError> {
@@ -515,14 +494,11 @@ impl StorageEngine for RocksStorage {
         let name = name.to_string();
         tokio::task::spawn_blocking(move || {
             let opts = Options::default();
-            db.create_cf(&name, &opts).map_err(|e| {
-                StorageError::Io(std::io::Error::other(e.to_string()))
-            })
+            db.create_cf(&name, &opts)
+                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
         })
         .await
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::other(e.to_string()))
-        })?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
     }
 }
 
@@ -764,7 +740,10 @@ mod tests {
         )
         .expect("should open with cf overrides");
         storage.put("raft_log", b"k", b"v").await.unwrap();
-        assert_eq!(storage.get("raft_log", b"k").await.unwrap(), Some(b"v".to_vec()));
+        assert_eq!(
+            storage.get("raft_log", b"k").await.unwrap(),
+            Some(b"v".to_vec())
+        );
     }
 
     #[test]

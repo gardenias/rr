@@ -19,17 +19,17 @@ use openraft::error::RPCError;
 use openraft::error::ReplicationClosed;
 use openraft::error::StreamingError;
 use openraft::error::Unreachable;
+use openraft::network::v2::RaftNetworkV2;
 use openraft::network::RPCOption;
 use openraft::network::RaftNetworkFactory;
-use openraft::network::v2::RaftNetworkV2;
 use openraft::raft::AppendEntriesRequest;
 use openraft::raft::AppendEntriesResponse;
 use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
-use openraft::BasicNode;
 use openraft::type_config::alias::SnapshotOf;
 use openraft::type_config::alias::VoteOf;
+use openraft::BasicNode;
 use rr_core::error::NetworkError;
 use rr_core::types::NodeId;
 use tonic::transport::Channel;
@@ -190,17 +190,21 @@ impl ChannelPool {
                 addr: addr.to_string(),
                 reason: e,
             })?;
-            endpoint = endpoint.tls_config(client_tls).map_err(|e| {
-                NetworkError::ConnectionFailed {
-                    addr: addr.to_string(),
-                    reason: format!("tls attach: {e}"),
-                }
-            })?;
+            endpoint =
+                endpoint
+                    .tls_config(client_tls)
+                    .map_err(|e| NetworkError::ConnectionFailed {
+                        addr: addr.to_string(),
+                        reason: format!("tls attach: {e}"),
+                    })?;
         }
-        let channel = endpoint.connect().await.map_err(|e| NetworkError::ConnectionFailed {
-            addr: addr.to_string(),
-            reason: e.to_string(),
-        })?;
+        let channel = endpoint
+            .connect()
+            .await
+            .map_err(|e| NetworkError::ConnectionFailed {
+                addr: addr.to_string(),
+                reason: e.to_string(),
+            })?;
         self.channels.insert(node_id, channel.clone());
         Ok(channel)
     }
@@ -229,8 +233,8 @@ fn build_client_tls(t: &TlsPaths) -> Result<tonic::transport::ClientTlsConfig, S
     let mut cfg = tonic::transport::ClientTlsConfig::new()
         .identity(tonic::transport::Identity::from_pem(cert, key));
     if let Some(ca) = &t.ca_path {
-        let ca_pem = std::fs::read(ca)
-            .map_err(|e| format!("failed to read ca at {}: {e}", ca.display()))?;
+        let ca_pem =
+            std::fs::read(ca).map_err(|e| format!("failed to read ca at {}: {e}", ca.display()))?;
         cfg = cfg.ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
     }
     if let Some(name) = &t.domain_name {
@@ -251,7 +255,11 @@ pub trait ChannelPoolLike: Send + Sync + 'static {
     /// Returns true if the pool is empty.
     fn is_empty(&self) -> bool;
     /// Remove a cached channel and immediately reconnect, returning the fresh channel.
-    async fn remove_and_reconnect(&self, node_id: NodeId, addr: &str) -> Result<Channel, NetworkError>;
+    async fn remove_and_reconnect(
+        &self,
+        node_id: NodeId,
+        addr: &str,
+    ) -> Result<Channel, NetworkError>;
 }
 
 #[async_trait::async_trait]
@@ -268,7 +276,11 @@ impl ChannelPoolLike for ChannelPool {
     fn is_empty(&self) -> bool {
         ChannelPool::is_empty(self)
     }
-    async fn remove_and_reconnect(&self, node_id: NodeId, addr: &str) -> Result<Channel, NetworkError> {
+    async fn remove_and_reconnect(
+        &self,
+        node_id: NodeId,
+        addr: &str,
+    ) -> Result<Channel, NetworkError> {
         self.remove(node_id);
         self.get_or_connect(node_id, addr).await
     }
@@ -492,11 +504,9 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         // Serialize the entire openraft request into the metadata field.
         // Only the final chunk carries metadata; earlier chunks carry data only.
         let snapshot_data = snapshot.snapshot.into_inner();
-        let metadata = bincode::serde::encode_to_vec(
-            &(vote, snapshot.meta),
-            bincode::config::standard(),
-        )
-        .map_err(to_unreachable_streaming)?;
+        let metadata =
+            bincode::serde::encode_to_vec(&(vote, snapshot.meta), bincode::config::standard())
+                .map_err(to_unreachable_streaming)?;
 
         // Split snapshot data into 64 KB chunks.
         const CHUNK_SIZE: usize = 65_536;

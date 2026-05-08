@@ -1,19 +1,22 @@
 //! Manages the lifecycle of multiple Raft groups on a single node.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bincode::config::standard;
 use metrics::{counter, gauge, histogram};
+use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
 use openraft::ReadPolicy;
-use openraft::type_config::async_runtime::WatchReceiver;
 use tokio::sync::RwLock;
+use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument};
 
 use rr_core::error::{RaftError, RrError};
-use rr_core::state_machine::{IngestorOffsetControl, StateMachine, StateMachineReader};
+use rr_core::state_machine::{
+    IngestorOffsetControl, StateMachine, StateMachineLifecycleHook, StateMachineReader,
+};
 use rr_core::types::{GroupId, NodeId};
 
 use crate::network_factory::{ChannelPoolLike, GrpcNetworkFactory};
@@ -40,14 +43,14 @@ pub struct RaftGroupManager {
     /// Per-group metrics tickers (replication_lag etc). Populated by
     /// [`Self::start_group`] / [`Self::start_group_rocks`]; stop_group
     /// cancels and joins them.
-    metrics_tickers:
-        Arc<RwLock<HashMap<GroupId, crate::metrics_ticker::MetricsTickerHandle>>>,
+    metrics_tickers: Arc<RwLock<HashMap<GroupId, crate::metrics_ticker::MetricsTickerHandle>>>,
     /// Per-group optional control handle for directly overriding the
     /// state machine's persisted ingestor offset.
-    ingestor_offset_controls:
-        Arc<RwLock<HashMap<GroupId, Arc<dyn IngestorOffsetControl>>>>,
+    ingestor_offset_controls: Arc<RwLock<HashMap<GroupId, Arc<dyn IngestorOffsetControl>>>>,
     /// Per-group local read handles for follower reads.
     read_handles: Arc<RwLock<HashMap<GroupId, Arc<dyn StateMachineReader>>>>,
+    /// Per-group lifecycle hooks for leader transitions and shutdown.
+    lifecycle_hooks: Arc<RwLock<HashMap<GroupId, Arc<dyn StateMachineLifecycleHook>>>>,
     /// Per-group auto-promote-learner supervisors. Optional; populated
     /// by [`Self::start_learner_promoter`]; stop_group + Drop both
     /// clean these up.
@@ -73,6 +76,7 @@ impl RaftGroupManager {
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
             read_handles: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle_hooks: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
@@ -98,6 +102,7 @@ impl RaftGroupManager {
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
             read_handles: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle_hooks: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
@@ -122,6 +127,7 @@ impl RaftGroupManager {
         let sm = (self.sm_factory)(group_id);
         let ingestor_offset_control = sm.ingestor_offset_control();
         let read_handle = sm.read_handle();
+        let lifecycle_hook = sm.lifecycle_hook();
 
         let node = if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
@@ -147,6 +153,9 @@ impl RaftGroupManager {
         }
         if let Some(handle) = read_handle {
             self.read_handles.write().await.insert(group_id, handle);
+        }
+        if let Some(hook) = lifecycle_hook {
+            self.lifecycle_hooks.write().await.insert(group_id, hook);
         }
         Ok(())
     }
@@ -246,8 +255,12 @@ impl RaftGroupManager {
         if let Some(handle) = self.ingestor_handles.write().await.remove(&group_id) {
             handle.stop().await;
         }
-        self.ingestor_offset_controls.write().await.remove(&group_id);
+        self.ingestor_offset_controls
+            .write()
+            .await
+            .remove(&group_id);
         self.read_handles.write().await.remove(&group_id);
+        let lifecycle_hook = self.lifecycle_hooks.write().await.remove(&group_id);
         if let Some(ticker) = self.metrics_tickers.write().await.remove(&group_id) {
             ticker.stop().await;
         }
@@ -255,11 +268,24 @@ impl RaftGroupManager {
             promoter.stop().await;
         }
 
-        let mut guard = self.groups.write().await;
+        let node = {
+            let mut guard = self.groups.write().await;
+            guard
+                .remove(&group_id)
+                .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?
+        };
 
-        let node = guard
-            .remove(&group_id)
-            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let was_leader = matches!(
+            node.raft.metrics().borrow_watched().state,
+            openraft::ServerState::Leader
+        );
+
+        if let Some(hook) = lifecycle_hook {
+            if was_leader {
+                hook.on_step_down(group_id).await;
+            }
+            hook.on_shutdown().await;
+        }
 
         node.raft
             .shutdown()
@@ -379,10 +405,7 @@ impl RaftGroupManager {
     /// without spawning a duplicate ticker. Production wiring through
     /// `RrNode::start()` calls this automatically after each
     /// `start_group`; standalone tests usually skip it.
-    pub async fn start_metrics_ticker(
-        self: &Arc<Self>,
-        group_id: GroupId,
-    ) -> Result<(), RrError> {
+    pub async fn start_metrics_ticker(self: &Arc<Self>, group_id: GroupId) -> Result<(), RrError> {
         if self.get_raft(group_id).await.is_none() {
             return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
         }
@@ -485,11 +508,72 @@ impl RaftGroupManager {
         Ok(result.data.into())
     }
 
+    /// Submit multiple write entries to a Raft group in a single batch.
+    ///
+    /// Returns state-machine responses in the same order as input payloads.
+    /// Uses OpenRaft `client_write_many()` to reduce per-entry Raft round trips.
+    #[instrument(skip(self, payloads))]
+    pub async fn write_batch(
+        &self,
+        group_id: GroupId,
+        payloads: Vec<Vec<u8>>,
+    ) -> Result<Vec<Vec<u8>>, RrError> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let raft = self
+            .get_raft(group_id)
+            .await
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+
+        let start = Instant::now();
+        let mut stream = raft
+            .client_write_many(payloads.into_iter().map(Into::into))
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+
+        let mut responses = Vec::new();
+        while let Some(item) = stream.next().await {
+            let write_result = item.map_err(|e| RrError::Application(e.to_string()))?;
+            match write_result {
+                Ok(resp) => responses.push(resp.response.into()),
+                Err(forward) => {
+                    return Err(RrError::Raft(RaftError::NotLeader {
+                        leader: forward.leader_id,
+                    }));
+                }
+            }
+        }
+
+        let gid = group_id.to_string();
+        histogram!("rr_proposal_duration_seconds", "group_id" => gid.clone())
+            .record(start.elapsed().as_secs_f64());
+
+        // Update raft gauge metrics from the current raft state.
+        let m = raft.metrics().borrow_watched().clone();
+        let is_leader = if matches!(m.state, openraft::ServerState::Leader) {
+            1.0_f64
+        } else {
+            0.0_f64
+        };
+        gauge!("rr_raft_is_leader", "group_id" => gid.clone()).set(is_leader);
+        gauge!("rr_raft_current_term", "group_id" => gid.clone()).set(m.current_term as f64);
+        gauge!("rr_raft_last_log_index", "group_id" => gid)
+            .set(m.last_log_index.unwrap_or(0) as f64);
+
+        Ok(responses)
+    }
+
     /// Read directly from local state machine without raft coordination.
     ///
     /// This is a stale read and may lag behind leader commit/apply progress.
     #[instrument(skip(self, payload))]
-    pub async fn local_read(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+    pub async fn local_read(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RrError> {
         let read_handle = self
             .read_handles
             .read()
@@ -641,6 +725,7 @@ impl RaftGroupManager {
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
             read_handles: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle_hooks: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             rocks_base_path: Some(base_path),
         }
@@ -667,6 +752,7 @@ impl RaftGroupManager {
         let sm = (self.sm_factory)(group_id);
         let ingestor_offset_control = sm.ingestor_offset_control();
         let read_handle = sm.read_handle();
+        let lifecycle_hook = sm.lifecycle_hook();
         let node =
             RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
                 .await
@@ -690,23 +776,70 @@ impl RaftGroupManager {
         if let Some(handle) = read_handle {
             self.read_handles.write().await.insert(group_id, handle);
         }
+        if let Some(hook) = lifecycle_hook {
+            self.lifecycle_hooks.write().await.insert(group_id, hook);
+        }
         Ok(())
+    }
+
+    /// Notify per-group lifecycle hook that leadership was acquired.
+    pub(crate) async fn notify_leader_elected(&self, group_id: GroupId) {
+        let hook = self.lifecycle_hooks.read().await.get(&group_id).cloned();
+        if let Some(hook) = hook {
+            hook.on_leader_elected(group_id).await;
+        }
+    }
+
+    /// Notify per-group lifecycle hook that leadership was lost.
+    pub(crate) async fn notify_step_down(&self, group_id: GroupId) {
+        let hook = self.lifecycle_hooks.read().await.get(&group_id).cloned();
+        if let Some(hook) = hook {
+            hook.on_step_down(group_id).await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openraft::type_config::async_runtime::WatchReceiver;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::network_factory::ChannelPool;
     use crate::service_adapter::ServiceStateMachineAdapter;
     use async_trait::async_trait;
     use bincode::config::standard;
+    use openraft::type_config::async_runtime::WatchReceiver;
     use rr_core::error::RrError;
     use rr_core::service::Service;
     use rr_core::types::LogIndex;
 
     struct NoopSM;
+
+    #[derive(Default)]
+    struct LifecycleCounters {
+        leader_elected: AtomicUsize,
+        step_down: AtomicUsize,
+        shutdown: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StateMachineLifecycleHook for LifecycleCounters {
+        async fn on_leader_elected(&self, _group_id: GroupId) {
+            self.leader_elected.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn on_step_down(&self, _group_id: GroupId) {
+            self.step_down.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn on_shutdown(&self) {
+            self.shutdown.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct LifecycleSM {
+        hook: Arc<LifecycleCounters>,
+    }
 
     #[derive(Clone)]
     struct NoopService;
@@ -749,12 +882,54 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl StateMachine for LifecycleSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+            Ok(entry.to_vec())
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(Vec::new())
+        }
+
+        async fn restore(&mut self, _snapshot: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+
+        fn lifecycle_hook(&self) -> Option<Arc<dyn StateMachineLifecycleHook>> {
+            Some(Arc::clone(&self.hook) as Arc<dyn StateMachineLifecycleHook>)
+        }
+    }
+
     fn noop_factory() -> StateMachineFactory {
         Box::new(|_group_id| Box::new(NoopSM))
     }
 
     fn offset_capable_factory() -> StateMachineFactory {
         Box::new(|group_id| Box::new(ServiceStateMachineAdapter::new(group_id, NoopService)))
+    }
+
+    fn lifecycle_factory(counters: Arc<LifecycleCounters>) -> StateMachineFactory {
+        Box::new(move |_group_id| {
+            Box::new(LifecycleSM {
+                hook: Arc::clone(&counters),
+            })
+        })
+    }
+
+    async fn wait_for_counter(counter: &AtomicUsize, min: usize, timeout: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if counter.load(Ordering::SeqCst) >= min {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for counter to reach {min}");
     }
 
     #[tokio::test]
@@ -993,4 +1168,43 @@ mod tests {
         assert!(mgr.latest_ingestor_offset(1).await.unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn test_lifecycle_hooks_on_leader_elected_step_down_and_shutdown() {
+        let counters = Arc::new(LifecycleCounters::default());
+        let mgr = Arc::new(RaftGroupManager::new(
+            1,
+            lifecycle_factory(Arc::clone(&counters)),
+        ));
+
+        mgr.start_group(1).await.unwrap();
+        mgr.start_metrics_ticker(1).await.unwrap();
+
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        mgr.init_cluster(1, members).await.unwrap();
+
+        wait_for_counter(
+            &counters.leader_elected,
+            1,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+
+        mgr.stop_group(1).await.unwrap();
+
+        assert!(
+            counters.step_down.load(Ordering::SeqCst) >= 1,
+            "expected at least one step-down callback"
+        );
+        assert_eq!(
+            counters.shutdown.load(Ordering::SeqCst),
+            1,
+            "shutdown callback should fire exactly once"
+        );
+    }
 }

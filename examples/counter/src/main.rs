@@ -96,9 +96,7 @@ impl CounterResponse {
 
     /// Construct a response carrying a value.
     fn some(value: i64) -> Self {
-        Self {
-            value: Some(value),
-        }
+        Self { value: Some(value) }
     }
 }
 
@@ -131,9 +129,8 @@ impl Default for CounterService {
 #[async_trait]
 impl Service for CounterService {
     async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        let (req, _): (CounterRequest, _) =
-            bincode::serde::decode_from_slice(&request, standard())
-                .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
+        let (req, _): (CounterRequest, _) = bincode::serde::decode_from_slice(&request, standard())
+            .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
 
         let response = match req {
             CounterRequest::Increment { key, delta } => {
@@ -243,7 +240,10 @@ async fn run_demo() -> Result<()> {
     let storage_engine: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
 
     let sm_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(group_id, CounterService::new()))
+        Box::new(ServiceStateMachineAdapter::new(
+            group_id,
+            CounterService::new(),
+        ))
     });
 
     let config = NodeConfig::new(
@@ -340,7 +340,10 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     // ── Build RaftGroupManager with real gRPC network ───────────────────────
     let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
     let sm_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(group_id, CounterService::new()))
+        Box::new(ServiceStateMachineAdapter::new(
+            group_id,
+            CounterService::new(),
+        ))
     });
 
     let mgr = Arc::new(RaftGroupManager::new_with_network(
@@ -357,7 +360,10 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     // ── Build and start RrNode ──────────────────────────────────────────────
     let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
     let dummy_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
-        Box::new(ServiceStateMachineAdapter::new(group_id, CounterService::new()))
+        Box::new(ServiceStateMachineAdapter::new(
+            group_id,
+            CounterService::new(),
+        ))
     });
 
     let config = NodeConfig::new(
@@ -583,9 +589,7 @@ mod tests {
         let mut svc2 = CounterService::new();
         svc2.restore(&snapshot).await.expect("restore");
 
-        let get = encode_req(CounterRequest::Get {
-            key: "snap".into(),
-        });
+        let get = encode_req(CounterRequest::Get { key: "snap".into() });
         let resp = decode_resp(svc2.handle(get).await.expect("handle Get after restore"));
         assert_eq!(resp.value, Some(99));
     }

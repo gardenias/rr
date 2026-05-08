@@ -15,20 +15,14 @@ fn bench_mem_storage_put_scan(c: &mut Criterion) {
                 for i in 0u64..1000 {
                     let key = i.to_be_bytes().to_vec();
                     let value = key.clone();
-                    storage
-                        .put("state_machine", &key, &value)
-                        .await
-                        .unwrap();
+                    storage.put("state_machine", &key, &value).await.unwrap();
                 }
                 // 1000 scans (scan entire range each time would be too heavy;
                 // instead scan small windows of 10 keys each)
                 for i in 0u64..1000 {
                     let start = (i % 990).to_be_bytes().to_vec();
                     let end = ((i % 990) + 10).to_be_bytes().to_vec();
-                    let _ = storage
-                        .scan("state_machine", &start, &end)
-                        .await
-                        .unwrap();
+                    let _ = storage.scan("state_machine", &start, &end).await.unwrap();
                 }
             });
         });

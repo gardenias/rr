@@ -3,19 +3,19 @@
 use std::io;
 use std::io::Cursor;
 
-use tokio_stream::Stream;
-use tokio_stream::StreamExt;
-use openraft::storage::RaftStateMachine;
 use openraft::storage::EntryResponder;
+use openraft::storage::RaftStateMachine;
+use openraft::type_config::alias::LogIdOf;
+use openraft::type_config::alias::SnapshotMetaOf;
+use openraft::type_config::alias::SnapshotOf;
+use openraft::type_config::alias::StoredMembershipOf;
 use openraft::EntryPayload;
 use openraft::RaftSnapshotBuilder;
 use openraft::Snapshot;
 use openraft::SnapshotMeta;
 use openraft::StoredMembership;
-use openraft::type_config::alias::LogIdOf;
-use openraft::type_config::alias::SnapshotMetaOf;
-use openraft::type_config::alias::SnapshotOf;
-use openraft::type_config::alias::StoredMembershipOf;
+use tokio_stream::Stream;
+use tokio_stream::StreamExt;
 
 use rr_core::state_machine::StateMachine;
 
@@ -50,7 +50,13 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
     async fn applied_state(
         &mut self,
-    ) -> Result<(Option<LogIdOf<RrTypeConfig>>, StoredMembershipOf<RrTypeConfig>), io::Error> {
+    ) -> Result<
+        (
+            Option<LogIdOf<RrTypeConfig>>,
+            StoredMembershipOf<RrTypeConfig>,
+        ),
+        io::Error,
+    > {
         Ok((self.last_applied, self.last_membership.clone()))
     }
 
@@ -63,15 +69,12 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
             self.last_applied = Some(entry.log_id);
 
             let response = match entry.payload {
-                EntryPayload::Blank => {
-                    Vec::new()
-                }
-                EntryPayload::Normal(ref data) => {
-                    self.inner
-                        .apply(data.as_ref())
-                        .await
-                        .map_err(|e| io::Error::other(e.to_string()))?
-                }
+                EntryPayload::Blank => Vec::new(),
+                EntryPayload::Normal(ref data) => self
+                    .inner
+                    .apply(data.as_ref())
+                    .await
+                    .map_err(|e| io::Error::other(e.to_string()))?,
                 EntryPayload::Membership(ref mem) => {
                     self.last_membership = StoredMembership::new(Some(entry.log_id), mem.clone());
                     Vec::new()
@@ -97,9 +100,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         }
     }
 
-    async fn begin_receiving_snapshot(
-        &mut self,
-    ) -> Result<Cursor<Vec<u8>>, io::Error> {
+    async fn begin_receiving_snapshot(&mut self) -> Result<Cursor<Vec<u8>>, io::Error> {
         Ok(Cursor::new(Vec::new()))
     }
 
@@ -175,13 +176,13 @@ mod tests {
     use std::io::Cursor;
 
     use openraft::storage::EntryResponder;
+    use openraft::type_config::alias::EntryOf;
+    use openraft::type_config::alias::SnapshotMetaOf;
     use openraft::vote::leader_id_adv::CommittedLeaderId;
     use openraft::vote::RaftLeaderId;
     use openraft::SnapshotMeta;
     use openraft::StoredMembership;
     use openraft::{Entry, EntryPayload, LogId};
-    use openraft::type_config::alias::EntryOf;
-    use openraft::type_config::alias::SnapshotMetaOf;
 
     use rr_core::error::RrError;
     use rr_core::state_machine::StateMachine;

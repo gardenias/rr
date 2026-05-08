@@ -60,8 +60,7 @@ fn install_crypto_provider() {
 async fn serve(args: ServeArgs) -> Result<()> {
     init_tracing(&args.log_level);
 
-    let cfg = ResolvedConfig::resolve(&args)
-        .context("failed to resolve node configuration")?;
+    let cfg = ResolvedConfig::resolve(&args).context("failed to resolve node configuration")?;
 
     info!(
         node_id = cfg.node_id,
@@ -73,7 +72,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
         "starting rr-server"
     );
 
-    let node = start_node(&cfg).await.context("failed to start rr-server")?;
+    let node = start_node(&cfg)
+        .await
+        .context("failed to start rr-server")?;
 
     info!(
         node_id = cfg.node_id,
@@ -82,9 +83,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
     wait_for_shutdown_signal().await?;
 
     info!(node_id = cfg.node_id, "shutdown signal received");
-    node.shutdown()
-        .await
-        .context("graceful shutdown failed")?;
+    node.shutdown().await.context("graceful shutdown failed")?;
     info!(node_id = cfg.node_id, "rr-server shut down cleanly");
     Ok(())
 }
@@ -241,9 +240,7 @@ fn build_storage(cfg: &ResolvedConfig) -> Result<Arc<dyn StorageEngine>> {
                     vec!["raft_log", "state_machine", "metadata"],
                     rocks_cfg,
                 )
-                .with_context(|| {
-                    format!("failed to open RocksDB at {}", data_dir.display())
-                })?;
+                .with_context(|| format!("failed to open RocksDB at {}", data_dir.display()))?;
                 Ok(Arc::new(storage))
             }
             #[cfg(not(feature = "rocks"))]
@@ -281,7 +278,10 @@ async fn bootstrap_single_member(node: &Arc<RrNode>, cfg: &ResolvedConfig) -> Re
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("already") || msg.contains("Initialized") {
-                warn!(node_id = cfg.node_id, "cluster already initialized; continuing");
+                warn!(
+                    node_id = cfg.node_id,
+                    "cluster already initialized; continuing"
+                );
             } else {
                 return Err(anyhow!("raft.initialize failed: {msg}"));
             }

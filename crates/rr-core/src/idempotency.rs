@@ -192,13 +192,12 @@ impl ApplyOutcome {
     /// Encode the outcome as `[tag][version][bincode body]` bytes for
     /// `apply`'s `Vec<u8>` return.
     pub fn encode(&self) -> Result<Vec<u8>, crate::error::RrError> {
-        let body = bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(
-            |e| {
+        let body =
+            bincode::serde::encode_to_vec(self, bincode::config::standard()).map_err(|e| {
                 crate::error::RrError::Codec(crate::error::CodecError::SerializeFailed(
                     e.to_string(),
                 ))
-            },
-        )?;
+            })?;
         let mut out = Vec::with_capacity(2 + body.len());
         out.push(APPLY_OUTCOME_TAG);
         out.push(APPLY_OUTCOME_VERSION);

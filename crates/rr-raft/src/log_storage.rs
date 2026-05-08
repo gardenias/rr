@@ -16,11 +16,11 @@ use parking_lot::RwLock;
 
 use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
+use openraft::type_config::alias::LogIdOf;
+use openraft::type_config::alias::VoteOf;
 use openraft::LogState;
 use openraft::RaftLogReader;
 use openraft::RaftTypeConfig;
-use openraft::type_config::alias::LogIdOf;
-use openraft::type_config::alias::VoteOf;
 
 use crate::type_config::RrTypeConfig;
 
@@ -201,13 +201,13 @@ impl RaftLogStorage<RrTypeConfig> for RrLogStorage {
 mod tests {
     use super::*;
     use openraft::storage::RaftLogStorageExt;
+    use openraft::type_config::alias::EntryOf;
     use openraft::vote::leader_id_adv::CommittedLeaderId;
     use openraft::vote::RaftLeaderId;
     use openraft::Entry;
     use openraft::EntryPayload;
     use openraft::LogId;
     use openraft::Vote;
-    use openraft::type_config::alias::EntryOf;
 
     fn make_entry(index: u64, term: u64) -> EntryOf<RrTypeConfig> {
         Entry {
@@ -330,12 +330,12 @@ mod tests {
 mod defensive_tests {
     use super::*;
     use openraft::storage::RaftLogStorageExt;
+    use openraft::type_config::alias::EntryOf;
     use openraft::vote::leader_id_adv::CommittedLeaderId;
     use openraft::vote::RaftLeaderId;
     use openraft::Entry;
     use openraft::EntryPayload;
     use openraft::LogId;
-    use openraft::type_config::alias::EntryOf;
 
     fn make_entry(index: u64, term: u64) -> EntryOf<RrTypeConfig> {
         Entry {

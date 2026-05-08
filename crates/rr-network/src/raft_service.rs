@@ -132,8 +132,7 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         let mut total_bytes: usize = 0;
 
         while let Some(chunk) = stream.next().await {
-            let chunk =
-                chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?;
+            let chunk = chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?;
             total_bytes = total_bytes.saturating_add(chunk.data.len());
             if total_bytes > MAX_INSTALL_SNAPSHOT_BYTES {
                 tracing::error!(

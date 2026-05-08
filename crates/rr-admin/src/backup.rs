@@ -33,6 +33,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
@@ -56,6 +57,10 @@ pub struct BackupMetadata {
     /// Free-form comment (useful for human operators).
     #[serde(default)]
     pub comment: Option<String>,
+    /// SHA-256 hex digest of all data files in the backup (sorted by relative
+    /// path). Empty string for backups created before this field was added.
+    #[serde(default)]
+    pub data_sha256: String,
 }
 
 impl BackupMetadata {
@@ -66,8 +71,40 @@ impl BackupMetadata {
             source_node_id,
             taken_at: Utc::now(),
             comment,
+            data_sha256: String::new(),
         }
     }
+}
+
+/// Compute a deterministic SHA-256 digest over all files in `dir`.
+///
+/// Files are visited in sorted-path order; each file contributes its
+/// relative path (UTF-8), a NUL separator, 8-byte big-endian length,
+/// then its raw bytes. This ensures the digest changes whenever any
+/// file is added, removed, renamed, or has its content modified.
+fn sha256_of_dir(dir: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    let mut paths: Vec<_> = walkdir::WalkDir::new(dir)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .collect();
+    paths.sort();
+    for path in &paths {
+        let rel = path
+            .strip_prefix(dir)
+            .context("path outside dir")?
+            .to_string_lossy();
+        hasher.update(rel.as_bytes());
+        hasher.update(b"\0");
+        let bytes =
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Create a `.tar.gz` backup of the node's data directory.
@@ -91,7 +128,10 @@ pub fn create_backup(
         return Err(anyhow!("data_dir does not exist: {}", data_dir.display()));
     }
     if !data_dir.is_dir() {
-        return Err(anyhow!("data_dir is not a directory: {}", data_dir.display()));
+        return Err(anyhow!(
+            "data_dir is not a directory: {}",
+            data_dir.display()
+        ));
     }
     if output.exists() {
         return Err(anyhow!(
@@ -100,9 +140,10 @@ pub fn create_backup(
         ));
     }
 
-    let metadata = BackupMetadata::new(source_node_id, comment);
-    let metadata_json = serde_json::to_vec_pretty(&metadata)
-        .context("failed to serialize backup metadata")?;
+    let mut metadata = BackupMetadata::new(source_node_id, comment);
+    metadata.data_sha256 = sha256_of_dir(data_dir).context("failed to compute data checksum")?;
+    let metadata_json =
+        serde_json::to_vec_pretty(&metadata).context("failed to serialize backup metadata")?;
 
     let file = File::create(output)
         .with_context(|| format!("failed to create output file {}", output.display()))?;
@@ -171,10 +212,7 @@ pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
 
     for entry in tar.entries().context("failed to read tar entries")? {
         let mut entry = entry.context("failed to read tar entry")?;
-        let path = entry
-            .path()
-            .context("invalid entry path")?
-            .into_owned();
+        let path = entry.path().context("invalid entry path")?.into_owned();
         if path == PathBuf::from("metadata.json") {
             continue;
         }
@@ -189,6 +227,17 @@ pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
         entry
             .unpack(&dst)
             .with_context(|| format!("failed to unpack {}", dst.display()))?;
+    }
+
+    if !metadata.data_sha256.is_empty() {
+        let actual = sha256_of_dir(data_dir).context("failed to verify data checksum")?;
+        if actual != metadata.data_sha256 {
+            return Err(anyhow!(
+                "backup integrity check failed: expected SHA-256 {}, got {}",
+                metadata.data_sha256,
+                actual
+            ));
+        }
     }
 
     Ok(metadata)
@@ -207,8 +256,8 @@ pub fn read_metadata(input: &Path) -> Result<BackupMetadata> {
         if path == PathBuf::from("metadata.json") {
             let mut buf = Vec::new();
             std::io::copy(&mut entry, &mut buf).context("failed to read metadata.json")?;
-            let meta: BackupMetadata = serde_json::from_slice(&buf)
-                .context("failed to parse metadata.json")?;
+            let meta: BackupMetadata =
+                serde_json::from_slice(&buf).context("failed to parse metadata.json")?;
             return Ok(meta);
         }
     }
@@ -242,13 +291,8 @@ mod tests {
 
         populate_fake_data_dir(src.path()).unwrap();
 
-        let meta = create_backup(
-            src.path(),
-            &backup_path,
-            Some(42),
-            Some("nightly".into()),
-        )
-        .expect("backup should succeed");
+        let meta = create_backup(src.path(), &backup_path, Some(42), Some("nightly".into()))
+            .expect("backup should succeed");
         assert_eq!(meta.source_node_id, Some(42));
         assert_eq!(meta.format_version, BACKUP_FORMAT_VERSION);
 

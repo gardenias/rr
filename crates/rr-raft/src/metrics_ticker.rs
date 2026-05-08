@@ -55,10 +55,7 @@ impl MetricsTickerHandle {
 /// Spawn a per-group metrics ticker. The ticker exits cleanly when
 /// the group's `Raft` instance is dropped (the `metrics()` watch
 /// channel closes) or when [`MetricsTickerHandle::stop`] is called.
-pub fn spawn_for_group(
-    mgr: Arc<RaftGroupManager>,
-    group_id: GroupId,
-) -> MetricsTickerHandle {
+pub fn spawn_for_group(mgr: Arc<RaftGroupManager>, group_id: GroupId) -> MetricsTickerHandle {
     spawn_for_group_with_interval(mgr, group_id, METRICS_TICK_INTERVAL)
 }
 
@@ -91,9 +88,14 @@ async fn run(
         .get_raft(group_id)
         .await
         .ok_or_else(|| format!("metrics ticker: group {group_id} not started"))?;
-    let metrics_rx = raft.metrics();
+    let mut metrics_rx = raft.metrics();
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut was_leader = false;
+    let initial: RrRaftMetrics = metrics_rx.borrow_watched().clone();
+    emit(group_id, &initial);
+    was_leader = maybe_notify_leadership_transition(&mgr, group_id, was_leader, &initial).await;
 
     loop {
         tokio::select! {
@@ -101,12 +103,40 @@ async fn run(
                 debug!(group_id, "metrics ticker cancelled");
                 return Ok(());
             }
+            changed = metrics_rx.changed() => {
+                if changed.is_err() {
+                    if was_leader {
+                        mgr.notify_step_down(group_id).await;
+                    }
+                    debug!(group_id, "metrics ticker: raft metrics channel closed");
+                    return Ok(());
+                }
+
+                let snapshot: RrRaftMetrics = metrics_rx.borrow_watched().clone();
+                was_leader = maybe_notify_leadership_transition(&mgr, group_id, was_leader, &snapshot).await;
+            }
             _ = tick.tick() => {
                 let snapshot: RrRaftMetrics = metrics_rx.borrow_watched().clone();
+                was_leader = maybe_notify_leadership_transition(&mgr, group_id, was_leader, &snapshot).await;
                 emit(group_id, &snapshot);
             }
         }
     }
+}
+
+async fn maybe_notify_leadership_transition(
+    mgr: &RaftGroupManager,
+    group_id: GroupId,
+    was_leader: bool,
+    snapshot: &RrRaftMetrics,
+) -> bool {
+    let is_leader = matches!(snapshot.state, ServerState::Leader);
+    match (was_leader, is_leader) {
+        (false, true) => mgr.notify_leader_elected(group_id).await,
+        (true, false) => mgr.notify_step_down(group_id).await,
+        _ => {}
+    }
+    is_leader
 }
 
 fn emit(group_id: GroupId, m: &RrRaftMetrics) {
@@ -115,8 +145,13 @@ fn emit(group_id: GroupId, m: &RrRaftMetrics) {
         .set(m.current_term as f64);
     metrics::gauge!("rr_raft_last_log_index", "group_id" => group_label.clone())
         .set(m.last_log_index.unwrap_or(0) as f64);
-    metrics::gauge!("rr_raft_is_leader", "group_id" => group_label.clone())
-        .set(if matches!(m.state, ServerState::Leader) { 1.0 } else { 0.0 });
+    metrics::gauge!("rr_raft_is_leader", "group_id" => group_label.clone()).set(
+        if matches!(m.state, ServerState::Leader) {
+            1.0
+        } else {
+            0.0
+        },
+    );
 
     if !matches!(m.state, ServerState::Leader) {
         return;
@@ -144,8 +179,8 @@ fn emit(group_id: GroupId, m: &RrRaftMetrics) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use openraft::BasicNode;
+    use std::collections::BTreeMap;
 
     use crate::group_manager::{RaftGroupManager, StateMachineFactory};
     use rr_core::error::RrError;
@@ -188,8 +223,7 @@ mod tests {
         mgr.init_cluster(1, members).await.unwrap();
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        let handle =
-            spawn_for_group_with_interval(Arc::clone(&mgr), 1, Duration::from_millis(50));
+        let handle = spawn_for_group_with_interval(Arc::clone(&mgr), 1, Duration::from_millis(50));
         tokio::time::sleep(Duration::from_millis(200)).await;
         handle.stop().await;
         mgr.stop_group(1).await.unwrap();

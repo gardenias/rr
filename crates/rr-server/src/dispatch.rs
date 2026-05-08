@@ -65,10 +65,10 @@ impl ClientDispatch for ClientDispatchImpl {
             FramedEntry::from_payload(payload)
                 .with_idem_key(key)
                 .encode()
-            .map_err(|e| {
-                tracing::error!(group_id, error = %e, "framed entry encode failed");
-                tonic::Status::internal("internal encode error")
-            })?
+                .map_err(|e| {
+                    tracing::error!(group_id, error = %e, "framed entry encode failed");
+                    tonic::Status::internal("internal encode error")
+                })?
         } else {
             payload
         };

@@ -10,9 +10,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use openraft::type_config::async_runtime::WatchReceiver;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
-use openraft::type_config::async_runtime::WatchReceiver;
 
 use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
@@ -86,11 +86,7 @@ pub struct AdminServiceImpl {
 
 impl AdminServiceImpl {
     /// Create a new `AdminServiceImpl`.
-    pub fn new(
-        node_id: NodeId,
-        listen_addr: String,
-        group_manager: Arc<RaftGroupManager>,
-    ) -> Self {
+    pub fn new(node_id: NodeId, listen_addr: String, group_manager: Arc<RaftGroupManager>) -> Self {
         Self {
             node_id,
             listen_addr,
@@ -458,8 +454,9 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
-    type OnlineBackupStream =
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<OnlineBackupChunk, Status>> + Send>>;
+    type OnlineBackupStream = std::pin::Pin<
+        Box<dyn tokio_stream::Stream<Item = Result<OnlineBackupChunk, Status>> + Send>,
+    >;
 
     async fn online_backup(
         &self,

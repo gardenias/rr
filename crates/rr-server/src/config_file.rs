@@ -184,10 +184,9 @@ impl ResolvedConfig {
         };
         let file = file.unwrap_or_default();
 
-        let node_id = args
-            .node_id
-            .or(file.node.id)
-            .ok_or_else(|| anyhow!("missing node id: set via --node-id, RR_NODE_ID, or [node].id in config"))?;
+        let node_id = args.node_id.or(file.node.id).ok_or_else(|| {
+            anyhow!("missing node id: set via --node-id, RR_NODE_ID, or [node].id in config")
+        })?;
 
         let listen_addr = args
             .listen_addr
@@ -244,10 +243,7 @@ impl ResolvedConfig {
             }
         };
 
-        let data_dir = args
-            .data_dir
-            .clone()
-            .or(file.node.data_dir.clone());
+        let data_dir = args.data_dir.clone().or(file.node.data_dir.clone());
 
         if matches!(storage_backend, StorageBackend::Rocks) && data_dir.is_none() {
             return Err(anyhow!(
@@ -576,10 +572,7 @@ mod tests {
             ..Default::default()
         };
         let err = ResolvedConfig::resolve(&args).unwrap_err();
-        assert!(
-            err.to_string().contains("mutually exclusive"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
     }
 
     #[test]

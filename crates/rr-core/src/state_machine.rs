@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::error::RrError;
-use crate::types::LogIndex;
+use crate::types::{GroupId, LogIndex};
 
 /// Optional runtime control surface for state machines that persist
 /// framework-level ingestor progress.
@@ -37,6 +37,20 @@ pub trait IngestorOffsetControl: Send + Sync {
 pub trait StateMachineReader: Send + Sync {
     /// Read from local state machine replica.
     async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError>;
+}
+
+/// Optional lifecycle callback surface the group manager can invoke on
+/// leadership transitions and shutdown.
+#[async_trait]
+pub trait StateMachineLifecycleHook: Send + Sync {
+    /// Called when this node becomes group leader.
+    async fn on_leader_elected(&self, _group_id: GroupId) {}
+
+    /// Called when this node steps down from leadership.
+    async fn on_step_down(&self, _group_id: GroupId) {}
+
+    /// Called before the group is stopped.
+    async fn on_shutdown(&self) {}
 }
 
 /// Low-level trait for implementing a Raft-backed state machine.
@@ -132,6 +146,22 @@ pub trait StateMachine: Send + Sync {
 
     /// Return the index of the last applied log entry, if any.
     async fn last_applied(&self) -> Option<LogIndex>;
+
+    /// Called when this node becomes the group leader.
+    async fn on_leader_elected(&mut self, _group_id: GroupId) {}
+
+    /// Called when this node steps down from leadership.
+    async fn on_step_down(&mut self, _group_id: GroupId) {}
+
+    /// Called before the group is stopped.
+    async fn on_shutdown(&mut self) {}
+
+    /// Optional lifecycle hook handle for out-of-band lifecycle notifications.
+    ///
+    /// Most state machines can keep the default `None` implementation.
+    fn lifecycle_hook(&self) -> Option<Arc<dyn StateMachineLifecycleHook>> {
+        None
+    }
 
     /// Optional control surface for overriding persisted ingestor offset.
     ///

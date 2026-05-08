@@ -17,10 +17,10 @@ use rr_core::config::{ConfigProvider, RoutingTableChange};
 use rr_core::error::{ConfigError, RrError};
 use rr_core::types::NodeId;
 use rr_network::client_service::{ClientDispatch, ClientServiceImpl};
+use rr_network::proto::admin::admin_service_server::AdminServiceServer;
 use rr_network::proto::client::client_service_server::ClientServiceServer;
 use rr_network::proto::raft::raft_service_server::RaftServiceServer;
 use rr_network::raft_service::{RaftGroupLookup, RaftServiceImpl};
-use rr_network::proto::admin::admin_service_server::AdminServiceServer;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_router::router::ShardRouter;
 
@@ -183,14 +183,14 @@ impl RrNode {
         }
 
         let prom_handle = if config.metrics_port.is_some() {
-            let (recorder, _exporter_handle) = metrics_exporter_prometheus::PrometheusBuilder::new()
-                .build()
-                .map_err(|e| RrError::Config(ConfigError::InvalidConfig(e.to_string())))?;
+            let (recorder, _exporter_handle) =
+                metrics_exporter_prometheus::PrometheusBuilder::new()
+                    .build()
+                    .map_err(|e| RrError::Config(ConfigError::InvalidConfig(e.to_string())))?;
             let handle = recorder.handle();
             let _ = metrics::set_global_recorder(recorder);
             info!("Prometheus recorder installed (metrics served via HTTP observability port)");
-            gauge!("rr_security_insecure_mode")
-                .set(if config.allow_insecure { 1.0 } else { 0.0 });
+            gauge!("rr_security_insecure_mode").set(if config.allow_insecure { 1.0 } else { 0.0 });
             Some(handle)
         } else {
             None
@@ -257,9 +257,7 @@ impl RrNode {
         for (group_id, meta) in &table.groups {
             if meta.replicas.contains(&self.node_id) {
                 self.group_manager.start_group(*group_id).await?;
-                self.group_manager
-                    .start_metrics_ticker(*group_id)
-                    .await?;
+                self.group_manager.start_metrics_ticker(*group_id).await?;
                 info!(node_id = self.node_id, group_id, "started Raft group");
                 counter!("node.group.started").increment(1);
             }
@@ -458,11 +456,9 @@ impl RrNode {
             let mut shutdown_rx = self.shutdown_tx.subscribe();
             let mut builder = tonic::transport::Server::builder();
             if let Some(tls) = &self.tls_config {
-                let server_tls = tls
-                    .build_server_tls()
-                    .map_err(|e| {
-                        RrError::Config(ConfigError::InvalidConfig(format!("server tls: {e}")))
-                    })?;
+                let server_tls = tls.build_server_tls().map_err(|e| {
+                    RrError::Config(ConfigError::InvalidConfig(format!("server tls: {e}")))
+                })?;
                 builder = builder.tls_config(server_tls).map_err(|e| {
                     RrError::Config(ConfigError::InvalidConfig(format!(
                         "tls_config attach failed: {e}"
@@ -503,14 +499,14 @@ impl RrNode {
             );
         }
 
-
         // ── 4. Start admin gRPC server (optional) ────────────────────────────
         if let Some(port) = self.admin_port {
-            let admin_addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
-                .parse()
-                .map_err(|e: std::net::AddrParseError| {
-                    RrError::Config(ConfigError::InvalidConfig(e.to_string()))
-                })?;
+            let admin_addr: std::net::SocketAddr =
+                format!("0.0.0.0:{port}")
+                    .parse()
+                    .map_err(|e: std::net::AddrParseError| {
+                        RrError::Config(ConfigError::InvalidConfig(e.to_string()))
+                    })?;
 
             let admin_chain = rr_network::ChainedInterceptor {
                 first: self.auth_config.admin_interceptor(),
@@ -572,15 +568,19 @@ impl RrNode {
         }
 
         if let (Some(port), Some(handle)) = (self.metrics_port, self.prom_handle.clone()) {
-            let addr: std::net::SocketAddr = format!("0.0.0.0:{port}")
-                .parse()
-                .map_err(|e: std::net::AddrParseError| {
-                    RrError::Config(ConfigError::InvalidConfig(e.to_string()))
-                })?;
+            let addr: std::net::SocketAddr =
+                format!("0.0.0.0:{port}")
+                    .parse()
+                    .map_err(|e: std::net::AddrParseError| {
+                        RrError::Config(ConfigError::InvalidConfig(e.to_string()))
+                    })?;
             let shutdown_rx = self.shutdown_tx.subscribe();
             let http = spawn_http_server(addr, handle, self.readiness.clone(), shutdown_rx).await?;
             *self.http_handle.lock().await = Some(http);
-            info!(node_id = self.node_id, port, "HTTP observability server spawned");
+            info!(
+                node_id = self.node_id,
+                port, "HTTP observability server spawned"
+            );
         }
 
         self.readiness.set(true);
@@ -697,11 +697,7 @@ mod tests {
 
     #[async_trait]
     impl RaftGroupLookup for DummyRaftLookup {
-        async fn append_entries(
-            &self,
-            _: GroupId,
-            _: Vec<u8>,
-        ) -> Result<Vec<u8>, tonic::Status> {
+        async fn append_entries(&self, _: GroupId, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }
         async fn vote(&self, _: GroupId, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
@@ -984,9 +980,10 @@ mod tests {
 
     #[test]
     fn validate_security_raft_without_tls_rejects() {
-        let cfg = make_config(1, "127.0.0.1:50100")
-            .with_raft_lookup(Arc::new(DummyRaftLookup));
-        let err = RrNode::new(cfg).err().expect("must reject raft without tls");
+        let cfg = make_config(1, "127.0.0.1:50100").with_raft_lookup(Arc::new(DummyRaftLookup));
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject raft without tls");
         let msg = err.to_string();
         assert!(
             msg.contains("RaftService") && msg.contains("TLS"),
@@ -999,7 +996,9 @@ mod tests {
         let cfg = make_config(1, "127.0.0.1:50101")
             .with_raft_lookup(Arc::new(DummyRaftLookup))
             .with_tls(tls_without_mtls());
-        let err = RrNode::new(cfg).err().expect("must reject raft without mtls");
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject raft without mtls");
         let msg = err.to_string();
         assert!(
             msg.contains("require_client_cert"),
@@ -1013,7 +1012,9 @@ mod tests {
             admin_token: Some("x".into()),
             client_token: None,
         });
-        let err = RrNode::new(cfg).err().expect("must reject bearer auth without tls");
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject bearer auth without tls");
         let msg = err.to_string();
         assert!(
             msg.contains("Bearer-token") && msg.contains("TLS"),
@@ -1029,7 +1030,9 @@ mod tests {
                 admin_token: Some("x".into()),
                 client_token: None,
             });
-        let err = RrNode::new(cfg).err().expect("must reject admin port without tls");
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject admin port without tls");
         let msg = err.to_string();
         assert!(
             msg.contains("AdminService") && msg.contains("TLS"),
@@ -1042,7 +1045,9 @@ mod tests {
         let cfg = make_config(1, "127.0.0.1:50104")
             .with_admin_port(9999)
             .with_tls(tls_with_mtls());
-        let err = RrNode::new(cfg).err().expect("must reject admin port without token");
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject admin port without token");
         let msg = err.to_string();
         assert!(
             msg.contains("admin_token"),

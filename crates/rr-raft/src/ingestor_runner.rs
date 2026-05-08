@@ -19,10 +19,10 @@
 //!
 //! # Backpressure
 //!
-//! The poll loop calls [`crate::group_manager::RaftGroupManager::write`]
-//! sequentially per command. `write` blocks until the entry is
-//! committed and applied, so the loop is naturally rate-limited by
-//! commit throughput — no separate bounded channel needed.
+//! The poll loop calls [`crate::group_manager::RaftGroupManager::write_batch`]
+//! once per fetched ingestor batch. This reduces per-entry Raft round
+//! trips while preserving per-entry offset commit semantics after apply.
+//! Backpressure still comes from Raft commit/apply throughput.
 //!
 //! # Failure handling
 //!
@@ -31,7 +31,7 @@
 //! Raft leader down on ingestor failure — a Kafka outage must not
 //! destabilise consensus (ADR A-0001 §"Open questions" #5).
 //!
-//! Errors from `mgr.write` (e.g. the leader stepped down between
+//! Errors from `mgr.write_batch` (e.g. the leader stepped down between
 //! poll and write) cause the poll loop to exit cleanly; the
 //! supervisor parks waiting for the next leadership transition.
 
@@ -149,8 +149,7 @@ pub fn spawn_with_batch_size(
 ) -> IngestorHandle {
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let join = tokio::spawn(async move {
-        if let Err(e) = supervise(mgr, group_id, ingestor, auto_idem, batch_size, cancel_rx).await
-        {
+        if let Err(e) = supervise(mgr, group_id, ingestor, auto_idem, batch_size, cancel_rx).await {
             warn!(group_id, error = %e, "ingestor supervisor exited with error");
         }
     });
@@ -279,11 +278,7 @@ async fn refresh_snapshot_if_stale(mgr: &RaftGroupManager, group_id: GroupId) {
         Some(0) | None => return,
         Some(idx) => idx,
     };
-    let current_snap_index = metrics
-        .snapshot
-        .as_ref()
-        .map(|l| l.index)
-        .unwrap_or(0);
+    let current_snap_index = metrics.snapshot.as_ref().map(|l| l.index).unwrap_or(0);
     if current_snap_index >= target_index {
         return;
     }
@@ -390,16 +385,17 @@ async fn run_poll_loop(
             continue;
         }
 
-        let batch_len = batch.len();
-        for (idx, cmd) in batch.into_iter().enumerate() {
+        let mut payloads = Vec::with_capacity(batch.len());
+        let mut commit_offsets = Vec::with_capacity(batch.len());
+
+        for cmd in batch {
             let mut entry = FramedEntry::from_payload(cmd.payload).with_offset(cmd.offset.clone());
             if let Some(cfg) = auto_idem {
                 let request_id = (cfg.offset_to_request_id)(&cmd.offset);
-                entry = entry.with_idem_key(IdempotencyKey::new(
-                    cfg.request_type.clone(),
-                    request_id,
-                ));
+                entry =
+                    entry.with_idem_key(IdempotencyKey::new(cfg.request_type.clone(), request_id));
             }
+
             let bytes = match entry.encode() {
                 Ok(b) => b,
                 Err(e) => {
@@ -407,9 +403,36 @@ async fn run_poll_loop(
                     break;
                 }
             };
-            match mgr.write(group_id, bytes).await {
-                Ok(_) => {
-                    if let Err(e) = ingestor.commit_applied_bytes(&cmd.offset).await {
+
+            payloads.push(bytes);
+            commit_offsets.push(cmd.offset);
+        }
+
+        if payloads.is_empty() {
+            continue;
+        }
+
+        match mgr.write_batch(group_id, payloads).await {
+            Ok(responses) => {
+                if responses.len() != commit_offsets.len() {
+                    let dropped = commit_offsets.len() as u64;
+                    metrics::counter!(
+                        "rr_ingestor_step_down_drops_total",
+                        "group_id" => group_id.to_string()
+                    )
+                    .increment(dropped);
+                    warn!(
+                        group_id,
+                        dropped,
+                        expected = commit_offsets.len(),
+                        got = responses.len(),
+                        "ingestor: write_batch response count mismatch; treating as step-down"
+                    );
+                    return;
+                }
+
+                for offset in commit_offsets {
+                    if let Err(e) = ingestor.commit_applied_bytes(&offset).await {
                         debug!(
                             group_id,
                             error = %e,
@@ -418,21 +441,21 @@ async fn run_poll_loop(
                         );
                     }
                 }
-                Err(e) => {
-                    let dropped = (batch_len - idx) as u64;
-                    metrics::counter!(
-                        "rr_ingestor_step_down_drops_total",
-                        "group_id" => group_id.to_string()
-                    )
-                    .increment(dropped);
-                    debug!(
-                        group_id,
-                        error = %e,
-                        dropped,
-                        "ingestor: write failed; likely stepped down"
-                    );
-                    return;
-                }
+            }
+            Err(e) => {
+                let dropped = commit_offsets.len() as u64;
+                metrics::counter!(
+                    "rr_ingestor_step_down_drops_total",
+                    "group_id" => group_id.to_string()
+                )
+                .increment(dropped);
+                debug!(
+                    group_id,
+                    error = %e,
+                    dropped,
+                    "ingestor: batch write failed; likely stepped down"
+                );
+                return;
             }
         }
     }
@@ -657,13 +680,8 @@ mod tests {
     #[tokio::test]
     async fn supervisor_exits_when_seed_offset_fails() {
         let mgr = make_single_node_leader().await;
-        let handle = spawn_with_batch_size(
-            Arc::clone(&mgr),
-            1,
-            Box::new(SeedFailIngestor),
-            None,
-            1,
-        );
+        let handle =
+            spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(SeedFailIngestor), None, 1);
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while handle.is_running() {
             if std::time::Instant::now() > deadline {
@@ -686,12 +704,8 @@ mod tests {
         };
         assert_eq!(auto_idem.request_type, "test_topic");
         let mut buf = Vec::new();
-        bincode::serde::encode_into_std_write(
-            42_u64,
-            &mut buf,
-            bincode::config::standard(),
-        )
-        .unwrap();
+        bincode::serde::encode_into_std_write(42_u64, &mut buf, bincode::config::standard())
+            .unwrap();
         assert_eq!((auto_idem.offset_to_request_id)(&buf), 42);
     }
 }

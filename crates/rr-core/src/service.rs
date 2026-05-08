@@ -14,6 +14,7 @@
 use async_trait::async_trait;
 
 use crate::error::RrError;
+use crate::types::GroupId;
 
 /// High-level trait for implementing a distributed service.
 ///
@@ -160,6 +161,29 @@ pub trait Service: Send + Sync {
     /// returns, the service must behave exactly as if the snapshot bytes
     /// were the only history it had ever seen.
     async fn restore(&mut self, data: &[u8]) -> Result<(), RrError>;
+
+    /// Called when this node becomes the group leader for `group_id`.
+    ///
+    /// This is the right place to start leader-only resources (e.g. attach
+    /// a Kafka ingestor, start background tasks, pre-warm caches).
+    /// The default implementation is a no-op.
+    ///
+    /// **Note**: Called from within a Tokio task; must not block the thread.
+    #[allow(unused_variables)]
+    async fn on_leader_elected(&mut self, group_id: GroupId) {}
+
+    /// Called when this node steps down from leadership for `group_id`.
+    ///
+    /// This is the right place to stop leader-only resources. Called before
+    /// the state machine applies further entries from the new leader.
+    /// The default implementation is a no-op.
+    #[allow(unused_variables)]
+    async fn on_step_down(&mut self, group_id: GroupId) {}
+
+    /// Called before the Raft group is stopped. Use this to flush state,
+    /// close connections, or release external resources.
+    /// The default implementation is a no-op.
+    async fn shutdown(&mut self) {}
 }
 
 #[cfg(test)]

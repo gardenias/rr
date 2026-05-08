@@ -18,6 +18,8 @@ tar = "0.4"
 flate2 = "1"
 walkdir = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true

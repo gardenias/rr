@@ -77,7 +77,10 @@ pub trait CommandIngestor: Send + Sync + 'static {
     /// items; an empty vector signals "no commands available right
     /// now, retry later". Errors propagate to the framework's poll
     /// loop, which applies exponential backoff.
-    async fn poll(&mut self, max_batch_size: usize) -> Result<Vec<IngressCommand<Self::Offset>>, RrError>;
+    async fn poll(
+        &mut self,
+        max_batch_size: usize,
+    ) -> Result<Vec<IngressCommand<Self::Offset>>, RrError>;
 
     /// Hook called after the framework has successfully applied
     /// `offset` (and any earlier offsets) to the state machine.
@@ -129,12 +132,13 @@ impl<I: CommandIngestor> DynCommandIngestor for I {
         let typed: Option<I::Offset> = match offset {
             Some(bytes) => {
                 let (decoded, _) =
-                    bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-                        .map_err(|e| {
+                    bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map_err(
+                        |e| {
                             RrError::Codec(crate::error::CodecError::DeserializeFailed(format!(
                                 "ingestor offset decode failed: {e}"
                             )))
-                        })?;
+                        },
+                    )?;
                 Some(decoded)
             }
             None => None,
@@ -149,12 +153,14 @@ impl<I: CommandIngestor> DynCommandIngestor for I {
         let batch = CommandIngestor::poll(self, max_batch_size).await?;
         let mut out = Vec::with_capacity(batch.len());
         for cmd in batch {
-            let offset_bytes = bincode::serde::encode_to_vec(cmd.offset, bincode::config::standard())
-                .map_err(|e| {
-                    RrError::Codec(crate::error::CodecError::SerializeFailed(format!(
-                        "ingestor offset encode failed: {e}"
-                    )))
-                })?;
+            let offset_bytes =
+                bincode::serde::encode_to_vec(cmd.offset, bincode::config::standard()).map_err(
+                    |e| {
+                        RrError::Codec(crate::error::CodecError::SerializeFailed(format!(
+                            "ingestor offset encode failed: {e}"
+                        )))
+                    },
+                )?;
             out.push(DynIngressCommand {
                 offset: offset_bytes,
                 payload: cmd.payload,

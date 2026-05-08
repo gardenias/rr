@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use openraft::storage::IOFlushed;
 use openraft::storage::RaftLogStorage;
+use openraft::type_config::alias::LogIdOf;
+use openraft::type_config::alias::VoteOf;
 use openraft::LogState;
 use openraft::RaftLogReader;
 use openraft::RaftTypeConfig;
-use openraft::type_config::alias::LogIdOf;
-use openraft::type_config::alias::VoteOf;
 
 use rr_core::storage::BatchOp;
 use rr_core::storage::StorageEngine;
@@ -281,12 +281,12 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
 mod tests {
     use super::*;
     use openraft::storage::RaftLogStorageExt;
+    use openraft::type_config::alias::EntryOf;
     use openraft::vote::leader_id_adv::CommittedLeaderId;
     use openraft::Entry;
     use openraft::EntryPayload;
     use openraft::LogId;
     use openraft::Vote;
-    use openraft::type_config::alias::EntryOf;
     use tempfile::TempDir;
 
     fn make_entry(index: u64, term: u64) -> EntryOf<RrTypeConfig> {
