@@ -31,6 +31,14 @@ pub trait IngestorOffsetControl: Send + Sync {
     fn get_offset(&self) -> Option<Vec<u8>>;
 }
 
+/// Read-only handle for serving follower reads directly from a local state
+/// machine replica.
+#[async_trait]
+pub trait StateMachineReader: Send + Sync {
+    /// Read from local state machine replica.
+    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError>;
+}
+
 /// Low-level trait for implementing a Raft-backed state machine.
 ///
 /// Implementations receive raw byte entries from the Raft log and must
@@ -130,6 +138,13 @@ pub trait StateMachine: Send + Sync {
     /// Most state machines don't track ingestor offsets and should keep
     /// the default `None` implementation.
     fn ingestor_offset_control(&self) -> Option<Arc<dyn IngestorOffsetControl>> {
+        None
+    }
+
+    /// Optional read handle for local follower reads.
+    ///
+    /// Most state machines can keep the default `None` implementation.
+    fn read_handle(&self) -> Option<Arc<dyn StateMachineReader>> {
         None
     }
 }

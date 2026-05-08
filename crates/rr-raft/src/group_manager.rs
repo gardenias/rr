@@ -7,12 +7,13 @@ use std::sync::Arc;
 use bincode::config::standard;
 use metrics::{counter, gauge, histogram};
 use openraft::BasicNode;
+use openraft::ReadPolicy;
 use openraft::type_config::async_runtime::WatchReceiver;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument};
 
 use rr_core::error::{RaftError, RrError};
-use rr_core::state_machine::{IngestorOffsetControl, StateMachine};
+use rr_core::state_machine::{IngestorOffsetControl, StateMachine, StateMachineReader};
 use rr_core::types::{GroupId, NodeId};
 
 use crate::network_factory::{ChannelPoolLike, GrpcNetworkFactory};
@@ -45,6 +46,8 @@ pub struct RaftGroupManager {
     /// state machine's persisted ingestor offset.
     ingestor_offset_controls:
         Arc<RwLock<HashMap<GroupId, Arc<dyn IngestorOffsetControl>>>>,
+    /// Per-group local read handles for follower reads.
+    read_handles: Arc<RwLock<HashMap<GroupId, Arc<dyn StateMachineReader>>>>,
     /// Per-group auto-promote-learner supervisors. Optional; populated
     /// by [`Self::start_learner_promoter`]; stop_group + Drop both
     /// clean these up.
@@ -69,6 +72,7 @@ impl RaftGroupManager {
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
+            read_handles: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
@@ -93,6 +97,7 @@ impl RaftGroupManager {
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
+            read_handles: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
@@ -116,6 +121,7 @@ impl RaftGroupManager {
 
         let sm = (self.sm_factory)(group_id);
         let ingestor_offset_control = sm.ingestor_offset_control();
+        let read_handle = sm.read_handle();
 
         let node = if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
@@ -138,6 +144,9 @@ impl RaftGroupManager {
                 .write()
                 .await
                 .insert(group_id, control);
+        }
+        if let Some(handle) = read_handle {
+            self.read_handles.write().await.insert(group_id, handle);
         }
         Ok(())
     }
@@ -238,6 +247,7 @@ impl RaftGroupManager {
             handle.stop().await;
         }
         self.ingestor_offset_controls.write().await.remove(&group_id);
+        self.read_handles.write().await.remove(&group_id);
         if let Some(ticker) = self.metrics_tickers.write().await.remove(&group_id) {
             ticker.stop().await;
         }
@@ -475,6 +485,59 @@ impl RaftGroupManager {
         Ok(result.data.into())
     }
 
+    /// Read directly from local state machine without raft coordination.
+    ///
+    /// This is a stale read and may lag behind leader commit/apply progress.
+    #[instrument(skip(self, payload))]
+    pub async fn local_read(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        let read_handle = self
+            .read_handles
+            .read()
+            .await
+            .get(&group_id)
+            .cloned()
+            .ok_or_else(|| {
+                RrError::Application(format!(
+                    "group {group_id} state machine does not support local read"
+                ))
+            })?;
+
+        read_handle.read(payload).await
+    }
+
+    /// Read from local state machine with linearizable semantics.
+    ///
+    /// Uses openraft ReadIndex to confirm leader commit index, then waits
+    /// until local state machine has applied through that point before reading.
+    #[instrument(skip(self, payload))]
+    pub async fn linearizable_read(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RrError> {
+        let raft = self
+            .get_raft(group_id)
+            .await
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+
+        let linearizer = raft
+            .get_read_linearizer(ReadPolicy::ReadIndex)
+            .await
+            .map_err(|e| {
+                RrError::Application(format!(
+                    "linearizable read index failed for group {group_id}: {e}"
+                ))
+            })?;
+
+        linearizer.await_ready(&raft).await.map_err(|e| {
+            RrError::Application(format!(
+                "linearizable read await_ready failed for group {group_id}: {e}"
+            ))
+        })?;
+
+        self.local_read(group_id, payload).await
+    }
+
     /// Override the state machine's latest ingestor offset for `group_id`.
     ///
     /// The offset is persisted in the adapter-level ingestor state and then
@@ -577,6 +640,7 @@ impl RaftGroupManager {
             ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
             metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
             ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
+            read_handles: Arc::new(RwLock::new(HashMap::new())),
             learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             rocks_base_path: Some(base_path),
         }
@@ -602,6 +666,7 @@ impl RaftGroupManager {
         }
         let sm = (self.sm_factory)(group_id);
         let ingestor_offset_control = sm.ingestor_offset_control();
+        let read_handle = sm.read_handle();
         let node =
             RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
                 .await
@@ -621,6 +686,9 @@ impl RaftGroupManager {
                 .write()
                 .await
                 .insert(group_id, control);
+        }
+        if let Some(handle) = read_handle {
+            self.read_handles.write().await.insert(group_id, handle);
         }
         Ok(())
     }

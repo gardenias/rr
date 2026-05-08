@@ -39,13 +39,14 @@
 
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
+use tokio::sync::RwLock as TokioRwLock;
 
 use rr_core::error::RrError;
 use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::{FramedSnapshot, IngestorState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
 use rr_core::service::Service;
-use rr_core::state_machine::{IngestorOffsetControl, StateMachine};
+use rr_core::state_machine::{IngestorOffsetControl, StateMachine, StateMachineReader};
 use rr_core::types::{GroupId, LogIndex};
 
 use crate::idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
@@ -65,7 +66,7 @@ use crate::idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
 /// ```
 pub struct ServiceStateMachineAdapter<S: Service> {
     group_id: GroupId,
-    service: S,
+    service: Arc<TokioRwLock<S>>,
     applied_count: u64,
     idempotency: IdempotencyLayer,
     /// Most recent ingestor offset observed via [`FramedEntry::offset`].
@@ -76,6 +77,17 @@ pub struct ServiceStateMachineAdapter<S: Service> {
     /// this adapter instance.
     latest_ingestor_offset: Arc<RwLock<Option<Vec<u8>>>>,
     ingestor_offset_control: Arc<dyn IngestorOffsetControl>,
+}
+
+struct ServiceReadHandle<S: Service> {
+    service: Arc<TokioRwLock<S>>,
+}
+
+#[async_trait]
+impl<S: Service + 'static> StateMachineReader for ServiceReadHandle<S> {
+    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        self.service.read().await.handle(payload).await
+    }
 }
 
 struct SharedIngestorOffsetControl {
@@ -119,7 +131,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         )) as Arc<dyn IngestorOffsetControl>;
         Self {
             group_id,
-            service,
+            service: Arc::new(TokioRwLock::new(service)),
             applied_count: 0,
             idempotency: IdempotencyLayer::new(capacity),
             latest_ingestor_offset,
@@ -202,7 +214,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
                 ApplyOutcome::Success(cached_response).encode()
             }
             IdempotencyDecision::New => {
-                let response = self.service.handle(payload).await?;
+                let response = self.service.read().await.handle(payload).await?;
                 self.idempotency.record(&key, response.clone());
                 metrics::gauge!(
                     "rr_idempotency_cache_size",
@@ -216,7 +228,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
 }
 
 #[async_trait]
-impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
+impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
         let (offset, idem_key, payload) = match FramedEntry::decode(entry)? {
             Some(framed) => (framed.offset, framed.idem_key, framed.payload),
@@ -224,7 +236,7 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
         };
 
         let result = match idem_key {
-            None => self.service.handle(payload).await,
+            None => self.service.read().await.handle(payload).await,
             Some(key) => self.apply_keyed(key, payload).await,
         };
 
@@ -238,7 +250,7 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
     }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
-        let user_snapshot = self.service.snapshot().await?;
+        let user_snapshot = self.service.read().await.snapshot().await?;
         let mut framed = FramedSnapshot::new(user_snapshot);
         if !self.idempotency.is_empty() {
             framed.framework_state.idempotency = Some(self.idempotency.capture()?);
@@ -281,7 +293,7 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
                 snapshot.to_vec()
             }
         };
-        self.service.restore(&user_bytes).await?;
+        self.service.write().await.restore(&user_bytes).await?;
         metrics::counter!(
             "rr_snapshot_installs_total",
             "group_id" => self.group_id.to_string()
@@ -300,6 +312,12 @@ impl<S: Service> StateMachine for ServiceStateMachineAdapter<S> {
 
     fn ingestor_offset_control(&self) -> Option<Arc<dyn IngestorOffsetControl>> {
         Some(self.ingestor_offset_control.clone())
+    }
+
+    fn read_handle(&self) -> Option<Arc<dyn StateMachineReader>> {
+        Some(Arc::new(ServiceReadHandle {
+            service: Arc::clone(&self.service),
+        }))
     }
 }
 
