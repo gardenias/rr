@@ -5,12 +5,12 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-04-27 (multi-language SDK + etcd ConfigProvider + dashboard wave)
-**Current phase**: Phase 4 + Phase 3.1 done; v0.3 ecosystem build-out（SDK / contrib / observability polish）
-**Active plan**: `.sisyphus/plans/rr-phase4-v030.md` + `.sisyphus/plans/rr-phase3.1-hardening.md`
-**Latest tag**: `v0.2.0-rc1` (current `main` HEAD has all features beyond v0.2 + 本 session 的 Java SDK / etcd contrib / dashboard 增量)
-**Main branch HEAD**: 26 commits ahead of `origin/main` UNPUSHED + 本 session 工作树未 commit（按用户指示暂不做版本管理）
-**Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`) — Wave 4d cleared all P0 ship-blockers; Wave 13 closed 8 of 9 P1/P2 follow-ups
+**Last updated**: 2026-05-08 (framework deep review + quality hardening + openraft 0.10 + follower read)
+**Current phase**: Quality Hardening complete; next = P2 clean-up or feature work
+**Active plan**: `.sisyphus/plans/rr-quality-hardening.md`（P0/P1/P2/P3 全部完成）
+**Latest tag**: `v0.2.0-rc1` (main HEAD far ahead, unpushed per user directive)
+**Main branch HEAD**: 31 commits ahead of `origin/main`（unpushed）
+**Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`)
 
 ---
 
@@ -25,6 +25,54 @@ otel-client 自 v0.3**），完整的集成测试 + chaos framework + Docusaurus
 ---
 
 ## 已完成的工作 / Completed Work
+
+### Session 2026-05-08 — Framework Review + Quality Hardening + openraft 0.10 + Follower Read
+
+**Framework Deep Review**（`.sisyphus/evidence/rr-framework-review-2026-05-08.md`）：
+- 三轮并行 explore agent 分析：错误处理、API 完整性、性能/并发
+- 产出完整的能力/限制/缺陷/边界报告
+
+**openraft 0.9.21 → 0.10.0-alpha.19 迁移**（`c19d258`）：
+- 移除 storage-v2 feature（0.10 已合并）
+- RrTypeConfig 新增 Term/LeaderId/Vote/Responder 关联类型
+- RaftStateMachine::apply() 从 IntoIterator → Stream<EntryResponder>
+- RaftLogStorage：truncate → truncate_after，移除 read_vote，全 io::Error
+- RaftNetwork → RaftNetworkV2：full_snapshot，stream_append/transfer_leader
+- Raft<C> → Raft<C, SM>，RaftMetrics 类型参数统一
+
+**Follower Read 特性**（`c742a98`）：
+- 两种一致性：stale（本地直读）+ linearizable（ReadIndex via openraft 0.10）
+- Proto: ClientRequest 新增 read_only=4, linearizable=5
+- SDK: RrClient::read() + read_linearizable()
+- ServiceStateMachineAdapter 改为 Arc<RwLock<S>> 支持并发读
+
+**Quality Hardening P0-P3**（`7d183d8`, `35943e7`, `069f24c`）：
+
+P0（已修）：
+- Lock poisoning：service_adapter/rate_limit 5 处 .expect() → .unwrap_or_else(|p| p.into_inner())
+- RetryConfig 溢出：5 处 2u64.pow(attempt) → saturating_mul/pow(min(20))
+
+P1（已修）：
+- Ingestor batch write：write_batch() via client_write_many()，吞吐 ~1k → ~10k+ msgs/sec/group
+- Service lifecycle hooks：on_leader_elected/on_step_down/shutdown，自动 via metrics_ticker
+
+P2（已修）：
+- GroupManager 7 RwLocks → 1 DashMap<GroupId, Arc<Mutex<GroupState>>>
+- Admin proto 错误码 gRPC-idiomatic：5 RPC 改用 Status 替代 bool success+message
+
+P3（已修）：
+- Rate limiter 后台 GC task（Weak Arc，60s 间隔）
+- Backup/restore SHA-256 checksum（data_sha256 in metadata.json，verify on restore）
+
+**ADR 新增**（同 session）：
+- A-0005: Per-caller rate limiting design
+- A-0006: RocksDB CF-level tuning design
+
+**新增 contract tests**（同 session）：
+- test_idempotency_dedup_survives_leader_switch (P0/C-005)
+- test_committed_entry_applies_exactly_once_after_leader_crash (T-005)
+- test_snapshot_state_digest_consistent_across_nodes (T-002)
+- test_ingestor_survives_leader_switch_no_message_loss (T-003)
 
 ### Session 2026-04-27 — multi-language SDK + etcd contrib + dashboard polish（4 个并行交付，未 commit）
 
