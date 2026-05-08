@@ -16,7 +16,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rr_network::proto::admin::admin_service_client::AdminServiceClient;
 use rr_network::proto::admin::{
     online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
-    Empty, GroupId, OnlineBackupRequest, ResetIngestorOffsetRequest, TransferLeaderRequest,
+    DrainRequest, Empty, GroupId, OnlineBackupRequest, ResetIngestorOffsetRequest,
+    TransferLeaderRequest,
 };
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::ClientRequest;
@@ -82,6 +83,11 @@ enum Commands {
     Group {
         #[command(subcommand)]
         cmd: GroupCommands,
+    },
+    /// Configuration inspection commands.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCommands,
     },
     /// Show top-level metrics summary.
     Metrics,
@@ -169,12 +175,29 @@ enum NodeCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Drain local leadership away from this node before shutdown.
+    Drain {
+        /// Node ID to drain (must be this local node on the target admin endpoint).
+        #[arg(long = "node-id")]
+        node_id: u64,
+        /// Max wait time for each leadership transfer.
+        #[arg(long, default_value = "30")]
+        timeout_secs: u32,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum GroupCommands {
+    /// List all local Raft groups with basic status.
+    List,
     /// Get Raft group status.
     Status {
+        /// Raft group ID.
+        #[arg(long)]
+        group: u64,
+    },
+    /// Show snapshot status for a Raft group.
+    SnapshotStatus {
         /// Raft group ID.
         #[arg(long)]
         group: u64,
@@ -253,6 +276,12 @@ enum GroupCommands {
         #[arg(long)]
         force_fresh: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommands {
+    /// Show current routing table snapshot.
+    Show,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -398,6 +427,54 @@ async fn main() -> Result<()> {
                     }
                 }
                 Commands::Node {
+                    cmd:
+                        NodeCommands::Drain {
+                            node_id,
+                            timeout_secs,
+                        },
+                } => {
+                    let resp = client
+                        .drain_node(DrainRequest {
+                            node_id: *node_id,
+                            timeout_secs: *timeout_secs,
+                        })
+                        .await?
+                        .into_inner();
+                    let mut groups = resp.groups;
+                    groups.sort_unstable_by_key(|g| g.group_id);
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "node_id": node_id,
+                                "timeout_secs": timeout_secs,
+                                "groups": groups.iter().map(|g| serde_json::json!({
+                                    "group_id": g.group_id,
+                                    "leadership_transferred": g.leadership_transferred,
+                                    "message": g.message,
+                                })).collect::<Vec<_>>(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("Node Drain (node_id={node_id}, timeout_secs={timeout_secs})");
+                            if groups.is_empty() {
+                                println!("  (no groups drained; likely remote-node no-op)");
+                            } else {
+                                println!(
+                                    "  {:<10} {:<11} message",
+                                    "group_id", "transferred"
+                                );
+                                for g in &groups {
+                                    println!(
+                                        "  {:<10} {:<11} {}",
+                                        g.group_id, g.leadership_transferred, g.message
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Commands::Node {
                     cmd: NodeCommands::Status,
                 } => {
                     let resp = client.get_node_status(Empty {}).await?.into_inner();
@@ -417,6 +494,42 @@ async fn main() -> Result<()> {
                             println!("  listen_addr: {}", resp.listen_addr);
                             println!("  group_ids  : {:?}", resp.group_ids);
                             println!("  uptime_secs: {}", resp.uptime_secs);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::List,
+                } => {
+                    let mut groups = client.list_groups(Empty {}).await?.into_inner().groups;
+                    groups.sort_unstable_by_key(|g| g.group_id);
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "groups": groups.iter().map(|g| serde_json::json!({
+                                    "group_id": g.group_id,
+                                    "is_leader": g.is_leader,
+                                    "current_term": g.current_term,
+                                    "last_log_index": g.last_log_index,
+                                    "leader_node_id": g.leader_node_id,
+                                })).collect::<Vec<_>>(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!(
+                                "{:<10} {:<10} {:<8} {:<14} leader",
+                                "group_id", "is_leader", "term", "last_log_index"
+                            );
+                            for g in &groups {
+                                let leader = g
+                                    .leader_node_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "none".to_string());
+                                println!(
+                                    "{:<10} {:<10} {:<8} {:<14} {}",
+                                    g.group_id, g.is_leader, g.current_term, g.last_log_index, leader
+                                );
+                            }
                         }
                     }
                 }
@@ -444,6 +557,41 @@ async fn main() -> Result<()> {
                             println!("  current_term  : {}", resp.current_term);
                             println!("  last_log_index: {}", resp.last_log_index);
                             println!("  leader_node_id: {}", resp.leader_node_id);
+                        }
+                    }
+                }
+                Commands::Group {
+                    cmd: GroupCommands::SnapshotStatus { group },
+                } => {
+                    let resp = client
+                        .get_snapshot_status(GroupId { group_id: *group })
+                        .await?
+                        .into_inner();
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "group_id": resp.group_id,
+                                "snapshot_in_progress": resp.snapshot_in_progress,
+                                "last_snapshot_index": resp.last_snapshot_index,
+                                "last_snapshot_term": resp.last_snapshot_term,
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("Snapshot Status (group {})", resp.group_id);
+                            println!("  snapshot_in_progress: {}", resp.snapshot_in_progress);
+                            println!(
+                                "  last_snapshot_index : {}",
+                                resp.last_snapshot_index
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "none".to_string())
+                            );
+                            println!(
+                                "  last_snapshot_term  : {}",
+                                resp.last_snapshot_term
+                                    .map(|v| v.to_string())
+                                    .unwrap_or_else(|| "none".to_string())
+                            );
                         }
                     }
                 }
@@ -714,6 +862,43 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Commands::Config {
+                    cmd: ConfigCommands::Show,
+                } => {
+                    let mut partitions = client
+                        .get_routing_table(Empty {})
+                        .await?
+                        .into_inner()
+                        .partitions;
+                    partitions.sort_unstable_by_key(|p| p.partition_id);
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "partitions": partitions.iter().map(|p| serde_json::json!({
+                                    "partition_id": p.partition_id,
+                                    "group_id": p.group_id,
+                                    "replica_node_ids": p.replica_node_ids,
+                                })).collect::<Vec<_>>(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("{:<12} {:<10} replicas", "partition_id", "group_id");
+                            for p in &partitions {
+                                let replicas = if p.replica_node_ids.is_empty() {
+                                    "(none)".to_string()
+                                } else {
+                                    p.replica_node_ids
+                                        .iter()
+                                        .map(std::string::ToString::to_string)
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                };
+                                println!("{:<12} {:<10} {}", p.partition_id, p.group_id, replicas);
+                            }
+                        }
+                    }
+                }
                 Commands::Repl { .. }
                 | Commands::Backup { .. }
                 | Commands::Restore { .. }
@@ -817,10 +1002,13 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                                 &inner.payload,
                                 standard(),
                             ) {
-                                Ok((kv_resp, _)) => match kv_resp.value {
-                                    Some(v) => println!("{}", String::from_utf8_lossy(&v)),
-                                    None => println!("(nil)"),
-                                },
+                                Ok((kv_resp, _)) => {
+                                    if let Some(v) = kv_resp.value {
+                                        println!("{}", String::from_utf8_lossy(&v));
+                                    } else {
+                                        println!("(nil)");
+                                    }
+                                }
                                 Err(e) => println!("decode error: {e}"),
                             }
                         } else {
@@ -963,6 +1151,29 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_parse_group_list() {
+        let cli = Cli::try_parse_from(["rr-admin", "group", "list"]).expect("should parse group list");
+        assert!(matches!(
+            cli.command,
+            Commands::Group {
+                cmd: GroupCommands::List
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_group_snapshot_status() {
+        let cli = Cli::try_parse_from(["rr-admin", "group", "snapshot-status", "--group", "2"])
+            .expect("should parse group snapshot-status");
+        assert!(matches!(
+            cli.command,
+            Commands::Group {
+                cmd: GroupCommands::SnapshotStatus { group: 2 }
+            }
+        ));
+    }
+
     /// Verify group snapshot subcommand parses correctly.
     #[test]
     fn test_parse_group_snapshot() {
@@ -1031,6 +1242,33 @@ mod tests {
                 assert!(dry_run);
             }
             other => panic!("expected Decommission, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_node_drain() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "node",
+            "drain",
+            "--node-id",
+            "4",
+            "--timeout-secs",
+            "45",
+        ])
+        .expect("should parse node drain");
+        match cli.command {
+            Commands::Node {
+                cmd:
+                    NodeCommands::Drain {
+                        node_id,
+                        timeout_secs,
+                    },
+            } => {
+                assert_eq!(node_id, 4);
+                assert_eq!(timeout_secs, 45);
+            }
+            other => panic!("expected Drain, got {other:?}"),
         }
     }
 
@@ -1205,6 +1443,18 @@ mod tests {
     fn test_parse_metrics() {
         let cli = Cli::try_parse_from(["rr-admin", "metrics"]).expect("should parse metrics");
         assert!(matches!(cli.command, Commands::Metrics));
+    }
+
+    #[test]
+    fn test_parse_config_show() {
+        let cli =
+            Cli::try_parse_from(["rr-admin", "config", "show"]).expect("should parse config show");
+        assert!(matches!(
+            cli.command,
+            Commands::Config {
+                cmd: ConfigCommands::Show
+            }
+        ));
     }
 
     /// Verify --output json flag parses correctly.

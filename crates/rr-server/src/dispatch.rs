@@ -54,9 +54,9 @@ impl ClientDispatch for ClientDispatchImpl {
             tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
         })?;
 
-        let raft = self
+        let (raft, _guard) = self
             .group_manager
-            .get_raft(group_id)
+            .get_raft_for_write(group_id)
             .await
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 

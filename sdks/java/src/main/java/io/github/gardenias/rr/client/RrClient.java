@@ -66,6 +66,35 @@ public final class RrClient implements AutoCloseable {
         return sendRequest(partitionId, payload);
     }
 
+    /**
+     * Read from any cluster node (stale read).
+     *
+     * <p>Routes to a local follower replica without Raft consensus. No leader redirect.
+     * Lowest latency; the returned data may be slightly behind the latest committed write.
+     *
+     * @param groupId the Raft group / partition ID
+     * @param payload application-defined read payload (forwarded to {@code Service.handle()})
+     * @return the state machine response
+     */
+    public CompletableFuture<byte[]> read(long groupId, byte[] payload) {
+        return CompletableFuture.supplyAsync(() -> sendReadSync(groupId, payload, false));
+    }
+
+    /**
+     * Linearizable read — guaranteed to see all writes committed before this call.
+     *
+     * <p>Uses the ReadIndex protocol: the local replica confirms the current commit index
+     * with the leader via a heartbeat, then waits to apply up to that index before reading.
+     * Adds approximately one extra network round-trip to the leader compared to a stale read.
+     *
+     * @param groupId the Raft group / partition ID
+     * @param payload application-defined read payload
+     * @return the state machine response, reflecting all writes visible at call time
+     */
+    public CompletableFuture<byte[]> readLinearizable(long groupId, byte[] payload) {
+        return CompletableFuture.supplyAsync(() -> sendReadSync(groupId, payload, true));
+    }
+
     public CompletableFuture<Client.ClusterInfo> getClusterInfo() {
         return CompletableFuture.supplyAsync(this::getClusterInfoSync);
     }
@@ -96,6 +125,55 @@ public final class RrClient implements AutoCloseable {
 
     void removeCachedLeader(long groupId) {
         leaderCache.remove(groupId);
+    }
+
+    private byte[] sendReadSync(long groupId, byte[] payload, boolean linearizable) {
+        int maxAttempts = retryConfig.maxRetries() + 1;
+        int bootstrapIndex = 0;
+        RuntimeException lastError = null;
+        Timer.Sample timerSample = Timer.start(meterRegistry);
+
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            String addr = bootstrapAddrs.get(bootstrapIndex % bootstrapAddrs.size());
+            bootstrapIndex++;
+
+            try {
+                ClientServiceGrpc.ClientServiceBlockingV2Stub stub =
+                        ClientServiceGrpc.newBlockingV2Stub(channelFor(addr));
+
+                Client.ClientRequest request = Client.ClientRequest.newBuilder()
+                        .setPartitionId(groupId)
+                        .setPayload(com.google.protobuf.ByteString.copyFrom(payload))
+                        .setReadOnly(true)
+                        .setLinearizable(linearizable)
+                        .build();
+
+                Client.ClientResponse response = stub.request(request);
+                timerSample.stop(requestTimer(groupId, "success"));
+                return response.getPayload().toByteArray();
+            } catch (StatusException e) {
+                String message = e.getStatus().getDescription() == null
+                        ? e.getStatus().toString()
+                        : e.getStatus().getDescription();
+                lastError = new RpcFailedException(addr, message, e);
+                if (attempt + 1 < maxAttempts) {
+                    sleepBackoff(attempt);
+                }
+            } catch (RuntimeException e) {
+                lastError = e instanceof RrClientException
+                        ? e
+                        : new NetworkException(addr, "connection failed", e);
+                if (attempt + 1 < maxAttempts) {
+                    sleepBackoff(attempt);
+                }
+            }
+        }
+
+        timerSample.stop(requestTimer(groupId, "failure"));
+        if (lastError != null) {
+            throw lastError;
+        }
+        throw new RpcFailedException("<unknown>", "max retries exhausted");
     }
 
     private byte[] sendRequestSync(long groupId, byte[] payload, IdempotencyKey idemKey) {
@@ -218,7 +296,8 @@ public final class RrClient implements AutoCloseable {
     }
 
     private void sleepBackoff(int attempt) {
-        long delayMs = retryConfig.retryDelayMs() * (1L << attempt);
+        long multiplier = 1L << Math.min(attempt, 20);
+        long delayMs = retryConfig.retryDelayMs() * multiplier;
         try {
             Thread.sleep(delayMs);
         } catch (InterruptedException e) {

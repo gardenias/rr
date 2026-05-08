@@ -157,11 +157,7 @@ impl RrNode {
     /// Validates config, assembles sub-components, but does **not** start any
     /// groups or the gRPC server. Call [`start()`](Self::start) for that.
     pub fn new(config: NodeConfig) -> Result<Self, RrError> {
-        if config.listen_addr.is_empty() {
-            return Err(RrError::Config(ConfigError::InvalidConfig(
-                "listen_addr cannot be empty".to_string(),
-            )));
-        }
+        config.validate()?;
 
         validate_security_invariants(&config)?;
 
@@ -517,6 +513,7 @@ impl RrNode {
                     self.node_id,
                     self.listen_addr.clone(),
                     Arc::clone(&self.group_manager),
+                    Arc::clone(&self.config_provider),
                 ),
                 admin_chain,
             );
@@ -803,13 +800,24 @@ mod tests {
     }
 
     #[test]
+    fn test_node_new_invalid_node_id_returns_error() {
+        let result = RrNode::new(make_config(0, "127.0.0.1:50051"));
+        assert!(result.is_err());
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("node_id must be > 0"),
+            "expected error about invalid node_id, got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_node_new_empty_addr_returns_error() {
         let result = RrNode::new(make_config(1, ""));
         assert!(result.is_err());
         let msg = result.err().unwrap().to_string();
         assert!(
-            msg.contains("listen_addr cannot be empty"),
-            "expected error about empty listen_addr, got: {msg}"
+            msg.contains("listen_addr"),
+            "expected error about listen_addr, got: {msg}"
         );
     }
 

@@ -28,6 +28,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, Ia5String, IsCa, KeyPair,
     KeyUsagePurpose, SanType,
 };
+use rr_config::mem::MemConfigProvider;
 use rr_network::audit::ServiceLabel;
 use rr_network::auth::BearerInterceptor;
 use rr_network::proto::admin::admin_service_client::AdminServiceClient;
@@ -172,7 +173,8 @@ async fn spawn_tls_admin_server(
     let server_tls = tls.build_server_tls().expect("server tls");
 
     let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
-    let admin = AdminServiceImpl::new(1, addr.to_string(), mgr);
+    let config_provider = Arc::new(MemConfigProvider::new());
+    let admin = AdminServiceImpl::new(1, addr.to_string(), mgr, config_provider);
 
     let auth = BearerInterceptor::new(ServiceLabel::Admin, ADMIN_TOKEN.to_string());
     let svc = AdminServiceServer::with_interceptor(admin, auth);

@@ -16,7 +16,7 @@ use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
 use rr_core::config::ConfigProvider;
-use rr_core::state_machine::StateMachine;
+use rr_core::state_machine::{StateMachine, StateMachineReader};
 use rr_core::storage::StorageEngine;
 use rr_core::types::{GroupId, LogIndex, NodeId, PartitionConfig};
 use rr_raft::group_manager::RaftGroupManager;
@@ -34,6 +34,15 @@ use rr_storage::mem::MemStorage;
 /// Minimal state machine that echoes its input — used for harness tests.
 struct EchoSM;
 
+struct EchoReader;
+
+#[async_trait::async_trait]
+impl StateMachineReader for EchoReader {
+    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, rr_core::error::RrError> {
+        Ok(payload)
+    }
+}
+
 #[async_trait::async_trait]
 impl StateMachine for EchoSM {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, rr_core::error::RrError> {
@@ -47,6 +56,9 @@ impl StateMachine for EchoSM {
     }
     async fn last_applied(&self) -> Option<LogIndex> {
         None
+    }
+    fn read_handle(&self) -> Option<Arc<dyn StateMachineReader>> {
+        Some(Arc::new(EchoReader))
     }
 }
 
@@ -462,6 +474,55 @@ mod tests {
         Box::new(move |gid| {
             let svc = CountingService {
                 applied: Arc::clone(&applied),
+            };
+            Box::new(ServiceStateMachineAdapter::new(gid, svc))
+        })
+    }
+
+    // ── TrackingService (lifecycle hook counter) ────────────────────────────
+    #[derive(Clone)]
+    struct TrackingService {
+        elected_count: Arc<std::sync::atomic::AtomicUsize>,
+        step_down_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Service for TrackingService {
+        async fn handle(&self, req: Vec<u8>) -> Result<Vec<u8>, rr_core::error::RrError> {
+            Ok(req)
+        }
+
+        fn name(&self) -> &str {
+            "tracking"
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, rr_core::error::RrError> {
+            Ok(vec![])
+        }
+
+        async fn restore(&mut self, _data: &[u8]) -> Result<(), rr_core::error::RrError> {
+            Ok(())
+        }
+
+        async fn on_leader_elected(&mut self, _group_id: GroupId) {
+            self.elected_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        async fn on_step_down(&mut self, _group_id: GroupId) {
+            self.step_down_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn tracking_factory(
+        elected: Arc<std::sync::atomic::AtomicUsize>,
+        step_down: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> StateMachineFactory {
+        Box::new(move |gid| {
+            let svc = TrackingService {
+                elected_count: Arc::clone(&elected),
+                step_down_count: Arc::clone(&step_down),
             };
             Box::new(ServiceStateMachineAdapter::new(gid, svc))
         })
@@ -2299,5 +2360,220 @@ mod tests {
         );
 
         node.shutdown().await.expect("RrNode::shutdown");
+    }
+
+    // ── T29-T33: Follower reads, lifecycle hooks, routing consistency ───────
+
+    /// T29 — Stale read from a follower node must succeed and echo payload.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_stale_read_from_follower() {
+        let (nodes, provider) = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        let follower = nodes.iter().find(|n| n.node_id() != leader_id).unwrap();
+        let follower_id = follower.node_id();
+
+        let table = provider.get_routing_table().await.unwrap();
+        let follower_addr = table.nodes.get(&follower_id).unwrap().addr.clone();
+
+        let client = RrClient::connect(vec![follower_addr]).await.unwrap();
+
+        let payload = b"stale-read-test".to_vec();
+        let resp = client.read(1, payload.clone()).await.unwrap();
+        assert_eq!(resp, payload, "stale read from follower must echo payload");
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T30 — Linearizable read from a cluster node must succeed and echo payload.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_linearizable_read_from_follower() {
+        let (nodes, provider) = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        let table = provider.get_routing_table().await.unwrap();
+        let leader_addr = table.nodes.get(&leader_id).unwrap().addr.clone();
+
+        let client = RrClient::connect(vec![leader_addr]).await.unwrap();
+
+        let payload = b"linearizable-read-test".to_vec();
+        let resp = client.read_linearizable(1, payload.clone()).await.unwrap();
+        assert_eq!(
+            resp, payload,
+            "linearizable read must echo payload"
+        );
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T31 — Lifecycle hooks fire automatically on leader change.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_lifecycle_hooks_fire_on_leader_change() {
+        use std::sync::atomic::Ordering;
+
+        let group_id = 201;
+        let elected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let step_down = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let (nodes, _injector) = build_3node_cluster_with_factory(
+            tracking_factory(Arc::clone(&elected), Arc::clone(&step_down)),
+            group_id,
+        )
+        .await
+        .unwrap();
+
+        let original_leader_id = wait_for_cluster_ready(&nodes, group_id, 8_000)
+            .await
+            .unwrap();
+
+        let initial_elected = elected.load(Ordering::SeqCst);
+        assert!(
+            initial_elected >= 1,
+            "on_leader_elected should fire after initial election"
+        );
+
+        let leader_node = nodes
+            .iter()
+            .find(|n| n.node_id() == original_leader_id)
+            .unwrap();
+        leader_node
+            .group_manager()
+            .stop_group(group_id)
+            .await
+            .unwrap();
+
+        let new_leader_id = wait_for_new_leader(&nodes, group_id, original_leader_id, 12_000)
+            .await
+            .unwrap();
+        assert_ne!(new_leader_id, original_leader_id);
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let final_elected = elected.load(Ordering::SeqCst);
+        let final_step_down = step_down.load(Ordering::SeqCst);
+
+        assert!(
+            final_elected >= initial_elected + 1,
+            "on_leader_elected should fire on new leader; got {final_elected}, initial was {initial_elected}"
+        );
+        assert!(
+            final_step_down >= 1,
+            "on_step_down should fire at least once; got {final_step_down}"
+        );
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T32 — After routing table update, messages to a partition go to the new group.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_routing_table_update_routes_to_new_shard() {
+        let (nodes, provider) = ClusterBuilder::new(3, 2)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        wait_for_cluster_ready(&nodes, 2, 8_000).await.unwrap();
+
+        let table = provider.get_routing_table().await.unwrap();
+        let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
+        let client = RrClient::connect(addrs).await.unwrap();
+
+        client.send_request(1, b"pre-update".to_vec()).await.unwrap();
+
+        let raft2_before = nodes[0].group_manager().get_raft(2).await.unwrap();
+        let metrics2_before = raft2_before.metrics().borrow_watched().clone();
+        let last_log_2_before = metrics2_before.last_log_index.unwrap_or(0);
+
+        let node_ids: Vec<NodeId> = nodes.iter().map(|n| n.node_id()).collect();
+        provider
+            .add_partition(1, PartitionConfig::SingleId(1), 2, node_ids)
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        client
+            .send_request(1, b"post-update".to_vec())
+            .await
+            .unwrap();
+
+        let raft2_after = nodes[0].group_manager().get_raft(2).await.unwrap();
+        let metrics2_after = raft2_after.metrics().borrow_watched().clone();
+        let last_log_2_after = metrics2_after.last_log_index.unwrap_or(0);
+
+        assert!(
+            last_log_2_after > last_log_2_before,
+            "group 2 last_log_index should increase after routing update; before={last_log_2_before}, after={last_log_2_after}"
+        );
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T33 — After routing table update, no messages go to the old group.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_routing_no_messages_to_old_shard_after_update() {
+        let (nodes, provider) = ClusterBuilder::new(3, 2)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        wait_for_cluster_ready(&nodes, 2, 8_000).await.unwrap();
+
+        let table = provider.get_routing_table().await.unwrap();
+        let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
+        let client = RrClient::connect(addrs).await.unwrap();
+
+        client.send_request(1, b"pre-update".to_vec()).await.unwrap();
+
+        let raft1_before = nodes[0].group_manager().get_raft(1).await.unwrap();
+        let metrics1_before = raft1_before.metrics().borrow_watched().clone();
+        let last_log_1_before = metrics1_before.last_log_index.unwrap_or(0);
+
+        let raft2_before = nodes[0].group_manager().get_raft(2).await.unwrap();
+        let metrics2_before = raft2_before.metrics().borrow_watched().clone();
+        let last_log_2_before = metrics2_before.last_log_index.unwrap_or(0);
+
+        let node_ids: Vec<NodeId> = nodes.iter().map(|n| n.node_id()).collect();
+        provider
+            .add_partition(1, PartitionConfig::SingleId(1), 2, node_ids)
+            .await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        for i in 0u8..3 {
+            client.send_request(1, vec![b'w', i]).await.unwrap();
+        }
+
+        let raft1_after = nodes[0].group_manager().get_raft(1).await.unwrap();
+        let metrics1_after = raft1_after.metrics().borrow_watched().clone();
+        let last_log_1_after = metrics1_after.last_log_index.unwrap_or(0);
+
+        assert_eq!(
+            last_log_1_after, last_log_1_before,
+            "group 1 last_log_index should NOT change after routing update; before={last_log_1_before}, after={last_log_1_after}"
+        );
+
+        let raft2_after = nodes[0].group_manager().get_raft(2).await.unwrap();
+        let metrics2_after = raft2_after.metrics().borrow_watched().clone();
+        let last_log_2_after = metrics2_after.last_log_index.unwrap_or(0);
+
+        assert!(
+            last_log_2_after > last_log_2_before,
+            "group 2 should have received post-update writes; before={last_log_2_before}, after={last_log_2_after}"
+        );
+
+        shutdown_all(&nodes).await;
     }
 }

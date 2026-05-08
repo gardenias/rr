@@ -14,15 +14,17 @@ use openraft::type_config::async_runtime::WatchReceiver;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use rr_core::config::ConfigProvider;
 use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
 use rr_network::error_convert::IntoStatus;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
     online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
-    Empty, GroupId, GroupMembership, GroupStatus, MetricsSummary, NodeMember, NodeStatus,
-    OnlineBackupChunk, OnlineBackupMetadata, OnlineBackupRequest, ResetIngestorOffsetRequest,
-    TransferLeaderRequest,
+    DrainRequest, DrainResult, Empty, GroupDrainStatus, GroupId, GroupList, GroupMembership,
+    GroupStatus, GroupSummary, MetricsSummary, NodeMember, NodeStatus, OnlineBackupChunk,
+    OnlineBackupMetadata, OnlineBackupRequest, PartitionRoute, ResetIngestorOffsetRequest,
+    RoutingTableSnapshot, SnapshotStatus, TransferLeaderRequest,
 };
 use rr_raft::group_manager::RaftGroupManager;
 use std::collections::BTreeSet;
@@ -81,16 +83,23 @@ pub struct AdminServiceImpl {
     node_id: NodeId,
     listen_addr: String,
     group_manager: Arc<RaftGroupManager>,
+    config_provider: Arc<dyn ConfigProvider>,
     start_time: Instant,
 }
 
 impl AdminServiceImpl {
     /// Create a new `AdminServiceImpl`.
-    pub fn new(node_id: NodeId, listen_addr: String, group_manager: Arc<RaftGroupManager>) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        listen_addr: String,
+        group_manager: Arc<RaftGroupManager>,
+        config_provider: Arc<dyn ConfigProvider>,
+    ) -> Self {
         Self {
             node_id,
             listen_addr,
             group_manager,
+            config_provider,
             start_time: Instant::now(),
         }
     }
@@ -146,6 +155,68 @@ impl AdminService for AdminServiceImpl {
             current_term: metrics.current_term,
             last_log_index: metrics.last_log_index.unwrap_or(0),
             leader_node_id: metrics.current_leader.unwrap_or(0),
+        }))
+    }
+
+    async fn list_groups(&self, request: Request<Empty>) -> Result<Response<GroupList>, Status> {
+        let peer = peer_from_request(&request);
+        info!(
+            target: AUDIT_TARGET,
+            op = "ListGroups",
+            peer = %peer,
+            node_id = self.node_id,
+            "admin rpc"
+        );
+        let mut group_ids = self.group_manager.group_ids().await;
+        group_ids.sort_unstable();
+        let mut groups = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            if let Some(raft) = self.group_manager.get_raft(group_id).await {
+                let metrics = raft.metrics().borrow_watched().clone();
+                groups.push(GroupSummary {
+                    group_id,
+                    is_leader: metrics.current_leader == Some(self.node_id),
+                    current_term: metrics.current_term,
+                    last_log_index: metrics.last_log_index.unwrap_or(0),
+                    leader_node_id: metrics.current_leader,
+                });
+            }
+        }
+        Ok(Response::new(GroupList { groups }))
+    }
+
+    async fn get_snapshot_status(
+        &self,
+        request: Request<GroupId>,
+    ) -> Result<Response<SnapshotStatus>, Status> {
+        let peer = peer_from_request(&request);
+        let group_id = request.into_inner().group_id;
+        info!(
+            target: AUDIT_TARGET,
+            op = "GetSnapshotStatus",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id,
+            "admin rpc"
+        );
+        let raft = self
+            .group_manager
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
+        let metrics = raft.metrics().borrow_watched().clone();
+        let last_snapshot_index = metrics.snapshot.as_ref().map(|log_id| log_id.index);
+        let last_snapshot_term = metrics.snapshot.as_ref().map(|log_id| log_id.leader_id.term);
+
+        // openraft 0.10 metrics expose the latest completed snapshot id,
+        // but not an explicit "building snapshot" runtime flag.
+        let snapshot_in_progress = false;
+
+        Ok(Response::new(SnapshotStatus {
+            group_id,
+            snapshot_in_progress,
+            last_snapshot_index,
+            last_snapshot_term,
         }))
     }
 
@@ -282,6 +353,128 @@ impl AdminService for AdminServiceImpl {
                 Err(Status::internal(message))
             }
         }
+    }
+
+    async fn drain_node(
+        &self,
+        request: Request<DrainRequest>,
+    ) -> Result<Response<DrainResult>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        info!(
+            target: AUDIT_TARGET,
+            op = "DrainNode",
+            peer = %peer,
+            node_id = self.node_id,
+            requested_node_id = req.node_id,
+            timeout_secs = req.timeout_secs,
+            "admin rpc — mutation"
+        );
+
+        if req.node_id != self.node_id {
+            info!(
+                target: AUDIT_TARGET,
+                op = "DrainNode",
+                peer = %peer,
+                node_id = self.node_id,
+                requested_node_id = req.node_id,
+                success = true,
+                message = "drain request is for a different node; no-op",
+                "admin rpc result"
+            );
+            return Ok(Response::new(DrainResult { groups: Vec::new() }));
+        }
+
+        let mut group_ids = self.group_manager.group_ids().await;
+        group_ids.sort_unstable();
+        let timeout = Duration::from_secs(req.timeout_secs as u64);
+        let mut groups = Vec::with_capacity(group_ids.len());
+
+        for group_id in group_ids {
+            let Some(raft) = self.group_manager.get_raft(group_id).await else {
+                groups.push(GroupDrainStatus {
+                    group_id,
+                    leadership_transferred: false,
+                    message: "group not found during drain".to_string(),
+                });
+                continue;
+            };
+
+            let metrics = raft.metrics().borrow_watched().clone();
+            let is_local_leader = metrics.current_leader == Some(self.node_id);
+            if !is_local_leader {
+                groups.push(GroupDrainStatus {
+                    group_id,
+                    leadership_transferred: true,
+                    message: "already not leader".to_string(),
+                });
+                continue;
+            }
+
+            let membership = metrics.membership_config.membership();
+            let target = membership.voter_ids().find(|node_id| *node_id != self.node_id);
+            let Some(target_node_id) = target else {
+                groups.push(GroupDrainStatus {
+                    group_id,
+                    leadership_transferred: false,
+                    message: "no other voter available for leadership transfer".to_string(),
+                });
+                continue;
+            };
+
+            if let Err(e) = raft.trigger().transfer_leader(target_node_id).await {
+                groups.push(GroupDrainStatus {
+                    group_id,
+                    leadership_transferred: false,
+                    message: format!("transfer_leader trigger failed: {e}"),
+                });
+                continue;
+            }
+
+            if req.timeout_secs == 0 {
+                groups.push(GroupDrainStatus {
+                    group_id,
+                    leadership_transferred: true,
+                    message: format!(
+                        "transfer requested to node {target_node_id} (best-effort, no wait)"
+                    ),
+                });
+                continue;
+            }
+
+            let deadline = std::time::Instant::now() + timeout;
+            let mut transferred = false;
+            while std::time::Instant::now() < deadline {
+                let current = raft.metrics().borrow_watched().clone();
+                if current.current_leader != Some(self.node_id) {
+                    let leader_desc = current
+                        .current_leader
+                        .map(|node_id| node_id.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    groups.push(GroupDrainStatus {
+                        group_id,
+                        leadership_transferred: true,
+                        message: format!("leadership moved to node {leader_desc}"),
+                    });
+                    transferred = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            if !transferred {
+                groups.push(GroupDrainStatus {
+                    group_id,
+                    leadership_transferred: false,
+                    message: format!(
+                        "timeout waiting for leadership transfer after {}s",
+                        req.timeout_secs
+                    ),
+                });
+            }
+        }
+
+        Ok(Response::new(DrainResult { groups }))
     }
 
     async fn add_learner(
@@ -603,6 +796,40 @@ impl AdminService for AdminServiceImpl {
         ))
     }
 
+    async fn get_routing_table(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<RoutingTableSnapshot>, Status> {
+        let peer = peer_from_request(&request);
+        info!(
+            target: AUDIT_TARGET,
+            op = "GetRoutingTable",
+            peer = %peer,
+            node_id = self.node_id,
+            "admin rpc"
+        );
+        let table = self
+            .config_provider
+            .get_routing_table()
+            .await
+            .map_err(|e| Status::internal(format!("get_routing_table failed: {e}")))?;
+        let groups_meta = table.groups;
+        let mut partitions: Vec<PartitionRoute> = table
+            .partitions
+            .into_iter()
+            .map(|(partition_id, (_cfg, group_id))| PartitionRoute {
+                partition_id,
+                group_id,
+                replica_node_ids: groups_meta
+                    .get(&group_id)
+                    .map(|meta| meta.replicas.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        partitions.sort_unstable_by_key(|route| route.partition_id);
+        Ok(Response::new(RoutingTableSnapshot { partitions }))
+    }
+
     async fn get_metrics_summary(
         &self,
         request: Request<Empty>,
@@ -627,6 +854,7 @@ impl AdminService for AdminServiceImpl {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use rr_config::mem::MemConfigProvider;
     use bincode::config::standard;
     use rr_core::error::RrError;
     use rr_core::service::Service;
@@ -685,7 +913,8 @@ mod tests {
 
     fn make_admin_service() -> AdminServiceImpl {
         let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
-        AdminServiceImpl::new(1, "127.0.0.1:9090".to_string(), mgr)
+        let config_provider = Arc::new(MemConfigProvider::new());
+        AdminServiceImpl::new(1, "127.0.0.1:9090".to_string(), mgr, config_provider)
     }
 
     #[test]
@@ -819,7 +1048,13 @@ mod tests {
     async fn test_reset_ingestor_offset_updates_group_manager_offset() {
         let mgr = Arc::new(RaftGroupManager::new(1, offset_capable_factory()));
         mgr.start_group(1).await.unwrap();
-        let svc = AdminServiceImpl::new(1, "127.0.0.1:9090".to_string(), mgr.clone());
+        let config_provider = Arc::new(MemConfigProvider::new());
+        let svc = AdminServiceImpl::new(
+            1,
+            "127.0.0.1:9090".to_string(),
+            mgr.clone(),
+            config_provider,
+        );
 
         svc.reset_ingestor_offset(Request::new(ResetIngestorOffsetRequest {
             group_id: 1,

@@ -8,12 +8,18 @@ service AdminService {
     rpc GetNodeStatus(Empty) returns (NodeStatus);
     /// Get status for a specific Raft group.
     rpc GetGroupStatus(GroupId) returns (GroupStatus);
+    /// List all local Raft groups with basic status.
+    rpc ListGroups(Empty) returns (GroupList);
+    /// Get snapshot progress/state for a specific Raft group.
+    rpc GetSnapshotStatus(GroupId) returns (SnapshotStatus);
     /// Trigger a manual snapshot/log compaction for a group.
     /// Returns OK on success; failures are returned as gRPC Status.
     rpc TriggerSnapshot(GroupId) returns (Empty);
     /// Transfer leadership to another node.
     /// Returns OK on success; failures are returned as gRPC Status.
     rpc TransferLeader(TransferLeaderRequest) returns (Empty);
+    /// Prepare a node for shutdown by draining leadership away.
+    rpc DrainNode(DrainRequest) returns (DrainResult);
     /// Add a learner node to a Raft group. Learner replicates logs but
     /// does not vote — call ChangeMembership next to promote to voter.
     /// Returns OK on success; failures are returned as gRPC Status.
@@ -33,6 +39,8 @@ service AdminService {
     /// Server may trigger a fresh snapshot before streaming if
     /// `force_fresh_snapshot=true` or no snapshot exists yet.
     rpc OnlineBackup(OnlineBackupRequest) returns (stream OnlineBackupChunk);
+    /// Get the current routing-table snapshot.
+    rpc GetRoutingTable(Empty) returns (RoutingTableSnapshot);
     /// Get a top-level metrics summary.
     rpc GetMetricsSummary(Empty) returns (MetricsSummary);
 }
@@ -58,9 +66,43 @@ message GroupStatus {
     uint64 leader_node_id = 5;
 }
 
+message GroupList {
+    repeated GroupSummary groups = 1;
+}
+
+message GroupSummary {
+    uint64 group_id = 1;
+    bool is_leader = 2;
+    uint64 current_term = 3;
+    uint64 last_log_index = 4;
+    optional uint64 leader_node_id = 5;
+}
+
+message SnapshotStatus {
+    uint64 group_id = 1;
+    bool snapshot_in_progress = 2;
+    optional uint64 last_snapshot_index = 3;
+    optional uint64 last_snapshot_term = 4;
+}
+
 message TransferLeaderRequest {
     uint64 group_id = 1;
     uint64 target_node_id = 2;
+}
+
+message DrainRequest {
+    uint64 node_id = 1;
+    uint32 timeout_secs = 2;
+}
+
+message DrainResult {
+    repeated GroupDrainStatus groups = 1;
+}
+
+message GroupDrainStatus {
+    uint64 group_id = 1;
+    bool leadership_transferred = 2;
+    string message = 3;
 }
 
 message MetricsSummary {
@@ -114,4 +156,14 @@ message OnlineBackupMetadata {
     uint64 last_log_term = 3;
     uint64 size_bytes = 4;
     string rr_version = 5;
+}
+
+message RoutingTableSnapshot {
+    repeated PartitionRoute partitions = 1;
+}
+
+message PartitionRoute {
+    uint64 partition_id = 1;
+    uint64 group_id = 2;
+    repeated uint64 replica_node_ids = 3;
 }

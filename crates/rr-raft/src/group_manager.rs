@@ -1,6 +1,7 @@
 //! Manages the lifecycle of multiple Raft groups on a single node.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -35,6 +36,26 @@ struct GroupState {
     read_handle: Option<Arc<dyn StateMachineReader>>,
     learner_promoter_handle: Option<crate::learner_promoter::LearnerPromoterHandle>,
     lifecycle_hook: Option<Arc<dyn StateMachineLifecycleHook>>,
+    /// Tracks in-flight client writes so `stop_group()` can drain them
+    /// before shutting down Raft.
+    in_flight_writes: Arc<AtomicUsize>,
+}
+
+pub struct InFlightWriteGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl InFlightWriteGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self { counter }
+    }
+}
+
+impl Drop for InFlightWriteGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// Manages multiple Raft groups on a single node.
@@ -121,6 +142,7 @@ impl RaftGroupManager {
             read_handle,
             learner_promoter_handle: None,
             lifecycle_hook,
+            in_flight_writes: Arc::new(AtomicUsize::new(0)),
         }));
 
         match self.groups.entry(group_id) {
@@ -246,6 +268,7 @@ impl RaftGroupManager {
             learner_promoter_handle,
             lifecycle_hook,
             was_leader,
+            in_flight_writes,
         ) = {
             let mut state = state.lock().await;
             let was_leader = matches!(
@@ -259,6 +282,7 @@ impl RaftGroupManager {
                 state.learner_promoter_handle.take(),
                 state.lifecycle_hook.take(),
                 was_leader,
+                Arc::clone(&state.in_flight_writes),
             )
         };
 
@@ -270,6 +294,20 @@ impl RaftGroupManager {
         }
         if let Some(promoter) = learner_promoter_handle {
             promoter.stop().await;
+        }
+
+        let drain_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        while in_flight_writes.load(Ordering::SeqCst) > 0 {
+            if tokio::time::Instant::now() >= drain_deadline {
+                let remaining = in_flight_writes.load(Ordering::SeqCst);
+                tracing::warn!(
+                    group_id,
+                    in_flight = remaining,
+                    "stop_group: drain timeout, proceeding with shutdown"
+                );
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
 
         if let Some(hook) = lifecycle_hook {
@@ -492,8 +530,8 @@ impl RaftGroupManager {
     /// and updating Raft gauge metrics on success.
     #[instrument(skip(self, payload))]
     pub async fn write(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        let raft = self
-            .get_raft(group_id)
+        let (raft, _guard) = self
+            .get_raft_for_write(group_id)
             .await
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
 
@@ -536,8 +574,8 @@ impl RaftGroupManager {
             return Ok(Vec::new());
         }
 
-        let raft = self
-            .get_raft(group_id)
+        let (raft, _guard) = self
+            .get_raft_for_write(group_id)
             .await
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
 
@@ -715,6 +753,29 @@ impl RaftGroupManager {
         Some(raft)
     }
 
+    /// Get a Raft reference for a write operation, paired with an
+    /// [`InFlightWriteGuard`] that tracks the write until it completes.
+    ///
+    /// Returns `None` if the group does not exist.
+    #[instrument(skip(self))]
+    pub async fn get_raft_for_write(
+        &self,
+        group_id: GroupId,
+    ) -> Option<(
+        openraft::Raft<RrTypeConfig, crate::sm_adapter::RrStateMachine>,
+        InFlightWriteGuard,
+    )> {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))?;
+        let guard = state.lock().await;
+        let raft = guard.node.raft.clone();
+        let counter = Arc::clone(&guard.in_flight_writes);
+        drop(guard);
+        Some((raft, InFlightWriteGuard::new(counter)))
+    }
+
     #[instrument(skip(self))]
     /// Returns the list of active group IDs.
     pub async fn group_ids(&self) -> Vec<GroupId> {
@@ -775,6 +836,7 @@ impl RaftGroupManager {
             read_handle,
             learner_promoter_handle: None,
             lifecycle_hook,
+            in_flight_writes: Arc::new(AtomicUsize::new(0)),
         }));
 
         match self.groups.entry(group_id) {

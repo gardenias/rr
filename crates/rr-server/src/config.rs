@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use rr_core::config::ConfigProvider;
+use rr_core::error::ConfigError;
 use rr_core::storage::StorageEngine;
 use rr_core::types::NodeId;
 use rr_network::auth::AuthConfig;
@@ -180,5 +181,31 @@ impl NodeConfig {
     pub fn with_allow_insecure(mut self, allow: bool) -> Self {
         self.allow_insecure = allow;
         self
+    }
+
+    /// Validate configuration fields and return `Err` on first violation.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.node_id == 0 {
+            return Err(ConfigError::InvalidConfig(
+                "node_id must be > 0".to_string(),
+            ));
+        }
+
+        if self.listen_addr.parse::<std::net::SocketAddr>().is_err() {
+            return Err(ConfigError::InvalidConfig(format!(
+                "listen_addr '{}' is not a valid host:port",
+                self.listen_addr
+            )));
+        }
+
+        if let Some(ref tls) = self.tls_config {
+            if tls.cert_path.as_os_str().is_empty() || tls.key_path.as_os_str().is_empty() {
+                return Err(ConfigError::InvalidConfig(
+                    "TLS config requires both cert_path and key_path".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
