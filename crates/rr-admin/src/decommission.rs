@@ -209,20 +209,12 @@ async fn decommission_one_group(
         wait_for_drain(client, group_id, target_node_id).await?;
     }
 
-    let resp = client
+    client
         .change_membership(ChangeMembershipRequest {
             group_id,
             voter_node_ids: remaining.clone(),
         })
-        .await?
-        .into_inner();
-    if !resp.success {
-        return Ok(DecommissionGroupResult {
-            group_id,
-            action: GroupAction::Failed,
-            message: format!("change_membership failed: {}", resp.message),
-        });
-    }
+        .await?;
 
     let confirm = client
         .get_group_membership(GroupId { group_id })

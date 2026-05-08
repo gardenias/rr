@@ -16,13 +16,13 @@ use tracing::{info, warn};
 
 use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
+use rr_network::error_convert::IntoStatus;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
-    online_backup_chunk::Body as OnlineBackupBody, ActionResult, AddLearnerRequest,
-    AddLearnerResponse, ChangeMembershipRequest, ChangeMembershipResponse, Empty, GroupId,
-    GroupMembership, GroupStatus, MetricsSummary, NodeMember, NodeStatus, OnlineBackupChunk,
-    OnlineBackupMetadata, OnlineBackupRequest, ResetIngestorOffsetRequest, TransferLeaderRequest,
-    TransferLeaderResponse, TriggerSnapshotResponse,
+    online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
+    Empty, GroupId, GroupMembership, GroupStatus, MetricsSummary, NodeMember, NodeStatus,
+    OnlineBackupChunk, OnlineBackupMetadata, OnlineBackupRequest, ResetIngestorOffsetRequest,
+    TransferLeaderRequest,
 };
 use rr_raft::group_manager::RaftGroupManager;
 use std::collections::BTreeSet;
@@ -149,10 +149,7 @@ impl AdminService for AdminServiceImpl {
         }))
     }
 
-    async fn trigger_snapshot(
-        &self,
-        request: Request<GroupId>,
-    ) -> Result<Response<TriggerSnapshotResponse>, Status> {
+    async fn trigger_snapshot(&self, request: Request<GroupId>) -> Result<Response<Empty>, Status> {
         let peer = peer_from_request(&request);
         let group_id = request.into_inner().group_id;
         info!(
@@ -169,27 +166,39 @@ impl AdminService for AdminServiceImpl {
             .await
             .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
 
-        let result = raft.trigger().snapshot().await;
-        let (success, message) = match &result {
-            Ok(()) => (true, "snapshot triggered".to_string()),
-            Err(e) => (false, e.to_string()),
-        };
-        info!(
-            target: AUDIT_TARGET,
-            op = "TriggerSnapshot",
-            peer = %peer,
-            group_id,
-            success,
-            message = %message,
-            "admin rpc result"
-        );
-        Ok(Response::new(TriggerSnapshotResponse { success, message }))
+        match raft.trigger().snapshot().await {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TriggerSnapshot",
+                    peer = %peer,
+                    group_id,
+                    success = true,
+                    message = "snapshot triggered",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let message = e.to_string();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TriggerSnapshot",
+                    peer = %peer,
+                    group_id,
+                    success = false,
+                    message = %message,
+                    "admin rpc result"
+                );
+                Err(Status::internal(message))
+            }
+        }
     }
 
     async fn transfer_leader(
         &self,
         request: Request<TransferLeaderRequest>,
-    ) -> Result<Response<TransferLeaderResponse>, Status> {
+    ) -> Result<Response<Empty>, Status> {
         let peer = peer_from_request(&request);
         let req = request.into_inner();
         info!(
@@ -223,45 +232,62 @@ impl AdminService for AdminServiceImpl {
             }
         };
 
-        let response = if req.target_node_id == self.node_id {
-            match raft.trigger().elect().await {
-                Ok(()) => TransferLeaderResponse {
-                    success: true,
-                    message: "election triggered on this node".to_string(),
-                },
-                Err(e) => TransferLeaderResponse {
-                    success: false,
-                    message: e.to_string(),
-                },
-            }
-        } else {
-            TransferLeaderResponse {
-                success: false,
-                message: format!(
-                    "transfer to remote node {} not supported; call the target node's admin API",
-                    req.target_node_id
-                ),
-            }
-        };
+        if req.target_node_id != self.node_id {
+            let message = format!(
+                "transfer to remote node {} not supported; call the target node's admin API",
+                req.target_node_id
+            );
+            info!(
+                target: AUDIT_TARGET,
+                op = "TransferLeader",
+                peer = %peer,
+                group_id = req.group_id,
+                target_node_id = req.target_node_id,
+                success = false,
+                result = "failed",
+                message = %message,
+                "admin rpc result"
+            );
+            return Err(Status::failed_precondition(message));
+        }
 
-        info!(
-            target: AUDIT_TARGET,
-            op = "TransferLeader",
-            peer = %peer,
-            group_id = req.group_id,
-            target_node_id = req.target_node_id,
-            success = response.success,
-            result = if response.success { "succeeded" } else { "failed" },
-            message = %response.message,
-            "admin rpc result"
-        );
-        Ok(Response::new(response))
+        match raft.trigger().elect().await {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TransferLeader",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.target_node_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "election triggered on this node",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let message = e.to_string();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TransferLeader",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.target_node_id,
+                    success = false,
+                    result = "failed",
+                    message = %message,
+                    "admin rpc result"
+                );
+                Err(Status::internal(message))
+            }
+        }
     }
 
     async fn add_learner(
         &self,
         request: Request<AddLearnerRequest>,
-    ) -> Result<Response<AddLearnerResponse>, Status> {
+    ) -> Result<Response<Empty>, Status> {
         let peer = peer_from_request(&request);
         let req = request.into_inner();
         info!(
@@ -279,34 +305,44 @@ impl AdminService for AdminServiceImpl {
             .group_manager
             .add_learner(req.group_id, req.node_id, req.addr.clone())
             .await;
-        let response = match &outcome {
-            Ok(()) => AddLearnerResponse {
-                success: true,
-                message: "learner added".to_string(),
-            },
-            Err(e) => AddLearnerResponse {
-                success: false,
-                message: e.to_string(),
-            },
-        };
-        info!(
-            target: AUDIT_TARGET,
-            op = "AddLearner",
-            peer = %peer,
-            group_id = req.group_id,
-            target_node_id = req.node_id,
-            success = response.success,
-            result = if response.success { "succeeded" } else { "failed" },
-            message = %response.message,
-            "admin rpc result"
-        );
-        Ok(Response::new(response))
+        match outcome {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "AddLearner",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "learner added",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let status = e.into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "AddLearner",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                Err(status)
+            }
+        }
     }
 
     async fn change_membership(
         &self,
         request: Request<ChangeMembershipRequest>,
-    ) -> Result<Response<ChangeMembershipResponse>, Status> {
+    ) -> Result<Response<Empty>, Status> {
         let peer = peer_from_request(&request);
         let req = request.into_inner();
         let voters: BTreeSet<NodeId> = req.voter_node_ids.iter().copied().collect();
@@ -338,33 +374,42 @@ impl AdminService for AdminServiceImpl {
             .group_manager
             .change_membership(req.group_id, voters)
             .await;
-        let response = match &outcome {
-            Ok(()) => ChangeMembershipResponse {
-                success: true,
-                message: "membership changed".to_string(),
-            },
-            Err(e) => ChangeMembershipResponse {
-                success: false,
-                message: e.to_string(),
-            },
-        };
-        info!(
-            target: AUDIT_TARGET,
-            op = "ChangeMembership",
-            peer = %peer,
-            group_id = req.group_id,
-            success = response.success,
-            result = if response.success { "succeeded" } else { "failed" },
-            message = %response.message,
-            "admin rpc result"
-        );
-        Ok(Response::new(response))
+        match outcome {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "membership changed",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let status = e.into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                Err(status)
+            }
+        }
     }
 
     async fn reset_ingestor_offset(
         &self,
         request: Request<ResetIngestorOffsetRequest>,
-    ) -> Result<Response<ActionResult>, Status> {
+    ) -> Result<Response<Empty>, Status> {
         let peer = peer_from_request(&request);
         let req = request.into_inner();
         let group_id = req.group_id;
@@ -387,12 +432,10 @@ impl AdminService for AdminServiceImpl {
                     result = "ok",
                     "admin rpc result"
                 );
-                Ok(Response::new(ActionResult {
-                    success: true,
-                    message: "ingestor offset reset".to_string(),
-                }))
+                Ok(Response::new(Empty {}))
             }
             Err(e) => {
+                let status = e.into_status();
                 warn!(
                     target: AUDIT_TARGET,
                     op = "reset_ingestor_offset",
@@ -401,13 +444,11 @@ impl AdminService for AdminServiceImpl {
                     group_id,
                     new_offset = offset,
                     result = "failed",
-                    error = %e,
+                    grpc_code = ?status.code(),
+                    error = %status.message(),
                     "admin rpc result"
                 );
-                Ok(Response::new(ActionResult {
-                    success: false,
-                    message: e.to_string(),
-                }))
+                Err(status)
             }
         }
     }
@@ -703,23 +744,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_learner_unknown_group_returns_failure() {
+    async fn test_add_learner_unknown_group_returns_not_found() {
         let svc = make_admin_service();
-        let resp = svc
+        let result = svc
             .add_learner(Request::new(AddLearnerRequest {
                 group_id: 99,
                 node_id: 2,
                 addr: "127.0.0.1:5001".to_string(),
             }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.success);
-        assert!(
-            resp.message.contains("group not found") || resp.message.contains("group 99"),
-            "unexpected message: {}",
-            resp.message
-        );
+            .await;
+        let err = result.expect_err("expected add_learner to fail for unknown group");
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]
@@ -737,17 +772,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_change_membership_unknown_group_returns_failure() {
+    async fn test_change_membership_unknown_group_returns_not_found() {
         let svc = make_admin_service();
-        let resp = svc
+        let result = svc
             .change_membership(Request::new(ChangeMembershipRequest {
                 group_id: 99,
                 voter_node_ids: vec![1, 2, 3],
             }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!resp.success);
+            .await;
+        let err = result.expect_err("expected change_membership to fail for unknown group");
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     #[tokio::test]
@@ -787,15 +821,12 @@ mod tests {
         mgr.start_group(1).await.unwrap();
         let svc = AdminServiceImpl::new(1, "127.0.0.1:9090".to_string(), mgr.clone());
 
-        let resp = svc
-            .reset_ingestor_offset(Request::new(ResetIngestorOffsetRequest {
-                group_id: 1,
-                offset: 100,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(resp.success, "unexpected failure: {}", resp.message);
+        svc.reset_ingestor_offset(Request::new(ResetIngestorOffsetRequest {
+            group_id: 1,
+            offset: 100,
+        }))
+        .await
+        .unwrap();
 
         let raw = mgr
             .latest_ingestor_offset(1)
@@ -806,15 +837,12 @@ mod tests {
             .expect("stored bytes should decode as i64");
         assert_eq!(decoded, 100);
 
-        let cleared = svc
-            .reset_ingestor_offset(Request::new(ResetIngestorOffsetRequest {
-                group_id: 1,
-                offset: -1,
-            }))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(cleared.success, "unexpected failure: {}", cleared.message);
+        svc.reset_ingestor_offset(Request::new(ResetIngestorOffsetRequest {
+            group_id: 1,
+            offset: -1,
+        }))
+        .await
+        .unwrap();
         assert!(mgr.latest_ingestor_offset(1).await.unwrap().is_none());
     }
 }

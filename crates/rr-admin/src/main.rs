@@ -21,7 +21,7 @@ use rr_network::proto::admin::{
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::ClientRequest;
 use std::path::PathBuf;
-use tonic::transport::Channel;
+use tonic::{transport::Channel, Code, Response, Status};
 
 mod backup;
 mod decommission;
@@ -450,49 +450,45 @@ async fn main() -> Result<()> {
                 Commands::Group {
                     cmd: GroupCommands::Snapshot { group },
                 } => {
-                    let resp = client
-                        .trigger_snapshot(GroupId { group_id: *group })
-                        .await?
-                        .into_inner();
+                    let (success, message) = admin_action_outcome(
+                        client.trigger_snapshot(GroupId { group_id: *group }).await,
+                        "snapshot triggered",
+                    );
                     match cli.output {
                         OutputFormat::Json => {
                             let val = serde_json::json!({
-                                "success": resp.success,
-                                "message": resp.message,
+                                "success": success,
+                                "message": message,
                             });
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!(
-                                "TriggerSnapshot: success={} message={}",
-                                resp.success, resp.message
-                            );
+                            println!("TriggerSnapshot: success={success} message={message}");
                         }
                     }
                 }
                 Commands::Group {
                     cmd: GroupCommands::TransferLeader { group, to },
                 } => {
-                    let resp = client
-                        .transfer_leader(TransferLeaderRequest {
-                            group_id: *group,
-                            target_node_id: *to,
-                        })
-                        .await?
-                        .into_inner();
+                    let (success, message) = admin_action_outcome(
+                        client
+                            .transfer_leader(TransferLeaderRequest {
+                                group_id: *group,
+                                target_node_id: *to,
+                            })
+                            .await,
+                        "election triggered on this node",
+                    );
                     match cli.output {
                         OutputFormat::Json => {
                             let val = serde_json::json!({
-                                "success": resp.success,
-                                "message": resp.message,
+                                "success": success,
+                                "message": message,
                             });
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!(
-                                "TransferLeader: success={} message={}",
-                                resp.success, resp.message
-                            );
+                            println!("TransferLeader: success={success} message={message}");
                         }
                     }
                 }
@@ -504,27 +500,26 @@ async fn main() -> Result<()> {
                             addr,
                         },
                 } => {
-                    let resp = client
-                        .add_learner(AddLearnerRequest {
-                            group_id: *group,
-                            node_id: *node_id,
-                            addr: addr.clone(),
-                        })
-                        .await?
-                        .into_inner();
+                    let (success, message) = admin_action_outcome(
+                        client
+                            .add_learner(AddLearnerRequest {
+                                group_id: *group,
+                                node_id: *node_id,
+                                addr: addr.clone(),
+                            })
+                            .await,
+                        "learner added",
+                    );
                     match cli.output {
                         OutputFormat::Json => {
                             let val = serde_json::json!({
-                                "success": resp.success,
-                                "message": resp.message,
+                                "success": success,
+                                "message": message,
                             });
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!(
-                                "AddLearner: success={} message={}",
-                                resp.success, resp.message
-                            );
+                            println!("AddLearner: success={success} message={message}");
                         }
                     }
                 }
@@ -541,44 +536,45 @@ async fn main() -> Result<()> {
                     if voter_node_ids.is_empty() {
                         anyhow::bail!("--voters must list at least one node id");
                     }
-                    let resp = client
-                        .change_membership(ChangeMembershipRequest {
-                            group_id: *group,
-                            voter_node_ids,
-                        })
-                        .await?
-                        .into_inner();
+                    let (success, message) = admin_action_outcome(
+                        client
+                            .change_membership(ChangeMembershipRequest {
+                                group_id: *group,
+                                voter_node_ids,
+                            })
+                            .await,
+                        "membership changed",
+                    );
                     match cli.output {
                         OutputFormat::Json => {
                             let val = serde_json::json!({
-                                "success": resp.success,
-                                "message": resp.message,
+                                "success": success,
+                                "message": message,
                             });
                             println!("{}", serde_json::to_string_pretty(&val)?);
                         }
                         OutputFormat::Human => {
-                            println!(
-                                "ChangeMembership: success={} message={}",
-                                resp.success, resp.message
-                            );
+                            println!("ChangeMembership: success={success} message={message}");
                         }
                     }
                 }
                 Commands::Group {
                     cmd: GroupCommands::ResetIngestorOffset { group, offset },
                 } => {
-                    let resp = client
-                        .reset_ingestor_offset(ResetIngestorOffsetRequest {
-                            group_id: *group,
-                            offset: *offset,
-                        })
-                        .await?
-                        .into_inner();
+                    let (success, message) = admin_action_outcome(
+                        client
+                            .reset_ingestor_offset(ResetIngestorOffsetRequest {
+                                group_id: *group,
+                                offset: *offset,
+                            })
+                            .await,
+                        "ingestor offset reset",
+                    );
                     match cli.output {
                         OutputFormat::Json => {
                             let val = serde_json::json!({
-                                "success": resp.success,
-                                "message": resp.message,
+                                "success": success,
+                                "message": message,
                                 "group_id": group,
                                 "offset": offset,
                             });
@@ -586,8 +582,7 @@ async fn main() -> Result<()> {
                         }
                         OutputFormat::Human => {
                             println!(
-                                "ResetIngestorOffset: success={} group={} offset={} message={}",
-                                resp.success, group, offset, resp.message
+                                "ResetIngestorOffset: success={success} group={group} offset={offset} message={message}",
                             );
                         }
                     }
@@ -740,6 +735,30 @@ async fn connect(addr: &str) -> Result<Channel> {
         .connect()
         .await?;
     Ok(channel)
+}
+
+fn admin_action_outcome<T>(
+    result: Result<Response<T>, Status>,
+    ok_message: &str,
+) -> (bool, String) {
+    match result {
+        Ok(_) => (true, ok_message.to_string()),
+        Err(status) => {
+            let code = status.code();
+            let detail = status.message();
+            let message = match code {
+                Code::NotFound => format!("not found [{code}]: {detail}"),
+                Code::InvalidArgument => format!("invalid argument [{code}]: {detail}"),
+                Code::FailedPrecondition => {
+                    format!("failed precondition [{code}]: {detail}")
+                }
+                Code::AlreadyExists => format!("already exists [{code}]: {detail}"),
+                Code::Internal => format!("internal error [{code}]: {detail}"),
+                _ => format!("rpc error [{code}]: {detail}"),
+            };
+            (false, message)
+        }
+    }
 }
 
 /// Run the interactive REPL.

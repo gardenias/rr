@@ -1,15 +1,16 @@
 //! Manages the lifecycle of multiple Raft groups on a single node.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use bincode::config::standard;
+use dashmap::DashMap;
 use metrics::{counter, gauge, histogram};
 use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
 use openraft::ReadPolicy;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument};
 
@@ -25,37 +26,29 @@ use crate::type_config::RrTypeConfig;
 /// A factory function type for creating state machine instances per group.
 pub type StateMachineFactory = Box<dyn Fn(GroupId) -> Box<dyn StateMachine> + Send + Sync>;
 
+/// All mutable state for a single Raft group, protected by a single Mutex.
+struct GroupState {
+    node: RaftNode,
+    ingestor_handle: Option<crate::ingestor_runner::IngestorHandle>,
+    metrics_ticker_handle: Option<crate::metrics_ticker::MetricsTickerHandle>,
+    ingestor_offset_control: Option<Arc<dyn IngestorOffsetControl>>,
+    read_handle: Option<Arc<dyn StateMachineReader>>,
+    learner_promoter_handle: Option<crate::learner_promoter::LearnerPromoterHandle>,
+    lifecycle_hook: Option<Arc<dyn StateMachineLifecycleHook>>,
+}
+
 /// Manages multiple Raft groups on a single node.
 ///
 /// Responsible for creating, starting, and stopping Raft group instances.
-/// Thread-safe — all state is behind `Arc<RwLock<...>>`.
+/// Thread-safe — all per-group mutable state is behind `Arc<Mutex<GroupState>>`.
 pub struct RaftGroupManager {
     node_id: NodeId,
-    groups: Arc<RwLock<HashMap<GroupId, RaftNode>>>,
+    groups: Arc<DashMap<GroupId, Arc<Mutex<GroupState>>>>,
     sm_factory: Arc<StateMachineFactory>,
     /// When `Some`, new groups are created with `GrpcNetworkFactory` for real
     /// multi-node networking.  When `None`, `NoopNetworkFactory` is used
     /// (single-node / test mode).
     channel_pool: Option<Arc<dyn ChannelPoolLike>>,
-    /// Per-group ingestor supervisor handles. Populated by
-    /// [`Self::attach_ingestor`]; stop_group + drop both clean these up.
-    ingestor_handles: Arc<RwLock<HashMap<GroupId, crate::ingestor_runner::IngestorHandle>>>,
-    /// Per-group metrics tickers (replication_lag etc). Populated by
-    /// [`Self::start_group`] / [`Self::start_group_rocks`]; stop_group
-    /// cancels and joins them.
-    metrics_tickers: Arc<RwLock<HashMap<GroupId, crate::metrics_ticker::MetricsTickerHandle>>>,
-    /// Per-group optional control handle for directly overriding the
-    /// state machine's persisted ingestor offset.
-    ingestor_offset_controls: Arc<RwLock<HashMap<GroupId, Arc<dyn IngestorOffsetControl>>>>,
-    /// Per-group local read handles for follower reads.
-    read_handles: Arc<RwLock<HashMap<GroupId, Arc<dyn StateMachineReader>>>>,
-    /// Per-group lifecycle hooks for leader transitions and shutdown.
-    lifecycle_hooks: Arc<RwLock<HashMap<GroupId, Arc<dyn StateMachineLifecycleHook>>>>,
-    /// Per-group auto-promote-learner supervisors. Optional; populated
-    /// by [`Self::start_learner_promoter`]; stop_group + Drop both
-    /// clean these up.
-    learner_promoters:
-        Arc<RwLock<HashMap<GroupId, crate::learner_promoter::LearnerPromoterHandle>>>,
     /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
@@ -69,15 +62,9 @@ impl RaftGroupManager {
         info!(node_id, "creating RaftGroupManager (single-node mode)");
         Self {
             node_id,
-            groups: Arc::new(RwLock::new(HashMap::new())),
+            groups: Arc::new(DashMap::new()),
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
-            ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
-            metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
-            ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
-            read_handles: Arc::new(RwLock::new(HashMap::new())),
-            lifecycle_hooks: Arc::new(RwLock::new(HashMap::new())),
-            learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -95,15 +82,9 @@ impl RaftGroupManager {
         info!(node_id, "creating RaftGroupManager (multi-node mode)");
         Self {
             node_id,
-            groups: Arc::new(RwLock::new(HashMap::new())),
+            groups: Arc::new(DashMap::new()),
             sm_factory: Arc::new(sm_factory),
             channel_pool: Some(channel_pool),
-            ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
-            metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
-            ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
-            read_handles: Arc::new(RwLock::new(HashMap::new())),
-            lifecycle_hooks: Arc::new(RwLock::new(HashMap::new())),
-            learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -116,14 +97,6 @@ impl RaftGroupManager {
     /// `GrpcNetworkFactory`; otherwise `NoopNetworkFactory` is used.
     #[instrument(skip(self))]
     pub async fn start_group(&self, group_id: GroupId) -> Result<(), RrError> {
-        let mut guard = self.groups.write().await;
-
-        if guard.contains_key(&group_id) {
-            return Err(RrError::Application(format!(
-                "group {group_id} already exists"
-            )));
-        }
-
         let sm = (self.sm_factory)(group_id);
         let ingestor_offset_control = sm.ingestor_offset_control();
         let read_handle = sm.read_handle();
@@ -140,23 +113,32 @@ impl RaftGroupManager {
                 .map_err(|e| RrError::Application(e.to_string()))?
         };
 
+        let state = Arc::new(Mutex::new(GroupState {
+            node,
+            ingestor_handle: None,
+            metrics_ticker_handle: None,
+            ingestor_offset_control,
+            read_handle,
+            learner_promoter_handle: None,
+            lifecycle_hook,
+        }));
+
+        match self.groups.entry(group_id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(state);
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                let raft = { state.lock().await.node.raft.clone() };
+                let _ = raft.shutdown().await;
+                return Err(RrError::Application(format!(
+                    "group {group_id} already exists"
+                )));
+            }
+        }
+
         debug!(group_id, node_id = self.node_id, "started raft group");
         let node_id = self.node_id;
         counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
-        guard.insert(group_id, node);
-        drop(guard);
-        if let Some(control) = ingestor_offset_control {
-            self.ingestor_offset_controls
-                .write()
-                .await
-                .insert(group_id, control);
-        }
-        if let Some(handle) = read_handle {
-            self.read_handles.write().await.insert(group_id, handle);
-        }
-        if let Some(hook) = lifecycle_hook {
-            self.lifecycle_hooks.write().await.insert(group_id, hook);
-        }
         Ok(())
     }
 
@@ -252,33 +234,43 @@ impl RaftGroupManager {
     /// raft instance.
     #[instrument(skip(self))]
     pub async fn stop_group(&self, group_id: GroupId) -> Result<(), RrError> {
-        if let Some(handle) = self.ingestor_handles.write().await.remove(&group_id) {
-            handle.stop().await;
-        }
-        self.ingestor_offset_controls
-            .write()
-            .await
-            .remove(&group_id);
-        self.read_handles.write().await.remove(&group_id);
-        let lifecycle_hook = self.lifecycle_hooks.write().await.remove(&group_id);
-        if let Some(ticker) = self.metrics_tickers.write().await.remove(&group_id) {
-            ticker.stop().await;
-        }
-        if let Some(promoter) = self.learner_promoters.write().await.remove(&group_id) {
-            promoter.stop().await;
-        }
+        let (_, state) = self
+            .groups
+            .remove(&group_id)
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
 
-        let node = {
-            let mut guard = self.groups.write().await;
-            guard
-                .remove(&group_id)
-                .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?
+        let (
+            raft,
+            ingestor_handle,
+            metrics_ticker_handle,
+            learner_promoter_handle,
+            lifecycle_hook,
+            was_leader,
+        ) = {
+            let mut state = state.lock().await;
+            let was_leader = matches!(
+                state.node.raft.metrics().borrow_watched().state,
+                openraft::ServerState::Leader
+            );
+            (
+                state.node.raft.clone(),
+                state.ingestor_handle.take(),
+                state.metrics_ticker_handle.take(),
+                state.learner_promoter_handle.take(),
+                state.lifecycle_hook.take(),
+                was_leader,
+            )
         };
 
-        let was_leader = matches!(
-            node.raft.metrics().borrow_watched().state,
-            openraft::ServerState::Leader
-        );
+        if let Some(handle) = ingestor_handle {
+            handle.stop().await;
+        }
+        if let Some(ticker) = metrics_ticker_handle {
+            ticker.stop().await;
+        }
+        if let Some(promoter) = learner_promoter_handle {
+            promoter.stop().await;
+        }
 
         if let Some(hook) = lifecycle_hook {
             if was_leader {
@@ -287,8 +279,7 @@ impl RaftGroupManager {
             hook.on_shutdown().await;
         }
 
-        node.raft
-            .shutdown()
+        raft.shutdown()
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
 
@@ -381,17 +372,19 @@ impl RaftGroupManager {
         ingestor: Box<dyn rr_core::ingestor::DynCommandIngestor>,
         auto_idem: Option<crate::ingestor_runner::AutoIdempotency>,
     ) -> Result<(), RrError> {
-        let mut guard = self.ingestor_handles.write().await;
-        if self.get_raft(group_id).await.is_none() {
-            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
-        }
-        if guard.contains_key(&group_id) {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let mut guard = state.lock().await;
+        if guard.ingestor_handle.is_some() {
             return Err(RrError::Application(format!(
                 "ingestor already attached to group {group_id}"
             )));
         }
         let handle = crate::ingestor_runner::spawn(self.clone(), group_id, ingestor, auto_idem);
-        guard.insert(group_id, handle);
+        guard.ingestor_handle = Some(handle);
         info!(group_id, "attached ingestor supervisor");
         Ok(())
     }
@@ -406,15 +399,17 @@ impl RaftGroupManager {
     /// `RrNode::start()` calls this automatically after each
     /// `start_group`; standalone tests usually skip it.
     pub async fn start_metrics_ticker(self: &Arc<Self>, group_id: GroupId) -> Result<(), RrError> {
-        if self.get_raft(group_id).await.is_none() {
-            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
-        }
-        let mut guard = self.metrics_tickers.write().await;
-        if guard.contains_key(&group_id) {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let mut guard = state.lock().await;
+        if guard.metrics_ticker_handle.is_some() {
             return Ok(());
         }
         let handle = crate::metrics_ticker::spawn_for_group(self.clone(), group_id);
-        guard.insert(group_id, handle);
+        guard.metrics_ticker_handle = Some(handle);
         debug!(group_id, "started metrics ticker");
         Ok(())
     }
@@ -432,15 +427,20 @@ impl RaftGroupManager {
         group_id: GroupId,
         config: crate::learner_promoter::AutoPromoteConfig,
     ) -> Result<(), RrError> {
-        if self.get_raft(group_id).await.is_none() {
-            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
-        }
-        let mut guard = self.learner_promoters.write().await;
-        if let Some(prev) = guard.remove(&group_id) {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let prev = {
+            let mut guard = state.lock().await;
+            guard.learner_promoter_handle.take()
+        };
+        if let Some(prev) = prev {
             prev.stop().await;
         }
         let handle = crate::learner_promoter::spawn_for_group(self.clone(), group_id, config);
-        guard.insert(group_id, handle);
+        state.lock().await.learner_promoter_handle = Some(handle);
         info!(group_id, "started learner-promoter");
         Ok(())
     }
@@ -448,7 +448,14 @@ impl RaftGroupManager {
     /// Stop the learner-promoter for `group_id` if one is running.
     /// Returns `Ok(false)` if none was running.
     pub async fn stop_learner_promoter(&self, group_id: GroupId) -> Result<bool, RrError> {
-        let handle = self.learner_promoters.write().await.remove(&group_id);
+        let Some(state) = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return Ok(false);
+        };
+        let handle = state.lock().await.learner_promoter_handle.take();
         match handle {
             Some(h) => {
                 h.stop().await;
@@ -463,7 +470,14 @@ impl RaftGroupManager {
     /// Returns `Ok(false)` if no supervisor was running. The Raft group
     /// itself remains active.
     pub async fn stop_ingestor(&self, group_id: GroupId) -> Result<bool, RrError> {
-        let handle = self.ingestor_handles.write().await.remove(&group_id);
+        let Some(state) = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return Ok(false);
+        };
+        let handle = state.lock().await.ingestor_handle.take();
         match handle {
             Some(h) => {
                 h.stop().await;
@@ -574,17 +588,20 @@ impl RaftGroupManager {
         group_id: GroupId,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, RrError> {
-        let read_handle = self
-            .read_handles
-            .read()
-            .await
+        let state = self
+            .groups
             .get(&group_id)
-            .cloned()
+            .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| {
                 RrError::Application(format!(
                     "group {group_id} state machine does not support local read"
                 ))
             })?;
+        let read_handle = state.lock().await.read_handle.clone().ok_or_else(|| {
+            RrError::Application(format!(
+                "group {group_id} state machine does not support local read"
+            ))
+        })?;
 
         read_handle.read(payload).await
     }
@@ -631,16 +648,17 @@ impl RaftGroupManager {
         group_id: GroupId,
         offset: Option<i64>,
     ) -> Result<(), RrError> {
-        if self.get_raft(group_id).await.is_none() {
-            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
-        }
-
-        let control = self
-            .ingestor_offset_controls
-            .read()
-            .await
+        let state = self
+            .groups
             .get(&group_id)
-            .cloned()
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+
+        let control = state
+            .lock()
+            .await
+            .ingestor_offset_control
+            .clone()
             .ok_or_else(|| {
                 RrError::Application(format!(
                     "group {group_id} state machine does not support ingestor offset override"
@@ -663,15 +681,16 @@ impl RaftGroupManager {
         &self,
         group_id: GroupId,
     ) -> Result<Option<Vec<u8>>, RrError> {
-        if self.get_raft(group_id).await.is_none() {
-            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
-        }
-        let control = self
-            .ingestor_offset_controls
-            .read()
-            .await
+        let state = self
+            .groups
             .get(&group_id)
-            .cloned()
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let control = state
+            .lock()
+            .await
+            .ingestor_offset_control
+            .clone()
             .ok_or_else(|| {
                 RrError::Application(format!(
                     "group {group_id} state machine does not support ingestor offset override"
@@ -688,22 +707,24 @@ impl RaftGroupManager {
         &self,
         group_id: GroupId,
     ) -> Option<openraft::Raft<RrTypeConfig, crate::sm_adapter::RrStateMachine>> {
-        let guard = self.groups.read().await;
-        guard.get(&group_id).map(|node| node.raft.clone())
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))?;
+        let raft = state.lock().await.node.raft.clone();
+        Some(raft)
     }
 
     #[instrument(skip(self))]
     /// Returns the list of active group IDs.
     pub async fn group_ids(&self) -> Vec<GroupId> {
-        let guard = self.groups.read().await;
-        guard.keys().copied().collect()
+        self.groups.iter().map(|entry| *entry.key()).collect()
     }
 
     #[instrument(skip(self))]
     /// Returns the number of active groups.
     pub async fn group_count(&self) -> usize {
-        let guard = self.groups.read().await;
-        guard.len()
+        self.groups.len()
     }
     /// Create a `RaftGroupManager` that uses RocksDB-backed log storage.
     ///
@@ -718,15 +739,9 @@ impl RaftGroupManager {
         info!(node_id, %base_path, "creating RaftGroupManager (rocks mode)");
         Self {
             node_id,
-            groups: Arc::new(RwLock::new(HashMap::new())),
+            groups: Arc::new(DashMap::new()),
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
-            ingestor_handles: Arc::new(RwLock::new(HashMap::new())),
-            metrics_tickers: Arc::new(RwLock::new(HashMap::new())),
-            ingestor_offset_controls: Arc::new(RwLock::new(HashMap::new())),
-            read_handles: Arc::new(RwLock::new(HashMap::new())),
-            lifecycle_hooks: Arc::new(RwLock::new(HashMap::new())),
-            learner_promoters: Arc::new(RwLock::new(HashMap::new())),
             rocks_base_path: Some(base_path),
         }
     }
@@ -743,12 +758,6 @@ impl RaftGroupManager {
             .ok_or_else(|| RrError::Application("rocks_base_path not set".to_string()))?;
         let path = format!("{base}/{group_id}");
 
-        let mut guard = self.groups.write().await;
-        if guard.contains_key(&group_id) {
-            return Err(RrError::Application(format!(
-                "group {group_id} already exists"
-            )));
-        }
         let sm = (self.sm_factory)(group_id);
         let ingestor_offset_control = sm.ingestor_offset_control();
         let read_handle = sm.read_handle();
@@ -758,6 +767,29 @@ impl RaftGroupManager {
                 .await
                 .map_err(|e| RrError::Application(e.to_string()))?;
 
+        let state = Arc::new(Mutex::new(GroupState {
+            node,
+            ingestor_handle: None,
+            metrics_ticker_handle: None,
+            ingestor_offset_control,
+            read_handle,
+            learner_promoter_handle: None,
+            lifecycle_hook,
+        }));
+
+        match self.groups.entry(group_id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(state);
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                let raft = { state.lock().await.node.raft.clone() };
+                let _ = raft.shutdown().await;
+                return Err(RrError::Application(format!(
+                    "group {group_id} already exists"
+                )));
+            }
+        }
+
         debug!(
             group_id,
             node_id = self.node_id,
@@ -765,26 +797,20 @@ impl RaftGroupManager {
         );
         let node_id = self.node_id;
         counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
-        guard.insert(group_id, node);
-        drop(guard);
-        if let Some(control) = ingestor_offset_control {
-            self.ingestor_offset_controls
-                .write()
-                .await
-                .insert(group_id, control);
-        }
-        if let Some(handle) = read_handle {
-            self.read_handles.write().await.insert(group_id, handle);
-        }
-        if let Some(hook) = lifecycle_hook {
-            self.lifecycle_hooks.write().await.insert(group_id, hook);
-        }
         Ok(())
     }
 
     /// Notify per-group lifecycle hook that leadership was acquired.
     pub(crate) async fn notify_leader_elected(&self, group_id: GroupId) {
-        let hook = self.lifecycle_hooks.read().await.get(&group_id).cloned();
+        let hook = if let Some(state) = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            state.lock().await.lifecycle_hook.clone()
+        } else {
+            None
+        };
         if let Some(hook) = hook {
             hook.on_leader_elected(group_id).await;
         }
@@ -792,7 +818,15 @@ impl RaftGroupManager {
 
     /// Notify per-group lifecycle hook that leadership was lost.
     pub(crate) async fn notify_step_down(&self, group_id: GroupId) {
-        let hook = self.lifecycle_hooks.read().await.get(&group_id).cloned();
+        let hook = if let Some(state) = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            state.lock().await.lifecycle_hook.clone()
+        } else {
+            None
+        };
         if let Some(hook) = hook {
             hook.on_step_down(group_id).await;
         }
