@@ -66,6 +66,21 @@ public final class RrClient implements AutoCloseable {
         return sendRequest(partitionId, payload);
     }
 
+    /**
+     * Read from any cluster node (stale read).
+     *
+     * <p>Routes to the local replica's state machine without Raft consensus. No leader redirect —
+     * any node (leader or follower) can serve the request. Lowest latency; the returned data may
+     * be slightly behind the latest committed write.
+     *
+     * @param groupId the Raft group / partition ID
+     * @param payload application-defined read payload (forwarded to {@code Service.handle()})
+     * @return the state machine response
+     */
+    public CompletableFuture<byte[]> read(long groupId, byte[] payload) {
+        return CompletableFuture.supplyAsync(() -> readSync(groupId, payload));
+    }
+
     public CompletableFuture<Client.ClusterInfo> getClusterInfo() {
         return CompletableFuture.supplyAsync(this::getClusterInfoSync);
     }
@@ -172,6 +187,51 @@ public final class RrClient implements AutoCloseable {
                 }
             } catch (RuntimeException e) {
                 removeCachedLeader(groupId);
+                lastError = e instanceof RrClientException
+                        ? e
+                        : new NetworkException(addr, "connection failed", e);
+                if (attempt + 1 < maxAttempts) {
+                    sleepBackoff(attempt);
+                }
+            }
+        }
+
+        timerSample.stop(requestTimer(groupId, "failure"));
+        if (lastError != null) {
+            throw lastError;
+        }
+        throw new RpcFailedException("<unknown>", "max retries exhausted");
+    }
+
+    private byte[] readSync(long groupId, byte[] payload) {
+        int maxAttempts = retryConfig.maxRetries() + 1;
+        int bootstrapIndex = 0;
+        RuntimeException lastError = null;
+        Timer.Sample timerSample = Timer.start(meterRegistry);
+
+        for (int attempt = 0; attempt < maxAttempts; attempt++) {
+            String addr = bootstrapAddrs.get(bootstrapIndex % bootstrapAddrs.size());
+            bootstrapIndex++;
+
+            try {
+                ClientServiceGrpc.ClientServiceBlockingV2Stub stub =
+                        ClientServiceGrpc.newBlockingV2Stub(channelFor(addr));
+                Client.ReadLocalRequest request = Client.ReadLocalRequest.newBuilder()
+                        .setPartitionId(groupId)
+                        .setPayload(com.google.protobuf.ByteString.copyFrom(payload))
+                        .build();
+                Client.ReadLocalResponse response = stub.readLocal(request);
+                timerSample.stop(requestTimer(groupId, "success"));
+                return response.getPayload().toByteArray();
+            } catch (StatusException e) {
+                String message = e.getStatus().getDescription() == null
+                        ? e.getStatus().toString()
+                        : e.getStatus().getDescription();
+                lastError = new RpcFailedException(addr, message, e);
+                if (attempt + 1 < maxAttempts) {
+                    sleepBackoff(attempt);
+                }
+            } catch (RuntimeException e) {
                 lastError = e instanceof RrClientException
                         ? e
                         : new NetworkException(addr, "connection failed", e);

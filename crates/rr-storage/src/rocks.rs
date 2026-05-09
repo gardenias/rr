@@ -239,12 +239,14 @@ pub struct RocksStorage {
 /// Handle for a background group-commit task.
 pub struct GroupCommitHandle {
     _handle: tokio::task::JoinHandle<()>,
-    cancel_tx: tokio::sync::oneshot::Sender<()>,
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Drop for GroupCommitHandle {
     fn drop(&mut self) {
-        let _ = &self.cancel_tx;
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
     }
 }
 
@@ -310,7 +312,7 @@ impl RocksStorage {
 
         GroupCommitHandle {
             _handle: handle,
-            cancel_tx,
+            cancel_tx: Some(cancel_tx),
         }
     }
 

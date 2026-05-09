@@ -60,4 +60,15 @@ class RrClientBuilderTest {
             client.close();
         }
     }
+
+    @Test
+    void readMethodFailsWithoutServer() {
+        RrClient client = RrClientBuilder.newBuilder(List.of("127.0.0.1:1")).build().join();
+        try {
+            assertThatThrownBy(() -> client.read(1L, new byte[]{1}).join())
+                    .hasCauseInstanceOf(RrClientException.class);
+        } finally {
+            client.close();
+        }
+    }
 }
