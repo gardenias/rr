@@ -9,6 +9,7 @@ pub mod learner_promoter;
 pub mod log_storage;
 pub mod metrics_ticker;
 pub mod network_factory;
+pub mod output_runner;
 pub mod raft_node;
 pub mod service_adapter;
 pub mod sm_adapter;

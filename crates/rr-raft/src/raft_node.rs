@@ -16,6 +16,7 @@ use openraft::raft::AppendEntriesResponse;
 use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
+use openraft::SnapshotPolicy;
 use openraft::type_config::alias::SnapshotOf;
 use openraft::type_config::alias::VoteOf;
 use openraft::BasicNode;
@@ -58,9 +59,10 @@ impl RaftNode {
     {
         let config = Arc::new(
             Config {
-                heartbeat_interval: 250,
-                election_timeout_min: 299,
-                election_timeout_max: 500,
+                heartbeat_interval: 50,
+                election_timeout_min: 150,
+                election_timeout_max: 300,
+                snapshot_policy: SnapshotPolicy::LogsSinceLast(50_000),
                 ..Default::default()
             }
             .validate()
@@ -132,9 +134,10 @@ impl RaftNode {
     {
         let config = Arc::new(
             Config {
-                heartbeat_interval: 250,
-                election_timeout_min: 299,
-                election_timeout_max: 500,
+                heartbeat_interval: 50,
+                election_timeout_min: 150,
+                election_timeout_max: 300,
+                snapshot_policy: SnapshotPolicy::LogsSinceLast(50_000),
                 ..Default::default()
             }
             .validate()

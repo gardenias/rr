@@ -3446,6 +3446,7 @@ dependencies = [
  "openraft",
  "parking_lot",
  "prost 0.14.3",
+ "rr-client",
  "rr-core",
  "rr-storage",
  "serde",

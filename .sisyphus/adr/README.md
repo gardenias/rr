@@ -25,6 +25,8 @@
 | [A-0004](./A-0004-etcd-config-schema.md) | etcd key schema for ConfigProvider routing state | proposed | 2026-04-27 |
 | [A-0005](./A-0005-per-caller-rate-limiting.md) | Per-caller rate limiting for gRPC services | accepted | 2026-05-07 |
 | [A-0006](./A-0006-rocksdb-cf-tuning.md) | Per-CF RocksDB options tuning for rr-storage | accepted | 2026-05-07 |
+| [A-0007](./A-0007-output-outbox-mechanism.md) | Output/Outbox mechanism for guaranteed side-effect delivery | accepted | 2026-05-09 |
+| [A-0008](./A-0008-snapshot-strategy.md) | Snapshot strategy — periodic auto-trigger via openraft SnapshotPolicy | accepted | 2026-05-09 |
 
 ## Relationship
 

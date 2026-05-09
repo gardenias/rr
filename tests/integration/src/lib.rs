@@ -16,7 +16,7 @@ use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
 use rr_core::config::ConfigProvider;
-use rr_core::state_machine::{StateMachine, StateMachineReader};
+use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{GroupId, LogIndex, NodeId, PartitionConfig};
 use rr_raft::group_manager::RaftGroupManager;
@@ -34,15 +34,6 @@ use rr_storage::mem::MemStorage;
 /// Minimal state machine that echoes its input — used for harness tests.
 struct EchoSM;
 
-struct EchoReader;
-
-#[async_trait::async_trait]
-impl StateMachineReader for EchoReader {
-    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, rr_core::error::RrError> {
-        Ok(payload)
-    }
-}
-
 #[async_trait::async_trait]
 impl StateMachine for EchoSM {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, rr_core::error::RrError> {
@@ -56,9 +47,6 @@ impl StateMachine for EchoSM {
     }
     async fn last_applied(&self) -> Option<LogIndex> {
         None
-    }
-    fn read_handle(&self) -> Option<Arc<dyn StateMachineReader>> {
-        Some(Arc::new(EchoReader))
     }
 }
 
@@ -2362,11 +2350,11 @@ mod tests {
         node.shutdown().await.expect("RrNode::shutdown");
     }
 
-    // ── T29-T33: Follower reads, lifecycle hooks, routing consistency ───────
+    // ── T29-T33: lifecycle hooks and routing consistency ─────────────────────
 
-    /// T29 — Stale read from a follower node must succeed and echo payload.
+    /// T29 — Request via follower bootstrap must redirect and echo payload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_stale_read_from_follower() {
+    async fn test_request_via_follower_bootstrap() {
         let (nodes, provider) = ClusterBuilder::new(3, 1)
             .with_real_network()
             .build_with_provider()
@@ -2382,16 +2370,16 @@ mod tests {
 
         let client = RrClient::connect(vec![follower_addr]).await.unwrap();
 
-        let payload = b"stale-read-test".to_vec();
-        let resp = client.read(1, payload.clone()).await.unwrap();
-        assert_eq!(resp, payload, "stale read from follower must echo payload");
+        let payload = b"follower-bootstrap-request".to_vec();
+        let resp = client.send_request(1, payload.clone()).await.unwrap();
+        assert_eq!(resp, payload, "request via follower bootstrap must echo payload");
 
         shutdown_all(&nodes).await;
     }
 
-    /// T30 — Linearizable read from a cluster node must succeed and echo payload.
+    /// T30 — Request via leader bootstrap must succeed and echo payload.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_linearizable_read_from_follower() {
+    async fn test_request_via_leader_bootstrap() {
         let (nodes, provider) = ClusterBuilder::new(3, 1)
             .with_real_network()
             .build_with_provider()
@@ -2405,12 +2393,9 @@ mod tests {
 
         let client = RrClient::connect(vec![leader_addr]).await.unwrap();
 
-        let payload = b"linearizable-read-test".to_vec();
-        let resp = client.read_linearizable(1, payload.clone()).await.unwrap();
-        assert_eq!(
-            resp, payload,
-            "linearizable read must echo payload"
-        );
+        let payload = b"leader-bootstrap-request".to_vec();
+        let resp = client.send_request(1, payload.clone()).await.unwrap();
+        assert_eq!(resp, payload, "request via leader bootstrap must echo payload");
 
         shutdown_all(&nodes).await;
     }

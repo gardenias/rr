@@ -73,6 +73,9 @@ pub struct FrameworkState {
     /// `CommandIngestor` is bound to this group. Populated by Wave 4
     /// Tier 3.
     pub ingestor: Option<IngestorState>,
+    /// Outbox state: pending outputs and sent watermark.
+    /// None if no outputs have been produced on this group.
+    pub outbox: Option<OutboxState>,
 }
 
 /// Idempotency layer's serialized state, populated by
@@ -98,6 +101,18 @@ pub struct IngestorState {
     /// ingestor adapter knows how to interpret these bytes. `None`
     /// before any commands have been consumed.
     pub last_applied_offset: Option<Vec<u8>>,
+}
+
+/// Outbox state captured in snapshots so output delivery can resume after
+/// leader changes or process restarts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutboxState {
+    /// Outputs awaiting delivery (seq > sent_watermark).
+    pub pending: Vec<crate::output::Output>,
+    /// Highest seq that has been successfully sent. 0 = none sent.
+    pub sent_watermark: u64,
+    /// Next seq to assign (monotonically increasing).
+    pub next_seq: u64,
 }
 
 impl FramedSnapshot {
@@ -184,6 +199,7 @@ mod tests {
         assert!(decoded.user_snapshot.is_empty());
         assert!(decoded.framework_state.idempotency.is_none());
         assert!(decoded.framework_state.ingestor.is_none());
+        assert!(decoded.framework_state.outbox.is_none());
     }
 
     #[test]
@@ -208,6 +224,29 @@ mod tests {
             ingestor.last_applied_offset,
             Some(vec![0, 1, 2, 3, 4, 5, 6, 7])
         );
+    }
+
+    #[test]
+    fn framework_state_with_outbox_roundtrip() {
+        let mut original = FramedSnapshot::new(b"user".to_vec());
+        original.framework_state.outbox = Some(OutboxState {
+            pending: vec![crate::output::Output::new(
+                "req-1:0",
+                crate::output::OutputTarget::RaftWrite {
+                    addrs: vec!["127.0.0.1:50051".to_string()],
+                    group_id: 7,
+                },
+                b"payload".to_vec(),
+            )],
+            sent_watermark: 0,
+            next_seq: 1,
+        });
+        let encoded = original.encode().unwrap();
+        let decoded = FramedSnapshot::decode(&encoded).unwrap().unwrap();
+        let outbox = decoded.framework_state.outbox.expect("outbox should exist");
+        assert_eq!(outbox.pending.len(), 1);
+        assert_eq!(outbox.sent_watermark, 0);
+        assert_eq!(outbox.next_seq, 1);
     }
 
     #[test]

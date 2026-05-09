@@ -43,11 +43,13 @@ use tokio::sync::RwLock as TokioRwLock;
 
 use rr_core::error::RrError;
 use rr_core::framed_entry::FramedEntry;
-use rr_core::framed_snapshot::{FramedSnapshot, IngestorState};
+use rr_core::framed_snapshot::{FramedSnapshot, IngestorState, OutboxState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
+use rr_core::output::Output;
 use rr_core::service::Service;
 use rr_core::state_machine::{
-    IngestorOffsetControl, StateMachine, StateMachineLifecycleHook, StateMachineReader,
+    IngestorOffsetControl, OutboxControl, StateMachine, StateMachineLifecycleHook,
+    StateMachineReader,
 };
 use rr_core::types::{GroupId, LogIndex};
 
@@ -79,30 +81,49 @@ pub struct ServiceStateMachineAdapter<S: Service> {
     /// this adapter instance.
     latest_ingestor_offset: Arc<RwLock<Option<Vec<u8>>>>,
     ingestor_offset_control: Arc<dyn IngestorOffsetControl>,
+    outbox_state: Arc<RwLock<OutboxRuntimeState>>,
+    outbox_control: Arc<dyn OutboxControl>,
 }
 
-struct ServiceReadHandle<S: Service> {
-    service: Arc<TokioRwLock<S>>,
+#[derive(Debug, Default, Clone)]
+struct OutboxRuntimeState {
+    pending: Vec<Output>,
+    sent_watermark: u64,
+    next_seq: u64,
 }
 
 struct ServiceLifecycleHook<S: Service> {
     service: Arc<TokioRwLock<S>>,
 }
 
-#[async_trait]
-impl<S: Service + 'static> StateMachineReader for ServiceReadHandle<S> {
-    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        self.service.read().await.handle(payload).await
-    }
+struct ServiceReadHandle<S: Service> {
+    service: Arc<TokioRwLock<S>>,
 }
 
 struct SharedIngestorOffsetControl {
     inner: Arc<RwLock<Option<Vec<u8>>>>,
 }
 
+struct SharedOutboxControl {
+    inner: Arc<RwLock<OutboxRuntimeState>>,
+}
+
 impl SharedIngestorOffsetControl {
     fn new(inner: Arc<RwLock<Option<Vec<u8>>>>) -> Self {
         Self { inner }
+    }
+}
+
+impl SharedOutboxControl {
+    fn new(inner: Arc<RwLock<OutboxRuntimeState>>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl<S: Service + 'static> StateMachineReader for ServiceReadHandle<S> {
+    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        self.service.read().await.handle(payload).await
     }
 }
 
@@ -119,6 +140,33 @@ impl IngestorOffsetControl for SharedIngestorOffsetControl {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+}
+
+impl OutboxControl for SharedOutboxControl {
+    fn pending_outputs(&self) -> Vec<Output> {
+        let state = self
+            .inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .pending
+            .iter()
+            .filter(|o| o.seq > state.sent_watermark)
+            .cloned()
+            .collect()
+    }
+
+    fn advance_watermark(&self, seq: u64) {
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if seq > state.sent_watermark {
+            state.sent_watermark = seq;
+            let watermark = state.sent_watermark;
+            state.pending.retain(|o| o.seq > watermark);
+        }
     }
 }
 
@@ -153,6 +201,9 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         let ingestor_offset_control = Arc::new(SharedIngestorOffsetControl::new(
             latest_ingestor_offset.clone(),
         )) as Arc<dyn IngestorOffsetControl>;
+        let outbox_state = Arc::new(RwLock::new(OutboxRuntimeState::default()));
+        let outbox_control =
+            Arc::new(SharedOutboxControl::new(outbox_state.clone())) as Arc<dyn OutboxControl>;
         Self {
             group_id,
             service: Arc::new(TokioRwLock::new(service)),
@@ -160,7 +211,30 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             idempotency: IdempotencyLayer::new(capacity),
             latest_ingestor_offset,
             ingestor_offset_control,
+            outbox_state,
+            outbox_control,
         }
+    }
+
+    fn append_outputs(&self, outputs: Vec<Output>) {
+        if outputs.is_empty() {
+            return;
+        }
+        let mut state = self
+            .outbox_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for mut output in outputs {
+            state.next_seq = state.next_seq.saturating_add(1);
+            output.seq = state.next_seq;
+            state.pending.push(output);
+        }
+    }
+
+    async fn handle_and_collect_outputs(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        let result = self.service.read().await.handle_with_outputs(payload).await?;
+        self.append_outputs(result.outputs);
+        Ok(result.response)
     }
 
     /// Latest ingestor offset (bincode-encoded `CommandIngestor::Offset`)
@@ -196,6 +270,16 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
     /// Notify the wrapped service to shut down.
     pub async fn notify_shutdown(&self) {
         self.service.write().await.shutdown().await;
+    }
+
+    /// Get pending outputs (seq > sent_watermark).
+    pub fn pending_outputs(&self) -> Vec<Output> {
+        self.outbox_control.pending_outputs()
+    }
+
+    /// Advance the sent watermark (called by OutputRunner after successful delivery).
+    pub fn advance_output_watermark(&mut self, seq: u64) {
+        self.outbox_control.advance_watermark(seq);
     }
 
     async fn apply_keyed(
@@ -253,7 +337,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
                 ApplyOutcome::Success(cached_response).encode()
             }
             IdempotencyDecision::New => {
-                let response = self.service.read().await.handle(payload).await?;
+                let response = self.handle_and_collect_outputs(payload).await?;
                 self.idempotency.record(&key, response.clone());
                 metrics::gauge!(
                     "rr_idempotency_cache_size",
@@ -275,7 +359,7 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
         };
 
         let result = match idem_key {
-            None => self.service.read().await.handle(payload).await,
+            None => self.handle_and_collect_outputs(payload).await,
             Some(key) => self.apply_keyed(key, payload).await,
         };
 
@@ -300,6 +384,19 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
                 last_applied_offset: latest_ingestor_offset,
             });
         }
+        {
+            let outbox = self
+                .outbox_state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !outbox.pending.is_empty() || outbox.sent_watermark > 0 {
+                framed.framework_state.outbox = Some(OutboxState {
+                    pending: outbox.pending.clone(),
+                    sent_watermark: outbox.sent_watermark,
+                    next_seq: outbox.next_seq,
+                });
+            }
+        }
         framed.encode()
     }
 
@@ -320,6 +417,19 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
                 if let Some(ing_state) = framed.framework_state.ingestor {
                     self.set_latest_ingestor_offset(ing_state.last_applied_offset);
                 }
+                {
+                    let mut outbox = self
+                        .outbox_state
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(outbox_state) = framed.framework_state.outbox {
+                        outbox.pending = outbox_state.pending;
+                        outbox.sent_watermark = outbox_state.sent_watermark;
+                        outbox.next_seq = outbox_state.next_seq;
+                    } else {
+                        *outbox = OutboxRuntimeState::default();
+                    }
+                }
                 framed.user_snapshot
             }
             None => {
@@ -329,6 +439,10 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
                     "restoring from legacy (pre-framed) snapshot — auto-migrating; \
                      next snapshot() emits the new envelope"
                 );
+                *self
+                    .outbox_state
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = OutboxRuntimeState::default();
                 snapshot.to_vec()
             }
         };
@@ -376,6 +490,10 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
             service: Arc::clone(&self.service),
         }))
     }
+
+    fn outbox_control(&self) -> Option<Arc<dyn OutboxControl>> {
+        Some(self.outbox_control.clone())
+    }
 }
 
 #[cfg(test)]
@@ -388,6 +506,7 @@ mod tests {
     struct MockService {
         calls: Arc<Mutex<Vec<Vec<u8>>>>,
         response: Vec<u8>,
+        outputs: Vec<rr_core::output::Output>,
         error: Option<String>,
         snapshot_data: Arc<Mutex<Vec<u8>>>,
     }
@@ -397,9 +516,15 @@ mod tests {
             Self {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 response,
+                outputs: Vec::new(),
                 error: None,
                 snapshot_data: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn with_outputs(mut self, outputs: Vec<rr_core::output::Output>) -> Self {
+            self.outputs = outputs;
+            self
         }
 
         fn with_error(mut self, msg: &str) -> Self {
@@ -424,6 +549,20 @@ mod tests {
             }
             self.calls.lock().await.push(request);
             Ok(self.response.clone())
+        }
+
+        async fn handle_with_outputs(
+            &self,
+            request: Vec<u8>,
+        ) -> Result<rr_core::output::HandleResult, RrError> {
+            if let Some(ref msg) = self.error {
+                return Err(RrError::Application(msg.clone()));
+            }
+            self.calls.lock().await.push(request);
+            Ok(rr_core::output::HandleResult::with_outputs(
+                self.response.clone(),
+                self.outputs.clone(),
+            ))
         }
 
         fn name(&self) -> &str {
@@ -821,5 +960,49 @@ mod tests {
             Some(vec![0u8, 0, 0, 99]),
             "restored adapter must surface the persisted offset so the runner can seek"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_collects_outputs_and_assigns_monotonic_seq() {
+        let svc = MockService::new(b"resp".to_vec()).with_outputs(vec![rr_core::output::Output::new(
+            "idem:0",
+            rr_core::output::OutputTarget::RaftWrite {
+                addrs: vec!["127.0.0.1:50051".to_string()],
+                group_id: 9,
+            },
+            b"out".to_vec(),
+        )]);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        adapter.apply(b"req").await.unwrap();
+        let pending = adapter.pending_outputs();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].seq, 1);
+        assert_eq!(pending[0].idempotency_key, "idem:0");
+    }
+
+    #[tokio::test]
+    async fn snapshot_restore_roundtrip_preserves_outbox_state() {
+        let svc = MockService::new(b"resp".to_vec()).with_outputs(vec![rr_core::output::Output::new(
+            "idem:1",
+            rr_core::output::OutputTarget::RaftWrite {
+                addrs: vec!["127.0.0.1:50051".to_string()],
+                group_id: 9,
+            },
+            b"out".to_vec(),
+        )]);
+        let mut adapter1 = ServiceStateMachineAdapter::new(7, svc);
+        adapter1.apply(b"req").await.unwrap();
+
+        let snap = adapter1.snapshot().await.unwrap();
+        let mut adapter2 = ServiceStateMachineAdapter::new(7, MockService::new(b"r".to_vec()));
+        adapter2.restore(&snap).await.unwrap();
+
+        let pending = adapter2.pending_outputs();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].seq, 1);
+
+        adapter2.advance_output_watermark(1);
+        assert!(adapter2.pending_outputs().is_empty());
     }
 }

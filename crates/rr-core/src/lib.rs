@@ -50,6 +50,7 @@ pub mod framed_entry;
 pub mod framed_snapshot;
 pub mod idempotency;
 pub mod ingestor;
+pub mod output;
 pub mod service;
 pub mod state_machine;
 pub mod storage;
@@ -62,11 +63,12 @@ pub use error::{
 };
 pub use framed_entry::{FramedEntry, FRAMED_ENTRY_MAGIC};
 pub use framed_snapshot::{
-    FramedSnapshot, FrameworkState, IdempotencyState, IngestorState, FRAMED_SNAPSHOT_MAGIC,
-    FRAMED_SNAPSHOT_VERSION,
+    FramedSnapshot, FrameworkState, IdempotencyState, IngestorState, OutboxState,
+    FRAMED_SNAPSHOT_MAGIC, FRAMED_SNAPSHOT_VERSION,
 };
 pub use idempotency::{ApplyOutcome, IdempotencyDecision, IdempotencyError, IdempotencyKey};
 pub use ingestor::{CommandIngestor, DynCommandIngestor, DynIngressCommand, IngressCommand};
+pub use output::{HandleResult, Output, OutputTarget};
 pub use service::Service;
 pub use state_machine::StateMachine;
 pub use storage::{BatchOp, StorageEngine};

@@ -132,45 +132,6 @@ impl ClientDispatch for ClientDispatchImpl {
         }
     }
 
-    #[instrument(skip(self, payload), fields(payload_len = payload.len(), linearizable))]
-    async fn submit_read(
-        &self,
-        partition_id: u64,
-        payload: Vec<u8>,
-        linearizable: bool,
-    ) -> Result<ClientWriteResult, tonic::Status> {
-        let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
-            tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
-        })?;
-
-        let read_result = if linearizable {
-            self.group_manager
-                .linearizable_read(group_id, payload)
-                .await
-        } else {
-            self.group_manager.local_read(group_id, payload).await
-        };
-
-        let payload = read_result.map_err(|e| {
-            tracing::error!(
-                partition_id,
-                group_id,
-                linearizable,
-                error = %e,
-                "local read failed"
-            );
-            tonic::Status::internal("client read failed")
-        })?;
-
-        Ok(ClientWriteResult {
-            success: true,
-            payload,
-            leader_node_id: None,
-            leader_addr: None,
-            idem_error: None,
-        })
-    }
-
     #[instrument(skip(self))]
     async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
         let group_ids = self.group_manager.group_ids().await;

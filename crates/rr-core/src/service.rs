@@ -14,6 +14,7 @@
 use async_trait::async_trait;
 
 use crate::error::RrError;
+use crate::output::HandleResult;
 use crate::types::GroupId;
 
 /// High-level trait for implementing a distributed service.
@@ -142,6 +143,16 @@ pub trait Service: Send + Sync {
     /// every state mutation must be persisted to `self` before this method
     /// returns. No `tokio::spawn` of write tasks; no detached background work.
     async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError>;
+
+    /// Handle a request and optionally produce outputs for delivery.
+    ///
+    /// Outputs are delivered at-least-once after this apply commits (see ADR
+    /// A-0007). Default implementation delegates to [`Self::handle`] with
+    /// empty outputs — backward compatible.
+    async fn handle_with_outputs(&self, request: Vec<u8>) -> Result<HandleResult, RrError> {
+        let response = self.handle(request).await?;
+        Ok(HandleResult::from_response(response))
+    }
 
     /// Return the name of this service (used for identification and logging).
     fn name(&self) -> &str;

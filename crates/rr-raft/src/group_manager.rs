@@ -17,7 +17,8 @@ use tracing::{debug, info, instrument};
 
 use rr_core::error::{RaftError, RrError};
 use rr_core::state_machine::{
-    IngestorOffsetControl, StateMachine, StateMachineLifecycleHook, StateMachineReader,
+    IngestorOffsetControl, OutboxControl, StateMachine, StateMachineLifecycleHook,
+    StateMachineReader,
 };
 use rr_core::types::{GroupId, NodeId};
 
@@ -31,9 +32,11 @@ pub type StateMachineFactory = Box<dyn Fn(GroupId) -> Box<dyn StateMachine> + Se
 struct GroupState {
     node: RaftNode,
     ingestor_handle: Option<crate::ingestor_runner::IngestorHandle>,
+    output_handle: Option<crate::output_runner::OutputHandle>,
     metrics_ticker_handle: Option<crate::metrics_ticker::MetricsTickerHandle>,
     ingestor_offset_control: Option<Arc<dyn IngestorOffsetControl>>,
     read_handle: Option<Arc<dyn StateMachineReader>>,
+    outbox_control: Option<Arc<dyn OutboxControl>>,
     learner_promoter_handle: Option<crate::learner_promoter::LearnerPromoterHandle>,
     lifecycle_hook: Option<Arc<dyn StateMachineLifecycleHook>>,
     /// Tracks in-flight client writes so `stop_group()` can drain them
@@ -121,6 +124,7 @@ impl RaftGroupManager {
         let sm = (self.sm_factory)(group_id);
         let ctrl = sm.ingestor_offset_control();
         let read = sm.read_handle();
+        let outbox = sm.outbox_control();
         let hook = sm.lifecycle_hook();
         let node = if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
@@ -132,7 +136,8 @@ impl RaftGroupManager {
                 .await
                 .map_err(|e| RrError::Application(e.to_string()))?
         };
-        self.register_node(group_id, node, ctrl, read, hook).await
+        self.register_node(group_id, node, ctrl, read, outbox, hook)
+            .await
     }
 
     async fn register_node(
@@ -141,14 +146,17 @@ impl RaftGroupManager {
         node: RaftNode,
         ingestor_offset_control: Option<Arc<dyn IngestorOffsetControl>>,
         read_handle: Option<Arc<dyn StateMachineReader>>,
+        outbox_control: Option<Arc<dyn OutboxControl>>,
         lifecycle_hook: Option<Arc<dyn StateMachineLifecycleHook>>,
     ) -> Result<(), RrError> {
         let state = Arc::new(Mutex::new(GroupState {
             node,
             ingestor_handle: None,
+            output_handle: None,
             metrics_ticker_handle: None,
             ingestor_offset_control,
             read_handle,
+            outbox_control,
             learner_promoter_handle: None,
             lifecycle_hook,
             in_flight_writes: Arc::new(AtomicUsize::new(0)),
@@ -273,6 +281,7 @@ impl RaftGroupManager {
         let (
             raft,
             ingestor_handle,
+            output_handle,
             metrics_ticker_handle,
             learner_promoter_handle,
             lifecycle_hook,
@@ -287,6 +296,7 @@ impl RaftGroupManager {
             (
                 state.node.raft.clone(),
                 state.ingestor_handle.take(),
+                state.output_handle.take(),
                 state.metrics_ticker_handle.take(),
                 state.learner_promoter_handle.take(),
                 state.lifecycle_hook.take(),
@@ -296,6 +306,9 @@ impl RaftGroupManager {
         };
 
         if let Some(handle) = ingestor_handle {
+            handle.stop().await;
+        }
+        if let Some(handle) = output_handle {
             handle.stop().await;
         }
         if let Some(ticker) = metrics_ticker_handle {
@@ -433,6 +446,31 @@ impl RaftGroupManager {
         let handle = crate::ingestor_runner::spawn(self.clone(), group_id, ingestor, auto_idem);
         guard.ingestor_handle = Some(handle);
         info!(group_id, "attached ingestor supervisor");
+        Ok(())
+    }
+
+    /// Attach an output runner for `group_id`.
+    ///
+    /// The runner is leader-driven and retries outputs indefinitely.
+    pub async fn attach_output_runner(
+        self: &Arc<Self>,
+        group_id: GroupId,
+        rr_client: Option<Arc<rr_client::RrClient>>,
+    ) -> Result<(), RrError> {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let mut guard = state.lock().await;
+        if guard.output_handle.is_some() {
+            return Err(RrError::Application(format!(
+                "output runner already attached to group {group_id}"
+            )));
+        }
+        let handle = crate::output_runner::spawn(self.clone(), group_id, rr_client);
+        guard.output_handle = Some(handle);
+        info!(group_id, "attached output runner");
         Ok(())
     }
 
@@ -746,6 +784,50 @@ impl RaftGroupManager {
         Ok(control.get_offset())
     }
 
+    /// Get pending outputs for a group.
+    pub async fn pending_outputs(
+        &self,
+        group_id: GroupId,
+    ) -> Result<Vec<rr_core::output::Output>, RrError> {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let control = state
+            .lock()
+            .await
+            .outbox_control
+            .clone()
+            .ok_or_else(|| {
+                RrError::Application(format!(
+                    "group {group_id} state machine does not support outbox"
+                ))
+            })?;
+        Ok(control.pending_outputs())
+    }
+
+    /// Advance output sent watermark for a group.
+    pub async fn advance_output_watermark(&self, group_id: GroupId, seq: u64) -> Result<(), RrError> {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let control = state
+            .lock()
+            .await
+            .outbox_control
+            .clone()
+            .ok_or_else(|| {
+                RrError::Application(format!(
+                    "group {group_id} state machine does not support outbox"
+                ))
+            })?;
+        control.advance_watermark(seq);
+        Ok(())
+    }
+
     /// Get a reference to a Raft group's `openraft::Raft` instance.
     ///
     /// Returns `None` if the group does not exist.
@@ -830,12 +912,14 @@ impl RaftGroupManager {
         let sm = (self.sm_factory)(group_id);
         let ctrl = sm.ingestor_offset_control();
         let read = sm.read_handle();
+        let outbox = sm.outbox_control();
         let hook = sm.lifecycle_hook();
         let node =
             RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
                 .await
                 .map_err(|e| RrError::Application(e.to_string()))?;
-        self.register_node(group_id, node, ctrl, read, hook).await
+        self.register_node(group_id, node, ctrl, read, outbox, hook)
+            .await
     }
 
     /// Notify per-group lifecycle hook that leadership was acquired.

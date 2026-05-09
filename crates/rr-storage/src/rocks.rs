@@ -7,6 +7,7 @@ use rocksdb::{
     Options, ReadOptions, WriteBatch, WriteOptions, DB,
 };
 use std::sync::Arc;
+use std::time::Duration;
 
 use rr_core::error::StorageError;
 use rr_core::storage::{BatchOp, StorageEngine};
@@ -177,6 +178,8 @@ pub struct RocksConfig {
     /// Per-CF tuning overrides for the `state_machine` column family.
     /// Recommended: larger block_cache for read-heavy application state.
     pub state_machine_cf: Option<CfOptions>,
+    /// Optional background WAL flush interval in milliseconds.
+    pub group_commit_interval_ms: Option<u64>,
 }
 
 impl Default for RocksConfig {
@@ -192,6 +195,7 @@ impl Default for RocksConfig {
             durability: DurabilityPolicy::Strict,
             raft_log_cf: None,
             state_machine_cf: None,
+            group_commit_interval_ms: None,
         }
     }
 }
@@ -215,6 +219,7 @@ impl RocksConfig {
             durability: DurabilityPolicy::TestOnly,
             raft_log_cf: None,
             state_machine_cf: None,
+            group_commit_interval_ms: None,
         }
     }
 }
@@ -228,6 +233,19 @@ impl RocksConfig {
 pub struct RocksStorage {
     db: Arc<DB>,
     durability: DurabilityPolicy,
+    group_commit: Option<GroupCommitHandle>,
+}
+
+/// Handle for a background group-commit task.
+pub struct GroupCommitHandle {
+    _handle: tokio::task::JoinHandle<()>,
+    cancel_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+impl Drop for GroupCommitHandle {
+    fn drop(&mut self) {
+        let _ = &self.cancel_tx;
+    }
 }
 
 fn build_cf_options(base_config: &RocksConfig, overrides: Option<&CfOptions>) -> Options {
@@ -267,6 +285,35 @@ fn build_cf_options(base_config: &RocksConfig, overrides: Option<&CfOptions>) ->
 }
 
 impl RocksStorage {
+    /// Spawn a background group-commit task that periodically flushes the WAL.
+    pub fn spawn_group_commit(&self, interval_ms: u64) -> GroupCommitHandle {
+        let db = Arc::clone(&self.db);
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = &mut cancel_rx => break,
+                    _ = ticker.tick() => {
+                        let _ = tokio::task::spawn_blocking({
+                            let db = Arc::clone(&db);
+                            move || {
+                                let _ = db.flush_wal(false);
+                            }
+                        })
+                        .await;
+                    }
+                }
+            }
+        });
+
+        GroupCommitHandle {
+            _handle: handle,
+            cancel_tx,
+        }
+    }
+
     /// Open a RocksDB instance with custom column families.
     ///
     /// # Arguments
@@ -322,10 +369,26 @@ impl RocksStorage {
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)
             .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
 
-        Ok(Self {
+        let mut storage = Self {
             db: Arc::new(db),
             durability,
-        })
+            group_commit: None,
+        };
+
+        #[allow(deprecated)]
+        let should_spawn_group_commit = matches!(
+            durability,
+            DurabilityPolicy::ReplicatedOnly | DurabilityPolicy::Balanced
+        );
+
+        if let Some(interval_ms) = config.group_commit_interval_ms {
+            if should_spawn_group_commit {
+                let group_commit = storage.spawn_group_commit(interval_ms);
+                storage.group_commit = Some(group_commit);
+            }
+        }
+
+        Ok(storage)
     }
 
     /// Current durability policy in effect for all writes.
@@ -536,6 +599,7 @@ mod tests {
         let config = RocksConfig::default();
         assert!(config.raft_log_cf.is_none());
         assert!(config.state_machine_cf.is_none());
+        assert!(config.group_commit_interval_ms.is_none());
     }
 
     #[test]
@@ -760,6 +824,7 @@ mod tests {
             config.compression,
             rocksdb::DBCompressionType::Lz4
         ));
+        assert!(config.group_commit_interval_ms.is_none());
     }
 
     #[test]
@@ -778,6 +843,7 @@ mod tests {
         assert!(config.block_cache_size_mb < default.block_cache_size_mb);
         assert!(config.write_buffer_size_mb < default.write_buffer_size_mb);
         assert!(config.max_background_jobs < default.max_background_jobs);
+        assert!(config.group_commit_interval_ms.is_none());
     }
 
     #[tokio::test]
@@ -794,6 +860,7 @@ mod tests {
             durability: DurabilityPolicy::ReplicatedOnly,
             raft_log_cf: None,
             state_machine_cf: None,
+            group_commit_interval_ms: None,
         };
         let storage = RocksStorage::open(
             tmp.path().to_str().unwrap(),

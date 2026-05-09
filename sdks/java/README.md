@@ -7,7 +7,6 @@ Features:
 - Automatic leader-redirect with per-group leader cache.
 - Exponential-backoff retry on transport errors.
 - Framework-level idempotency with `sendRequestIdempotent(...)`.
-- **Follower reads**: `read()` (stale) and `readLinearizable()` (ReadIndex) for read-heavy workloads.
 - TLS / mTLS client configuration via `TlsConfig`.
 - Bearer-token auth via gRPC metadata header `authorization: Bearer <token>`.
 - Built-in Micrometer metrics (`rr.client.*`).
@@ -106,25 +105,6 @@ byte[] response = client.sendRequestIdempotent(1L, payload, key).join();
 
 If `request_id` is below the framework watermark and evicted from the LRU cache,
 the call completes exceptionally with `IdempotencyExpiredException`.
-
-## Follower reads
-
-For read-heavy workloads, route reads to any cluster node to reduce leader load:
-
-```java
-// Stale read — lowest latency, served from local follower replica
-byte[] value = client.read(1L, payload).join();
-
-// Linearizable read — guaranteed to see all committed writes before this call
-// Uses ReadIndex protocol: +1 RTT to leader for heartbeat confirmation
-byte[] value = client.readLinearizable(1L, payload).join();
-```
-
-| Method | Consistency | Latency | Leader Load |
-|---|---|---|---|
-| `sendRequest` | Linearizable (write) | Highest | High |
-| `readLinearizable` | Linearizable (read) | Medium (+1 RTT) | Low (heartbeat only) |
-| `read` | Stale (eventual) | Lowest (local) | Zero |
 
 ## Cluster discovery
 

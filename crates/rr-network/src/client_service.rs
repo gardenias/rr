@@ -60,18 +60,6 @@ pub trait ClientDispatch: Send + Sync {
         idem_key: Option<IdempotencyKey>,
     ) -> Result<ClientWriteResult, tonic::Status>;
 
-    /// Submit a read request to the given partition.
-    ///
-    /// If `linearizable` is true, the implementation should enforce
-    /// linearizable read semantics (e.g. ReadIndex + local apply wait).
-    /// Otherwise it may serve a stale local read.
-    async fn submit_read(
-        &self,
-        partition_id: u64,
-        payload: Vec<u8>,
-        linearizable: bool,
-    ) -> Result<ClientWriteResult, tonic::Status>;
-
     /// Get cluster topology information.
     ///
     /// Returns a list of [`GroupInfo`] describing the current cluster state.
@@ -118,22 +106,15 @@ impl client_service_server::ClientService for ClientServiceImpl {
         let idem_key = req.idem_key.map(proto_to_idem_key);
         tracing::debug!(
             partition_id = req.partition_id,
-            read_only = req.read_only,
-            linearizable = req.linearizable,
             keyed = idem_key.is_some(),
             traceparent = traceparent.as_deref().unwrap_or(""),
             "client request received"
         );
 
-        let result = if req.read_only {
-            self.dispatch
-                .submit_read(req.partition_id, req.payload, req.linearizable)
-                .await?
-        } else {
-            self.dispatch
-                .submit_write(req.partition_id, req.payload, idem_key)
-                .await?
-        };
+        let result = self
+            .dispatch
+            .submit_write(req.partition_id, req.payload, idem_key)
+            .await?;
 
         let leader_info = match (result.leader_node_id, result.leader_addr) {
             (Some(node_id), Some(addr)) => Some(LeaderInfo { node_id, addr }),
@@ -171,7 +152,6 @@ mod tests {
     /// A mock dispatch that returns configurable results.
     struct MockDispatch {
         write_result: Result<ClientWriteResult, tonic::Status>,
-        read_result: Result<ClientWriteResult, tonic::Status>,
         cluster_info: Result<Vec<GroupInfo>, tonic::Status>,
     }
 
@@ -181,13 +161,6 @@ mod tests {
                 write_result: Ok(ClientWriteResult {
                     success: true,
                     payload: vec![1, 2, 3],
-                    leader_node_id: None,
-                    leader_addr: None,
-                    idem_error: None,
-                }),
-                read_result: Ok(ClientWriteResult {
-                    success: true,
-                    payload: vec![9, 9, 9],
                     leader_node_id: None,
                     leader_addr: None,
                     idem_error: None,
@@ -209,13 +182,6 @@ mod tests {
                     leader_addr: Some("127.0.0.1:50051".to_string()),
                     idem_error: None,
                 }),
-                read_result: Ok(ClientWriteResult {
-                    success: true,
-                    payload: vec![9, 9, 9],
-                    leader_node_id: None,
-                    leader_addr: None,
-                    idem_error: None,
-                }),
                 cluster_info: Ok(vec![]),
             }
         }
@@ -223,7 +189,6 @@ mod tests {
         fn failing() -> Self {
             Self {
                 write_result: Err(tonic::Status::unavailable("no leader for partition")),
-                read_result: Err(tonic::Status::unavailable("read unavailable")),
                 cluster_info: Err(tonic::Status::internal("cluster state unavailable")),
             }
         }
@@ -238,15 +203,6 @@ mod tests {
             _idem_key: Option<IdempotencyKey>,
         ) -> Result<ClientWriteResult, tonic::Status> {
             self.write_result.clone()
-        }
-
-        async fn submit_read(
-            &self,
-            _partition_id: u64,
-            _payload: Vec<u8>,
-            _linearizable: bool,
-        ) -> Result<ClientWriteResult, tonic::Status> {
-            self.read_result.clone()
         }
 
         async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
@@ -269,8 +225,6 @@ mod tests {
             partition_id: 7,
             payload: vec![10, 20],
             idem_key: None,
-            read_only: false,
-            linearizable: false,
         };
 
         let result =
@@ -322,8 +276,6 @@ mod tests {
             partition_id: 1,
             payload: vec![42],
             idem_key: None,
-            read_only: false,
-            linearizable: false,
         };
 
         let result =
@@ -344,8 +296,6 @@ mod tests {
             partition_id: 5,
             payload: vec![],
             idem_key: None,
-            read_only: false,
-            linearizable: false,
         };
 
         let result =
@@ -359,25 +309,4 @@ mod tests {
         assert_eq!(leader.addr, "127.0.0.1:50051");
     }
 
-    #[tokio::test]
-    async fn test_request_read_path() {
-        let svc = ClientServiceImpl::new(Arc::new(MockDispatch::success()));
-
-        let proto_req = ClientRequest {
-            partition_id: 1,
-            payload: vec![1],
-            idem_key: None,
-            read_only: true,
-            linearizable: true,
-        };
-
-        let result =
-            client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
-                .await;
-
-        let resp = result.unwrap().into_inner();
-        assert!(resp.success);
-        assert_eq!(resp.payload, vec![9, 9, 9]);
-        assert!(resp.leader_info.is_none());
-    }
 }

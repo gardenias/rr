@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rr-core = { path = "../rr-core" }
+rr-client = { path = "../rr-client" }
 rr-storage = { path = "../rr-storage" }
 openraft = { workspace = true, features = ["serde"] }
 tokio = { workspace = true }

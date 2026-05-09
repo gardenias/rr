@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::error::RrError;
+use crate::output::Output;
 use crate::types::{GroupId, LogIndex};
 
 /// Optional runtime control surface for state machines that persist
@@ -37,6 +38,16 @@ pub trait IngestorOffsetControl: Send + Sync {
 pub trait StateMachineReader: Send + Sync {
     /// Read from local state machine replica.
     async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError>;
+}
+
+/// Optional runtime control surface for state machines that persist
+/// framework-level outbox progress.
+pub trait OutboxControl: Send + Sync {
+    /// Read outputs whose `seq` is newer than the sent watermark.
+    fn pending_outputs(&self) -> Vec<Output>;
+
+    /// Advance sent watermark and allow implementation to GC older entries.
+    fn advance_watermark(&self, seq: u64);
 }
 
 /// Optional lifecycle callback surface the group manager can invoke on
@@ -175,6 +186,14 @@ pub trait StateMachine: Send + Sync {
     ///
     /// Most state machines can keep the default `None` implementation.
     fn read_handle(&self) -> Option<Arc<dyn StateMachineReader>> {
+        None
+    }
+
+    /// Optional control surface for output outbox access.
+    ///
+    /// Most state machines don't track outbox outputs and should keep
+    /// the default `None` implementation.
+    fn outbox_control(&self) -> Option<Arc<dyn OutboxControl>> {
         None
     }
 }

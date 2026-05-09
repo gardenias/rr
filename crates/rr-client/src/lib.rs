@@ -348,27 +348,6 @@ impl RrClient {
         self.send_request_inner(group_id, payload, Some(key)).await
     }
 
-    /// Read from a local replica without Raft coordination.
-    ///
-    /// This is a stale read and may return slightly out-of-date data.
-    #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len(), consistency = "stale"))]
-    pub async fn read(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        self.send_read_inner(group_id, payload, false).await
-    }
-
-    /// Read with linearizable consistency.
-    ///
-    /// The target node coordinates with leader via ReadIndex, waits for local
-    /// apply to catch up, then serves from local state machine.
-    #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len(), consistency = "linearizable"))]
-    pub async fn read_linearizable(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-    ) -> Result<Vec<u8>, RrError> {
-        self.send_read_inner(group_id, payload, true).await
-    }
-
     async fn send_request_inner(
         &self,
         group_id: GroupId,
@@ -446,8 +425,6 @@ impl RrClient {
                 partition_id: group_id,
                 payload: payload.clone(),
                 idem_key: idem_key.clone().map(idem_key_to_proto),
-                read_only: false,
-                linearizable: false,
             };
 
             let tonic_req = match self.build_request(request) {
@@ -532,108 +509,6 @@ impl RrClient {
             "outcome" => "failure",
         )
         .record(request_start.elapsed().as_secs_f64());
-        Err(last_error.unwrap_or_else(|| {
-            RrError::Network(NetworkError::RpcFailed("max retries exhausted".to_string()))
-        }))
-    }
-
-    async fn send_read_inner(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-        linearizable: bool,
-    ) -> Result<Vec<u8>, RrError> {
-        let max_attempts = self.retry_config.max_retries + 1;
-        let mut last_error: Option<RrError> = None;
-        let request_start = std::time::Instant::now();
-        let gid_label = group_id.to_string();
-
-        for attempt in 0..max_attempts {
-            if attempt > 0 {
-                metrics::counter!(
-                    "rr_client_retries_total",
-                    "group_id" => gid_label.clone()
-                )
-                .increment(1);
-            }
-
-            let addr =
-                self.bootstrap_addrs[(attempt as usize) % self.bootstrap_addrs.len()].clone();
-
-            let mut grpc_client = match self.connect_to_addr(&addr).await {
-                Ok(client) => client,
-                Err(e) => {
-                    last_error = Some(e);
-                    if attempt + 1 < max_attempts {
-                        let delay_ms = self
-                            .retry_config
-                            .retry_delay_ms
-                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    }
-                    continue;
-                }
-            };
-
-            let request = ClientRequest {
-                partition_id: group_id,
-                payload: payload.clone(),
-                idem_key: None,
-                read_only: true,
-                linearizable,
-            };
-
-            let tonic_req = self.build_request(request)?;
-
-            match grpc_client.request(tonic_req).await {
-                Ok(response) => {
-                    let resp = response.into_inner();
-                    if resp.success {
-                        metrics::histogram!(
-                            "rr_client_request_duration_seconds",
-                            "group_id" => gid_label.clone(),
-                            "outcome" => "success",
-                        )
-                        .record(request_start.elapsed().as_secs_f64());
-                        return Ok(resp.payload);
-                    }
-
-                    if let Some(leader_info) = resp.leader_info {
-                        tracing::debug!(
-                            group_id,
-                            leader_node_id = leader_info.node_id,
-                            leader_addr = %leader_info.addr,
-                            "read response carried unexpected leader redirect"
-                        );
-                    }
-
-                    last_error = Some(RrError::Network(NetworkError::RpcFailed(
-                        "read request not successful".to_string(),
-                    )));
-                }
-                Err(status) => {
-                    last_error = Some(RrError::Network(NetworkError::RpcFailed(
-                        status.message().to_string(),
-                    )));
-                }
-            }
-
-            if attempt + 1 < max_attempts {
-                let delay_ms = self
-                    .retry_config
-                    .retry_delay_ms
-                    .saturating_mul(2u64.saturating_pow(attempt.min(20)));
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            }
-        }
-
-        metrics::histogram!(
-            "rr_client_request_duration_seconds",
-            "group_id" => gid_label.clone(),
-            "outcome" => "failure",
-        )
-        .record(request_start.elapsed().as_secs_f64());
-
         Err(last_error.unwrap_or_else(|| {
             RrError::Network(NetworkError::RpcFailed("max retries exhausted".to_string()))
         }))
