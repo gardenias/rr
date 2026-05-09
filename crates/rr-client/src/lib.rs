@@ -39,7 +39,7 @@ use rr_core::types::{GroupId, NodeId};
 use rr_network::auth::attach_bearer_token;
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::{
-    ClientRequest, ClusterInfo, Empty, IdempotencyKey as ProtoIdemKey,
+    ClientRequest, ClusterInfo, Empty, IdempotencyKey as ProtoIdemKey, ReadLocalRequest,
 };
 use rr_network::tls::TlsConfig;
 use rr_network::ChannelPool;
@@ -325,6 +325,7 @@ impl RrClient {
     /// Routes to a local follower replica without Raft consensus. No leader redirect.
     /// Lowest latency; the returned data may be slightly behind the latest committed write.
     #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len()))]
+    #[allow(clippy::explicit_counter_loop)]
     pub async fn read(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
         let max_attempts = self.retry_config.max_retries + 1;
         let mut bootstrap_index: usize = 0;
@@ -334,11 +335,9 @@ impl RrClient {
             let addr = self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
             bootstrap_index += 1;
 
-            let request = ClientRequest {
+            let request = ReadLocalRequest {
                 partition_id: group_id,
                 payload: payload.clone(),
-                idem_key: None,
-                read_only: true,
             };
             let tonic_req = match self.build_request(request) {
                 Ok(req) => req,
@@ -346,7 +345,7 @@ impl RrClient {
             };
 
             match self.connect_to_addr(&addr).await {
-                Ok(mut client) => match client.request(tonic_req).await {
+                Ok(mut client) => match client.read_local(tonic_req).await {
                     Ok(resp) => return Ok(resp.into_inner().payload),
                     Err(e) => {
                         last_error = Some(RrError::Network(NetworkError::RpcFailed(
@@ -475,7 +474,6 @@ impl RrClient {
                             partition_id: group_id,
                             payload: payload.clone(),
                             idem_key: idem_key.clone().map(idem_key_to_proto),
-                            read_only: false,
                         };
 
             let tonic_req = match self.build_request(request) {

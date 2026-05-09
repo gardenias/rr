@@ -16,7 +16,7 @@ use rr_core::idempotency::{IdempotencyError, IdempotencyKey};
 use crate::proto::client::client_service_server;
 use crate::proto::client::{
     ClientRequest, ClientResponse, ClusterInfo, Empty, GroupInfo, IdempotencyError as ProtoIdemErr,
-    IdempotencyKey as ProtoIdemKey, LeaderInfo,
+    IdempotencyKey as ProtoIdemKey, LeaderInfo, ReadLocalRequest, ReadLocalResponse,
 };
 
 /// Result of submitting a client write request.
@@ -121,19 +121,6 @@ impl client_service_server::ClientService for ClientServiceImpl {
             "client request received"
         );
 
-        if req.read_only {
-            let payload = self
-                .dispatch
-                .submit_read(req.partition_id, req.payload)
-                .await?;
-            return Ok(tonic::Response::new(ClientResponse {
-                success: true,
-                payload,
-                leader_info: None,
-                idem_error: None,
-            }));
-        }
-
         let result = self
             .dispatch
             .submit_write(req.partition_id, req.payload, idem_key)
@@ -165,6 +152,26 @@ impl client_service_server::ClientService for ClientServiceImpl {
         let groups = self.dispatch.get_cluster_info().await?;
 
         Ok(tonic::Response::new(ClusterInfo { groups }))
+    }
+
+    async fn read_local(
+        &self,
+        request: tonic::Request<ReadLocalRequest>,
+    ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+        let traceparent = crate::tracing::extract_traceparent(&request);
+        let req = request.into_inner();
+        tracing::debug!(
+            partition_id = req.partition_id,
+            traceparent = traceparent.as_deref().unwrap_or(""),
+            "read_local request received"
+        );
+
+        let payload = self
+            .dispatch
+            .submit_read(req.partition_id, req.payload)
+            .await?;
+
+        Ok(tonic::Response::new(ReadLocalResponse { payload }))
     }
 }
 
@@ -256,7 +263,6 @@ mod tests {
                     partition_id: 7,
                     payload: vec![10, 20],
                     idem_key: None,
-                    read_only: false,
                 };
 
         let result =
@@ -308,7 +314,6 @@ mod tests {
                     partition_id: 1,
                     payload: vec![42],
                     idem_key: None,
-                    read_only: false,
                 };
 
         let result =
@@ -329,7 +334,6 @@ mod tests {
                     partition_id: 5,
                     payload: vec![],
                     idem_key: None,
-                    read_only: false,
                 };
 
         let result =

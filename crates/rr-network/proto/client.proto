@@ -6,6 +6,9 @@ package rr.client;
 service ClientService {
     /// Submit a client request to a partition. Framework routes to correct Raft group.
     rpc Request(ClientRequest) returns (ClientResponse);
+    /// Read from local replica's state machine (stale read).
+    /// Bypasses Raft consensus. Any node can serve this request.
+    rpc ReadLocal(ReadLocalRequest) returns (ReadLocalResponse);
     /// Get cluster topology information.
     rpc GetClusterInfo(Empty) returns (ClusterInfo);
 }
@@ -43,10 +46,6 @@ message ClientRequest {
     /// cached response. When absent, the request follows v0.2.x semantics
     /// (no framework dedup).
     optional IdempotencyKey idem_key = 3;
-    /// If true, route as a stale read on the local replica's state machine.
-    /// The read bypasses Raft consensus and may return slightly stale data.
-    /// No leader redirect occurs — any node can serve the request.
-    bool read_only = 4;
 }
 
 /// Client response. Contains optional leader redirect info.
@@ -76,4 +75,15 @@ message GroupInfo {
     uint64 group_id = 1;
     uint64 leader_node_id = 2;
     repeated uint64 replica_node_ids = 3;
+}
+
+/// Request for the ReadLocal RPC — reads from local replica without consensus.
+message ReadLocalRequest {
+    uint64 partition_id = 1;
+    bytes payload = 2;
+}
+
+/// Response from the ReadLocal RPC.
+message ReadLocalResponse {
+    bytes payload = 1;
 }

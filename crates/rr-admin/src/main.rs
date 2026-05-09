@@ -1013,7 +1013,6 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                                             partition_id: group,
                                             payload,
                                             idem_key: None,
-                                            read_only: false,
                                         })
                     .await
                 {
@@ -1055,7 +1054,6 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                                             partition_id: group,
                                             payload,
                                             idem_key: None,
-                                            read_only: false,
                                         })
                     .await
                 {
@@ -1077,7 +1075,6 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                                             partition_id: group,
                                             payload,
                                             idem_key: None,
-                                            read_only: false,
                                         })
                     .await
                 {

@@ -27,6 +27,7 @@
 | [A-0006](./A-0006-rocksdb-cf-tuning.md) | Per-CF RocksDB options tuning for rr-storage | accepted | 2026-05-07 |
 | [A-0007](./A-0007-output-outbox-mechanism.md) | Output/Outbox mechanism for guaranteed side-effect delivery | accepted | 2026-05-09 |
 | [A-0008](./A-0008-snapshot-strategy.md) | Snapshot strategy — periodic auto-trigger via openraft SnapshotPolicy | accepted | 2026-05-09 |
+| [A-0009](./A-0009-read-write-separation-and-sm-locking.md) | Read/write RPC separation and state machine locking model | accepted | 2026-05-09 |
 
 ## Relationship
 
