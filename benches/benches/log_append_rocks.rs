@@ -4,13 +4,16 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use openraft::storage::RaftLogStorageExt;
-use openraft::{CommittedLeaderId, Entry, EntryPayload, LogId};
+use openraft::type_config::alias::EntryOf;
+use openraft::vote::leader_id_adv::CommittedLeaderId;
+use openraft::vote::RaftLeaderId;
+use openraft::{EntryPayload, LogId};
 use rr_raft::rocks_log_storage::RocksLogStorage;
 use rr_raft::type_config::RrTypeConfig;
 
-fn make_entries(count: u64) -> Vec<Entry<RrTypeConfig>> {
+fn make_entries(count: u64) -> Vec<EntryOf<RrTypeConfig>> {
     (1..=count)
-        .map(|i| Entry {
+        .map(|i| EntryOf::<RrTypeConfig> {
             log_id: LogId::new(CommittedLeaderId::new(1, 0), i),
             payload: EntryPayload::Blank,
         })

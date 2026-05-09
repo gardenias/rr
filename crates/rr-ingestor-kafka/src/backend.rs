@@ -45,7 +45,14 @@ pub enum KafkaIngestorError {
 
 impl From<KafkaIngestorError> for RrError {
     fn from(e: KafkaIngestorError) -> Self {
-        RrError::Application(e.to_string())
+        match &e {
+            KafkaIngestorError::Config(_) | KafkaIngestorError::MissingSecret { .. } => {
+                RrError::Config(rr_core::error::ConfigError::InvalidConfig(e.to_string()))
+            }
+            KafkaIngestorError::Kafka(_) => {
+                RrError::Application(format!("kafka: {e}"))
+            }
+        }
     }
 }
 

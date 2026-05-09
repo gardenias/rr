@@ -959,6 +959,7 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
     let channel = connect(addr).await?;
     let mut admin_client = AdminServiceClient::new(channel.clone());
     let mut kv_client = ClientServiceClient::new(channel);
+    let mut needs_reconnect = false;
 
     let mut rl = rustyline::DefaultEditor::new()?;
 
@@ -974,6 +975,28 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
             continue;
         }
         let _ = rl.add_history_entry(&line);
+
+        if needs_reconnect || line.trim() == "reconnect" {
+            match connect(addr).await {
+                Ok(ch) => {
+                    admin_client = AdminServiceClient::new(ch.clone());
+                    kv_client = ClientServiceClient::new(ch);
+                    needs_reconnect = false;
+                    if line.trim() == "reconnect" {
+                        println!("reconnected to {addr}");
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    println!("reconnect failed: {e}  (will retry on next command)");
+                    continue;
+                }
+            }
+        }
+        if line.trim() == "reconnect" {
+            continue;
+        }
+
         let tokens: Vec<&str> = line.splitn(3, ' ').collect();
         match tokens[0] {
             "get" => {
@@ -1015,7 +1038,7 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                             println!("Error: request not successful");
                         }
                     }
-                    Err(e) => println!("RPC error: {e}"),
+                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); }
                 }
             }
             "put" => {
@@ -1039,7 +1062,7 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                     .await
                 {
                     Ok(_) => println!("OK"),
-                    Err(e) => println!("RPC error: {e}"),
+                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
                 }
             }
             "delete" => {
@@ -1062,7 +1085,7 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                     .await
                 {
                     Ok(_) => println!("OK"),
-                    Err(e) => println!("RPC error: {e}"),
+                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
                 }
             }
             "status" => match admin_client.get_node_status(Empty {}).await {
@@ -1073,7 +1096,7 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                     println!("group_ids  : {:?}", s.group_ids);
                     println!("uptime_secs: {}", s.uptime_secs);
                 }
-                Err(e) => println!("RPC error: {e}"),
+                Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
             },
             "members" => {
                 match admin_client
@@ -1088,7 +1111,7 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                         println!("last_log_index: {}", s.last_log_index);
                         println!("leader_node_id: {}", s.leader_node_id);
                     }
-                    Err(e) => println!("RPC error: {e}"),
+                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
                 }
             }
             "help" => {

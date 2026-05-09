@@ -243,7 +243,7 @@ impl RrClient {
     }
 
     /// Update the leader cache for a given group.
-    pub async fn update_leader_cache(&self, group_id: GroupId, node_id: NodeId, addr: String) {
+    async fn update_leader_cache(&self, group_id: GroupId, node_id: NodeId, addr: String) {
         let mut cache = self.leader_cache.write().await;
         cache.insert(group_id, (node_id, addr));
     }

@@ -119,10 +119,9 @@ impl RaftGroupManager {
     #[instrument(skip(self))]
     pub async fn start_group(&self, group_id: GroupId) -> Result<(), RrError> {
         let sm = (self.sm_factory)(group_id);
-        let ingestor_offset_control = sm.ingestor_offset_control();
-        let read_handle = sm.read_handle();
-        let lifecycle_hook = sm.lifecycle_hook();
-
+        let ctrl = sm.ingestor_offset_control();
+        let read = sm.read_handle();
+        let hook = sm.lifecycle_hook();
         let node = if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
             RaftNode::new_with_factory(group_id, self.node_id, sm, factory)
@@ -133,7 +132,17 @@ impl RaftGroupManager {
                 .await
                 .map_err(|e| RrError::Application(e.to_string()))?
         };
+        self.register_node(group_id, node, ctrl, read, hook).await
+    }
 
+    async fn register_node(
+        &self,
+        group_id: GroupId,
+        node: RaftNode,
+        ingestor_offset_control: Option<Arc<dyn IngestorOffsetControl>>,
+        read_handle: Option<Arc<dyn StateMachineReader>>,
+        lifecycle_hook: Option<Arc<dyn StateMachineLifecycleHook>>,
+    ) -> Result<(), RrError> {
         let state = Arc::new(Mutex::new(GroupState {
             node,
             ingestor_handle: None,
@@ -818,48 +827,15 @@ impl RaftGroupManager {
             .as_ref()
             .ok_or_else(|| RrError::Application("rocks_base_path not set".to_string()))?;
         let path = format!("{base}/{group_id}");
-
         let sm = (self.sm_factory)(group_id);
-        let ingestor_offset_control = sm.ingestor_offset_control();
-        let read_handle = sm.read_handle();
-        let lifecycle_hook = sm.lifecycle_hook();
+        let ctrl = sm.ingestor_offset_control();
+        let read = sm.read_handle();
+        let hook = sm.lifecycle_hook();
         let node =
             RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
                 .await
                 .map_err(|e| RrError::Application(e.to_string()))?;
-
-        let state = Arc::new(Mutex::new(GroupState {
-            node,
-            ingestor_handle: None,
-            metrics_ticker_handle: None,
-            ingestor_offset_control,
-            read_handle,
-            learner_promoter_handle: None,
-            lifecycle_hook,
-            in_flight_writes: Arc::new(AtomicUsize::new(0)),
-        }));
-
-        match self.groups.entry(group_id) {
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(state);
-            }
-            dashmap::mapref::entry::Entry::Occupied(_) => {
-                let raft = { state.lock().await.node.raft.clone() };
-                let _ = raft.shutdown().await;
-                return Err(RrError::Application(format!(
-                    "group {group_id} already exists"
-                )));
-            }
-        }
-
-        debug!(
-            group_id,
-            node_id = self.node_id,
-            "started raft group (rocks)"
-        );
-        let node_id = self.node_id;
-        counter!("raft.group.start", "node_id" => node_id.to_string()).increment(1);
-        Ok(())
+        self.register_node(group_id, node, ctrl, read, hook).await
     }
 
     /// Notify per-group lifecycle hook that leadership was acquired.
