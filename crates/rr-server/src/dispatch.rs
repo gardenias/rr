@@ -132,6 +132,21 @@ impl ClientDispatch for ClientDispatchImpl {
         }
     }
 
+    #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
+    async fn submit_read(
+        &self,
+        partition_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, tonic::Status> {
+        let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
+            tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
+        })?;
+        self.group_manager
+            .local_read(group_id, payload)
+            .await
+            .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
     #[instrument(skip(self))]
     async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
         let group_ids = self.group_manager.group_ids().await;

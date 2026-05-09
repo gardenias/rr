@@ -1010,10 +1010,11 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
-                        partition_id: group,
-                        payload,
-                        idem_key: None,
-                    })
+                                            partition_id: group,
+                                            payload,
+                                            idem_key: None,
+                                            read_only: false,
+                                        })
                     .await
                 {
                     Ok(resp) => {
@@ -1051,10 +1052,11 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
-                        partition_id: group,
-                        payload,
-                        idem_key: None,
-                    })
+                                            partition_id: group,
+                                            payload,
+                                            idem_key: None,
+                                            read_only: false,
+                                        })
                     .await
                 {
                     Ok(_) => println!("OK"),
@@ -1072,10 +1074,11 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
-                        partition_id: group,
-                        payload,
-                        idem_key: None,
-                    })
+                                            partition_id: group,
+                                            payload,
+                                            idem_key: None,
+                                            read_only: false,
+                                        })
                     .await
                 {
                     Ok(_) => println!("OK"),

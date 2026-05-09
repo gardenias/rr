@@ -43,6 +43,10 @@ message ClientRequest {
     /// cached response. When absent, the request follows v0.2.x semantics
     /// (no framework dedup).
     optional IdempotencyKey idem_key = 3;
+    /// If true, route as a stale read on the local replica's state machine.
+    /// The read bypasses Raft consensus and may return slightly stale data.
+    /// No leader redirect occurs — any node can serve the request.
+    bool read_only = 4;
 }
 
 /// Client response. Contains optional leader redirect info.

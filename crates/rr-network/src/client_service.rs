@@ -60,6 +60,16 @@ pub trait ClientDispatch: Send + Sync {
         idem_key: Option<IdempotencyKey>,
     ) -> Result<ClientWriteResult, tonic::Status>;
 
+    /// Submit a stale-read request to the local replica's state machine.
+    ///
+    /// Bypasses Raft consensus — may return slightly stale data.
+    /// Any node (leader or follower) can serve the request.
+    async fn submit_read(
+        &self,
+        partition_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, tonic::Status>;
+
     /// Get cluster topology information.
     ///
     /// Returns a list of [`GroupInfo`] describing the current cluster state.
@@ -110,6 +120,19 @@ impl client_service_server::ClientService for ClientServiceImpl {
             traceparent = traceparent.as_deref().unwrap_or(""),
             "client request received"
         );
+
+        if req.read_only {
+            let payload = self
+                .dispatch
+                .submit_read(req.partition_id, req.payload)
+                .await?;
+            return Ok(tonic::Response::new(ClientResponse {
+                success: true,
+                payload,
+                leader_info: None,
+                idem_error: None,
+            }));
+        }
 
         let result = self
             .dispatch
@@ -205,6 +228,14 @@ mod tests {
             self.write_result.clone()
         }
 
+        async fn submit_read(
+            &self,
+            _partition_id: u64,
+            _payload: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            Ok(vec![])
+        }
+
         async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
             self.cluster_info.clone()
         }
@@ -222,10 +253,11 @@ mod tests {
         let svc = ClientServiceImpl::new(Arc::new(MockDispatch::failing()));
 
         let proto_req = ClientRequest {
-            partition_id: 7,
-            payload: vec![10, 20],
-            idem_key: None,
-        };
+                    partition_id: 7,
+                    payload: vec![10, 20],
+                    idem_key: None,
+                    read_only: false,
+                };
 
         let result =
             client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
@@ -273,10 +305,11 @@ mod tests {
         let svc = ClientServiceImpl::new(Arc::new(MockDispatch::success()));
 
         let proto_req = ClientRequest {
-            partition_id: 1,
-            payload: vec![42],
-            idem_key: None,
-        };
+                    partition_id: 1,
+                    payload: vec![42],
+                    idem_key: None,
+                    read_only: false,
+                };
 
         let result =
             client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
@@ -293,10 +326,11 @@ mod tests {
         let svc = ClientServiceImpl::new(Arc::new(MockDispatch::with_leader_info()));
 
         let proto_req = ClientRequest {
-            partition_id: 5,
-            payload: vec![],
-            idem_key: None,
-        };
+                    partition_id: 5,
+                    payload: vec![],
+                    idem_key: None,
+                    read_only: false,
+                };
 
         let result =
             client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))

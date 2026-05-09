@@ -722,6 +722,13 @@ mod tests {
         ) -> Result<ClientWriteResult, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }
+        async fn submit_read(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
         async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }

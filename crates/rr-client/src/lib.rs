@@ -320,6 +320,56 @@ impl RrClient {
         self.send_request_inner(group_id, payload, None).await
     }
 
+    /// Read from any cluster node (stale read).
+    ///
+    /// Routes to a local follower replica without Raft consensus. No leader redirect.
+    /// Lowest latency; the returned data may be slightly behind the latest committed write.
+    #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len()))]
+    pub async fn read(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        let max_attempts = self.retry_config.max_retries + 1;
+        let mut bootstrap_index: usize = 0;
+        let mut last_error: Option<RrError> = None;
+
+        for attempt in 0..max_attempts {
+            let addr = self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
+            bootstrap_index += 1;
+
+            let request = ClientRequest {
+                partition_id: group_id,
+                payload: payload.clone(),
+                idem_key: None,
+                read_only: true,
+            };
+            let tonic_req = match self.build_request(request) {
+                Ok(req) => req,
+                Err(e) => return Err(e),
+            };
+
+            match self.connect_to_addr(&addr).await {
+                Ok(mut client) => match client.request(tonic_req).await {
+                    Ok(resp) => return Ok(resp.into_inner().payload),
+                    Err(e) => {
+                        last_error = Some(RrError::Network(NetworkError::RpcFailed(
+                            e.to_string(),
+                        )));
+                        if attempt + 1 < max_attempts {
+                            let delay = self.retry_config.retry_delay_ms
+                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        }
+                    }
+                },
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            RrError::Network(NetworkError::RpcFailed("all read attempts exhausted".into()))
+        }))
+    }
+
     /// Send an *idempotent* request: the framework deduplicates retries
     /// of the same `(request_type, request_id)` and returns the cached
     /// response from the first apply.
@@ -422,10 +472,11 @@ impl RrClient {
             };
 
             let request = ClientRequest {
-                partition_id: group_id,
-                payload: payload.clone(),
-                idem_key: idem_key.clone().map(idem_key_to_proto),
-            };
+                            partition_id: group_id,
+                            payload: payload.clone(),
+                            idem_key: idem_key.clone().map(idem_key_to_proto),
+                            read_only: false,
+                        };
 
             let tonic_req = match self.build_request(request) {
                 Ok(req) => req,
