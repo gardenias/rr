@@ -1,0 +1,19 @@
+[package]
+name = "rr-perf-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Integration performance benchmark for rr: 3-process Raft cluster, real gRPC traffic"
+
+[[bin]]
+name = "rr-perf-bench"
+path = "src/main.rs"
+
+[dependencies]
+rr-client  = { path = "../../crates/rr-client" }
+tokio      = { workspace = true, features = ["full"] }
+anyhow     = { workspace = true }
+clap       = { version = "4", features = ["derive", "env"] }
+serde_json = { workspace = true }
+tempfile   = { workspace = true }
+hdrhistogram = "7"
