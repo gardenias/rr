@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 
 use rr_core::types::GroupId;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 
 

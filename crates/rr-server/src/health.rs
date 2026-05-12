@@ -348,12 +348,11 @@ mod tests {
     use tokio::net::TcpStream;
 
     async fn http_get(port: u16, path: &str) -> (u16, String, String) {
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .unwrap();
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-            path, port
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(request.as_bytes()).await.unwrap();
 
@@ -507,8 +506,7 @@ mod tests {
         assert_eq!(status, 200);
         assert!(
             headers.to_lowercase().contains("content-type: text/plain"),
-            "expected text/plain content-type, got headers:\n{}",
-            headers
+            "expected text/plain content-type, got headers:\n{headers}"
         );
 
         let _ = shutdown_tx.send(true);
