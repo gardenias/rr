@@ -61,6 +61,7 @@ dependencies {
     implementation("io.grpc:grpc-netty-shaded:$grpcVersion")
     api("io.grpc:grpc-protobuf:$grpcVersion")
     api("io.grpc:grpc-stub:$grpcVersion")
+    api("com.google.guava:guava:33.4.8-jre")
     api("com.google.protobuf:protobuf-java:$protobufVersion")
     implementation("io.micrometer:micrometer-core:$micrometerVersion")
     implementation("org.slf4j:slf4j-api:$slf4jVersion")

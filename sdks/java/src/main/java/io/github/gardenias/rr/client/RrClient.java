@@ -1,5 +1,6 @@
 package io.github.gardenias.rr.client;
 
+import com.google.common.util.concurrent.ListenableFuture;
 import io.grpc.ClientInterceptor;
 import io.grpc.ManagedChannel;
 import io.grpc.StatusException;
@@ -13,10 +14,26 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import rr.client.Client;
 import rr.client.ClientServiceGrpc;
 
-/** Async Java SDK client for rr distributed Multi-Raft clusters. */
+/**
+ * Java client for rr distributed Multi-Raft clusters.
+ *
+ * <p>Provides three calling styles:
+ *
+ * <ul>
+ *   <li><b>Reactive</b> ({@code sendRequest}, {@code read}, {@code getClusterInfo}) — returns
+ *       {@link CompletableFuture} immediately; the gRPC I/O is driven by Netty's event loop so no
+ *       thread is blocked while waiting for the response. Chain callbacks with
+ *       {@code .thenAccept()} / {@code .thenApply()}.
+ *   <li><b>Blocking</b> ({@code sendRequestSync}, {@code readSync}, {@code getClusterInfoSync}) —
+ *       blocks the calling thread until the response arrives. Suitable for simple sequential
+ *       programs or contexts where threading overhead does not matter.
+ * </ul>
+ */
 public final class RrClient implements AutoCloseable {
     private final List<String> bootstrapAddrs;
     private final RetryConfig retryConfig;
@@ -53,37 +70,88 @@ public final class RrClient implements AutoCloseable {
         return RrClientBuilder.newBuilder(addrs).withRetryConfig(retryConfig).build();
     }
 
+    // ── Reactive interface (non-blocking, callback-driven) ────────────────────
+
+    /**
+     * Reactive write: sends the request via Netty's non-blocking I/O and returns a
+     * {@link CompletableFuture} immediately. No thread is blocked while waiting for the response.
+     *
+     * <p>Use callbacks to handle the result without blocking:
+     * <pre>{@code
+     * client.sendRequest(groupId, payload)
+     *       .thenAccept(resp -> handleResponse(resp))
+     *       .exceptionally(ex -> { handleError(ex); return null; });
+     * }</pre>
+     */
     public CompletableFuture<byte[]> sendRequest(long groupId, byte[] payload) {
-        return CompletableFuture.supplyAsync(() -> sendRequestSync(groupId, payload, null));
+        Timer.Sample sample = Timer.start(meterRegistry);
+        return sendRequestAsync(groupId, payload, null, 0, 0)
+                .whenComplete((result, ex) ->
+                        sample.stop(requestTimer(groupId, timerOutcome(ex))));
     }
 
-    public CompletableFuture<byte[]> sendRequestIdempotent(long groupId, byte[] payload, IdempotencyKey key) {
+    /** Reactive idempotent write. See {@link #sendRequest} for the reactive usage pattern. */
+    public CompletableFuture<byte[]> sendRequestIdempotent(
+            long groupId, byte[] payload, IdempotencyKey key) {
         Objects.requireNonNull(key, "key");
-        return CompletableFuture.supplyAsync(() -> sendRequestSync(groupId, payload, key));
+        Timer.Sample sample = Timer.start(meterRegistry);
+        return sendRequestAsync(groupId, payload, key, 0, 0)
+                .whenComplete((result, ex) ->
+                        sample.stop(requestTimer(groupId, timerOutcome(ex))));
     }
 
+    /** Alias: routes by partition ID (same as group ID in single-group deployments). */
     public CompletableFuture<byte[]> sendRequestWithPartition(long partitionId, byte[] payload) {
         return sendRequest(partitionId, payload);
     }
 
     /**
-     * Read from any cluster node (stale read).
-     *
-     * <p>Routes to the local replica's state machine without Raft consensus. No leader redirect —
-     * any node (leader or follower) can serve the request. Lowest latency; the returned data may
-     * be slightly behind the latest committed write.
-     *
-     * @param groupId the Raft group / partition ID
-     * @param payload application-defined read payload (forwarded to {@code Service.handle()})
-     * @return the state machine response
+     * Reactive stale read: routes to any replica without Raft consensus.
+     * No leader redirect — any node serves the request. Returns a {@link CompletableFuture}
+     * immediately; no thread is blocked during I/O.
      */
     public CompletableFuture<byte[]> read(long groupId, byte[] payload) {
-        return CompletableFuture.supplyAsync(() -> readSync(groupId, payload));
+        Timer.Sample sample = Timer.start(meterRegistry);
+        return readAsync(groupId, payload, 0, 0)
+                .whenComplete((result, ex) ->
+                        sample.stop(requestTimer(groupId, timerOutcome(ex))));
     }
 
+    /** Reactive cluster-info fetch. Returns a {@link CompletableFuture} immediately. */
     public CompletableFuture<Client.ClusterInfo> getClusterInfo() {
-        return CompletableFuture.supplyAsync(this::getClusterInfoSync);
+        return clusterInfoAsync(0);
     }
+
+    // ── Blocking interface ────────────────────────────────────────────────────
+
+    /**
+     * Blocking write: blocks the calling thread until the response arrives.
+     *
+     * <p>Equivalent to {@code sendRequest(groupId, payload).get()}, but wraps
+     * checked exceptions into {@link RrClientException} subclasses.
+     *
+     * @throws RrClientException on transport error, max retries exhausted, or idempotency expiry
+     */
+    public byte[] sendRequestSync(long groupId, byte[] payload) {
+        return blockOn(sendRequest(groupId, payload));
+    }
+
+    /** Blocking idempotent write. See {@link #sendRequestSync}. */
+    public byte[] sendRequestIdempotentSync(long groupId, byte[] payload, IdempotencyKey key) {
+        return blockOn(sendRequestIdempotent(groupId, payload, key));
+    }
+
+    /** Blocking stale read. See {@link #sendRequestSync}. */
+    public byte[] readSync(long groupId, byte[] payload) {
+        return blockOn(read(groupId, payload));
+    }
+
+    /** Blocking cluster-info fetch. See {@link #sendRequestSync}. */
+    public Client.ClusterInfo getClusterInfoSync() {
+        return blockOn(getClusterInfo());
+    }
+
+    // ── Accessors ─────────────────────────────────────────────────────────────
 
     public List<String> bootstrapAddrs() {
         return bootstrapAddrs;
@@ -113,179 +181,204 @@ public final class RrClient implements AutoCloseable {
         leaderCache.remove(groupId);
     }
 
-    private byte[] sendRequestSync(long groupId, byte[] payload, IdempotencyKey idemKey) {
+    // ── Internal async helpers ────────────────────────────────────────────────
+
+    /**
+     * Core async write with retry. Uses gRPC FutureStub so the underlying I/O is
+     * handled by Netty's event loop — no thread is blocked.
+     */
+    private CompletableFuture<byte[]> sendRequestAsync(
+            long groupId, byte[] payload, IdempotencyKey idemKey,
+            int attempt, int bootstrapIndex) {
+
         int maxAttempts = retryConfig.maxRetries() + 1;
-        int bootstrapIndex = 0;
-        RuntimeException lastError = null;
-        Timer.Sample timerSample = Timer.start(meterRegistry);
-
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            if (attempt > 0) {
-                retriesCounter(groupId).increment();
-            }
-
-            String addr;
-            Optional<LeaderCache.LeaderInfo> cachedLeader = getCachedLeader(groupId);
-            if (cachedLeader.isPresent()) {
-                leaderCacheHits(groupId).increment();
-                addr = cachedLeader.get().addr();
-            } else {
-                leaderCacheMisses(groupId).increment();
-                addr = bootstrapAddrs.get(bootstrapIndex % bootstrapAddrs.size());
-                bootstrapIndex++;
-            }
-
-            try {
-                ClientServiceGrpc.ClientServiceBlockingV2Stub stub =
-                        ClientServiceGrpc.newBlockingV2Stub(channelFor(addr));
-
-                Client.ClientRequest.Builder request = Client.ClientRequest.newBuilder()
-                        .setPartitionId(groupId)
-                        .setPayload(com.google.protobuf.ByteString.copyFrom(payload));
-                if (idemKey != null) {
-                    Client.IdempotencyKey.Builder idemProto = Client.IdempotencyKey.newBuilder()
-                            .setRequestType(idemKey.requestType())
-                            .setRequestId(idemKey.requestId());
-                    if (idemKey.clientId() != null) {
-                        idemProto.setClientId(idemKey.clientId());
-                    }
-                    request.setIdemKey(idemProto.build());
-                }
-
-                Client.ClientResponse response = stub.request(request.build());
-
-                if (response.hasIdemError()) {
-                    Client.IdempotencyError error = response.getIdemError();
-                    timerSample.stop(requestTimer(groupId, "idempotency_expired"));
-                    throw new IdempotencyExpiredException(
-                            error.getRequestType(),
-                            error.getRequestId(),
-                            error.getWatermark());
-                }
-
-                if (response.hasLeaderInfo()) {
-                    Client.LeaderInfo leaderInfo = response.getLeaderInfo();
-                    updateLeaderCache(groupId, leaderInfo.getNodeId(), leaderInfo.getAddr());
-                    if (!response.getSuccess() && attempt + 1 < maxAttempts) {
-                        sleepBackoff(attempt);
-                        continue;
-                    }
-                }
-
-                timerSample.stop(requestTimer(groupId, "success"));
-                return response.getPayload().toByteArray();
-            } catch (IdempotencyExpiredException e) {
-                throw e;
-            } catch (StatusException e) {
-                removeCachedLeader(groupId);
-                String message = e.getStatus().getDescription() == null
-                        ? e.getStatus().toString()
-                        : e.getStatus().getDescription();
-                lastError = new RpcFailedException(addr, message, e);
-                if (attempt + 1 < maxAttempts) {
-                    sleepBackoff(attempt);
-                }
-            } catch (RuntimeException e) {
-                removeCachedLeader(groupId);
-                lastError = e instanceof RrClientException
-                        ? e
-                        : new NetworkException(addr, "connection failed", e);
-                if (attempt + 1 < maxAttempts) {
-                    sleepBackoff(attempt);
-                }
-            }
+        if (attempt >= maxAttempts) {
+            return CompletableFuture.failedFuture(
+                    new RpcFailedException("<exhausted>", "max retries exhausted"));
         }
 
-        timerSample.stop(requestTimer(groupId, "failure"));
-        if (lastError != null) {
-            throw lastError;
+        if (attempt > 0) {
+            retriesCounter(groupId).increment();
         }
-        throw new RpcFailedException("<unknown>", "max retries exhausted");
+
+        final String addr = chooseAddr(groupId, bootstrapIndex);
+        final int nextBootstrapIndex = bootstrapIndex + 1;
+
+        Client.ClientRequest.Builder reqBuilder = Client.ClientRequest.newBuilder()
+                .setPartitionId(groupId)
+                .setPayload(com.google.protobuf.ByteString.copyFrom(payload));
+        if (idemKey != null) {
+            Client.IdempotencyKey.Builder ikb = Client.IdempotencyKey.newBuilder()
+                    .setRequestType(idemKey.requestType())
+                    .setRequestId(idemKey.requestId());
+            if (idemKey.clientId() != null) {
+                ikb.setClientId(idemKey.clientId());
+            }
+            reqBuilder.setIdemKey(ikb.build());
+        }
+
+        // FutureStub: gRPC sends the request via Netty, returns a ListenableFuture
+        // that completes on Netty's I/O thread — no blocking involved.
+        ListenableFuture<Client.ClientResponse> grpcFuture =
+                ClientServiceGrpc.newFutureStub(channelFor(addr)).request(reqBuilder.build());
+
+        return fromListenableFuture(grpcFuture)
+                .thenCompose(response -> {
+                    if (response.hasIdemError()) {
+                        Client.IdempotencyError e = response.getIdemError();
+                        return CompletableFuture.failedFuture(new IdempotencyExpiredException(
+                                e.getRequestType(), e.getRequestId(), e.getWatermark()));
+                    }
+                    if (response.hasLeaderInfo()) {
+                        Client.LeaderInfo li = response.getLeaderInfo();
+                        updateLeaderCache(groupId, li.getNodeId(), li.getAddr());
+                        if (!response.getSuccess()) {
+                            return asyncDelay(attempt).thenCompose(__ ->
+                                    sendRequestAsync(groupId, payload, idemKey,
+                                            attempt + 1, nextBootstrapIndex));
+                        }
+                    }
+                    return CompletableFuture.completedFuture(
+                            response.getPayload().toByteArray());
+                })
+                .exceptionallyCompose(ex -> {
+                    if (ex instanceof IdempotencyExpiredException) {
+                        return CompletableFuture.failedFuture(ex);
+                    }
+                    removeCachedLeader(groupId);
+                    if (attempt + 1 >= maxAttempts) {
+                        RuntimeException err = ex instanceof RrClientException
+                                ? (RrClientException) ex
+                                : new NetworkException(addr, "connection failed", ex);
+                        return CompletableFuture.failedFuture(err);
+                    }
+                    return asyncDelay(attempt).thenCompose(__ ->
+                            sendRequestAsync(groupId, payload, idemKey,
+                                    attempt + 1, nextBootstrapIndex));
+                });
     }
 
-    private byte[] readSync(long groupId, byte[] payload) {
+    private CompletableFuture<byte[]> readAsync(
+            long groupId, byte[] payload, int attempt, int bootstrapIndex) {
+
         int maxAttempts = retryConfig.maxRetries() + 1;
-        int bootstrapIndex = 0;
-        RuntimeException lastError = null;
-        Timer.Sample timerSample = Timer.start(meterRegistry);
-
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            String addr = bootstrapAddrs.get(bootstrapIndex % bootstrapAddrs.size());
-            bootstrapIndex++;
-
-            try {
-                ClientServiceGrpc.ClientServiceBlockingV2Stub stub =
-                        ClientServiceGrpc.newBlockingV2Stub(channelFor(addr));
-                Client.ReadLocalRequest request = Client.ReadLocalRequest.newBuilder()
-                        .setPartitionId(groupId)
-                        .setPayload(com.google.protobuf.ByteString.copyFrom(payload))
-                        .build();
-                Client.ReadLocalResponse response = stub.readLocal(request);
-                timerSample.stop(requestTimer(groupId, "success"));
-                return response.getPayload().toByteArray();
-            } catch (StatusException e) {
-                String message = e.getStatus().getDescription() == null
-                        ? e.getStatus().toString()
-                        : e.getStatus().getDescription();
-                lastError = new RpcFailedException(addr, message, e);
-                if (attempt + 1 < maxAttempts) {
-                    sleepBackoff(attempt);
-                }
-            } catch (RuntimeException e) {
-                lastError = e instanceof RrClientException
-                        ? e
-                        : new NetworkException(addr, "connection failed", e);
-                if (attempt + 1 < maxAttempts) {
-                    sleepBackoff(attempt);
-                }
-            }
+        if (attempt >= maxAttempts) {
+            return CompletableFuture.failedFuture(
+                    new RpcFailedException("<exhausted>", "max retries exhausted"));
         }
 
-        timerSample.stop(requestTimer(groupId, "failure"));
-        if (lastError != null) {
-            throw lastError;
-        }
-        throw new RpcFailedException("<unknown>", "max retries exhausted");
+        final String addr = bootstrapAddrs.get(bootstrapIndex % bootstrapAddrs.size());
+        final int nextBootstrapIndex = bootstrapIndex + 1;
+
+        Client.ReadLocalRequest req = Client.ReadLocalRequest.newBuilder()
+                .setPartitionId(groupId)
+                .setPayload(com.google.protobuf.ByteString.copyFrom(payload))
+                .build();
+
+        ListenableFuture<Client.ReadLocalResponse> grpcFuture =
+                ClientServiceGrpc.newFutureStub(channelFor(addr)).readLocal(req);
+
+        return fromListenableFuture(grpcFuture)
+                .thenApply(resp -> resp.getPayload().toByteArray())
+                .exceptionallyCompose(ex -> {
+                    if (attempt + 1 >= maxAttempts) {
+                        RuntimeException err = ex instanceof RrClientException
+                                ? (RrClientException) ex
+                                : new NetworkException(addr, "read failed", ex);
+                        return CompletableFuture.failedFuture(err);
+                    }
+                    return asyncDelay(attempt).thenCompose(__ ->
+                            readAsync(groupId, payload, attempt + 1, nextBootstrapIndex));
+                });
     }
 
-    private Client.ClusterInfo getClusterInfoSync() {
-        RuntimeException lastError = null;
-        for (String addr : bootstrapAddrs) {
-            try {
-                ClientServiceGrpc.ClientServiceBlockingV2Stub stub =
-                        ClientServiceGrpc.newBlockingV2Stub(channelFor(addr));
-                return stub.getClusterInfo(Client.Empty.getDefaultInstance());
-            } catch (StatusException e) {
-                String message = e.getStatus().getDescription() == null
-                        ? e.getStatus().toString()
-                        : e.getStatus().getDescription();
-                lastError = new RpcFailedException(addr, message, e);
-            } catch (RuntimeException e) {
-                lastError = e instanceof RrClientException
-                        ? e
-                        : new NetworkException(addr, "connection failed", e);
-            }
+    private CompletableFuture<Client.ClusterInfo> clusterInfoAsync(int bootstrapIndex) {
+        if (bootstrapIndex >= bootstrapAddrs.size()) {
+            return CompletableFuture.failedFuture(
+                    new NetworkException("<all>", "no reachable bootstrap nodes"));
         }
+        final String addr = bootstrapAddrs.get(bootstrapIndex);
+        ListenableFuture<Client.ClusterInfo> grpcFuture =
+                ClientServiceGrpc.newFutureStub(channelFor(addr))
+                        .getClusterInfo(Client.Empty.getDefaultInstance());
+        return fromListenableFuture(grpcFuture)
+                .exceptionallyCompose(ex ->
+                        clusterInfoAsync(bootstrapIndex + 1));
+    }
 
-        if (lastError != null) {
-            throw lastError;
+    // ── Utilities ─────────────────────────────────────────────────────────────
+
+    /**
+     * Converts a gRPC {@link ListenableFuture} (backed by Netty's event loop) into a
+     * {@link CompletableFuture} without occupying any thread while waiting.
+     * The callback fires on Netty's I/O thread when the response arrives.
+     */
+    private static <T> CompletableFuture<T> fromListenableFuture(ListenableFuture<T> lf) {
+        CompletableFuture<T> cf = new CompletableFuture<>() {
+            @Override
+            public boolean cancel(boolean mayInterruptIfRunning) {
+                lf.cancel(mayInterruptIfRunning);
+                return super.cancel(mayInterruptIfRunning);
+            }
+        };
+        // Runnable::run is a direct executor: runs on the thread that calls run(),
+        // which is Netty's I/O thread — no extra thread switch, no blocking.
+        lf.addListener(() -> {
+            try {
+                cf.complete(lf.get());
+            } catch (ExecutionException e) {
+                cf.completeExceptionally(e.getCause());
+            } catch (Exception e) {
+                cf.completeExceptionally(e);
+            }
+        }, Runnable::run);
+        return cf;
+    }
+
+    /** Non-blocking delay using a JDK scheduled executor — no thread is held during the wait. */
+    private CompletableFuture<Void> asyncDelay(int attempt) {
+        long multiplier = 1L << Math.min(attempt, 20);
+        long delayMs = retryConfig.retryDelayMs() * multiplier;
+        if (delayMs <= 0) {
+            return CompletableFuture.completedFuture(null);
         }
-        throw new NetworkException("<all>", "no reachable bootstrap nodes");
+        return CompletableFuture.runAsync(
+                () -> { },
+                CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS));
+    }
+
+    private String chooseAddr(long groupId, int bootstrapIndex) {
+        Optional<LeaderCache.LeaderInfo> cached = getCachedLeader(groupId);
+        if (cached.isPresent()) {
+            leaderCacheHits(groupId).increment();
+            return cached.get().addr();
+        }
+        leaderCacheMisses(groupId).increment();
+        return bootstrapAddrs.get(bootstrapIndex % bootstrapAddrs.size());
+    }
+
+    private static <T> T blockOn(CompletableFuture<T> future) {
+        try {
+            return future.get();
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RrClientException) throw (RrClientException) cause;
+            throw new NetworkException("<unknown>", "request failed", cause);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new NetworkException("<unknown>", "interrupted", e);
+        }
+    }
+
+    private static String timerOutcome(Throwable ex) {
+        if (ex == null) return "success";
+        if (ex instanceof IdempotencyExpiredException) return "idempotency_expired";
+        return "failure";
     }
 
     private ManagedChannel channelFor(String addr) {
-        return channels.computeIfAbsent(addr, a -> channelFactory.createChannel(a, tlsConfig, bearerTokenInterceptor));
-    }
-
-    private void sleepBackoff(int attempt) {
-        long multiplier = 1L << Math.min(attempt, 20);
-        long delayMs = retryConfig.retryDelayMs() * multiplier;
-        try {
-            Thread.sleep(delayMs);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new NetworkException("<sleep>", "retry interrupted", e);
-        }
+        return channels.computeIfAbsent(
+                addr, a -> channelFactory.createChannel(a, tlsConfig, bearerTokenInterceptor));
     }
 
     private Timer requestTimer(long groupId, String outcome) {
@@ -318,7 +411,8 @@ public final class RrClient implements AutoCloseable {
         for (ManagedChannel channel : channels.values()) {
             channel.shutdown();
             try {
-                channel.awaitTermination(Duration.ofSeconds(1).toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+                channel.awaitTermination(
+                        Duration.ofSeconds(1).toMillis(), TimeUnit.MILLISECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
