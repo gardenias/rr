@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-rr-raft = { path = "../crates/rr-raft" }
+rr-raft = { path = "../crates/rr-raft", features = [] }
 rr-storage = { path = "../crates/rr-storage" }
 rr-core = { path = "../crates/rr-core" }
 criterion = { workspace = true }
@@ -34,3 +34,21 @@ harness = false
 [[bench]]
 name = "mem_storage_put_scan"
 harness = false
+
+[[bench]]
+name = "framing_roundtrip"
+harness = false
+
+[[bench]]
+name = "idempotency_throughput"
+harness = false
+
+[[bench]]
+name = "log_append_batched"
+harness = false
+required-features = ["rocks"]
+
+[[bench]]
+name = "log_tps"
+harness = false
+required-features = ["rocks"]
