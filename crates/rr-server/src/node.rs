@@ -179,10 +179,8 @@ impl RrNode {
         }
 
         let prom_handle = if config.metrics_port.is_some() {
-            let (recorder, _exporter_handle) =
-                metrics_exporter_prometheus::PrometheusBuilder::new()
-                    .build()
-                    .map_err(|e| RrError::Config(ConfigError::InvalidConfig(e.to_string())))?;
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
+                .build_recorder();
             let handle = recorder.handle();
             let _ = metrics::set_global_recorder(recorder);
             info!("Prometheus recorder installed (metrics served via HTTP observability port)");

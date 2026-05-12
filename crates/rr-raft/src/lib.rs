@@ -16,6 +16,11 @@ pub mod sm_adapter;
 pub mod type_config;
 
 #[cfg(feature = "rocks")]
+pub mod io_batcher;
+#[cfg(feature = "rocks")]
+pub use io_batcher::{IoBatcher, IoBatcherConfig};
+
+#[cfg(feature = "rocks")]
 pub mod rocks_log_storage;
 #[cfg(feature = "rocks")]
 pub use rocks_log_storage::RocksLogStorage;

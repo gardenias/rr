@@ -1,9 +1,12 @@
-//! RocksDB-backed Raft log storage.
+//! RocksDB-backed Raft log storage with group-commit IO batching.
 //!
 //! Uses [`RocksStorage`] (which already wraps RocksDB behind `spawn_blocking`)
 //! to persist Raft log entries and metadata across restarts.
-
-#![cfg(feature = "rocks")]
+//!
+//! The [`append`](RaftLogStorage::append) implementation is **truly async**:
+//! it enqueues operations to an [`IoBatcher`] and returns immediately, so
+//! OpenRaft's pipeline support is engaged.  The batcher accumulates concurrent
+//! appends and flushes them in a single `write_batch()` (group commit).
 
 use std::fmt::Debug;
 use std::io;
@@ -22,6 +25,7 @@ use rr_core::storage::BatchOp;
 use rr_core::storage::StorageEngine;
 use rr_storage::rocks::RocksStorage;
 
+use crate::io_batcher::{IoBatcher, IoBatcherConfig};
 use crate::type_config::RrTypeConfig;
 
 type RrEntry = <RrTypeConfig as RaftTypeConfig>::Entry;
@@ -86,24 +90,42 @@ fn range_end(bound: Bound<&u64>) -> Vec<u8> {
 ///
 /// Wraps [`RocksStorage`] in an [`Arc`] so it can be cheaply cloned to satisfy
 /// the `type LogReader = Self` requirement while sharing the same underlying DB.
+/// An [`IoBatcher`] runs as a per-instance background task that accumulates
+/// concurrent `append()` calls and flushes them in a single `write_batch()`
+/// (group commit), dramatically increasing single-group write throughput.
 #[derive(Clone)]
 pub struct RocksLogStorage {
     storage: Arc<RocksStorage>,
+    batcher: Arc<IoBatcher>,
 }
 
 impl RocksLogStorage {
-    /// Create a `RocksLogStorage` from an existing [`RocksStorage`].
-    pub fn new(storage: RocksStorage) -> Self {
-        Self {
-            storage: Arc::new(storage),
-        }
+    /// Create a `RocksLogStorage` from an existing [`RocksStorage`] with
+    /// custom batcher tuning.
+    pub fn new_with_config(storage: RocksStorage, config: IoBatcherConfig) -> Self {
+        let storage = Arc::new(storage);
+        let batcher = Arc::new(IoBatcher::new(Arc::clone(&storage), config));
+        Self { storage, batcher }
     }
 
-    /// Open (or create) a RocksDB instance at `path` with the standard column
-    /// families (`raft_log`, `state_machine`, `metadata`).
+    /// Create a `RocksLogStorage` with default batcher configuration.
+    pub fn new(storage: RocksStorage) -> Self {
+        Self::new_with_config(storage, IoBatcherConfig::default())
+    }
+
+    /// Open (or create) a RocksDB instance at `path` with default batcher config.
     pub fn open(path: &str) -> Result<Self, rr_core::error::StorageError> {
         let storage = RocksStorage::open_default(path)?;
         Ok(Self::new(storage))
+    }
+
+    /// Open with custom batcher tuning (window + max_entries).
+    pub fn open_with_config(
+        path: &str,
+        config: IoBatcherConfig,
+    ) -> Result<Self, rr_core::error::StorageError> {
+        let storage = RocksStorage::open_default(path)?;
+        Ok(Self::new_with_config(storage, config))
     }
 }
 
@@ -208,10 +230,24 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
                 value,
             });
         }
-        if !ops.is_empty() {
-            self.storage.write_batch(ops).await.map_err(to_write_err)?;
+
+        if ops.is_empty() {
+            callback.io_completed(Ok(()));
+            return Ok(());
         }
-        callback.io_completed(Ok(()));
+
+        // Submit to the batcher and spawn a task to fire the callback when
+        // the batch is durable.  We return immediately so that the RaftCore
+        // task can continue processing the next proposal (pipeline support).
+        let batcher = Arc::clone(&self.batcher);
+        tokio::spawn(async move {
+            let result = batcher
+                .submit(ops)
+                .await
+                .map_err(io::Error::other);
+            callback.io_completed(result);
+        });
+
         Ok(())
     }
 
@@ -283,6 +319,7 @@ mod tests {
     use openraft::storage::RaftLogStorageExt;
     use openraft::type_config::alias::EntryOf;
     use openraft::vote::leader_id_adv::CommittedLeaderId;
+    use openraft::vote::RaftLeaderId;
     use openraft::Entry;
     use openraft::EntryPayload;
     use openraft::LogId;
@@ -459,6 +496,9 @@ mod tests {
             let vote = Vote::new(3, 1);
             s.save_vote(&vote).await.unwrap();
         }
+        // Yield to let the batcher background task drop its Arc<RocksStorage>
+        // before we try to reopen the same path.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         // Reopen — vote must survive
         let mut s2 = RocksLogStorage::open(&path).unwrap();
@@ -478,6 +518,7 @@ mod tests {
             let entries = vec![make_entry(1, 1), make_entry(2, 1), make_entry(3, 2)];
             s.blocking_append(entries).await.unwrap();
         }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         // Reopen — entries must survive
         let mut s2 = RocksLogStorage::open(&path).unwrap();
@@ -501,5 +542,86 @@ mod tests {
         // Verify entries landed, confirming the callback round-trip worked.
         let got = s.try_get_log_entries(1..3).await.unwrap();
         assert_eq!(got.len(), 2);
+    }
+
+    // ── IoBatcher-specific tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_async_append_entries_are_readable() {
+        let (mut s, _tmp) = open_storage();
+        let entries = (1..=10).map(|i| make_entry(i, 1)).collect::<Vec<_>>();
+        s.blocking_append(entries).await.unwrap();
+
+        let got = s.try_get_log_entries(1..11).await.unwrap();
+        assert_eq!(got.len(), 10);
+        for (i, e) in got.iter().enumerate() {
+            assert_eq!(e.log_id.index, (i + 1) as u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_appends_all_land() {
+        use crate::io_batcher::IoBatcherConfig;
+        use std::time::Duration;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut s = RocksLogStorage::open_with_config(
+            path,
+            IoBatcherConfig::new(Duration::from_millis(5), 512),
+        )
+        .unwrap();
+
+        for i in 1u64..=50 {
+            s.blocking_append(vec![make_data_entry(i, 1, vec![i as u8])])
+                .await
+                .unwrap();
+        }
+
+        let got = s.try_get_log_entries(1..51).await.unwrap();
+        assert_eq!(got.len(), 50);
+        assert_eq!(got[49].log_id.index, 50);
+    }
+
+    #[tokio::test]
+    async fn test_batch_window_config_zero_works() {
+        use crate::io_batcher::IoBatcherConfig;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut s =
+            RocksLogStorage::open_with_config(path, IoBatcherConfig::no_batching()).unwrap();
+
+        s.blocking_append(vec![make_entry(1, 1), make_entry(2, 1)])
+            .await
+            .unwrap();
+
+        let state = s.get_log_state().await.unwrap();
+        assert_eq!(state.last_log_id.unwrap().index, 2);
+    }
+
+    #[tokio::test]
+    async fn test_append_empty_entries_does_not_hang() {
+        let (mut s, _tmp) = open_storage();
+        // Empty iterator: callback must fire immediately without waiting on batcher.
+        s.blocking_append(vec![]).await.unwrap();
+        let state = s.get_log_state().await.unwrap();
+        assert_eq!(state.last_log_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_truncate_after_async_append() {
+        let (mut s, _tmp) = open_storage();
+        s.blocking_append((1..=5).map(|i| make_entry(i, 1)).collect::<Vec<_>>())
+            .await
+            .unwrap();
+
+        s.truncate_after(Some(LogId::new(CommittedLeaderId::new(1, 0), 3)))
+            .await
+            .unwrap();
+
+        let remaining = s.try_get_log_entries(0..10).await.unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert_eq!(remaining.last().unwrap().log_id.index, 3);
     }
 }
