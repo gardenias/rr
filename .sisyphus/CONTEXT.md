@@ -5,22 +5,30 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-05-12 (perf analysis + IoBatcher group-commit + SDK reactive/blocking + rr-perf-bench)
-**Current phase**: Performance & SDK hardening — all changes uncommitted (working tree)
+**Last updated**: 2026-05-12 late (A-0006/A-0007/A-0008 implemented; output runner real send loop)
+**Current phase**: ADR follow-through (Phase 4 wrap-up)
 **Active plan**: 无活跃 plan；follow-up 方向见下方"下一步工作"
-**Latest tag**: `v0.2.0-rc1` (main HEAD far ahead, unpushed per user directive)
-**Main branch HEAD**: 31+ commits ahead of `origin/main`（unpushed）
+**Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut.
+**Main branch HEAD**: prior 4 commits unpushed + new A-0006/A-0007/A-0008 work
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`)
 
 ---
 
 ## 项目一句话 / Project One-Liner
 
-rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft 0.9 + tonic gRPC + RocksDB，
-**10 个 crate**（core / storage / config / raft / network / router / server / client / admin /
-**ingestor-kafka 自 v0.3**），**4 个 example**（counter, kv-store, **kv-store-kafka,
-otel-client 自 v0.3**），完整的集成测试 + chaos framework + Docusaurus 文档站
-+ **drop-in Prometheus/Grafana 套件 自 v0.3**。
+rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.19` + tonic gRPC + RocksDB，
+**11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
+**ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
+完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-05-12 (late) — A-0006/A-0007/A-0008 implemented
+
+- **A-0008 配置化**：`rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST` (50_000) + `RaftNode::new_with_factory` / `new_with_rocks_factory` 接受 `snapshot_logs_since_last: u64` 参数；`RaftGroupManager::with_snapshot_logs_since_last` builder；`NodeConfig` 新字段 + builder；CLI `--snapshot-logs-since-last` + env `RR_SNAPSHOT_LOGS_SINCE_LAST` + TOML `[node].snapshot_logs_since_last`；零值拒绝；4 个 config_file 测试 + 1 个 raft_node 测试。
+- **A-0007 OutputRunner 真实实现**：替换 42 行 no-op placeholder 为完整 send loop。新增 `rr_core::output::{KafkaProducer, NoopKafkaProducer}` trait。Output runner 监听 raft 元数据通道实现 leader-only 执行，drain pending_outputs，按 OutputTarget 分发（RaftWrite via RrClient::send_request_idempotent / KafkaPublish via KafkaProducer），成功 advance_output_watermark，失败 exponential backoff（100ms → 30s cap）。`attach_output_runner` 扩展接受 kafka producer 参数。新增 metrics：`rr_output_send_total{group_id,target}` / `rr_output_send_failures_total` / `rr_output_send_duration_seconds` / `rr_output_pending`。5 个新单元测试。
+- **A-0006 状态收尾**：代码自 2026-05-07 已实现且测试齐备，本 session 仅做 ADR status → `implemented` + CHANGELOG 收录 + README banner 更新。
+- **ADR README banner 更新**：从 "proposed designs ... not yet implemented" 改为按 ADR 索引各自状态。A-0001/2/3/4/6/7/8 全部 `implemented`；A-0005/9 仍 `accepted`。
+- **Pre-existing clippy warning fixes**：`tcp_raft_server.rs` 未用 import / `config_file.rs` + `health.rs` uninlined_format_args / `main.rs` field_reassign_with_default。`cargo clippy -p rr-core -p rr-raft -p rr-server --features rocks --all-targets -- -D warnings` clean。
+- **测试通过**：rr-raft (122) / rr-server (92) / rr-core (57) / rr-storage (44) 全绿。
 
 ---
 

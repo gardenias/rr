@@ -7,9 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Post-`v0.2.0` security hardening + Phase 4 Tier 0 docs patches. No release tag yet.
+Post-`v0.2.0` security hardening + Phase 4 Tier 0 docs patches + the three
+accepted-but-pending ADRs (A-0006 / A-0007 / A-0008) landed. No release tag yet.
 
 ### Added
+
+#### Outbox / side-effect delivery (ADR A-0007)
+
+- **`rr_core::output::KafkaProducer` trait + `NoopKafkaProducer` stub**: pluggable
+  Kafka producer abstraction for `OutputTarget::KafkaPublish`. Implementations
+  should set Kafka-side idempotence; the framework guarantees only at-least-once
+  delivery so duplicate publishes may occur on leader transitions.
+- **Real `rr_raft::output_runner` send loop** (replaces v0.3-class no-op
+  placeholder): leader-only background task that drains the per-group outbox
+  via `RaftGroupManager::pending_outputs` → dispatches each `Output` by
+  target type (`OutputTarget::RaftWrite` via `RrClient::send_request_idempotent`,
+  `OutputTarget::KafkaPublish` via the supplied `KafkaProducer`) → on success
+  calls `advance_output_watermark` → on failure logs + exponential backoff
+  (`INITIAL_SEND_BACKOFF = 100ms`, `MAX_SEND_BACKOFF = 30s`). Honors stop
+  signal and openraft metrics-channel leadership changes. Outputs targeting
+  an unconfigured delivery client retry forever (no silent drops).
+- **`RaftGroupManager::attach_output_runner` extended** to accept
+  `Option<Arc<dyn KafkaProducer>>` alongside `Option<Arc<RrClient>>`. Existing
+  call sites adjusted.
+- **New metrics**: `rr_output_send_total{group_id, target}`,
+  `rr_output_send_failures_total{group_id, target}`,
+  `rr_output_send_duration_seconds{group_id, target}` (histogram),
+  `rr_output_pending{group_id}` (gauge).
+- **5 new unit tests** in `output_runner` covering: noop producer error,
+  successful KafkaPublish dispatch, failure propagation, RaftWrite-without-client
+  error, OutputHandle stop semantics.
+
+#### Snapshot strategy (ADR A-0008)
+
+- **`rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST` constant** = 50_000 (ADR-recommended
+  default at 100k ops/s → ~500ms snapshot cadence).
+- **Configurable snapshot trigger**: `RaftNode::new_with_factory` /
+  `new_with_rocks_factory` now accept `snapshot_logs_since_last: u64` (was
+  hardcoded `LogsSinceLast(50_000)`). `RaftGroupManager::with_snapshot_logs_since_last`
+  builder propagates the value to all groups it creates. `NodeConfig` in rr-server
+  exposes the matching field + `with_snapshot_logs_since_last` method.
+- **CLI flag `--snapshot-logs-since-last`** + env `RR_SNAPSHOT_LOGS_SINCE_LAST`
+  + TOML `[node].snapshot_logs_since_last`. Precedence: CLI > env > TOML > default.
+  Zero values are rejected at startup (would disable snapshots).
+- **4 new config_file unit tests** covering: default = framework constant, TOML
+  override, CLI overrides TOML, zero rejection.
+- **1 new raft_node test** verifying the parameter is plumbed all the way into
+  openraft's `Config::snapshot_policy`.
+
+#### Per-CF RocksDB tuning (ADR A-0006)
+
+- *(Already landed in code by 2026-05-07; surfacing in CHANGELOG.)*
+- **`CfOptions` struct** in `rr-storage::rocks` with optional `write_buffer_size_mb`,
+  `block_cache_size_mb`, `compression` per CF.
+- **`RocksConfig.raft_log_cf` / `state_machine_cf`** optional overrides;
+  `metadata` CF intentionally not exposed (defaults always sufficient).
+- **`build_cf_options`** helper merges DB-level defaults with per-CF overrides.
+- Recommended values documented in ADR A-0006 §"Recommended defaults" (NOT
+  hardcoded — operators tune via TOML / programmatic `RocksConfig`).
 
 #### Security
 - **Production safety validation in `RrNode::new`**: refuses to start when any of five gates is violated — RaftService without TLS, RaftService without mTLS, bearer-token auth without TLS, AdminService without TLS, or AdminService without `admin_token`. All violations are aggregated into a single error so operators fix the config in one pass. Closes F2.1 + F2.2 + F2.4 from the F1-F4 review.

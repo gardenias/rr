@@ -1,8 +1,8 @@
 ---
 title: "Snapshot strategy — periodic auto-trigger via openraft SnapshotPolicy"
-status: accepted
+status: implemented
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-12
 tags: [adr, snapshot, performance, reliability]
 ---
 

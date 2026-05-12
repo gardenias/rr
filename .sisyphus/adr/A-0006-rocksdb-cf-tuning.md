@@ -1,8 +1,8 @@
 ---
 title: "Per-CF RocksDB options tuning for rr-storage"
-status: accepted
+status: implemented
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-12
 tags: [adr, architecture, storage, rocksdb, performance]
 ---
 

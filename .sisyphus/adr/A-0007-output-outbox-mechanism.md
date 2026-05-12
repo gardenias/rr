@@ -1,8 +1,8 @@
 ---
 title: "Output/Outbox mechanism for guaranteed side-effect delivery"
-status: accepted
+status: implemented
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-12
 tags: [adr, architecture, output, outbox, reliability, at-least-once]
 ---
 
