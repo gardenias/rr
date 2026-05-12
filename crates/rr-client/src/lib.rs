@@ -81,6 +81,7 @@ impl Default for RetryConfig {
 ///
 /// For dev / loopback use [`RrClient::connect`]. For production deployments
 /// that enable TLS or bearer auth on rr-server, use [`RrClientBuilder`].
+#[derive(Clone)]
 pub struct RrClient {
     bootstrap_addrs: Vec<String>,
     channel_pool: ChannelPool,
@@ -627,6 +628,100 @@ impl RrClient {
             })
         }))
     }
+
+    // ── Blocking interface ────────────────────────────────────────────────────
+
+    /// Blocking write — blocks the calling OS thread until the response
+    /// arrives.  Wraps [`send_request`] via `block_in_place` so it is safe
+    /// to call from within a tokio **multi-thread** runtime without starving
+    /// the scheduler.  Panics if called from a `current_thread` runtime.
+    pub fn send_request_blocking(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RrError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.send_request(group_id, payload))
+        })
+    }
+
+    /// Idempotent blocking write.  See [`send_request_idempotent`] and
+    /// [`send_request_blocking`] for details.
+    pub fn send_request_idempotent_blocking(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+        key: IdempotencyKey,
+    ) -> Result<Vec<u8>, RrError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.send_request_idempotent(group_id, payload, key))
+        })
+    }
+
+    /// Blocking stale read.  See [`read`] and [`send_request_blocking`].
+    pub fn read_blocking(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RrError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.read(group_id, payload))
+        })
+    }
+
+    // ── Reactive interface (callback-driven) ──────────────────────────────────
+
+    /// Reactive write: fires the request and returns immediately.
+    ///
+    /// `callback` is invoked on a tokio worker thread when the response
+    /// (or error) arrives.  The calling context is never blocked.
+    pub fn send_request_reactive<F>(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+        callback: F,
+    ) where
+        F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
+    {
+        let client = self.clone();
+        tokio::spawn(async move {
+            callback(client.send_request(group_id, payload).await);
+        });
+    }
+
+    /// Reactive idempotent write.  See [`send_request_reactive`].
+    pub fn send_request_idempotent_reactive<F>(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+        key: IdempotencyKey,
+        callback: F,
+    ) where
+        F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
+    {
+        let client = self.clone();
+        tokio::spawn(async move {
+            callback(client.send_request_idempotent(group_id, payload, key).await);
+        });
+    }
+
+    /// Reactive stale read.  See [`send_request_reactive`].
+    pub fn read_reactive<F>(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+        callback: F,
+    ) where
+        F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
+    {
+        let client = self.clone();
+        tokio::spawn(async move {
+            callback(client.read(group_id, payload).await);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -864,5 +959,175 @@ mod tests {
             req.metadata().get("authorization").is_none(),
             "authorization header must NOT be present without bearer token"
         );
+    }
+
+    // ── Clone tests ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn clone_shares_leader_cache() {
+        let client = RrClient::connect(vec!["127.0.0.1:9000".to_string()])
+            .await
+            .expect("connect");
+        let clone = client.clone();
+
+        client
+            .update_leader_cache(1, 7, "10.0.0.7:50051".to_string())
+            .await;
+
+        let from_clone = clone.get_cached_leader(1).await;
+        assert!(
+            from_clone.is_some(),
+            "clone shares leader cache via Arc — update on original must be visible"
+        );
+        assert_eq!(from_clone.unwrap().0, 7);
+    }
+
+    #[test]
+    fn clone_preserves_bootstrap_addrs() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = rt
+            .block_on(RrClient::connect(vec![
+                "127.0.0.1:9001".to_string(),
+                "127.0.0.1:9002".to_string(),
+            ]))
+            .expect("connect");
+        let clone = client.clone();
+        assert_eq!(client.bootstrap_addrs(), clone.bootstrap_addrs());
+    }
+
+    // ── Blocking interface tests ───────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_send_returns_error_when_no_server() {
+        let client = RrClient::connect_with_config(
+            vec!["localhost:1".to_string()],
+            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+        )
+        .await
+        .expect("connect");
+
+        let result = client.send_request_blocking(1, b"ping".to_vec());
+        assert!(result.is_err(), "blocking send to unreachable addr must fail");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_read_returns_error_when_no_server() {
+        let client = RrClient::connect_with_config(
+            vec!["localhost:1".to_string()],
+            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+        )
+        .await
+        .expect("connect");
+
+        let result = client.read_blocking(1, b"q".to_vec());
+        assert!(result.is_err(), "blocking read to unreachable addr must fail");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_send_propagates_network_error_kind() {
+        let client = RrClient::connect_with_config(
+            vec!["localhost:1".to_string()],
+            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+        )
+        .await
+        .expect("connect");
+
+        let err = client
+            .send_request_blocking(1, vec![])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("network error") || err.contains("connection"),
+            "expected network error, got: {err}"
+        );
+    }
+
+    // ── Reactive interface tests ───────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reactive_send_fires_callback_on_error() {
+        let client = RrClient::connect_with_config(
+            vec!["localhost:1".to_string()],
+            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+        )
+        .await
+        .expect("connect");
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Vec<u8>, RrError>>();
+        client.send_request_reactive(1, b"ping".to_vec(), move |result| {
+            let _ = tx.send(result);
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rx,
+        )
+        .await
+        .expect("callback must fire within 5s")
+        .expect("oneshot sender must not be dropped");
+
+        assert!(result.is_err(), "reactive send to unreachable addr must fire error callback");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reactive_send_returns_immediately() {
+        let client = RrClient::connect_with_config(
+            vec!["localhost:1".to_string()],
+            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+        )
+        .await
+        .expect("connect");
+
+        let (tx, _rx) = tokio::sync::oneshot::channel::<bool>();
+        let t0 = std::time::Instant::now();
+        client.send_request_reactive(1, b"ping".to_vec(), move |_| {
+            let _ = tx.send(true);
+        });
+        let elapsed = t0.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "send_request_reactive must return immediately (took {elapsed:?})"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reactive_multiple_callbacks_all_fire() {
+        let client = RrClient::connect_with_config(
+            vec!["localhost:1".to_string()],
+            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+        )
+        .await
+        .expect("connect");
+
+        let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let done_tx = Arc::new(std::sync::Mutex::new(Some(done_tx)));
+
+        const N: u32 = 5;
+        for _ in 0..N {
+            let c = count.clone();
+            let dt = done_tx.clone();
+            client.send_request_reactive(1, b"x".to_vec(), move |_| {
+                let prev = c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if prev + 1 == N {
+                    if let Ok(mut guard) = dt.lock() {
+                        if let Some(sender) = guard.take() {
+                            let _ = sender.send(());
+                        }
+                    }
+                }
+            });
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), done_rx)
+            .await
+            .expect("all callbacks must fire within 10s")
+            .expect("oneshot not dropped");
+
+        assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), N);
     }
 }
