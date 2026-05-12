@@ -72,6 +72,14 @@ pub struct ServeArgs {
     #[arg(long = "metrics-port", env = "RR_METRICS_PORT")]
     pub metrics_port: Option<u16>,
 
+    /// Internal Raft transport for AppendEntries/Vote: `grpc` (default) or `tcp`.
+    #[arg(long = "raft-transport", env = "RR_RAFT_TRANSPORT")]
+    pub raft_transport: Option<String>,
+
+    /// TCP port for Raft AppendEntries/Vote when `--raft-transport tcp`.
+    #[arg(long = "raft-tcp-port", env = "RR_RAFT_TCP_PORT")]
+    pub raft_tcp_port: Option<u16>,
+
     /// Bootstrap this node as a single-member cluster (use ONCE per cluster life).
     #[arg(long = "bootstrap", env = "RR_BOOTSTRAP")]
     pub bootstrap: bool,
@@ -181,5 +189,27 @@ mod tests {
     #[test]
     fn clap_cli_definition_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_parses_tcp_raft_transport_flags() {
+        let cli = Cli::try_parse_from([
+            "rr-server",
+            "serve",
+            "--node-id",
+            "1",
+            "--listen-addr",
+            "127.0.0.1:51001",
+            "--raft-transport",
+            "tcp",
+            "--raft-tcp-port",
+            "61001",
+        ])
+        .expect("parse");
+        let Command::Serve(args) = cli.command else {
+            panic!("expected Serve");
+        };
+        assert_eq!(args.raft_transport.as_deref(), Some("tcp"));
+        assert_eq!(args.raft_tcp_port, Some(61001));
     }
 }

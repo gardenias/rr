@@ -42,6 +42,7 @@ pub struct NodeSection {
     pub data_dir: Option<PathBuf>,
     pub admin_port: Option<u16>,
     pub metrics_port: Option<u16>,
+    pub raft_tcp_port: Option<u16>,
     /// DANGEROUS — bypass production security validation. Dev/CI only.
     /// See `NodeConfig::allow_insecure` rustdoc for the full list of
     /// gates that get bypassed.
@@ -60,6 +61,7 @@ pub struct StorageSection {
 pub struct ClusterSection {
     pub bootstrap: Option<bool>,
     pub peers: Option<Vec<String>>,
+    pub raft_transport: Option<String>,
 }
 
 /// `[tls]` section — when present, gRPC runs over TLS.
@@ -114,6 +116,8 @@ pub struct ResolvedConfig {
     pub data_dir: Option<PathBuf>,
     pub admin_port: Option<u16>,
     pub metrics_port: Option<u16>,
+    pub raft_tcp_port: Option<u16>,
+    pub raft_transport: RaftTransportKind,
     pub storage_backend: StorageBackend,
     pub durability: DurabilityChoice,
     pub bootstrap: bool,
@@ -171,6 +175,12 @@ pub enum DurabilityChoice {
     Strict,
     ReplicatedOnly,
     TestOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RaftTransportKind {
+    Grpc,
+    Tcp,
 }
 
 impl ResolvedConfig {
@@ -253,6 +263,36 @@ impl ResolvedConfig {
 
         let admin_port = args.admin_port.or(file.node.admin_port);
         let metrics_port = args.metrics_port.or(file.node.metrics_port);
+        let raft_tcp_port = args.raft_tcp_port.or(file.node.raft_tcp_port);
+
+        let raft_transport = match args
+            .raft_transport
+            .as_deref()
+            .or(file.cluster.raft_transport.as_deref())
+            .unwrap_or("grpc")
+        {
+            "grpc" => RaftTransportKind::Grpc,
+            "tcp" => RaftTransportKind::Tcp,
+            other => {
+                return Err(anyhow!(
+                    "invalid raft transport '{other}': expected 'grpc' or 'tcp'"
+                ))
+            }
+        };
+
+        let raft_tcp_port = if matches!(raft_transport, RaftTransportKind::Tcp)
+            && raft_tcp_port.is_none()
+        {
+            let grpc_port = parse_port_from_addr(&listen_addr)?;
+            Some(grpc_port.checked_add(10_000).ok_or_else(|| {
+                anyhow!(
+                    "failed to derive raft_tcp_port from listen_addr '{}' with default +10000 offset",
+                    listen_addr
+                )
+            })?)
+        } else {
+            raft_tcp_port
+        };
 
         let bootstrap = args.bootstrap || file.cluster.bootstrap.unwrap_or(false);
         let peers = if !args.peers.is_empty() {
@@ -282,6 +322,8 @@ impl ResolvedConfig {
             data_dir,
             admin_port,
             metrics_port,
+            raft_tcp_port,
+            raft_transport,
             storage_backend,
             durability,
             bootstrap,
@@ -371,6 +413,14 @@ fn resolve_tls(args: &ServeArgs, file: &TlsSection) -> Result<Option<ResolvedTls
             }))
         }
     }
+}
+
+fn parse_port_from_addr(addr: &str) -> Result<u16> {
+    let (_, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("listen_addr '{addr}' must include a port"))?;
+    port.parse::<u16>()
+        .with_context(|| format!("listen_addr '{addr}' has invalid port"))
 }
 
 #[cfg(test)]
@@ -611,7 +661,42 @@ mod tests {
         assert!(resolved.peers.is_empty());
         assert_eq!(resolved.metrics_port, None);
         assert_eq!(resolved.admin_port, None);
+        assert_eq!(resolved.raft_tcp_port, None);
+        assert!(matches!(resolved.raft_transport, RaftTransportKind::Grpc));
         assert!(resolved.tls.is_none());
+    }
+
+    #[test]
+    fn raft_transport_tcp_from_cli_derives_default_tcp_port() {
+        let args = ServeArgs {
+            log_level: "info".to_string(),
+            node_id: Some(1),
+            listen_addr: Some("0.0.0.0:51001".to_string()),
+            raft_transport: Some("tcp".to_string()),
+            ..Default::default()
+        };
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(resolved.raft_transport, RaftTransportKind::Tcp));
+        assert_eq!(resolved.raft_tcp_port, Some(61001));
+    }
+
+    #[test]
+    fn raft_transport_tcp_port_from_toml_is_used() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+            raft_tcp_port = 52001
+
+            [cluster]
+            raft_transport = "tcp"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(resolved.raft_transport, RaftTransportKind::Tcp));
+        assert_eq!(resolved.raft_tcp_port, Some(52001));
     }
 
     #[test]

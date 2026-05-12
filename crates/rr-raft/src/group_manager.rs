@@ -22,11 +22,20 @@ use rr_core::state_machine::{
 };
 use rr_core::types::{GroupId, NodeId};
 
-use crate::network_factory::{ChannelPoolLike, GrpcNetworkFactory};
+use crate::network_factory::{ChannelPoolLike, GrpcNetworkFactory, TlsPaths};
 use crate::raft_node::{NoopNetworkFactory, RaftNode};
+use crate::tcp_transport::{TcpConnectionPool, TcpRaftNetworkFactory};
 use crate::type_config::RrTypeConfig;
 /// A factory function type for creating state machine instances per group.
 pub type StateMachineFactory = Box<dyn Fn(GroupId) -> Box<dyn StateMachine> + Send + Sync>;
+
+#[derive(Clone)]
+struct TcpNetworkConfig {
+    tcp_pool: Arc<TcpConnectionPool>,
+    grpc_channel_pool: Arc<dyn ChannelPoolLike>,
+    port_offset: u16,
+    tls: Option<TlsPaths>,
+}
 
 /// All mutable state for a single Raft group, protected by a single Mutex.
 struct GroupState {
@@ -73,6 +82,9 @@ pub struct RaftGroupManager {
     /// multi-node networking.  When `None`, `NoopNetworkFactory` is used
     /// (single-node / test mode).
     channel_pool: Option<Arc<dyn ChannelPoolLike>>,
+    /// When `Some`, new groups are created with `TcpRaftNetworkFactory`
+    /// (AppendEntries/Vote over binary TCP, snapshot over gRPC fallback).
+    tcp_network: Option<TcpNetworkConfig>,
     /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
@@ -89,6 +101,7 @@ impl RaftGroupManager {
             groups: Arc::new(DashMap::new()),
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
+            tcp_network: None,
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -109,6 +122,37 @@ impl RaftGroupManager {
             groups: Arc::new(DashMap::new()),
             sm_factory: Arc::new(sm_factory),
             channel_pool: Some(channel_pool),
+            tcp_network: None,
+            #[cfg(feature = "rocks")]
+            rocks_base_path: None,
+        }
+    }
+
+    /// Create a `RaftGroupManager` backed by TCP transport for append/vote.
+    pub fn new_with_tcp_network(
+        node_id: NodeId,
+        sm_factory: StateMachineFactory,
+        tcp_pool: Arc<TcpConnectionPool>,
+        grpc_channel_pool: Arc<dyn ChannelPoolLike>,
+        port_offset: u16,
+        tls: Option<TlsPaths>,
+    ) -> Self {
+        info!(
+            node_id,
+            port_offset,
+            "creating RaftGroupManager (tcp raft transport mode)"
+        );
+        Self {
+            node_id,
+            groups: Arc::new(DashMap::new()),
+            sm_factory: Arc::new(sm_factory),
+            channel_pool: None,
+            tcp_network: Some(TcpNetworkConfig {
+                tcp_pool,
+                grpc_channel_pool,
+                port_offset,
+                tls,
+            }),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
         }
@@ -126,7 +170,18 @@ impl RaftGroupManager {
         let read = sm.read_handle();
         let outbox = sm.outbox_control();
         let hook = sm.lifecycle_hook();
-        let node = if let Some(pool) = &self.channel_pool {
+        let node = if let Some(tcp_cfg) = &self.tcp_network {
+            let factory = TcpRaftNetworkFactory::new(
+                Arc::clone(&tcp_cfg.tcp_pool),
+                Arc::clone(&tcp_cfg.grpc_channel_pool),
+                group_id,
+                tcp_cfg.port_offset,
+                tcp_cfg.tls.clone(),
+            );
+            RaftNode::new_with_factory(group_id, self.node_id, sm, factory)
+                .await
+                .map_err(|e| RrError::Application(e.to_string()))?
+        } else if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
             RaftNode::new_with_factory(group_id, self.node_id, sm, factory)
                 .await
@@ -894,6 +949,7 @@ impl RaftGroupManager {
             groups: Arc::new(DashMap::new()),
             sm_factory: Arc::new(sm_factory),
             channel_pool: None,
+            tcp_network: None,
             rocks_base_path: Some(base_path),
         }
     }

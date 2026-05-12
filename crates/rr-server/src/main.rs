@@ -18,16 +18,18 @@ use rr_core::storage::StorageEngine;
 use rr_core::types::{NodeAddr, NodeId, PartitionConfig};
 use rr_network::auth::AuthConfig;
 use rr_network::rate_limit::RateLimitConfig;
+use rr_network::tcp_raft_server::TcpRaftServer;
 use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::network_factory::{ChannelPool, ChannelPoolLike, TlsPaths};
+use rr_raft::tcp_transport::TcpConnectionPool;
 use rr_router::router::ShardRouter;
 use rr_server::builtin_service::EchoStateMachine;
 use rr_server::cli::{Cli, Command, ServeArgs};
 use rr_server::config::NodeConfig;
 #[cfg(feature = "rocks")]
 use rr_server::config_file::DurabilityChoice;
-use rr_server::config_file::{ResolvedConfig, ResolvedTls, StorageBackend};
+use rr_server::config_file::{RaftTransportKind, ResolvedConfig, ResolvedTls, StorageBackend};
 use rr_server::dispatch::ClientDispatchImpl;
 use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::node::RrNode;
@@ -72,7 +74,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         "starting rr-server"
     );
 
-    let node = start_node(&cfg)
+    let (node, tcp_raft_handle) = start_node(&cfg)
         .await
         .context("failed to start rr-server")?;
 
@@ -84,6 +86,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     info!(node_id = cfg.node_id, "shutdown signal received");
     node.shutdown().await.context("graceful shutdown failed")?;
+    if let Some(handle) = tcp_raft_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
     info!(node_id = cfg.node_id, "rr-server shut down cleanly");
     Ok(())
 }
@@ -97,30 +103,60 @@ fn init_tracing(filter: &str) {
         .try_init();
 }
 
-async fn start_node(cfg: &ResolvedConfig) -> Result<Arc<RrNode>> {
+async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
     let config_provider = build_config_provider(cfg).await?;
     let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
     let storage = build_storage(cfg)?;
 
     let tls_config = build_tls_config(cfg.tls.as_ref());
-    let pool: Arc<dyn ChannelPoolLike> = match cfg.tls.as_ref() {
-        Some(tls) => Arc::new(ChannelPool::with_tls(TlsPaths {
+    let pool: Arc<dyn ChannelPoolLike> = if let Some(tls) = cfg.tls.as_ref() {
+        Arc::new(ChannelPool::with_tls(TlsPaths {
             cert_path: tls.cert_path.clone(),
             key_path: tls.key_path.clone(),
             ca_path: tls.ca_path.clone(),
             domain_name: tls.domain_name.clone(),
-        })),
-        None => Arc::new(ChannelPool::new()),
+        }))
+    } else {
+        Arc::new(ChannelPool::new())
     };
 
-    let mgr = Arc::new(RaftGroupManager::new_with_network(
-        cfg.node_id,
-        echo_factory(),
-        pool,
-    ));
+    let mgr = match cfg.raft_transport {
+        RaftTransportKind::Grpc => Arc::new(RaftGroupManager::new_with_network(
+            cfg.node_id,
+            echo_factory(),
+            Arc::clone(&pool),
+        )),
+        RaftTransportKind::Tcp => {
+            let tcp_pool = Arc::new(TcpConnectionPool::new(8));
+            let grpc_port = parse_port_from_addr(&cfg.listen_addr)
+                .context("failed to parse gRPC listen_addr port for tcp raft transport")?;
+            let tcp_port = cfg.raft_tcp_port.ok_or_else(|| {
+                anyhow!("raft_tcp_port must be set or derivable when raft_transport=tcp")
+            })?;
+            let port_offset = tcp_port.checked_sub(grpc_port).ok_or_else(|| {
+                anyhow!(
+                    "raft_tcp_port ({tcp_port}) must be >= listen_addr port ({grpc_port}) for offset-based derivation"
+                )
+            })?;
+            Arc::new(RaftGroupManager::new_with_tcp_network(
+                cfg.node_id,
+                echo_factory(),
+                tcp_pool,
+                Arc::clone(&pool),
+                port_offset,
+                cfg.tls.as_ref().map(|tls| TlsPaths {
+                    cert_path: tls.cert_path.clone(),
+                    key_path: tls.key_path.clone(),
+                    ca_path: tls.ca_path.clone(),
+                    domain_name: tls.domain_name.clone(),
+                }),
+            ))
+        }
+    };
 
     let router = Arc::new(ShardRouter::new(Arc::clone(&provider)));
-    let lookup = Arc::new(RaftGroupLookupImpl::new(Arc::clone(&mgr)));
+    let lookup: Arc<dyn rr_network::raft_service::RaftGroupLookup> =
+        Arc::new(RaftGroupLookupImpl::new(Arc::clone(&mgr)));
     let dispatch = Arc::new(ClientDispatchImpl::new(Arc::clone(&mgr), router));
 
     let mut node_config = NodeConfig::new(
@@ -131,7 +167,7 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<Arc<RrNode>> {
         echo_factory(),
     )
     .with_group_manager(Arc::clone(&mgr))
-    .with_raft_lookup(lookup)
+    .with_raft_lookup(Arc::clone(&lookup))
     .with_client_dispatch(dispatch);
 
     if let Some(port) = cfg.admin_port {
@@ -167,11 +203,35 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<Arc<RrNode>> {
     let node = Arc::new(RrNode::new(node_config)?);
     node.start().await?;
 
+    let tcp_raft_handle = if matches!(cfg.raft_transport, RaftTransportKind::Tcp) {
+        let tcp_port = cfg.raft_tcp_port.ok_or_else(|| {
+            anyhow!("raft_tcp_port must be set or derivable when raft_transport=tcp")
+        })?;
+        let tcp_bind_addr = replace_port(&cfg.listen_addr, tcp_port)
+            .context("failed to derive tcp raft bind address")?;
+        let server = TcpRaftServer::bind(&tcp_bind_addr, Arc::clone(&lookup))
+            .await
+            .with_context(|| format!("failed to bind tcp raft server at {tcp_bind_addr}"))?;
+        let local_addr = server.local_addr()?;
+        info!(
+            node_id = cfg.node_id,
+            tcp_raft_addr = %local_addr,
+            "tcp raft server listening"
+        );
+        Some(tokio::spawn(async move {
+            if let Err(e) = server.serve().await {
+                tracing::error!(error = %e, "tcp raft server terminated");
+            }
+        }))
+    } else {
+        None
+    };
+
     if cfg.bootstrap {
         bootstrap_single_member(&node, cfg).await?;
     }
 
-    Ok(node)
+    Ok((node, tcp_raft_handle))
 }
 
 fn build_tls_config(resolved: Option<&ResolvedTls>) -> Option<TlsConfig> {
@@ -311,4 +371,19 @@ async fn wait_for_shutdown_signal() -> Result<()> {
         info!("received Ctrl-C");
     }
     Ok(())
+}
+
+fn parse_port_from_addr(addr: &str) -> Result<u16> {
+    let (_, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("listen addr '{addr}' must include port"))?;
+    port.parse::<u16>()
+        .with_context(|| format!("listen addr '{addr}' has invalid port"))
+}
+
+fn replace_port(addr: &str, new_port: u16) -> Result<String> {
+    let (host, _) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("listen addr '{addr}' must include port"))?;
+    Ok(format!("{host}:{new_port}"))
 }

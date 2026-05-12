@@ -23,6 +23,7 @@ pub mod proto {
 }
 pub mod client_service;
 pub mod raft_service;
+pub mod tcp_raft_server;
 
 pub use audit::{ServiceLabel, AUDIT_TARGET};
 pub use auth::{attach_bearer_token, AuthConfig, BearerInterceptor};
