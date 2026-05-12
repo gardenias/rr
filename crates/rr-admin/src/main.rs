@@ -946,14 +946,116 @@ fn admin_action_outcome<T>(
     }
 }
 
+// ── REPL command model ─────────────────────────────────────────────────────────
+
+/// Parsed REPL command returned by [`parse_repl_line`].
+///
+/// All string fields are owned so the command can be matched and dispatched
+/// without borrowing the original input line.
+#[derive(Debug, PartialEq)]
+enum ReplCommand {
+    Get { key: String },
+    Put { key: String, value: String },
+    Delete { key: String },
+    Status,
+    Members,
+    Help,
+    /// User typed "reconnect" explicitly.
+    Reconnect,
+    /// A known command that requires arguments, but arguments were absent.
+    MissingArg {
+        cmd: &'static str,
+        usage: &'static str,
+    },
+    /// A command that is not recognised.
+    Unknown { cmd: String },
+    /// Empty or whitespace-only input.
+    Empty,
+}
+
+/// Parse a single REPL input line into a [`ReplCommand`].
+///
+/// This function is pure (no I/O) and therefore fully unit-testable without a
+/// running node or a rustyline instance.
+fn parse_repl_line(line: &str) -> ReplCommand {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return ReplCommand::Empty;
+    }
+    // splitn(3) so that "put key value with spaces" treats everything after the
+    // second space as the value, matching the original behaviour.
+    let tokens: Vec<&str> = trimmed.splitn(3, ' ').collect();
+    match tokens[0] {
+        "get" => {
+            if tokens.len() < 2 {
+                ReplCommand::MissingArg {
+                    cmd: "get",
+                    usage: "get <key>",
+                }
+            } else {
+                ReplCommand::Get {
+                    key: tokens[1].to_string(),
+                }
+            }
+        }
+        "put" => {
+            if tokens.len() < 3 {
+                ReplCommand::MissingArg {
+                    cmd: "put",
+                    usage: "put <key> <value>",
+                }
+            } else {
+                ReplCommand::Put {
+                    key: tokens[1].to_string(),
+                    value: tokens[2].to_string(),
+                }
+            }
+        }
+        "delete" => {
+            if tokens.len() < 2 {
+                ReplCommand::MissingArg {
+                    cmd: "delete",
+                    usage: "delete <key>",
+                }
+            } else {
+                ReplCommand::Delete {
+                    key: tokens[1].to_string(),
+                }
+            }
+        }
+        "status" => ReplCommand::Status,
+        "members" => ReplCommand::Members,
+        "help" => ReplCommand::Help,
+        "reconnect" => ReplCommand::Reconnect,
+        other => ReplCommand::Unknown {
+            cmd: other.to_string(),
+        },
+    }
+}
+
+/// Decode a serialised [`KvResponse`] payload (bincode) into an optional
+/// display string.
+///
+/// Returns `Ok(None)` when the key was not present, `Ok(Some(s))` when a
+/// value was found, or an error if the bytes cannot be decoded.
+fn decode_kv_response(bytes: &[u8]) -> anyhow::Result<Option<String>> {
+    let (resp, _): (KvResponse, _) =
+        bincode::serde::decode_from_slice(bytes, standard())?;
+    Ok(resp
+        .value
+        .map(|v| String::from_utf8_lossy(&v).to_string()))
+}
+
+// ── Interactive REPL ───────────────────────────────────────────────────────────
+
 /// Run the interactive REPL.
 ///
-/// 支持 6 个命令：get、put、delete、status、members、help。
+/// 支持 7 个命令：get、put、delete、status、members、help、reconnect。
 /// get/put/delete 使用 kv-store 的 bincode wire 格式。
 ///
 /// ---
 ///
-/// Supports exactly 6 commands: get, put, delete, status, members, help.
+/// Supports 7 commands: get, put, delete, status, members, help, reconnect.
 /// get/put/delete use the kv-store bincode wire format.
 async fn run_repl(addr: &str, group: u64) -> Result<()> {
     let channel = connect(addr).await?;
@@ -997,92 +1099,83 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
             continue;
         }
 
-        let tokens: Vec<&str> = line.splitn(3, ' ').collect();
-        match tokens[0] {
-            "get" => {
-                if tokens.len() < 2 {
-                    println!("Usage: get <key>");
-                    continue;
-                }
-                let req = KvRequest::Get {
-                    key: tokens[1].to_string(),
-                };
+        match parse_repl_line(&line) {
+            ReplCommand::Empty | ReplCommand::Reconnect => {}
+            ReplCommand::MissingArg { usage, .. } => {
+                println!("Usage: {usage}");
+            }
+            ReplCommand::Unknown { cmd } => {
+                println!("Unknown command: '{cmd}'. Type 'help' for available commands.");
+            }
+            ReplCommand::Get { key } => {
+                let req = KvRequest::Get { key };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
-                                            partition_id: group,
-                                            payload,
-                                            idem_key: None,
-                                        })
+                        partition_id: group,
+                        payload,
+                        idem_key: None,
+                    })
                     .await
                 {
                     Ok(resp) => {
                         let inner = resp.into_inner();
                         if inner.success {
-                            match bincode::serde::decode_from_slice::<KvResponse, _>(
-                                &inner.payload,
-                                standard(),
-                            ) {
-                                Ok((kv_resp, _)) => {
-                                    if let Some(v) = kv_resp.value {
-                                        println!("{}", String::from_utf8_lossy(&v));
-                                    } else {
-                                        println!("(nil)");
-                                    }
-                                }
+                            match decode_kv_response(&inner.payload) {
+                                Ok(Some(s)) => println!("{s}"),
+                                Ok(None) => println!("(nil)"),
                                 Err(e) => println!("decode error: {e}"),
                             }
                         } else {
                             println!("Error: request not successful");
                         }
                     }
-                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); }
+                    Err(e) => {
+                        needs_reconnect = true;
+                        println!("RPC error: {e}");
+                    }
                 }
             }
-            "put" => {
-                if tokens.len() < 3 {
-                    println!("Usage: put <key> <value>");
-                    continue;
-                }
+            ReplCommand::Put { key, value } => {
                 let req = KvRequest::Put {
-                    key: tokens[1].to_string(),
-                    value: tokens[2].as_bytes().to_vec(),
+                    key,
+                    value: value.as_bytes().to_vec(),
                 };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
-                                            partition_id: group,
-                                            payload,
-                                            idem_key: None,
-                                        })
+                        partition_id: group,
+                        payload,
+                        idem_key: None,
+                    })
                     .await
                 {
                     Ok(_) => println!("OK"),
-                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
+                    Err(e) => {
+                        needs_reconnect = true;
+                        println!("RPC error: {e}");
+                    }
                 }
             }
-            "delete" => {
-                if tokens.len() < 2 {
-                    println!("Usage: delete <key>");
-                    continue;
-                }
-                let req = KvRequest::Delete {
-                    key: tokens[1].to_string(),
-                };
+            ReplCommand::Delete { key } => {
+                let req = KvRequest::Delete { key };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
                 match kv_client
                     .request(ClientRequest {
-                                            partition_id: group,
-                                            payload,
-                                            idem_key: None,
-                                        })
+                        partition_id: group,
+                        payload,
+                        idem_key: None,
+                    })
                     .await
                 {
                     Ok(_) => println!("OK"),
-                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
+                    Err(e) => {
+                        needs_reconnect = true;
+                        println!("RPC error: {e}");
+                    }
                 }
             }
-            "status" => match admin_client.get_node_status(Empty {}).await {
+            ReplCommand::Status => match admin_client.get_node_status(Empty {}).await {
                 Ok(resp) => {
                     let s = resp.into_inner();
                     println!("node_id    : {}", s.node_id);
@@ -1090,9 +1183,12 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                     println!("group_ids  : {:?}", s.group_ids);
                     println!("uptime_secs: {}", s.uptime_secs);
                 }
-                Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
+                Err(e) => {
+                    needs_reconnect = true;
+                    println!("RPC error: {e}");
+                }
             },
-            "members" => {
+            ReplCommand::Members => {
                 match admin_client
                     .get_group_status(GroupId { group_id: group })
                     .await
@@ -1105,10 +1201,13 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                         println!("last_log_index: {}", s.last_log_index);
                         println!("leader_node_id: {}", s.leader_node_id);
                     }
-                    Err(e) => { needs_reconnect = true; println!("RPC error: {e}"); },
+                    Err(e) => {
+                        needs_reconnect = true;
+                        println!("RPC error: {e}");
+                    }
                 }
             }
-            "help" => {
+            ReplCommand::Help => {
                 println!("Available commands:");
                 println!("  get <key>             — fetch a value");
                 println!("  put <key> <value>     — store a value");
@@ -1117,10 +1216,10 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
                 println!("  members               — show group membership (via admin RPC)");
                 println!("  help                  — show this help");
                 println!();
-                println!("Note: get/put/delete use kv-store wire format (bincode-encoded KvRequest/KvResponse).");
-            }
-            other => {
-                println!("Unknown command: '{other}'. Type 'help' for available commands.");
+                println!(
+                    "Note: get/put/delete use kv-store wire format \
+                     (bincode-encoded KvRequest/KvResponse)."
+                );
             }
         }
     }
@@ -1536,5 +1635,165 @@ mod tests {
         };
         let bytes = bincode::serde::encode_to_vec(&req, standard()).expect("encode");
         assert!(!bytes.is_empty());
+    }
+
+    // ── parse_repl_line tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_repl_empty_line() {
+        assert_eq!(parse_repl_line(""), ReplCommand::Empty);
+        assert_eq!(parse_repl_line("   "), ReplCommand::Empty);
+    }
+
+    #[test]
+    fn test_parse_repl_get() {
+        assert_eq!(
+            parse_repl_line("get mykey"),
+            ReplCommand::Get {
+                key: "mykey".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_repl_get_missing_key() {
+        assert!(matches!(
+            parse_repl_line("get"),
+            ReplCommand::MissingArg { cmd: "get", .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_repl_put() {
+        assert_eq!(
+            parse_repl_line("put k v"),
+            ReplCommand::Put {
+                key: "k".to_string(),
+                value: "v".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_repl_put_value_with_spaces() {
+        assert_eq!(
+            parse_repl_line("put k hello world"),
+            ReplCommand::Put {
+                key: "k".to_string(),
+                value: "hello world".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_repl_put_missing_value() {
+        assert!(matches!(
+            parse_repl_line("put k"),
+            ReplCommand::MissingArg { cmd: "put", .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_repl_put_missing_both() {
+        assert!(matches!(
+            parse_repl_line("put"),
+            ReplCommand::MissingArg { cmd: "put", .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_repl_delete() {
+        assert_eq!(
+            parse_repl_line("delete k"),
+            ReplCommand::Delete {
+                key: "k".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_repl_delete_missing_key() {
+        assert!(matches!(
+            parse_repl_line("delete"),
+            ReplCommand::MissingArg { cmd: "delete", .. }
+        ));
+    }
+
+    #[test]
+    fn test_parse_repl_status() {
+        assert_eq!(parse_repl_line("status"), ReplCommand::Status);
+    }
+
+    #[test]
+    fn test_parse_repl_members() {
+        assert_eq!(parse_repl_line("members"), ReplCommand::Members);
+    }
+
+    #[test]
+    fn test_parse_repl_help() {
+        assert_eq!(parse_repl_line("help"), ReplCommand::Help);
+    }
+
+    #[test]
+    fn test_parse_repl_reconnect() {
+        assert_eq!(parse_repl_line("reconnect"), ReplCommand::Reconnect);
+    }
+
+    #[test]
+    fn test_parse_repl_unknown() {
+        assert_eq!(
+            parse_repl_line("foobar"),
+            ReplCommand::Unknown {
+                cmd: "foobar".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_repl_leading_whitespace_trimmed() {
+        assert_eq!(
+            parse_repl_line("  get mykey"),
+            ReplCommand::Get {
+                key: "mykey".to_string()
+            }
+        );
+    }
+
+    // ── decode_kv_response tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_decode_kv_response_none_value() {
+        let resp = KvResponse { value: None };
+        let bytes = bincode::serde::encode_to_vec(&resp, standard()).unwrap();
+        assert_eq!(decode_kv_response(&bytes).unwrap(), None);
+    }
+
+    #[test]
+    fn test_decode_kv_response_some_value() {
+        let resp = KvResponse {
+            value: Some(b"hello".to_vec()),
+        };
+        let bytes = bincode::serde::encode_to_vec(&resp, standard()).unwrap();
+        assert_eq!(
+            decode_kv_response(&bytes).unwrap(),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_decode_kv_response_utf8_value() {
+        let resp = KvResponse {
+            value: Some("世界".as_bytes().to_vec()),
+        };
+        let bytes = bincode::serde::encode_to_vec(&resp, standard()).unwrap();
+        assert_eq!(
+            decode_kv_response(&bytes).unwrap(),
+            Some("世界".to_string())
+        );
+    }
+
+    #[test]
+    fn test_decode_kv_response_invalid_bytes() {
+        assert!(decode_kv_response(&[0xFF, 0xFF, 0xFF]).is_err());
     }
 }
