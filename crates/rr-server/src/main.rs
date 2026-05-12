@@ -121,11 +121,10 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
     };
 
     let mgr = match cfg.raft_transport {
-        RaftTransportKind::Grpc => Arc::new(RaftGroupManager::new_with_network(
-            cfg.node_id,
-            echo_factory(),
-            Arc::clone(&pool),
-        )),
+        RaftTransportKind::Grpc => Arc::new(
+            RaftGroupManager::new_with_network(cfg.node_id, echo_factory(), Arc::clone(&pool))
+                .with_snapshot_logs_since_last(cfg.snapshot_logs_since_last),
+        ),
         RaftTransportKind::Tcp => {
             let tcp_pool = Arc::new(TcpConnectionPool::new(8));
             let grpc_port = parse_port_from_addr(&cfg.listen_addr)
@@ -138,19 +137,22 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
                     "raft_tcp_port ({tcp_port}) must be >= listen_addr port ({grpc_port}) for offset-based derivation"
                 )
             })?;
-            Arc::new(RaftGroupManager::new_with_tcp_network(
-                cfg.node_id,
-                echo_factory(),
-                tcp_pool,
-                Arc::clone(&pool),
-                port_offset,
-                cfg.tls.as_ref().map(|tls| TlsPaths {
-                    cert_path: tls.cert_path.clone(),
-                    key_path: tls.key_path.clone(),
-                    ca_path: tls.ca_path.clone(),
-                    domain_name: tls.domain_name.clone(),
-                }),
-            ))
+            Arc::new(
+                RaftGroupManager::new_with_tcp_network(
+                    cfg.node_id,
+                    echo_factory(),
+                    tcp_pool,
+                    Arc::clone(&pool),
+                    port_offset,
+                    cfg.tls.as_ref().map(|tls| TlsPaths {
+                        cert_path: tls.cert_path.clone(),
+                        key_path: tls.key_path.clone(),
+                        ca_path: tls.ca_path.clone(),
+                        domain_name: tls.domain_name.clone(),
+                    }),
+                )
+                .with_snapshot_logs_since_last(cfg.snapshot_logs_since_last),
+            )
         }
     };
 
@@ -195,6 +197,8 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
         per_caller_burst: None,
     };
     node_config = node_config.with_rate_limit(rl_config);
+
+    node_config = node_config.with_snapshot_logs_since_last(cfg.snapshot_logs_since_last);
 
     if cfg.allow_insecure {
         node_config = node_config.with_allow_insecure(true);
@@ -287,11 +291,13 @@ fn build_storage(cfg: &ResolvedConfig) -> Result<Arc<dyn StorageEngine>> {
                     .data_dir
                     .as_ref()
                     .ok_or_else(|| anyhow!("rocks backend requires data_dir"))?;
-                let mut rocks_cfg = RocksConfig::default();
-                rocks_cfg.durability = match cfg.durability {
-                    DurabilityChoice::Strict => DurabilityPolicy::Strict,
-                    DurabilityChoice::ReplicatedOnly => DurabilityPolicy::ReplicatedOnly,
-                    DurabilityChoice::TestOnly => DurabilityPolicy::TestOnly,
+                let rocks_cfg = RocksConfig {
+                    durability: match cfg.durability {
+                        DurabilityChoice::Strict => DurabilityPolicy::Strict,
+                        DurabilityChoice::ReplicatedOnly => DurabilityPolicy::ReplicatedOnly,
+                        DurabilityChoice::TestOnly => DurabilityPolicy::TestOnly,
+                    },
+                    ..RocksConfig::default()
                 };
                 let storage = RocksStorage::open(
                     data_dir

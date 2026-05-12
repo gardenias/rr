@@ -43,6 +43,9 @@ pub struct NodeSection {
     pub admin_port: Option<u16>,
     pub metrics_port: Option<u16>,
     pub raft_tcp_port: Option<u16>,
+    /// Openraft `LogsSinceLast(N)` snapshot trigger. Default 50_000.
+    /// See ADR A-0008.
+    pub snapshot_logs_since_last: Option<u64>,
     /// DANGEROUS — bypass production security validation. Dev/CI only.
     /// See `NodeConfig::allow_insecure` rustdoc for the full list of
     /// gates that get bypassed.
@@ -126,6 +129,8 @@ pub struct ResolvedConfig {
     pub tls: Option<ResolvedTls>,
     pub auth: ResolvedAuth,
     pub rate_limit: ResolvedRateLimit,
+    /// Openraft `LogsSinceLast(N)` snapshot trigger. See ADR A-0008.
+    pub snapshot_logs_since_last: u64,
     /// DANGEROUS — see `NodeConfig::allow_insecure`.
     pub allow_insecure: bool,
 }
@@ -286,8 +291,7 @@ impl ResolvedConfig {
             let grpc_port = parse_port_from_addr(&listen_addr)?;
             Some(grpc_port.checked_add(10_000).ok_or_else(|| {
                 anyhow!(
-                    "failed to derive raft_tcp_port from listen_addr '{}' with default +10000 offset",
-                    listen_addr
+                    "failed to derive raft_tcp_port from listen_addr '{listen_addr}' with default +10000 offset"
                 )
             })?)
         } else {
@@ -316,6 +320,16 @@ impl ResolvedConfig {
         };
         let allow_insecure = args.allow_insecure || file.node.allow_insecure.unwrap_or(false);
 
+        let snapshot_logs_since_last = args
+            .snapshot_logs_since_last
+            .or(file.node.snapshot_logs_since_last)
+            .unwrap_or(rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST);
+        if snapshot_logs_since_last == 0 {
+            return Err(anyhow!(
+                "snapshot_logs_since_last must be > 0; got 0 (would disable snapshots)"
+            ));
+        }
+
         Ok(Self {
             node_id,
             listen_addr,
@@ -332,6 +346,7 @@ impl ResolvedConfig {
             tls,
             auth,
             rate_limit,
+            snapshot_logs_since_last,
             allow_insecure,
         })
     }
@@ -550,6 +565,72 @@ mod tests {
         let args = args_with_config(f.path().to_path_buf());
         let resolved = ResolvedConfig::resolve(&args).unwrap();
         assert!(matches!(resolved.durability, DurabilityChoice::TestOnly));
+    }
+
+    #[test]
+    fn snapshot_logs_since_last_default_is_framework_constant() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(
+            resolved.snapshot_logs_since_last,
+            rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST
+        );
+    }
+
+    #[test]
+    fn snapshot_logs_since_last_from_toml() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            snapshot_logs_since_last = 5000
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.snapshot_logs_since_last, 5000);
+    }
+
+    #[test]
+    fn snapshot_logs_since_last_cli_overrides_toml() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            snapshot_logs_since_last = 5000
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.snapshot_logs_since_last = Some(123_456);
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.snapshot_logs_since_last, 123_456);
+    }
+
+    #[test]
+    fn snapshot_logs_since_last_zero_rejected() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            snapshot_logs_since_last = 0
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("must be > 0"),
+            "expected zero-rejection error, got: {err}"
+        );
     }
 
     #[test]

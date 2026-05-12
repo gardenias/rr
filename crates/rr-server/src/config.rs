@@ -67,6 +67,13 @@ pub struct NodeConfig {
     /// rate-limited — throttling Raft RPCs destabilizes consensus.
     /// Defaults to unlimited on every service.
     pub rate_limit_config: RateLimitConfig,
+    /// Openraft `LogsSinceLast(N)` snapshot trigger threshold.
+    /// Default `rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST` (50_000).
+    /// See [ADR A-0008] for the trade-off between snapshot frequency and
+    /// recovery replay length.
+    ///
+    /// [ADR A-0008]: https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0008-snapshot-strategy.md
+    pub snapshot_logs_since_last: u64,
     /// **DANGEROUS — development escape hatch.**
     ///
     /// When `false` (the default), [`RrNode::new`](super::node::RrNode::new)
@@ -122,8 +129,16 @@ impl NodeConfig {
             tls_config: None,
             auth_config: AuthConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
+            snapshot_logs_since_last: rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
             allow_insecure: false,
         }
+    }
+
+    /// Override the openraft `LogsSinceLast(N)` snapshot trigger threshold.
+    /// See [`Self::snapshot_logs_since_last`] for guidance.
+    pub fn with_snapshot_logs_since_last(mut self, n: u64) -> Self {
+        self.snapshot_logs_since_last = n;
+        self
     }
 
     /// Attach a [`RaftGroupLookup`] for inter-node Raft RPCs.

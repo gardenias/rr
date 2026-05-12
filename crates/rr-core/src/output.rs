@@ -1,5 +1,7 @@
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::error::RrError;
 use crate::types::GroupId;
 
 /// Where an Output should be delivered.
@@ -64,5 +66,51 @@ impl HandleResult {
 
     pub fn with_outputs(response: Vec<u8>, outputs: Vec<Output>) -> Self {
         Self { response, outputs }
+    }
+}
+
+/// Producer abstraction for [`OutputTarget::KafkaPublish`] delivery.
+///
+/// The framework's output runner calls [`Self::publish`] for each
+/// `KafkaPublish` output. Implementations should be idempotent at the
+/// Kafka level when possible (e.g. using `enable.idempotence=true` on
+/// the underlying producer), since the rr framework guarantees only
+/// at-least-once delivery — duplicate `publish` calls may occur after
+/// leader transitions or process crashes.
+#[async_trait]
+pub trait KafkaProducer: Send + Sync {
+    /// Publish one message. Returns `Ok(())` only after the broker has
+    /// acknowledged the write; transient errors should be returned so
+    /// the framework can retry with exponential backoff.
+    async fn publish(
+        &self,
+        topic: &str,
+        partition: i32,
+        key: &[u8],
+        payload: &[u8],
+        idempotency_key: &str,
+    ) -> Result<(), RrError>;
+}
+
+/// `KafkaProducer` that always errors — installed when the application
+/// has not wired a real Kafka producer. Output runners surfaced a
+/// `KafkaPublish` target will retry forever against this stub until
+/// the operator either installs a real producer or removes the
+/// `KafkaPublish` outputs from the service.
+pub struct NoopKafkaProducer;
+
+#[async_trait]
+impl KafkaProducer for NoopKafkaProducer {
+    async fn publish(
+        &self,
+        topic: &str,
+        _partition: i32,
+        _key: &[u8],
+        _payload: &[u8],
+        _idempotency_key: &str,
+    ) -> Result<(), RrError> {
+        Err(RrError::Application(format!(
+            "KafkaPublish to topic '{topic}' attempted but no KafkaProducer is configured"
+        )))
     }
 }

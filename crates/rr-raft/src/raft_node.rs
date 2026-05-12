@@ -53,6 +53,7 @@ impl RaftNode {
         node_id: u64,
         state_machine: Box<dyn StateMachine>,
         network_factory: NF,
+        snapshot_logs_since_last: u64,
     ) -> Result<Self, RrError>
     where
         NF: RaftNetworkFactory<RrTypeConfig> + 'static,
@@ -62,7 +63,7 @@ impl RaftNode {
                 heartbeat_interval: 50,
                 election_timeout_min: 150,
                 election_timeout_max: 300,
-                snapshot_policy: SnapshotPolicy::LogsSinceLast(50_000),
+                snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_logs_since_last),
                 ..Default::default()
             }
             .validate()
@@ -91,13 +92,22 @@ impl RaftNode {
     /// Create a new `RaftNode` for single-node clusters using `NoopNetworkFactory`.
     ///
     /// This is a convenience constructor for scenarios where no inter-node networking
-    /// is needed (e.g., single-node clusters or tests).
+    /// is needed (e.g., single-node clusters or tests). Uses the framework default
+    /// snapshot policy (`LogsSinceLast(50_000)`) — for tunable values use
+    /// [`Self::new_with_factory`] directly.
     pub async fn new_single_node(
         group_id: GroupId,
         node_id: u64,
         state_machine: Box<dyn StateMachine>,
     ) -> Result<Self, RrError> {
-        Self::new_with_factory(group_id, node_id, state_machine, NoopNetworkFactory).await
+        Self::new_with_factory(
+            group_id,
+            node_id,
+            state_machine,
+            NoopNetworkFactory,
+            crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
+        )
+        .await
     }
 
     /// Initialize this node as a single-node cluster.
@@ -128,6 +138,7 @@ impl RaftNode {
         state_machine: Box<dyn StateMachine>,
         network_factory: NF,
         rocks_path: &str,
+        snapshot_logs_since_last: u64,
     ) -> Result<Self, RrError>
     where
         NF: RaftNetworkFactory<RrTypeConfig> + 'static,
@@ -137,7 +148,7 @@ impl RaftNode {
                 heartbeat_interval: 50,
                 election_timeout_min: 150,
                 election_timeout_max: 300,
-                snapshot_policy: SnapshotPolicy::LogsSinceLast(50_000),
+                snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_logs_since_last),
                 ..Default::default()
             }
             .validate()
@@ -290,9 +301,15 @@ mod tests {
     #[tokio::test]
     async fn test_raft_node_accepts_noop_factory() {
         let (sm, _applied) = TestSM::new();
-        let node = RaftNode::new_with_factory(1, 1, Box::new(sm), NoopNetworkFactory)
-            .await
-            .unwrap();
+        let node = RaftNode::new_with_factory(
+            1,
+            1,
+            Box::new(sm),
+            NoopNetworkFactory,
+            crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
+        )
+        .await
+        .unwrap();
         assert_eq!(node.group_id, 1);
     }
 
@@ -301,9 +318,26 @@ mod tests {
         let (sm, _applied) = TestSM::new();
         // Verify we can pass a custom factory implementation
         // For now, we reuse NoopNetworkFactory as both the injected and expected factory
-        let node = RaftNode::new_with_factory(2, 2, Box::new(sm), NoopNetworkFactory)
+        let node = RaftNode::new_with_factory(
+            2,
+            2,
+            Box::new(sm),
+            NoopNetworkFactory,
+            crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
+        )
+        .await
+        .unwrap();
+        assert_eq!(node.group_id, 2);
+    }
+
+    #[tokio::test]
+    async fn test_raft_node_accepts_custom_snapshot_policy() {
+        let (sm, _applied) = TestSM::new();
+        // 100 logs since last — verifies the parameter is plumbed all the way
+        // into openraft's `Config::snapshot_policy`.
+        let node = RaftNode::new_with_factory(3, 3, Box::new(sm), NoopNetworkFactory, 100)
             .await
             .unwrap();
-        assert_eq!(node.group_id, 2);
+        assert_eq!(node.group_id, 3);
     }
 }

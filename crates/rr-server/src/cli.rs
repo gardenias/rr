@@ -130,6 +130,13 @@ pub struct ServeArgs {
     #[arg(long = "rate-limit-burst", env = "RR_RATE_LIMIT_BURST")]
     pub rate_limit_burst: Option<u32>,
 
+    /// Openraft `LogsSinceLast(N)` snapshot trigger threshold. Default 50_000.
+    /// Lower values → more frequent snapshots, shorter recovery replay.
+    /// Higher values → fewer snapshots, longer recovery replay.
+    /// See ADR A-0008 for the trade-off table.
+    #[arg(long = "snapshot-logs-since-last", env = "RR_SNAPSHOT_LOGS_SINCE_LAST")]
+    pub snapshot_logs_since_last: Option<u64>,
+
     /// DANGEROUS — bypass production security gates (no TLS / no mTLS / no
     /// admin_token). Intended only for local dev, examples, and CI.
     /// Enabling this also emits a startup warning and sets the Prometheus

@@ -88,6 +88,7 @@ pub struct RaftGroupManager {
     /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
+    snapshot_logs_since_last: u64,
 }
 
 impl RaftGroupManager {
@@ -104,6 +105,7 @@ impl RaftGroupManager {
             tcp_network: None,
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
+            snapshot_logs_since_last: crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
         }
     }
 
@@ -125,6 +127,7 @@ impl RaftGroupManager {
             tcp_network: None,
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
+            snapshot_logs_since_last: crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
         }
     }
 
@@ -155,7 +158,15 @@ impl RaftGroupManager {
             }),
             #[cfg(feature = "rocks")]
             rocks_base_path: None,
+            snapshot_logs_since_last: crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
         }
+    }
+
+    /// Override the openraft `LogsSinceLast(N)` snapshot trigger threshold.
+    /// See [`crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST`] and ADR A-0008.
+    pub fn with_snapshot_logs_since_last(mut self, n: u64) -> Self {
+        self.snapshot_logs_since_last = n;
+        self
     }
 
     /// Start a new Raft group on this node.
@@ -178,18 +189,36 @@ impl RaftGroupManager {
                 tcp_cfg.port_offset,
                 tcp_cfg.tls.clone(),
             );
-            RaftNode::new_with_factory(group_id, self.node_id, sm, factory)
-                .await
-                .map_err(|e| RrError::Application(e.to_string()))?
+            RaftNode::new_with_factory(
+                group_id,
+                self.node_id,
+                sm,
+                factory,
+                self.snapshot_logs_since_last,
+            )
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?
         } else if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
-            RaftNode::new_with_factory(group_id, self.node_id, sm, factory)
-                .await
-                .map_err(|e| RrError::Application(e.to_string()))?
+            RaftNode::new_with_factory(
+                group_id,
+                self.node_id,
+                sm,
+                factory,
+                self.snapshot_logs_since_last,
+            )
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?
         } else {
-            RaftNode::new_with_factory(group_id, self.node_id, sm, NoopNetworkFactory)
-                .await
-                .map_err(|e| RrError::Application(e.to_string()))?
+            RaftNode::new_with_factory(
+                group_id,
+                self.node_id,
+                sm,
+                NoopNetworkFactory,
+                self.snapshot_logs_since_last,
+            )
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?
         };
         self.register_node(group_id, node, ctrl, read, outbox, hook)
             .await
@@ -506,11 +535,18 @@ impl RaftGroupManager {
 
     /// Attach an output runner for `group_id`.
     ///
-    /// The runner is leader-driven and retries outputs indefinitely.
+    /// The runner is leader-driven and retries outputs indefinitely with
+    /// exponential backoff (see [ADR A-0007]). Provide at least one of
+    /// `rr_client` (for `OutputTarget::RaftWrite`) or `kafka_producer`
+    /// (for `OutputTarget::KafkaPublish`); outputs targeting an unconfigured
+    /// delivery client will retry forever until the operator wires one in.
+    ///
+    /// [ADR A-0007]: https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0007-output-outbox-mechanism.md
     pub async fn attach_output_runner(
         self: &Arc<Self>,
         group_id: GroupId,
         rr_client: Option<Arc<rr_client::RrClient>>,
+        kafka_producer: Option<Arc<dyn rr_core::output::KafkaProducer>>,
     ) -> Result<(), RrError> {
         let state = self
             .groups
@@ -523,7 +559,8 @@ impl RaftGroupManager {
                 "output runner already attached to group {group_id}"
             )));
         }
-        let handle = crate::output_runner::spawn(self.clone(), group_id, rr_client);
+        let handle =
+            crate::output_runner::spawn(self.clone(), group_id, rr_client, kafka_producer);
         guard.output_handle = Some(handle);
         info!(group_id, "attached output runner");
         Ok(())
@@ -951,6 +988,7 @@ impl RaftGroupManager {
             channel_pool: None,
             tcp_network: None,
             rocks_base_path: Some(base_path),
+            snapshot_logs_since_last: crate::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
         }
     }
 
@@ -970,10 +1008,16 @@ impl RaftGroupManager {
         let read = sm.read_handle();
         let outbox = sm.outbox_control();
         let hook = sm.lifecycle_hook();
-        let node =
-            RaftNode::new_with_rocks_factory(group_id, self.node_id, sm, NoopNetworkFactory, &path)
-                .await
-                .map_err(|e| RrError::Application(e.to_string()))?;
+        let node = RaftNode::new_with_rocks_factory(
+            group_id,
+            self.node_id,
+            sm,
+            NoopNetworkFactory,
+            &path,
+            self.snapshot_logs_since_last,
+        )
+        .await
+        .map_err(|e| RrError::Application(e.to_string()))?;
         self.register_node(group_id, node, ctrl, read, outbox, hook)
             .await
     }

@@ -2,6 +2,14 @@
 //!
 //! Part of the `rr` distributed framework.
 
+/// Default value for openraft's [`openraft::SnapshotPolicy::LogsSinceLast`].
+///
+/// At 100k ops/s this triggers a snapshot roughly every 500ms — see
+/// [ADR A-0008](../../../.sisyphus/adr/A-0008-snapshot-strategy.md) for the
+/// trade-off table between snapshot frequency and recovery replay length.
+/// Override per node via `NodeConfig::snapshot_logs_since_last`.
+pub const DEFAULT_SNAPSHOT_LOGS_SINCE_LAST: u64 = 50_000;
+
 pub mod group_manager;
 pub mod idempotency;
 pub mod ingestor_runner;
