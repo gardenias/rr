@@ -5,11 +5,11 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-05-08 (framework deep review + quality hardening + openraft 0.10 + follower read)
-**Current phase**: Quality Hardening complete; next = P2 clean-up or feature work
-**Active plan**: `.sisyphus/plans/rr-quality-hardening.md`（P0/P1/P2/P3 全部完成）
+**Last updated**: 2026-05-12 (perf analysis + IoBatcher group-commit + SDK reactive/blocking + rr-perf-bench)
+**Current phase**: Performance & SDK hardening — all changes uncommitted (working tree)
+**Active plan**: 无活跃 plan；follow-up 方向见下方"下一步工作"
 **Latest tag**: `v0.2.0-rc1` (main HEAD far ahead, unpushed per user directive)
-**Main branch HEAD**: 31 commits ahead of `origin/main`（unpushed）
+**Main branch HEAD**: 31+ commits ahead of `origin/main`（unpushed）
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`)
 
 ---
@@ -25,6 +25,68 @@ otel-client 自 v0.3**），完整的集成测试 + chaos framework + Docusaurus
 ---
 
 ## 已完成的工作 / Completed Work
+
+### Session 2026-05-12 — 性能分析 + IoBatcher + SDK reactive/blocking + rr-perf-bench
+
+**代码质量 — REPL 可测试化**（`crates/rr-admin/src/main.rs`）：
+- 从 `run_repl` 提取 `parse_repl_line(&str) -> ReplCommand` 和 `decode_kv_response(&[u8]) -> Result<Option<String>>`
+- +19 个单元测试（69/69 全绿）
+- 覆盖率：rr-admin REPL 从 ~15% 提升
+
+**IoBatcher — Raft log group commit 引擎**（`crates/rr-raft/src/io_batcher.rs`，新文件）：
+- 实现 per-group 异步 IO batcher，多提案共享单次 write_batch + fdatasync
+- 三阶段积累：Phase2 try_recv 零等待 drain / Phase3 500µs 窗口 / Phase4 单次写入
+- `RocksLogStorage::append()` 改为真正异步（channel 投递立即返回，callback 异步触发）
+- 开放 API：`IoBatcherConfig::default/no_batching/new()`，`RocksLogStorage::open_with_config()`
+- 新增 5 个 batcher 专项测试 + `log_append_batched` benchmark（26% 提升实测）
+- 修复预存 bug：`crates/rr-server/src/node.rs` `PrometheusBuilder::build()` → `build_recorder()`
+  （原实现会启动内置 HTTP server，多进程并发启动时端口冲突导致 node 2/3 崩溃）
+
+**新 benchmark 文件**（`benches/benches/`，4 个新文件）：
+- `framing_roundtrip.rs`：FramedEntry encode/decode 各 payload size
+- `idempotency_throughput.rs`：IdempotencyLayer decide+record 吞吐
+- `log_append_batched.rs`：group commit vs sequential 对比
+- `log_tps.rs`：TPS 直接测量（serial blocking / reactive pipeline）
+
+**Rust SDK — 阻塞 + 响应式接口**（`crates/rr-client/src/lib.rs`）：
+- `#[derive(Clone)]` to `RrClient`（所有字段 Arc-backed，clone 共享 leader cache）
+- 阻塞接口：`send_request_blocking / send_request_idempotent_blocking / read_blocking`
+  → `tokio::task::block_in_place` + `block_on`，需多线程 runtime
+- 响应式接口：`send_request_reactive / send_request_idempotent_reactive / read_reactive`
+  → `tokio::spawn` 内部 await，callback 在 tokio worker thread 触发，调用方立刻返回
+- 新增 10 个测试（23 总，全绿）：Clone 共享状态 / 阻塞失败路径 / reactive 立即返回 / 多 callback 全触发
+
+**Java SDK — 真响应式重构**（`sdks/java/src/main/java/.../RrClient.java`）：
+- 原实现：`CompletableFuture.supplyAsync(() -> blockingCall)` = 假异步（线程被占用）
+- 新实现：`ClientServiceGrpc.newFutureStub()` + `ListenableFuture` → `CompletableFuture`
+  → Netty event loop 驱动 I/O，无线程在 gRPC 等待期间被占用
+- 异步 retry 链：递归 `sendRequestAsync` via `thenCompose` + `exceptionallyCompose`
+- 非阻塞 backoff：`CompletableFuture.delayedExecutor()`（不用 `Thread.sleep`）
+- 公开阻塞接口：`sendRequestSync / readSync / getClusterInfoSync` → `blockOn(future.get())`
+- 新增 `sdks/java/src/test/.../RrClientTest.java`：11 个测试（21 总，全绿）
+  验证：阻塞接口抛 RrClientException / reactive 立即返回 / callback 触发 / 调用线程不阻塞
+
+**rr-perf-bench — 3 进程集成性能测试工具**（`tools/rr-perf-bench/`，新 crate）：
+- 4 个源文件：`cluster.rs / metrics.rs / workload.rs / report.rs / main.rs`
+- 启动 3 个 rr-server 进程，bootstrap 3-node cluster，用 rr-admin CLI 注册节点
+- S1：`send_request_blocking()` — 串行阻塞，测最低延迟基线
+- S2：`send_request_reactive()` + Semaphore — pipeline_depth 个请求始终 in-flight，响应驱动
+- HDR Histogram 延迟采集，table 输出 TPS / p50 / p95 / p99 / p999 / Errors
+- CLI：`--scenario / --storage / --durability / --payload / --concurrency / --warmup-secs / --duration-secs`
+
+**实测性能数据**（debug build，3 进程 localhost，RocksDB）：
+- S1 串行（Strict）：~568 TPS，p50=1.4ms（bottleneck：debug build CPU + gRPC RTT，非 fsync）
+- S2 reactive（ReplicatedOnly，depth=100）：~485 TPS，p99=720ms（server 侧饱和）
+- 三种 durability 几乎相同（< 2% 差异）→ debug build 下 CPU 是瓶颈，非 storage
+- release build 预估：2k-5k TPS（serial）；高并发 IoBatcher 后 50k+ TPS
+
+**关键发现（写入链路分析）**：
+- `append()` 之前 blocking await：RaftCore task 被卡，openraft pipeline 失效
+- `IoBatcher` 修复后：append 异步，多提案可同时 in-flight，group commit 生效
+- Java SDK 原 "假响应式"根因：`newBlockingV2Stub` 线程占用全程
+- 真响应式必须用 `newFutureStub` 把 I/O 交给 Netty
+
+---
 
 ### Session 2026-05-08 — Framework Review + Quality Hardening + openraft 0.10 + Follower Read
 
@@ -563,18 +625,12 @@ Theme C 测试加固) + Oracle review P0/P1/P2 跟进 — 全部 implemented，�
   block_cache_size / write_buffer。
 - **rr-client / rr-core / rr-network 的 workspace 级 publish metadata 补齐** —— 当前 rr-client 自身 metadata 已齐，但 path-deps 缺 version，`cargo publish` 阻塞。等用户决定整体发版时一起做。
 
-### 覆盖率维度的后续（基于最新的报告）
+### 覆盖率维度的后续（2026-05-12 更新）
 
-- **删除 vestigial stubs**（0% 覆盖的死代码）：
-  - `rr-network/src/client.rs`（11 行）— `RrGrpcClient::connect` 没被调用
-  - `rr-network/src/server.rs`（9 行）— `RrGrpcServer` 未使用
-- **补 `rr-server/src/health.rs` 集成测试**（当前 23.6%）— spawn node，
-  curl /health /ready /metrics，验证 200/503 + body。可一次拉到 90%+。
-- **修 CI 覆盖率命令** — `.github/workflows/ci.yml` 的 coverage job 用
-  `cargo llvm-cov --workspace --lcov` 没带 `--features rr-storage/rocks`，
-  Codecov 里 RocksDB 路径完全缺失。一行改。
-- **补 rr-admin REPL 测试**（当前 15.2%）— 或者把 REPL 拆到单独 module
-  更容易 mock。
+- ✅ **删除 vestigial stubs** — `rr-network/src/client.rs` + `server.rs` 文件不存在（已在早期 session 删除）
+- ✅ **health.rs 集成测试** — 已有 17 个测试含 6 个真实 HTTP server 测试（见 health.rs）
+- ✅ **CI coverage `--features rr-storage/rocks`** — ci.yml line 171 已有
+- ✅ **rr-admin REPL 测试** — 2026-05-12 提取 `parse_repl_line` + `decode_kv_response`，新增 19 个测试，覆盖率从 15% 提升
 
 ### 已知跨 session 的待办（非本 session 引入）
 
@@ -587,13 +643,26 @@ Theme C 测试加固) + Oracle review P0/P1/P2 跟进 — 全部 implemented，�
 
 ## 下一步工作 / Next Session's Candidate Work
 
-**所有规划框架功能已完成**。剩下的是用户决定何时进行版本管理 / 发布
-（明确暂不处理，见前述 user directive 2026-04-26）。
+**2026-05-12 更新**：本 session 专注于性能分析、IoBatcher group commit、SDK 响应式/阻塞接口、rr-perf-bench。所有变更在工作树（未 commit）。
 
-**可选 follow-up（按用户指示再启动）**:
-- P2-6 `rr-admin reset-ingestor-offset` CLI（Oracle review 唯一 deferred 项；2026-04-27 user 跳过本轮）
-- 多语言 client SDK Go / Python（Java + Rust 已于 2026-04-27 完成）
-- workspace 级发版准备：rr-core / rr-network / rr-client / rr-config / rr-config-etcd / rr-admin 全 crate publish metadata + 版本统一
+**性能方向（按优先级）**:
+1. **release build 压测** — 当前数字全是 debug build（CPU 瓶颈），release 会有 3-5× 提升
+2. **IoBatcher 实际效果验证** — 需要真正并发提案才能体现 group commit（可用 rr-perf-bench S2 reactive 模式）
+3. **WAL log storage** 替换 RocksDB log（raft-wal 或自实现顺序文件，去掉 LSM overhead）
+4. **ReplicatedOnly 生产建议** — 3 副本下去掉 per-write fsync，100k+ TPS 可达
+
+**SDK 方向**:
+- Java SDK 测试：`./gradlew test` 21 个全绿；reactive 接口用 `newFutureStub` 真异步（已实现）
+- 可选：Rust SDK `send_request_with_partition` 等其余方法补 blocking/reactive 变体
+
+**代码质量**:
+- 所有变更未 commit（工作树状态），需要用户触发 commit
+- rr-admin REPL 测试 ✅ / 4 个新 benchmark 文件 ✅ / IoBatcher ✅ / SDK 两侧 ✅
+
+**可选 follow-up（原有，未变化）**:
+- P2-6 `rr-admin reset-ingestor-offset` CLI（defer）
+- 多语言 client SDK Go / Python（Java + Rust 已完成）
+- workspace 级发版准备
 
 ---
 
@@ -628,6 +697,15 @@ cross-partition transactions、partition split/merge 等。
 ---
 
 ## 常见陷阱 / Common Pitfalls (Lessons Learned This Phase)
+
+### 性能 / SDK 陷阱（2026-05-12）
+
+- **`PrometheusBuilder::build()` 启动内置 HTTP server（默认端口 9000）**：`rr-server/node.rs` 原来用 `build()` 而非 `build_recorder()`，导致多进程并发启动时端口冲突，第 2/3 个节点崩溃。修复：改用 `build_recorder()`（只创建 recorder，不启动 HTTP）。
+- **`RocksLogStorage::append()` blocking await 让 openraft pipeline 失效**：原实现 `self.storage.write_batch(ops).await?` 阻塞等 fsync，RaftCore task 被卡住，无法处理下一个提案。修复：IoBatcher channel + 异步 callback，RaftCore 立即返回。
+- **Java CompletableFuture.supplyAsync(() -> blockingCall) 是假响应式**：只是把阻塞移到 ForkJoinPool 线程，线程仍然被 I/O 占满。真响应式必须用 `newFutureStub()` 让 Netty event loop 处理 I/O。
+- **debug build 下 fsync 不是瓶颈**：三种 durability（Strict/ReplicatedOnly/TestOnly）TPS 差异 < 2%，因为 CPU/序列化开销远大于 fsync。真实生产数字必须用 release build 测量。
+- **rr-perf-bench 进程泄漏 → 端口冲突**：`Cluster::start()` 失败时 `RocksLogStorage` drop 不杀子进程。修复：实现 `Drop for Cluster`，调用 `child.start_kill()` 清理所有子进程。
+- **RrClient 阻塞方法需 multi-thread runtime**：`send_request_blocking` 用 `block_in_place`，在 `current_thread` runtime 下会 panic。测试必须用 `#[tokio::test(flavor = "multi_thread")]`。
 
 ### OpenRaft 契约纠错（2026-04-24 sourcecheck，commit `30dc1f0c`）
 
@@ -788,10 +866,20 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 - `crates/rr-raft/src/group_manager.rs` — Multi-Raft 核心
 - `crates/rr-network/src/{auth,tls,rate_limit,tracing}.rs` — 安全/可观测性中间件
 - `crates/rr-admin/src/backup.rs` — 备份/恢复
-- `crates/rr-client/src/lib.rs` — Rust client SDK（Builder + TLS + bearer auth + retry + idempotency, 2026-04-27 polished）
+- `crates/rr-client/src/lib.rs` — Rust client SDK（blocking + reactive 接口，Clone，23 tests，2026-05-12）
+- `crates/rr-raft/src/io_batcher.rs` — IoBatcher group commit 引擎（2026-05-12 新增）
+- `crates/rr-raft/src/rocks_log_storage.rs` — 真异步 append + IoBatcherConfig（2026-05-12）
+- `crates/rr-admin/src/main.rs` — REPL 可测试化：parse_repl_line / decode_kv_response（2026-05-12）
 - `crates/rr-config-etcd/src/lib.rs` — etcd-backed ConfigProvider, read-only, ADR A-0004 schema (2026-04-27)
-- `sdks/java/src/main/java/io/github/gardenias/rr/client/` — Java SDK, JDK 17, Gradle Kotlin DSL, lightweight deps (2026-04-27)
+- `sdks/java/src/main/java/io/github/gardenias/rr/client/RrClient.java` — 真响应式（newFutureStub）+ blocking API，21 tests（2026-05-12）
+- `tools/rr-perf-bench/src/` — 3 进程集成性能测试工具（2026-05-12 新增）
 - `deploy/observability/{grafana,prometheus}/` — 12 panels / 10 rules / 9 alerts (2026-04-27 polish)
+
+### 性能 benchmark 文件（2026-05-12 新增）
+- `benches/benches/framing_roundtrip.rs` — FramedEntry encode/decode
+- `benches/benches/idempotency_throughput.rs` — IdempotencyLayer 吞吐
+- `benches/benches/log_append_batched.rs` — group commit vs sequential
+- `benches/benches/log_tps.rs` — TPS 直接测量
 
 ### 本次 session 的计划
 - `.sisyphus/plans/rr-phase3-prodready.md` — Phase 3 完整 roadmap（~30 任务 × 5 wave）
