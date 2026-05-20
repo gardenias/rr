@@ -1,8 +1,8 @@
 ---
 title: "Read/write RPC separation and state machine locking model"
-status: accepted
+status: implemented
 created: 2026-05-09
-updated: 2026-05-09
+updated: 2026-05-13
 tags: [adr, architecture, read, write, locking, safety]
 ---
 
@@ -165,3 +165,5 @@ async fn restore(&mut self, data: &[u8]);                  // &mut self
 | Date | Change |
 |------|--------|
 | 2026-05-09 | Initial: boolean flag → separate RPC; document locking model |
+| 2026-05-13 | Status → `implemented`. `ClientService.Request` (write) and `ClientService.ReadLocal` (stale read) already shipped separately with the `read_only` flag removed from `ClientRequest`; the `Arc<TokioRwLock<S>>` locking model in `ServiceStateMachineAdapter` is already in place. This session adds the missing **linearizable read** wire-up: new `ClientService.ReadLinearizable` RPC (re-uses `ReadLocalRequest` / `ReadLocalResponse`), `ClientDispatch::submit_linearizable_read` trait method + production impl that calls `RaftGroupManager::linearizable_read` (existing openraft `ReadPolicy::ReadIndex` + `await_ready` plumbing), and SDK methods `RrClient::read_linearizable` / `read_linearizable_blocking` / `read_linearizable_reactive`. Two new RPC-handler unit tests assert that `ReadLocal` and `ReadLinearizable` route to the correct dispatch methods. |
+| 2026-05-13 | **Follower-redirect fix** (Oracle review). Initial wire-up dropped openraft `LinearizableReadError::ForwardToLeader` on the floor — non-leader replicas would error instead of redirecting. Fixed by: (1) extending `RaftError::NotLeader` with `leader_addr: Option<String>`; (2) `RaftGroupManager::linearizable_read` now pattern-matches the openraft error and returns `NotLeader { leader, leader_addr }` populated from `ForwardToLeader.leader_node.addr`; (3) `ReadLocalResponse` proto gains `optional LeaderInfo leader_info = 2` (wire-additive); (4) `ClientDispatch::submit_linearizable_read` return type changed to `LinearizableReadResult { payload, leader_node_id, leader_addr }`; (5) `RrClient::read_linearizable` honours `leader_info` redirects by dialing the indicated leader on the next retry attempt. New unit test `test_read_linearizable_surfaces_leader_redirect_to_proto` validates the follower-dispatch → proto-redirect plumbing. **Outstanding**: a 3-node integration test calling `read_linearizable` against a known follower (Oracle's P1) is not in this change. Status remains `implemented` because the code path is now structurally correct and unit-covered; the integration gap is tracked as a follow-up. |

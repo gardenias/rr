@@ -103,12 +103,21 @@ pub struct AuthSection {
 /// `[rate_limit]` section — per-service rate limits. RaftService is
 /// intentionally not configurable: throttling Raft destabilizes
 /// consensus.
+///
+/// Per-caller fields (`per_caller_*`) enable exclusive-mode per-caller
+/// limits keyed on the bearer-token fingerprint. When set, each
+/// authenticated caller gets its own token bucket and the matching
+/// global `admin_rps`/`client_rps` is ignored. Unauthenticated requests
+/// fall through to the global bucket. See ADR A-0005.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitSection {
     pub admin_rps: Option<u32>,
     pub client_rps: Option<u32>,
     pub burst: Option<u32>,
+    pub per_caller_admin_rps: Option<u32>,
+    pub per_caller_client_rps: Option<u32>,
+    pub per_caller_burst: Option<u32>,
 }
 
 /// Fully-resolved configuration after merging file + CLI + defaults.
@@ -136,11 +145,18 @@ pub struct ResolvedConfig {
 }
 
 /// Resolved rate-limit settings. All fields default to `None` = unlimited.
+///
+/// Per-caller fields (`per_caller_*`), when set, switch the matching
+/// service into exclusive per-caller mode (one token bucket per
+/// authenticated caller). See ADR A-0005.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedRateLimit {
     pub admin_rps: Option<u32>,
     pub client_rps: Option<u32>,
     pub burst: Option<u32>,
+    pub per_caller_admin_rps: Option<u32>,
+    pub per_caller_client_rps: Option<u32>,
+    pub per_caller_burst: Option<u32>,
 }
 
 /// Resolved bearer-token auth settings.
@@ -317,6 +333,15 @@ impl ResolvedConfig {
             admin_rps: args.admin_rps.or(file.rate_limit.admin_rps),
             client_rps: args.client_rps.or(file.rate_limit.client_rps),
             burst: args.rate_limit_burst.or(file.rate_limit.burst),
+            per_caller_admin_rps: args
+                .per_caller_admin_rps
+                .or(file.rate_limit.per_caller_admin_rps),
+            per_caller_client_rps: args
+                .per_caller_client_rps
+                .or(file.rate_limit.per_caller_client_rps),
+            per_caller_burst: args
+                .per_caller_burst
+                .or(file.rate_limit.per_caller_burst),
         };
         let allow_insecure = args.allow_insecure || file.node.allow_insecure.unwrap_or(false);
 
@@ -597,6 +622,71 @@ mod tests {
         let args = args_with_config(f.path().to_path_buf());
         let resolved = ResolvedConfig::resolve(&args).unwrap();
         assert_eq!(resolved.snapshot_logs_since_last, 5000);
+    }
+
+    #[test]
+    fn per_caller_rate_limit_from_toml_propagates_to_resolved() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [rate_limit]
+            admin_rps = 50
+            client_rps = 200
+            per_caller_admin_rps = 5
+            per_caller_client_rps = 20
+            per_caller_burst = 10
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.rate_limit.admin_rps, Some(50));
+        assert_eq!(resolved.rate_limit.client_rps, Some(200));
+        assert_eq!(resolved.rate_limit.per_caller_admin_rps, Some(5));
+        assert_eq!(resolved.rate_limit.per_caller_client_rps, Some(20));
+        assert_eq!(resolved.rate_limit.per_caller_burst, Some(10));
+    }
+
+    #[test]
+    fn per_caller_rate_limit_cli_overrides_toml() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [rate_limit]
+            per_caller_admin_rps = 5
+            per_caller_client_rps = 20
+            per_caller_burst = 10
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.per_caller_admin_rps = Some(99);
+        args.per_caller_client_rps = Some(199);
+        args.per_caller_burst = Some(50);
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.rate_limit.per_caller_admin_rps, Some(99));
+        assert_eq!(resolved.rate_limit.per_caller_client_rps, Some(199));
+        assert_eq!(resolved.rate_limit.per_caller_burst, Some(50));
+    }
+
+    #[test]
+    fn per_caller_rate_limit_defaults_to_none() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(resolved.rate_limit.per_caller_admin_rps.is_none());
+        assert!(resolved.rate_limit.per_caller_client_rps.is_none());
+        assert!(resolved.rate_limit.per_caller_burst.is_none());
     }
 
     #[test]

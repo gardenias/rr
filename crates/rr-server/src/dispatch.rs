@@ -12,10 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use openraft::BasicNode;
+use rr_core::error::{RaftError, RrError};
 use rr_core::framed_entry::FramedEntry;
 use rr_core::idempotency::{ApplyOutcome, IdempotencyKey};
 use rr_core::types::GroupId;
-use rr_network::client_service::{ClientDispatch, ClientWriteResult};
+use rr_network::client_service::{ClientDispatch, ClientWriteResult, LinearizableReadResult};
 use rr_network::proto::client::GroupInfo;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_router::router::ShardRouter;
@@ -145,6 +146,41 @@ impl ClientDispatch for ClientDispatchImpl {
             .local_read(group_id, payload)
             .await
             .map_err(|e| tonic::Status::internal(e.to_string()))
+    }
+
+    #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
+    async fn submit_linearizable_read(
+        &self,
+        partition_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<LinearizableReadResult, tonic::Status> {
+        let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
+            tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
+        })?;
+        match self.group_manager.linearizable_read(group_id, payload).await {
+            Ok(bytes) => Ok(LinearizableReadResult {
+                payload: bytes,
+                leader_node_id: None,
+                leader_addr: None,
+            }),
+            Err(RrError::Raft(RaftError::NotLeader {
+                leader,
+                leader_addr,
+            })) => Ok(LinearizableReadResult {
+                payload: vec![],
+                leader_node_id: leader,
+                leader_addr,
+            }),
+            Err(e) => {
+                tracing::error!(
+                    partition_id,
+                    group_id,
+                    error = %e,
+                    "linearizable_read failed (detail sanitized for client)"
+                );
+                Err(tonic::Status::internal("linearizable read failed"))
+            }
+        }
     }
 
     #[instrument(skip(self))]

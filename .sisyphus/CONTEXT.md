@@ -5,12 +5,13 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-05-12 late (A-0006/A-0007/A-0008 implemented; output runner real send loop)
-**Current phase**: ADR follow-through (Phase 4 wrap-up)
-**Active plan**: 无活跃 plan；follow-up 方向见下方"下一步工作"
+**Last updated**: 2026-05-13 (A-0005/A-0009 implemented; A-0010 WAL ADR accepted)
+**Current phase**: ADR follow-through (Phase 4 wrap-up — only A-0010 implementation remains)
+**Active plan**: `.sisyphus/plans/rr-wal-impl.md` (deferred; awaits release-build profile)
 **Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut.
-**Main branch HEAD**: prior 4 commits unpushed + new A-0006/A-0007/A-0008 work
+**Main branch HEAD**: prior commits unpushed + new A-0005/A-0009 wire-up + A-0010 design
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`)
+**Latest Momus review**: 2026-05-13 (`bg_a0e5a6d2`) on rr-wal-impl.md — pending
 
 ---
 
@@ -20,6 +21,13 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.1
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-05-13 — A-0005 + A-0009 implemented; A-0010 WAL ADR accepted
+
+- **A-0005 per-caller rate limiting wire-up**: code path (`PerCallerLimiterMap`, `RateLimitConfig::per_caller_*`, `RateLimitInterceptor::with_per_caller`, 13 unit tests) was already shipped in `crates/rr-network/src/rate_limit.rs`. This session adds the missing config surface: 3 CLI flags (`--per-caller-admin-rps` / `--per-caller-client-rps` / `--per-caller-burst`) + matching `RR_PER_CALLER_*` env vars + `[rate_limit].per_caller_*` TOML fields + `ResolvedRateLimit` plumbing + `main.rs` mapping to `RateLimitConfig`. 3 new config_file tests. ADR `accepted` → `implemented`.
+- **A-0009 linearizable read wire-up**: stale-read separation (`Request` + `ReadLocal` RPCs) and locking model (`Arc<TokioRwLock<S>>`) were already shipped. This session adds the linearizable variant end-to-end: new `ClientService.ReadLinearizable` RPC, `ClientDispatch::submit_linearizable_read` trait method (returns `LinearizableReadResult { payload, leader_node_id, leader_addr }`), production impl in `ClientDispatchImpl` calling `RaftGroupManager::linearizable_read` (openraft `ReadPolicy::ReadIndex` + `await_ready`), SDK methods `RrClient::read_linearizable` / `read_linearizable_blocking` / `read_linearizable_reactive`. **Oracle-flagged correctness fix**: initial implementation dropped openraft `LinearizableReadError::ForwardToLeader` — would error on followers instead of redirect. Fixed by extending `RaftError::NotLeader` with `leader_addr`, having `RaftGroupManager::linearizable_read` surface `ForwardToLeader` as the structured `NotLeader { leader, leader_addr }`, adding `optional LeaderInfo leader_info` to `ReadLocalResponse` proto (wire-additive), and teaching `RrClient::read_linearizable` to honour `leader_info` redirects (dial the leader on next retry). 3 new unit tests including `test_read_linearizable_surfaces_leader_redirect_to_proto`. ADR `accepted` → `implemented` (3-node integration test gap tracked as follow-up). The write-path `client_write_many` was already extracting `leader_node.addr`; updated to populate the extended `NotLeader.leader_addr` field for consistency.
+- **A-0010 WAL log-storage backend** (`accepted`): librarian research (`bg_345e4dcc`) compared `raft-wal` (1★, openraft 0.9-only), TiKV `raft-engine` (proven but `raft-rs` protobuf API mismatch), sled / fjall (rejected — fsync issues or wrong abstraction), redb / heed (rejected — B-tree latency), and custom segmented log on `std::fs` (chosen). Decision: build custom because openraft 0.10-alpha fit + same effort as forking `raft-wal` + no supply-chain risk. **Implementation deferred** until release-build profile confirms storage is the binding constraint. Companion plan `.sisyphus/plans/rr-wal-impl.md` (12 phases, 16 ported tests + 3 WAL-specific recovery tests, ≥ 2× RocksDB acceptance bar, 24 h soak before default flip) sent to Momus (`bg_a0e5a6d2`).
+- **Tests passing**: rr-network 70 / rr-raft 101 / rr-server 95 / rr-client 23 — zero regressions. Clippy `-D warnings` clean across affected crates.
 
 ### Session 2026-05-12 (late) — A-0006/A-0007/A-0008 implemented
 

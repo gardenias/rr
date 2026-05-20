@@ -727,6 +727,13 @@ mod tests {
         ) -> Result<Vec<u8>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }
+        async fn submit_linearizable_read(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+        ) -> Result<rr_network::client_service::LinearizableReadResult, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
         async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }

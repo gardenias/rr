@@ -64,9 +64,15 @@ impl IntoStatus for RrError {
 impl IntoStatus for RaftError {
     fn into_status(self) -> Status {
         match self {
-            RaftError::NotLeader { leader } => {
-                let msg = leader.map_or("no leader".to_string(), |id| format!("leader is {id}"));
-                Status::unavailable(format!("not leader: {msg}"))
+            RaftError::NotLeader {
+                leader,
+                leader_addr,
+            } => {
+                let id_msg = leader.map_or("no leader".to_string(), |id| format!("leader is {id}"));
+                let addr_msg = leader_addr
+                    .map(|a| format!(", addr={a}"))
+                    .unwrap_or_default();
+                Status::unavailable(format!("not leader: {id_msg}{addr_msg}"))
             }
             RaftError::GroupNotFound { group_id } => {
                 Status::not_found(format!("raft group {group_id} not found"))
@@ -194,14 +200,20 @@ mod tests {
 
     #[test]
     fn test_not_leader_maps_to_unavailable() {
-        let err = RrError::Raft(RaftError::NotLeader { leader: Some(3) });
+            let err = RrError::Raft(RaftError::NotLeader {
+                leader: Some(3),
+                leader_addr: Some("127.0.0.1:9001".to_string()),
+            });
         let status = err.into_status();
         assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 
     #[test]
     fn test_not_leader_no_leader_maps_to_unavailable() {
-        let err = RrError::Raft(RaftError::NotLeader { leader: None });
+            let err = RrError::Raft(RaftError::NotLeader {
+                leader: None,
+                leader_addr: None,
+            });
         let status = err.into_status();
         assert_eq!(status.code(), tonic::Code::Unavailable);
         assert!(status.message().contains("no leader"));

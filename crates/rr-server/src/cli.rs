@@ -130,6 +130,24 @@ pub struct ServeArgs {
     #[arg(long = "rate-limit-burst", env = "RR_RATE_LIMIT_BURST")]
     pub rate_limit_burst: Option<u32>,
 
+    /// Per-caller rps limit for AdminService (exclusive mode). When set, each
+    /// authenticated caller gets its own token bucket and the global
+    /// `--admin-rps` is ignored. Unauthenticated requests fall back to the
+    /// global bucket. See ADR A-0005.
+    #[arg(long = "per-caller-admin-rps", env = "RR_PER_CALLER_ADMIN_RPS")]
+    pub per_caller_admin_rps: Option<u32>,
+
+    /// Per-caller rps limit for ClientService (exclusive mode). When set, each
+    /// authenticated caller gets its own token bucket and the global
+    /// `--client-rps` is ignored. Unauthenticated requests fall back to the
+    /// global bucket. See ADR A-0005.
+    #[arg(long = "per-caller-client-rps", env = "RR_PER_CALLER_CLIENT_RPS")]
+    pub per_caller_client_rps: Option<u32>,
+
+    /// Per-caller burst size. If unset, defaults to `max(per_caller_rps, 10)`.
+    #[arg(long = "per-caller-burst", env = "RR_PER_CALLER_BURST")]
+    pub per_caller_burst: Option<u32>,
+
     /// Openraft `LogsSinceLast(N)` snapshot trigger threshold. Default 50_000.
     /// Lower values → more frequent snapshots, shorter recovery replay.
     /// Higher values → fewer snapshots, longer recovery replay.

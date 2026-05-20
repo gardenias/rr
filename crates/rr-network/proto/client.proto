@@ -9,6 +9,13 @@ service ClientService {
     /// Read from local replica's state machine (stale read).
     /// Bypasses Raft consensus. Any node can serve this request.
     rpc ReadLocal(ReadLocalRequest) returns (ReadLocalResponse);
+    /// Read with linearizable semantics: server confirms leader commit
+    /// index via Raft ReadIndex and waits until the local state machine
+    /// has applied through it before serving the read. Per ADR A-0009
+    /// this is a separate RPC (not a boolean flag on Request) so the
+    /// consistency level is enforced at the protocol layer and cannot
+    /// be silently downgraded.
+    rpc ReadLinearizable(ReadLocalRequest) returns (ReadLocalResponse);
     /// Get cluster topology information.
     rpc GetClusterInfo(Empty) returns (ClusterInfo);
 }
@@ -83,7 +90,14 @@ message ReadLocalRequest {
     bytes payload = 2;
 }
 
-/// Response from the ReadLocal RPC.
+/// Response from the ReadLocal / ReadLinearizable RPC.
+///
+/// When `leader_info` is set, the contacted replica was not the leader
+/// (or could not run a ReadIndex round-trip locally) and is redirecting
+/// the client. SDKs MUST treat a present `leader_info` as a redirect
+/// regardless of `payload`. `payload` carries the read result only when
+/// `leader_info` is unset.
 message ReadLocalResponse {
     bytes payload = 1;
+    optional LeaderInfo leader_info = 2;
 }

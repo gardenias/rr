@@ -7,10 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Post-`v0.2.0` security hardening + Phase 4 Tier 0 docs patches + the three
-accepted-but-pending ADRs (A-0006 / A-0007 / A-0008) landed. No release tag yet.
+Post-`v0.2.0` security hardening + Phase 4 Tier 0 docs patches + ADRs
+A-0005 / A-0006 / A-0007 / A-0008 / A-0009 landed. No release tag yet.
 
 ### Added
+
+#### WAL log-storage backend design (ADR A-0010)
+
+- **New ADR `A-0010-wal-log-storage-backend.md`** — `accepted` status.
+  Decision matrix evaluating `raft-wal` crate, TiKV `raft-engine`,
+  sled / fjall, redb / heed, and a custom segmented log on `std::fs`.
+  Chosen path: **custom segmented log**, because openraft 0.10-alpha
+  binding compatibility, the librarian's "same effort" assessment vs
+  forking `raft-wal`, and supply-chain risk on the 1-star upstream.
+- **Implementation deferred** until a release-build profile shows
+  RocksDB LSM overhead is the binding constraint on the Raft log path
+  (current numbers are debug-build, CPU- and gRPC-bound). State
+  machine and snapshots stay on RocksDB; WAL replaces only the log.
+- **Implementation plan `.sisyphus/plans/rr-wal-impl.md`** — 12 phases
+  covering segment writer, segment reader, vote / `last_purged` files,
+  `RaftLogStorage` trait impl method-by-method, batcher reuse vs
+  fork decision, storage-backend wiring, test parity (16 ported tests
+  + 3 WAL-only torn-write / rotation / kill tests), benchmark
+  acceptance (≥ 2× RocksDB), chaos-suite parity, and 24 h soak
+  before flipping the default backend.
+
+#### Linearizable client reads (ADR A-0009)
+
+- **New gRPC RPC `ClientService.ReadLinearizable`** in
+  `crates/rr-network/proto/client.proto` — separate RPC method (not a
+  flag on `Request`) so the consistency level is enforced at the
+  protocol layer and cannot be silently downgraded by a misconfigured
+  client. On the leader the server runs openraft
+  `ReadPolicy::ReadIndex`, awaits local apply, and serves from the
+  state-machine adapter.
+- **Leader-aware redirect**: `ReadLocalResponse` gains an
+  `optional LeaderInfo leader_info` field (wire-additive). When the
+  contacted node is a follower, openraft returns
+  `LinearizableReadError::ForwardToLeader`;
+  `RaftGroupManager::linearizable_read` surfaces this as the new
+  extended `RaftError::NotLeader { leader, leader_addr }` variant; the
+  dispatch layer translates that into a redirect response and the SDK
+  retries against the leader's `addr`. Mirrors the existing write-path
+  forward-to-leader mechanism. Without this, a follower-targeted read
+  would error instead of redirect.
+- **`RaftError::NotLeader`** extended with `leader_addr: Option<String>`
+  (was previously `{ leader: Option<u64> }` only). Write path
+  populates it from `forward.leader_node.addr`; consumers in
+  `error_convert` print both id and addr in the `Status::unavailable`
+  message.
+- **`ClientDispatch::submit_linearizable_read` trait method**
+  now returns `LinearizableReadResult { payload, leader_node_id,
+  leader_addr }` (was `Result<Vec<u8>, Status>`) so non-leader
+  responses carry redirect info without being a transport error.
+- **SDK methods** (`crates/rr-client/src/lib.rs`):
+  `RrClient::read_linearizable`,
+  `RrClient::read_linearizable_blocking`,
+  `RrClient::read_linearizable_reactive`. The async variant honours
+  `leader_info` redirects: on receiving a non-empty `leader_info`, the
+  next retry attempt dials the indicated leader address. Transport
+  failures fall back to round-robin over bootstrap addresses (same as
+  stale reads). Total attempts still capped by
+  `RetryConfig::max_retries`.
+- **Tests**: three new unit tests in `rr-network::client_service::tests`
+  (`test_read_local_routes_to_submit_read`,
+  `test_read_linearizable_routes_to_submit_linearizable_read`,
+  `test_read_linearizable_surfaces_leader_redirect_to_proto`) verify
+  the handler routing and that a follower dispatch populates
+  `ReadLocalResponse.leader_info` correctly. A real-cluster integration
+  test (3-node, calling against a known follower, asserting redirect
+  succeeds) is on the follow-up list — the current coverage validates
+  proto-plumbing but not openraft end-to-end behaviour.
+
+#### Per-caller rate limiting wire-up (ADR A-0005)
+
+- **CLI flags** (`crates/rr-server/src/cli.rs`): `--per-caller-admin-rps`,
+  `--per-caller-client-rps`, `--per-caller-burst` with `RR_PER_CALLER_ADMIN_RPS`
+  / `RR_PER_CALLER_CLIENT_RPS` / `RR_PER_CALLER_BURST` env vars.
+- **TOML schema** (`crates/rr-server/src/config_file.rs`): `[rate_limit]`
+  section gains `per_caller_admin_rps`, `per_caller_client_rps`,
+  `per_caller_burst` fields. `RateLimitSection` keeps `deny_unknown_fields`.
+- **Plumbing**: `ResolvedRateLimit` extended; CLI → file → defaults merge
+  order preserved (CLI wins). `main.rs` now wires the resolved per-caller
+  fields into `RateLimitConfig` (previously hard-coded to `None`).
+- **Semantics** (already shipped in `crates/rr-network/src/rate_limit.rs`):
+  when per-caller is set, each authenticated caller (identified by
+  `caller_token_fp`) gets its own token bucket; unauthenticated requests
+  fall through to the global bucket. `RateLimitInterceptor::with_per_caller`
+  + `PerCallerLimiterMap` (`Arc<RwLock<HashMap>>` keyed on the bearer-token
+  siphash fingerprint, 5-minute idle TTL eviction).
+- **RaftService remains unconditionally unthrottled** (per-caller path
+  shares the same structural guarantee as the global path).
 
 #### Outbox / side-effect delivery (ADR A-0007)
 

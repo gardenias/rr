@@ -22,11 +22,12 @@
 | [A-0002](./A-0002-snapshot-consistency-and-recovery.md) | Snapshot consistency contract + disaster recovery path | implemented | 2026-04-24 |
 | [A-0003](./A-0003-framework-idempotency-layer.md) | Framework-level idempotency via `(request_type, request_id)` | implemented | 2026-04-24 |
 | [A-0004](./A-0004-etcd-config-schema.md) | etcd key schema for ConfigProvider routing state | implemented | 2026-04-27 |
-| [A-0005](./A-0005-per-caller-rate-limiting.md) | Per-caller rate limiting for gRPC services | accepted | 2026-05-07 |
+| [A-0005](./A-0005-per-caller-rate-limiting.md) | Per-caller rate limiting for gRPC services | implemented | 2026-05-07 |
 | [A-0006](./A-0006-rocksdb-cf-tuning.md) | Per-CF RocksDB options tuning for rr-storage | implemented | 2026-05-12 |
 | [A-0007](./A-0007-output-outbox-mechanism.md) | Output/Outbox mechanism for guaranteed side-effect delivery | implemented | 2026-05-12 |
 | [A-0008](./A-0008-snapshot-strategy.md) | Snapshot strategy — periodic auto-trigger via openraft SnapshotPolicy | implemented | 2026-05-12 |
-| [A-0009](./A-0009-read-write-separation-and-sm-locking.md) | Read/write RPC separation and state machine locking model | accepted | 2026-05-09 |
+| [A-0009](./A-0009-read-write-separation-and-sm-locking.md) | Read/write RPC separation and state machine locking model | implemented | 2026-05-09 |
+| [A-0010](./A-0010-wal-log-storage-backend.md) | WAL log-storage backend as a faster alternative to RocksDB | accepted | 2026-05-13 |
 
 ## Relationship
 

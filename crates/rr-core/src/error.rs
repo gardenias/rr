@@ -26,8 +26,11 @@ pub enum RrError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RaftError {
-    #[error("not leader, current leader: {leader:?}")]
-    NotLeader { leader: Option<u64> },
+    #[error("not leader, current leader: id={leader:?}, addr={leader_addr:?}")]
+    NotLeader {
+        leader: Option<u64>,
+        leader_addr: Option<String>,
+    },
     #[error("group not found: {group_id}")]
     GroupNotFound { group_id: u64 },
     #[error("proposal failed: {reason}")]
@@ -114,7 +117,11 @@ mod tests {
 
     #[test]
     fn test_raft_error_not_leader() {
-        let e = RaftError::NotLeader { leader: Some(3) };
+        let e = RaftError::NotLeader {
+            leader: Some(3),
+            leader_addr: Some("127.0.0.1:9001".to_string()),
+        };
         assert!(e.to_string().contains("not leader"));
+        assert!(e.to_string().contains("127.0.0.1:9001"));
     }
 }

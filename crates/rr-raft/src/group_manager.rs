@@ -732,6 +732,7 @@ impl RaftGroupManager {
                 Err(forward) => {
                     return Err(RrError::Raft(RaftError::NotLeader {
                         leader: forward.leader_id,
+                        leader_addr: forward.leader_node.as_ref().map(|n| n.addr.clone()),
                     }));
                 }
             }
@@ -787,6 +788,14 @@ impl RaftGroupManager {
     ///
     /// Uses openraft ReadIndex to confirm leader commit index, then waits
     /// until local state machine has applied through that point before reading.
+    ///
+    /// If invoked on a non-leader node, openraft returns
+    /// `LinearizableReadError::ForwardToLeader`. We surface it as
+    /// [`RaftError::NotLeader`] (carrying both `leader_id` and the
+    /// leader's transport `addr`) so the dispatch layer can populate a
+    /// `leader_info` redirect in the gRPC response and the SDK can retry
+    /// against the leader. Without this, follower-served linearizable
+    /// reads would error instead of redirect.
     #[instrument(skip(self, payload))]
     pub async fn linearizable_read(
         &self,
@@ -798,14 +807,20 @@ impl RaftGroupManager {
             .await
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
 
-        let linearizer = raft
-            .get_read_linearizer(ReadPolicy::ReadIndex)
-            .await
-            .map_err(|e| {
-                RrError::Application(format!(
+        let linearizer = match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
+            Ok(l) => l,
+            Err(ref e) => {
+                if let Some(fwd) = e.forward_to_leader() {
+                    return Err(RrError::Raft(RaftError::NotLeader {
+                        leader: fwd.leader_id,
+                        leader_addr: fwd.leader_node.as_ref().map(|n| n.addr.clone()),
+                    }));
+                }
+                return Err(RrError::Application(format!(
                     "linearizable read index failed for group {group_id}: {e}"
-                ))
-            })?;
+                )));
+            }
+        };
 
         linearizer.await_ready(&raft).await.map_err(|e| {
             RrError::Application(format!(

@@ -192,9 +192,9 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
         admin_rps: cfg.rate_limit.admin_rps,
         client_rps: cfg.rate_limit.client_rps,
         burst: cfg.rate_limit.burst,
-        per_caller_admin_rps: None,
-        per_caller_client_rps: None,
-        per_caller_burst: None,
+        per_caller_admin_rps: cfg.rate_limit.per_caller_admin_rps,
+        per_caller_client_rps: cfg.rate_limit.per_caller_client_rps,
+        per_caller_burst: cfg.rate_limit.per_caller_burst,
     };
     node_config = node_config.with_rate_limit(rl_config);
 

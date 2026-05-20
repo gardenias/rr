@@ -370,6 +370,87 @@ impl RrClient {
         }))
     }
 
+    /// Read with linearizable semantics.
+    ///
+    /// Server-side flow (per ADR A-0009): the contacted replica calls
+    /// openraft `ReadPolicy::ReadIndex`. If that replica is the leader,
+    /// it confirms its commit index, awaits local apply, and serves the
+    /// read directly. If it is a follower, openraft returns
+    /// `ForwardToLeader`; the server flattens this into a
+    /// `ReadLocalResponse.leader_info` redirect (mirrors the write
+    /// path) and this SDK retries against the leader's address.
+    ///
+    /// Retry semantics: on transport failure, round-robin bootstrap
+    /// addrs. On a follower redirect (`leader_info` present), dial the
+    /// indicated leader on the next attempt. Total attempts capped by
+    /// [`RetryConfig::max_retries`].
+    #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len()))]
+    #[allow(clippy::explicit_counter_loop)]
+    pub async fn read_linearizable(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RrError> {
+        let max_attempts = self.retry_config.max_retries + 1;
+        let mut bootstrap_index: usize = 0;
+        let mut redirect_addr: Option<String> = None;
+        let mut last_error: Option<RrError> = None;
+
+        for attempt in 0..max_attempts {
+            let addr = if let Some(a) = redirect_addr.take() {
+                a
+            } else {
+                let a = self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
+                bootstrap_index += 1;
+                a
+            };
+
+            let request = ReadLocalRequest {
+                partition_id: group_id,
+                payload: payload.clone(),
+            };
+            let tonic_req = match self.build_request(request) {
+                Ok(req) => req,
+                Err(e) => return Err(e),
+            };
+
+            match self.connect_to_addr(&addr).await {
+                Ok(mut client) => match client.read_linearizable(tonic_req).await {
+                    Ok(resp) => {
+                        let inner = resp.into_inner();
+                        if let Some(leader) = inner.leader_info {
+                            redirect_addr = Some(leader.addr);
+                            last_error = Some(RrError::Network(NetworkError::RpcFailed(
+                                "follower redirected to leader".into(),
+                            )));
+                            continue;
+                        }
+                        return Ok(inner.payload);
+                    }
+                    Err(e) => {
+                        last_error = Some(RrError::Network(NetworkError::RpcFailed(
+                            e.to_string(),
+                        )));
+                        if attempt + 1 < max_attempts {
+                            let delay = self.retry_config.retry_delay_ms
+                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        }
+                    }
+                },
+                Err(e) => {
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            RrError::Network(NetworkError::RpcFailed(
+                "all linearizable read attempts exhausted".into(),
+            ))
+        }))
+    }
+
     /// Send an *idempotent* request: the framework deduplicates retries
     /// of the same `(request_type, request_id)` and returns the cached
     /// response from the first apply.
@@ -672,6 +753,19 @@ impl RrClient {
         })
     }
 
+    /// Blocking linearizable read.  See [`read_linearizable`] and
+    /// [`send_request_blocking`] for the blocking-runtime requirements.
+    pub fn read_linearizable_blocking(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, RrError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.read_linearizable(group_id, payload))
+        })
+    }
+
     // ── Reactive interface (callback-driven) ──────────────────────────────────
 
     /// Reactive write: fires the request and returns immediately.
@@ -720,6 +814,21 @@ impl RrClient {
         let client = self.clone();
         tokio::spawn(async move {
             callback(client.read(group_id, payload).await);
+        });
+    }
+
+    /// Reactive linearizable read.  See [`send_request_reactive`].
+    pub fn read_linearizable_reactive<F>(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+        callback: F,
+    ) where
+        F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
+    {
+        let client = self.clone();
+        tokio::spawn(async move {
+            callback(client.read_linearizable(group_id, payload).await);
         });
     }
 }

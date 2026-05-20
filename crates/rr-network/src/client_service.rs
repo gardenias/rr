@@ -35,6 +35,20 @@ pub struct ClientWriteResult {
     pub idem_error: Option<IdempotencyError>,
 }
 
+/// Result of submitting a linearizable read request.
+///
+/// On the leader (or any node that successfully ran a ReadIndex
+/// round-trip locally), `payload` carries the read result and
+/// `leader_*` are `None`. When the contacted node is a follower,
+/// `payload` is empty and `leader_*` identify the leader so the SDK
+/// can redirect (mirrors the write-path `ClientWriteResult`).
+#[derive(Debug, Clone)]
+pub struct LinearizableReadResult {
+    pub payload: Vec<u8>,
+    pub leader_node_id: Option<u64>,
+    pub leader_addr: Option<String>,
+}
+
 /// Trait for dispatching client RPCs to the application layer.
 ///
 /// All payloads are raw bytes. The implementor is responsible for routing
@@ -69,6 +83,25 @@ pub trait ClientDispatch: Send + Sync {
         partition_id: u64,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, tonic::Status>;
+
+    /// Submit a linearizable read request.
+    ///
+    /// Uses openraft `ReadPolicy::ReadIndex` to confirm leader commit
+    /// index, then waits until the local state machine has applied
+    /// through that index before serving the read. Stronger consistency
+    /// than [`submit_read`](Self::submit_read) at the cost of a leader
+    /// round-trip plus apply-await.
+    ///
+    /// If the contacted node is not the leader, the implementation
+    /// MUST return a [`LinearizableReadResult`] with `leader_*`
+    /// populated (and `payload` empty) so the gRPC layer can issue a
+    /// redirect. Returning a generic error would lose the leader hint
+    /// and force the SDK to round-robin blindly.
+    async fn submit_linearizable_read(
+        &self,
+        partition_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<LinearizableReadResult, tonic::Status>;
 
     /// Get cluster topology information.
     ///
@@ -171,7 +204,38 @@ impl client_service_server::ClientService for ClientServiceImpl {
             .submit_read(req.partition_id, req.payload)
             .await?;
 
-        Ok(tonic::Response::new(ReadLocalResponse { payload }))
+        Ok(tonic::Response::new(ReadLocalResponse {
+            payload,
+            leader_info: None,
+        }))
+    }
+
+    async fn read_linearizable(
+        &self,
+        request: tonic::Request<ReadLocalRequest>,
+    ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+        let traceparent = crate::tracing::extract_traceparent(&request);
+        let req = request.into_inner();
+        tracing::debug!(
+            partition_id = req.partition_id,
+            traceparent = traceparent.as_deref().unwrap_or(""),
+            "read_linearizable request received"
+        );
+
+        let result = self
+            .dispatch
+            .submit_linearizable_read(req.partition_id, req.payload)
+            .await?;
+
+        let leader_info = match (result.leader_node_id, result.leader_addr) {
+            (Some(node_id), Some(addr)) => Some(LeaderInfo { node_id, addr }),
+            _ => None,
+        };
+
+        Ok(tonic::Response::new(ReadLocalResponse {
+            payload: result.payload,
+            leader_info,
+        }))
     }
 }
 
@@ -241,6 +305,18 @@ mod tests {
             _payload: Vec<u8>,
         ) -> Result<Vec<u8>, tonic::Status> {
             Ok(vec![])
+        }
+
+        async fn submit_linearizable_read(
+            &self,
+            _partition_id: u64,
+            _payload: Vec<u8>,
+        ) -> Result<LinearizableReadResult, tonic::Status> {
+            Ok(LinearizableReadResult {
+                payload: vec![],
+                leader_node_id: None,
+                leader_addr: None,
+            })
         }
 
         async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
@@ -347,4 +423,137 @@ mod tests {
         assert_eq!(leader.addr, "127.0.0.1:50051");
     }
 
+    struct ReadEchoDispatch;
+
+    #[async_trait::async_trait]
+    impl ClientDispatch for ReadEchoDispatch {
+        async fn submit_write(
+            &self,
+            _partition_id: u64,
+            _payload: Vec<u8>,
+            _idem_key: Option<IdempotencyKey>,
+        ) -> Result<ClientWriteResult, tonic::Status> {
+            Err(tonic::Status::unimplemented("writes not used in this test"))
+        }
+
+        async fn submit_read(
+            &self,
+            partition_id: u64,
+            mut payload: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            payload.extend_from_slice(b"-stale");
+            payload.extend_from_slice(&partition_id.to_le_bytes());
+            Ok(payload)
+        }
+
+        async fn submit_linearizable_read(
+            &self,
+            partition_id: u64,
+            mut payload: Vec<u8>,
+        ) -> Result<LinearizableReadResult, tonic::Status> {
+            payload.extend_from_slice(b"-lin");
+            payload.extend_from_slice(&partition_id.to_le_bytes());
+            Ok(LinearizableReadResult {
+                payload,
+                leader_node_id: None,
+                leader_addr: None,
+            })
+        }
+
+        async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_local_routes_to_submit_read() {
+        let svc = ClientServiceImpl::new(Arc::new(ReadEchoDispatch));
+        let req = ReadLocalRequest {
+            partition_id: 7,
+            payload: b"q".to_vec(),
+        };
+        let resp = client_service_server::ClientService::read_local(
+            &svc,
+            tonic::Request::new(req),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(resp.payload.starts_with(b"q-stale"));
+    }
+
+    #[tokio::test]
+    async fn test_read_linearizable_routes_to_submit_linearizable_read() {
+        let svc = ClientServiceImpl::new(Arc::new(ReadEchoDispatch));
+        let req = ReadLocalRequest {
+            partition_id: 9,
+            payload: b"q".to_vec(),
+        };
+        let resp = client_service_server::ClientService::read_linearizable(
+            &svc,
+            tonic::Request::new(req),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(resp.payload.starts_with(b"q-lin"));
+        assert!(resp.leader_info.is_none());
+    }
+
+    struct FollowerRedirectDispatch;
+
+    #[async_trait::async_trait]
+    impl ClientDispatch for FollowerRedirectDispatch {
+        async fn submit_write(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+            _: Option<IdempotencyKey>,
+        ) -> Result<ClientWriteResult, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn submit_read(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn submit_linearizable_read(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+        ) -> Result<LinearizableReadResult, tonic::Status> {
+            Ok(LinearizableReadResult {
+                payload: vec![],
+                leader_node_id: Some(42),
+                leader_addr: Some("127.0.0.1:60042".to_string()),
+            })
+        }
+        async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_linearizable_surfaces_leader_redirect_to_proto() {
+        let svc = ClientServiceImpl::new(Arc::new(FollowerRedirectDispatch));
+        let req = ReadLocalRequest {
+            partition_id: 3,
+            payload: b"q".to_vec(),
+        };
+        let resp = client_service_server::ClientService::read_linearizable(
+            &svc,
+            tonic::Request::new(req),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(resp.payload.is_empty());
+        let leader = resp
+            .leader_info
+            .expect("follower dispatch should populate leader_info");
+        assert_eq!(leader.node_id, 42);
+        assert_eq!(leader.addr, "127.0.0.1:60042");
+    }
 }

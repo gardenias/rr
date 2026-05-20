@@ -1,8 +1,8 @@
 ---
 title: "Per-caller rate limiting for gRPC services"
-status: accepted
+status: implemented
 created: 2026-05-07
-updated: 2026-05-07
+updated: 2026-05-13
 tags: [adr, architecture, security, rate-limiting, networking]
 ---
 
@@ -217,3 +217,4 @@ audit event (extends existing pattern from auth rejections).
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-05-07 | session | Initial draft — design from analysis + user discussion |
+| 2026-05-13 | session | Status → `implemented`. `PerCallerLimiterMap`, `RateLimitConfig::per_caller_*` fields, `RateLimitInterceptor::with_per_caller`, and 13 unit tests already shipped in `crates/rr-network/src/rate_limit.rs`. Final wire-up adds `--per-caller-admin-rps` / `--per-caller-client-rps` / `--per-caller-burst` CLI flags + matching `RR_PER_CALLER_*` env vars + `[rate_limit].per_caller_*` TOML fields, plus the `ResolvedRateLimit` → `RateLimitConfig` plumbing in `rr-server`. |
