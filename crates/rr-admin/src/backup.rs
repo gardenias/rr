@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tar::{Archive, Builder};
 
 /// Backup format version. Increment when breaking changes land.
@@ -213,7 +213,7 @@ pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
     for entry in tar.entries().context("failed to read tar entries")? {
         let mut entry = entry.context("failed to read tar entry")?;
         let path = entry.path().context("invalid entry path")?.into_owned();
-        if path == PathBuf::from("metadata.json") {
+        if path == Path::new("metadata.json") {
             continue;
         }
         let Ok(rel) = path.strip_prefix("data") else {
@@ -253,7 +253,7 @@ pub fn read_metadata(input: &Path) -> Result<BackupMetadata> {
     for entry in tar.entries().context("failed to read tar entries")? {
         let mut entry = entry.context("failed to read tar entry")?;
         let path = entry.path().context("invalid entry path")?.into_owned();
-        if path == PathBuf::from("metadata.json") {
+        if path == Path::new("metadata.json") {
             let mut buf = Vec::new();
             std::io::copy(&mut entry, &mut buf).context("failed to read metadata.json")?;
             let meta: BackupMetadata =

@@ -16,7 +16,7 @@ This guide will walk you through building a simple distributed Key-Value store t
 
 Before starting, ensure your environment meets these requirements:
 
-- **Rust toolchain**: stable, 1.75+
+- **Rust toolchain**: stable, 1.98+
 - **Protocol Buffer compiler (`protoc`)**:
   - macOS: `brew install protobuf`
   - Ubuntu: `apt install protobuf-compiler`

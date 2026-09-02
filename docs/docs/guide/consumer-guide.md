@@ -36,10 +36,9 @@ dependency pinned to a tag**.
    [net]
    git-fetch-with-cli = true
    ```
-3. **Rust 工具链 ≥ 1.88**。rr 的 `rust-version = "1.82"` 已经与实际情况脱节：
-   传递依赖链里 `clap_lex ≥ 1.1.0` 要求 `edition2024`（Rust 1.85 稳定），
-   `validit 0.2.5`（openraft 的依赖）里用了 `let_chains`（Rust 1.88 稳定）。
-   推荐业务项目 `rust-toolchain.toml` 锁定 `channel = "1.88"` 或更高。
+3. **Rust 工具链 ≥ 1.98**。rr 的 workspace `rust-version = "1.98"`（edition2024 及
+   新稳定特性所需），仓库根目录的 `rust-toolchain.toml` 会自动锁定对应工具链。
+   推荐业务项目 `rust-toolchain.toml` 锁定 `channel = "1.98"` 或更高。
 
 没有这三项任意一个，`cargo build` 会直接报错。
 

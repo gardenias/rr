@@ -264,6 +264,10 @@ A-0005 / A-0006 / A-0007 / A-0008 / A-0009 landed. No release tag yet.
   - Old names remain as `#[deprecated(since = "0.3.0")]` aliases for one minor version. TOML / CLI also accept old strings (`"balanced"` / `"fast"`) but emit a deprecation warning at startup. Migrate before v0.4.0.
 - `RocksStorage::open` now emits a `tracing::warn!` at startup when the policy is not `Strict` (violates OpenRaft's durability contract per ADR A-0002).
 
+#### Dependencies / Toolchain
+- **`openraft` migrated `0.10.0-alpha.19` → `0.10.0-alpha.34`**: adapts to the `SnapshotData` move (`RaftTypeConfig` → `RaftStateMachine` / `RaftSnapshotBuilder` / `RaftNetworkV2`), `snapshot_id` removal from `SnapshotMeta` (3-field wire layout preserved), and `Trigger::elect(pre_vote)`. Inherits upstream fixes including commit-safety #1802, snapshot membership divergence #1808, and RaftCore stalls #1810. New behavior: leader-lease-gated proposals fast-fail with `ForwardToLeader::empty()`; a leader removed from membership auto-transfers after 150 ms. Rolling-upgrade note: vote RPCs from pre-upgrade nodes fail to decode on upgraded nodes (bincode positional layout gained a trailing field) — upgrade the leader last and avoid elections mid-roll.
+- **MSRV bumped 1.88 → 1.98**: `rust-toolchain.toml`, workspace `rust-version`, the CI `msrv` job pin, and the Dockerfile builder all move together.
+
 ### Fixed
 
 - Error sanitization (F2.5) plus full audit trail (F2.4): the network layer no longer surfaces internal state to attackers, and unauthorized rejects are now investigatable from the audit sink.

@@ -1,5 +1,5 @@
 # Must match the workspace MSRV (Cargo.toml: rust-version) and rust-toolchain.toml.
-ARG RUST_VERSION=1.88
+ARG RUST_VERSION=1.98
 ARG DEBIAN_VERSION=bookworm
 
 FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder

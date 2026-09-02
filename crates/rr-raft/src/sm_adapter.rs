@@ -126,11 +126,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
             Ok(builder) => builder,
             Err(e) => {
                 Self::snapshot_build_failed(&e);
-                RrSnapshotBuilder::poisoned(
-                    e,
-                    self.last_applied,
-                    self.last_membership.clone(),
-                )
+                RrSnapshotBuilder::poisoned(e, self.last_applied, self.last_membership.clone())
             }
         }
     }

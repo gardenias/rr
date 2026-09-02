@@ -116,7 +116,7 @@ changes.
 
 ## Minimum Supported Rust Version (MSRV)
 
-**当前 / Current**: Rust `1.82`（workspace `rust-version` field in `Cargo.toml`）。
+**当前 / Current**: Rust `1.98`（workspace `rust-version` field in `Cargo.toml`）。
 
 **Policy**:
 - MSRV 提升视为 **MINOR** 变更，在 CHANGELOG `Changed` 小节显式声明。
