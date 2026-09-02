@@ -1,6 +1,6 @@
 [package]
 name = "rr-client"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 description = "Async Rust client SDK for the rr distributed Multi-Raft consensus framework. Auto leader-redirect, exponential-backoff retry, framework-level idempotency, TLS/mTLS, and bearer-token auth."

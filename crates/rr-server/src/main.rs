@@ -26,7 +26,7 @@ use rr_raft::tcp_transport::TcpConnectionPool;
 use rr_router::router::ShardRouter;
 use rr_server::builtin_service::EchoStateMachine;
 use rr_server::cli::{Cli, Command, ServeArgs};
-use rr_server::config::NodeConfig;
+use rr_server::config::{NodeConfig, RaftTransport};
 #[cfg(feature = "rocks")]
 use rr_server::config_file::DurabilityChoice;
 use rr_server::config_file::{RaftTransportKind, ResolvedConfig, ResolvedTls, StorageBackend};
@@ -103,7 +103,9 @@ fn init_tracing(filter: &str) {
         .try_init();
 }
 
-async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
+async fn start_node(
+    cfg: &ResolvedConfig,
+) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
     let config_provider = build_config_provider(cfg).await?;
     let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
     let storage = build_storage(cfg)?;
@@ -132,6 +134,16 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
             let tcp_port = cfg.raft_tcp_port.ok_or_else(|| {
                 anyhow!("raft_tcp_port must be set or derivable when raft_transport=tcp")
             })?;
+            if tcp_port == grpc_port {
+                // Equal ports derive a TCP bind address identical to the
+                // gRPC listen_addr — it passes G7 when loopback and then
+                // fails later with a bare "address already in use" (after
+                // gRPC has already bound), and the outbound pool would dial
+                // peers' gRPC ports with RRAF frames. Fail fast here instead.
+                return Err(anyhow!(
+                    "raft_tcp_port ({tcp_port}) must differ from the gRPC listen port ({grpc_port})"
+                ));
+            }
             let port_offset = tcp_port.checked_sub(grpc_port).ok_or_else(|| {
                 anyhow!(
                     "raft_tcp_port ({tcp_port}) must be >= listen_addr port ({grpc_port}) for offset-based derivation"
@@ -156,6 +168,23 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
         }
     };
 
+    // Derive the TCP raft bind address ONCE — single source of truth shared
+    // by the `NodeConfig::raft_transport` descriptor (security gates G6/G7
+    // run against it in `RrNode::new`, before anything binds) and by the
+    // actual `TcpRaftServer::bind` below. Same `replace_port` derivation as
+    // before, just hoisted so both consumers see the identical address.
+    let tcp_bind_addr = if matches!(cfg.raft_transport, RaftTransportKind::Tcp) {
+        let tcp_port = cfg.raft_tcp_port.ok_or_else(|| {
+            anyhow!("raft_tcp_port must be set or derivable when raft_transport=tcp")
+        })?;
+        Some(
+            replace_port(&cfg.listen_addr, tcp_port)
+                .context("failed to derive tcp raft bind address")?,
+        )
+    } else {
+        None
+    };
+
     let router = Arc::new(ShardRouter::new(Arc::clone(&provider)));
     let lookup: Arc<dyn rr_network::raft_service::RaftGroupLookup> =
         Arc::new(RaftGroupLookupImpl::new(Arc::clone(&mgr)));
@@ -170,7 +199,13 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
     )
     .with_group_manager(Arc::clone(&mgr))
     .with_raft_lookup(Arc::clone(&lookup))
-    .with_client_dispatch(dispatch);
+    .with_client_dispatch(dispatch)
+    .with_raft_transport(match &tcp_bind_addr {
+        Some(bind_addr) => RaftTransport::Tcp {
+            bind_addr: bind_addr.clone(),
+        },
+        None => RaftTransport::Grpc,
+    });
 
     if let Some(port) = cfg.admin_port {
         node_config = node_config.with_admin_port(port);
@@ -207,12 +242,9 @@ async fn start_node(cfg: &ResolvedConfig) -> Result<(Arc<RrNode>, Option<tokio::
     let node = Arc::new(RrNode::new(node_config)?);
     node.start().await?;
 
-    let tcp_raft_handle = if matches!(cfg.raft_transport, RaftTransportKind::Tcp) {
-        let tcp_port = cfg.raft_tcp_port.ok_or_else(|| {
-            anyhow!("raft_tcp_port must be set or derivable when raft_transport=tcp")
-        })?;
-        let tcp_bind_addr = replace_port(&cfg.listen_addr, tcp_port)
-            .context("failed to derive tcp raft bind address")?;
+    let tcp_raft_handle = if let Some(tcp_bind_addr) = tcp_bind_addr {
+        // G6/G7 already vetted this address in `RrNode::new` above; binding
+        // here can only happen after those gates passed.
         let server = TcpRaftServer::bind(&tcp_bind_addr, Arc::clone(&lookup))
             .await
             .with_context(|| format!("failed to bind tcp raft server at {tcp_bind_addr}"))?;
@@ -392,4 +424,42 @@ fn replace_port(addr: &str, new_port: u16) -> Result<String> {
         .rsplit_once(':')
         .ok_or_else(|| anyhow!("listen addr '{addr}' must include port"))?;
     Ok(format!("{host}:{new_port}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_port_derives_tcp_bind_from_listen_addr() {
+        assert_eq!(
+            replace_port("127.0.0.1:51001", 61001).unwrap(),
+            "127.0.0.1:61001"
+        );
+        assert_eq!(
+            replace_port("0.0.0.0:51001", 61001).unwrap(),
+            "0.0.0.0:61001"
+        );
+        assert!(replace_port("no-port", 61001).is_err());
+    }
+
+    #[test]
+    fn derived_tcp_bind_addr_aligns_with_g7_loopback_gate() {
+        // The single-derivation contract (ADR A-0014): whatever start_node
+        // hands to both `NodeConfig::raft_transport` (G7 gate) and
+        // `TcpRaftServer::bind` comes from this one `replace_port` call, so
+        // the address the gate vets is the address that gets bound.
+        let loopback = replace_port("127.0.0.1:51001", 61001).unwrap();
+        assert!(loopback
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .ip()
+            .is_loopback());
+        let wildcard = replace_port("0.0.0.0:51001", 61001).unwrap();
+        assert!(!wildcard
+            .parse::<std::net::SocketAddr>()
+            .unwrap()
+            .ip()
+            .is_loopback());
+    }
 }

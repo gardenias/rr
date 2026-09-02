@@ -91,7 +91,7 @@ brew install cmake
 use std::sync::Arc;
 
 use rr_ingestor_kafka::{KafkaIngestor, KafkaIngestorConfig, kafka_offset_to_request_id};
-use rr_raft::ingestor_runner::AutoIdempotency;
+use rr_raft::ingestor_runner::{AutoIdempotency, OffsetMapError};
 use rr_raft::RaftGroupManager;
 
 let mgr: Arc<RaftGroupManager> = /* … from RrNode setup */;
@@ -111,7 +111,9 @@ mgr.attach_ingestor_with_auto_idempotency(
     Box::new(ingestor),
     AutoIdempotency {
         request_type: cfg.topic_for(group_id),
-        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+        offset_to_request_id: Box::new(|b| {
+            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        }),
     },
 ).await?;
 ```

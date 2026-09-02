@@ -33,6 +33,7 @@
 //! for checking quorum impact before committing.
 
 use anyhow::{anyhow, Result};
+use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 use rr_network::proto::admin::admin_service_client::AdminServiceClient;
 use rr_network::proto::admin::{
     ChangeMembershipRequest, Empty, GroupId, NodeMember, TransferLeaderRequest,
@@ -49,12 +50,6 @@ pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often we poll `GetGroupStatus` while waiting for drain to
 /// complete. Mirrors openraft's tick cadence.
 pub const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
-/// Smallest voter-set size we'll allow `change_membership` to leave
-/// behind. `< 2` voters means single-point-of-failure or a torn-down
-/// group, both of which require an explicit operator action (add a
-/// fresh voter first, or `node-reset` / cluster teardown).
-pub const MIN_VOTERS_AFTER_REMOVAL: usize = 2;
 
 /// Per-group outcome line for the report.
 #[derive(Debug, Clone, Serialize)]
@@ -171,7 +166,10 @@ async fn decommission_one_group(
         .copied()
         .filter(|id| *id != target_node_id)
         .collect();
-    if remaining.len() < MIN_VOTERS_AFTER_REMOVAL {
+    // Use the shared predicate (not a bare threshold comparison) so this
+    // pre-check cannot drift from the server-side guard if the policy ever
+    // evolves beyond a single minimum (rr_core::membership module docs).
+    if !membership_change_is_safe(remaining.len()) {
         return Ok(DecommissionGroupResult {
             group_id,
             action: GroupAction::AbortedQuorumLoss,
@@ -213,6 +211,9 @@ async fn decommission_one_group(
         .change_membership(ChangeMembershipRequest {
             group_id,
             voter_node_ids: remaining.clone(),
+            // Decommission deliberately has no force channel: its contract
+            // is "add a fresh voter first, then remove" (see module docs).
+            force: false,
         })
         .await?;
 
@@ -394,6 +395,8 @@ mod tests {
 
     #[test]
     fn min_voters_after_removal_constant_is_two() {
+        // Pins the shared policy constant (rr-core) the client-side
+        // pre-check references — the server enforces the same value.
         assert_eq!(MIN_VOTERS_AFTER_REMOVAL, 2);
     }
 }

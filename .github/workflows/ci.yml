@@ -90,7 +90,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-rocks-${{ hashFiles('**/Cargo.lock') }}
       - name: Test with rocks feature
-        run: cargo test --workspace --features rr-storage/rocks
+        # integration/rocks gates the RocksDB persistence tests in tests/integration;
+        # rr-storage/rocks alone does not propagate into that crate's cfg(feature = "rocks").
+        run: cargo test --workspace --features rr-storage/rocks,integration/rocks
 
   test-defensive:
     runs-on: ubuntu-latest
@@ -124,6 +126,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install RocksDB dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
       - uses: actions/cache@v4
         with:
           path: |
@@ -132,7 +136,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # rocks-gated code (rocks benches, rocks log storage, persistence tests) must be linted too.
+        run: cargo clippy --workspace --all-targets --features rocks -- -D warnings
 
   fmt:
     runs-on: ubuntu-latest
@@ -168,7 +173,8 @@ jobs:
       - name: Install RocksDB dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --features rr-storage/rocks --lcov --output-path lcov.info
+        # integration/rocks needed so the rocks-gated persistence tests are included in coverage.
+        run: cargo llvm-cov --workspace --features rr-storage/rocks,integration/rocks --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         # Note: CODECOV_TOKEN secret must be configured in repository settings
         uses: codecov/codecov-action@v4
@@ -194,8 +200,12 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install RocksDB dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
       - name: Bench (compile + test mode)
-        run: cargo bench --workspace -- --test
+        # rr-benches/rocks enables the required-features = ["rocks"] benches
+        # (log_append_rocks, log_append_batched, log_tps), otherwise they are skipped.
+        run: cargo bench --workspace --features rr-benches/rocks -- --test
 
   msrv:
     runs-on: ubuntu-latest
@@ -293,7 +303,7 @@ jobs:
       - name: Run integration tests
         run: cargo test -p integration
 
-  chaos:
+  external-broker:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -307,6 +317,6 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-chaos-${{ hashFiles('**/Cargo.lock') }}
-      - name: Run chaos tests
+          key: ${{ runner.os }}-cargo-external-broker-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run external broker tests (Kafka/etcd, opt-in)
         run: cargo test --workspace -- --ignored

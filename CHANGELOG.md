@@ -10,6 +10,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Post-`v0.2.0` security hardening + Phase 4 Tier 0 docs patches + ADRs
 A-0005 / A-0006 / A-0007 / A-0008 / A-0009 landed. No release tag yet.
 
+### 发布加固批次(2026-08-29 — 路线图 WS-1~WS-7,ADR A-0011~A-0014)
+
+> Executed per `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`; designs in ADRs
+> A-0011/A-0012/A-0013/A-0014. Merge these entries into the `[0.2.0]` categories
+> when the tag is cut.
+
+#### Added
+
+- **Shutdown durability contract (ADR A-0011)**: `IoBatcher` is now a tracked
+  spawn with an explicit `close()` protocol (closing flag → drain → final fsync
+  → answer all pending callbacks → join; idempotent, 30 s deadline).
+  `RocksLogStorage::close` added; `RaftGroupManager::stop_group` now awaits the
+  batcher flush before returning (signature unchanged). The per-append relay
+  `tokio::spawn` on the write hot path was removed — completions are answered
+  directly by the batch worker (durability + latency, one change).
+- **Snapshot failure propagation**: `try_create_snapshot_builder(force)` —
+  non-forced failures defer and retry, forced snapshots go through a poisoned
+  builder so `build_snapshot()` returns `Err`. An empty snapshot with valid
+  metadata can no longer be produced or propagated.
+- **change-membership server-side quorum guard (ADR A-0012)**: requests whose
+  target voter set is `< 2` are rejected with `RaftError::UnsafeMembershipChange`
+  → `FAILED_PRECONDITION`; removing down to 0 voters is never permitted (use
+  `node reset`). Escape hatch: `ChangeMembershipRequest.force` (wire-additive) +
+  `rr-admin group change-membership --force`; forced acceptances emit a warn-level
+  audit event. `MIN_VOTERS_AFTER_REMOVAL = 2` moved to `rr_core::membership` as
+  the single definition. Rolling-upgrade note: pre-guard servers silently ignore
+  the `force` field.
+- **TCP raft transport security gate (ADR A-0014)**: new `NodeConfig::raft_transport`
+  (`RaftTransport::Grpc | Tcp { bind_addr }`, default `Grpc`). G6: TCP transport
+  requires explicit `allow_insecure` regardless of gRPC TLS state. G7: TCP bind
+  address must be loopback — and is **not** bypassable by `allow_insecure`.
+- **CI**: new `semver-checks.yml` workflow (baseline `v0.2.0-rc2`,
+  non-blocking until v0.2.0 ships, then becomes a gate).
+- **Tests**: durability T1–T6 (incl. `test_stop_group_flush_preserves_acked_and_pending`),
+  `membership_guard` e2e (quorum rejection + force path), `leader_redirect_failover`
+  e2e (client reconverges after leader kill without `GroupMeta.leader`), G6/G7
+  gate test matrix, `GroupMeta` serde shape guard tests.
+
+#### Changed (breaking — landed before the v0.2.0 API freeze)
+
+- **`GroupMeta.leader` removed (ADR A-0013)**: the volatile raft-runtime leader
+  no longer lives in the static routing table. Also removed:
+  `ShardRouter::get_leader` / `get_leader_addr`, `RouterError::NoLeader`, and the
+  `router.get_leader_addr.success` metric. Leader discovery is exclusively the
+  client SDK's redirect cache fed by `NotLeader { leader_addr }` / `leader_info`.
+  etcd-stored routing data needs **no migration** (group values are `Vec<NodeId>`;
+  `leader` was derived at read time); legacy JSON containing a `leader` key is
+  silently ignored (serde guard tests added).
+- **`OffsetToRequestId` and `kafka_offset_to_request_id` now return `Result`**:
+  undecodable offset bytes and negative sentinels are fail-closed — the ingestor
+  supervisor exits with an error instead of silently mapping to `0` (which broke
+  the exactly-once guarantee). This closes the silent-degradation hole in the
+  A-0001/A-0003 chain.
+- **All public error enums are now `#[non_exhaustive]`**: `RrError`,
+  `RaftError`, `StorageError`, `ConfigError`, `RouterError`, `NetworkError`,
+  `CodecError`. (`BatchOp` and `ApplyOutcome` were reviewed and deliberately left
+  exhaustive — a silently-ignored new variant would be a correctness hazard there.)
+- All workspace crates now share `workspace.package.version = "0.2.0"`;
+  Helm `Chart.yaml` and the Java SDK fallback version aligned.
+- K8s raw manifests default to a configuration that passes the startup security
+  gates (TLS Secret mount + required `admin_token`); Helm chart adds
+  `security.allowInsecure` (default `false`; combined with `tls.enabled=false`
+  the template `fail`s with remediation hints). Both gained pod anti-affinity.
+
+#### Fixed
+
+- **CI now actually runs the rocks persistence tests**:
+  `--features rr-storage/rocks,integration/rocks` propagation fixed, and the
+  three tests' bit-rot (never compiled in CI) repaired. The `chaos` job was
+  renamed `external-broker` to match what it runs; the bench job now builds the
+  rocks benches (`log_append_rocks`, `log_append_batched`, `log_tps`).
+- **Dockerfile**: builder `rust:1.82` → `1.88` (below-MSRV image could not build
+  the workspace at all); added `COPY tools ./tools` (missing workspace member
+  broke the build); added `HEALTHCHECK` against `/ready` (curl installed in the
+  runtime stage). `docker-compose.yml` gained healthchecks +
+  `service_healthy` ordering; the insecure opt-in now lives only in compose env
+  (`RR_ALLOW_INSECURE=true`, dev-only comment) instead of being buried in TOML.
+- Grafana dashboard: removed the panel referencing the nonexistent
+  `rr_auth_rejects_total` metric (implementing that metric is scheduled in the
+  RC audit-pairing batch).
+
 ### Added
 
 #### WAL log-storage backend design (ADR A-0010)

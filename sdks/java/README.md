@@ -27,7 +27,7 @@ repositories {
 }
 
 dependencies {
-    implementation("io.github.gardenias:rr-client:0.1.0")
+    implementation("io.github.gardenias:rr-client:0.2.0")
 }
 ```
 

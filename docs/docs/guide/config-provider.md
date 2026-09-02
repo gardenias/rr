@@ -75,7 +75,6 @@ pub enum PartitionConfig {
 
 pub struct GroupMeta {
     pub group_id: GroupId,
-    pub leader: Option<NodeId>,
     pub replicas: Vec<NodeId>,
 }
 ```

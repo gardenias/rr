@@ -157,7 +157,11 @@ impl ClientDispatch for ClientDispatchImpl {
         let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
             tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
         })?;
-        match self.group_manager.linearizable_read(group_id, payload).await {
+        match self
+            .group_manager
+            .linearizable_read(group_id, payload)
+            .await
+        {
             Ok(bytes) => Ok(LinearizableReadResult {
                 payload: bytes,
                 leader_node_id: None,
@@ -190,6 +194,11 @@ impl ClientDispatch for ClientDispatchImpl {
             .into_iter()
             .map(|group_id| GroupInfo {
                 group_id,
+                // Placeholder: `0` carries no information. If a real value is
+                // ever provided here, it MUST be sourced from the raft runtime
+                // (`metrics.current_leader`, as `admin.rs` does) — the
+                // routing-table `GroupMeta.leader` field was removed by
+                // ADR A-0013 and must NOT be reintroduced.
                 leader_node_id: 0,
                 replica_node_ids: vec![],
             })

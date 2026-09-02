@@ -14,6 +14,36 @@ use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::group_manager::StateMachineFactory;
 
+/// Which transport carries inter-node Raft RPCs (AppendEntries / Vote).
+///
+/// This is a *descriptor*: [`RrNode`](super::node::RrNode) does not bind the
+/// TCP server itself — the embedding binary does (see `main.rs::start_node`,
+/// which derives the bind address from `listen_addr` and passes it here).
+/// `RrNode::new` uses this field to enforce the transport-aware security
+/// gates (G6/G7, ADR A-0014) before anything binds.
+///
+/// Note that `InstallSnapshot` always falls back to gRPC, so the gRPC
+/// `RaftService` — and its existing TLS/mTLS gates — stay in force under
+/// both variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RaftTransport {
+    /// gRPC transport (default). TLS/mTLS available via `tls_config`.
+    Grpc,
+    /// Experimental plaintext TCP transport (binary `RRAF` framing).
+    ///
+    /// The frame protocol has **no TLS and no peer authentication of any
+    /// kind**; in v0.2.0 it is a dev/benchmark-only feature. `RrNode::new`
+    /// refuses this variant unless:
+    ///
+    /// - `allow_insecure` is explicitly set (gate G6), **and**
+    /// - `bind_addr` parses as a [`std::net::SocketAddr`] whose IP is
+    ///   loopback (gate G7 — **not** bypassable by `allow_insecure`).
+    Tcp {
+        /// Planned bind address (`host:port`) of the TCP raft server.
+        bind_addr: String,
+    },
+}
+
 /// Configuration for creating an [`RrNode`](super::node::RrNode).
 pub struct NodeConfig {
     /// Unique identifier for this node in the cluster.
@@ -37,6 +67,19 @@ pub struct NodeConfig {
     ///
     /// If `None`, the gRPC server is not started.
     pub raft_lookup: Option<Arc<dyn RaftGroupLookup>>,
+    /// Which transport carries inter-node Raft RPCs (AppendEntries / Vote).
+    ///
+    /// Defaults to [`RaftTransport::Grpc`]. When set to
+    /// [`RaftTransport::Tcp`], `RrNode::new` additionally enforces:
+    ///
+    /// - **G6**: `allow_insecure` must be explicitly set, regardless of
+    ///   gRPC TLS/mTLS state (the TCP frame protocol has neither);
+    /// - **G7**: the planned `bind_addr` must be loopback. G7 is *hard* —
+    ///   it is the one gate `allow_insecure` does **not** bypass.
+    ///
+    /// See ADR A-0014. Embedded/library users that never enable the TCP
+    /// transport are unaffected (the default keeps v0.1.x behavior exactly).
+    pub raft_transport: RaftTransport,
     /// Optional client dispatch — enables client-facing RPCs.
     ///
     /// If `None`, the gRPC server is not started.
@@ -88,8 +131,18 @@ pub struct NodeConfig {
     /// 4. `AdminService` enabled (`admin_port = Some`) without TLS.
     /// 5. `AdminService` enabled with no `admin_token` — anyone reaching
     ///    the port can transfer leadership / trigger snapshots.
+    /// 6. `raft_transport` is [`RaftTransport::Tcp`] — the TCP frame
+    ///    protocol has no TLS and no peer authentication of any kind, so
+    ///    in v0.2.0 it is a dev/benchmark-only transport requiring an
+    ///    explicit opt-in, *regardless* of gRPC TLS/mTLS state.
+    /// 7. `raft_transport` is [`RaftTransport::Tcp`] and the planned bind
+    ///    address is not loopback.
     ///
-    /// Setting this to `true` bypasses ALL of the above checks. Use only
+    /// Setting this to `true` bypasses ALL of the above checks **except
+    /// gate 7**: a plaintext, unauthenticated TCP raft listener is never
+    /// allowed to bind off-loopback, in any mode. This is the first
+    /// deliberate exception to the "bypass everything" semantics — see
+    /// ADR A-0014 for the rationale. Use `true` only
     /// for local dev / examples / CI. Production binaries should never
     /// flip this in their default config; operators must opt in
     /// explicitly via `--allow-insecure` (CLI) or
@@ -122,6 +175,7 @@ impl NodeConfig {
             config_provider,
             state_machine_factory,
             raft_lookup: None,
+            raft_transport: RaftTransport::Grpc,
             client_dispatch: None,
             group_manager: None,
             metrics_port: None,
@@ -144,6 +198,14 @@ impl NodeConfig {
     /// Attach a [`RaftGroupLookup`] for inter-node Raft RPCs.
     pub fn with_raft_lookup(mut self, lookup: Arc<dyn RaftGroupLookup>) -> Self {
         self.raft_lookup = Some(lookup);
+        self
+    }
+
+    /// Declare which transport carries inter-node Raft RPCs. See
+    /// [`NodeConfig::raft_transport`] for the security gates (G6/G7) that
+    /// [`RaftTransport::Tcp`] triggers in `RrNode::new`.
+    pub fn with_raft_transport(mut self, transport: RaftTransport) -> Self {
+        self.raft_transport = transport;
         self
     }
 

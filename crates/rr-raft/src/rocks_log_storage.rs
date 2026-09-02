@@ -6,7 +6,11 @@
 //! The [`append`](RaftLogStorage::append) implementation is **truly async**:
 //! it enqueues operations to an [`IoBatcher`] and returns immediately, so
 //! OpenRaft's pipeline support is engaged.  The batcher accumulates concurrent
-//! appends and flushes them in a single `write_batch()` (group commit).
+//! appends and flushes them in a single `write_batch()` (group commit), then
+//! fires each append's `IOFlushed` callback itself — no relay tasks.
+//!
+//! Shutdown goes through [`RocksLogStorage::close`] (ADR A-0011 C3): after
+//! it returns, every accepted append is durable and every callback answered.
 
 use std::fmt::Debug;
 use std::io;
@@ -127,6 +131,19 @@ impl RocksLogStorage {
         let storage = RocksStorage::open_default(path)?;
         Ok(Self::new_with_config(storage, config))
     }
+
+    /// Flush every append accepted so far and shut the IO batcher down.
+    ///
+    /// ADR A-0011 C3: when `close()` returns `Ok`, all queued entries have
+    /// been folded into a final `write_batch` (fsync under
+    /// `DurabilityPolicy::Strict`) and every outstanding `IOFlushed`
+    /// callback has been answered exactly once. Idempotent; after closing
+    /// begins, new `append` calls fail fast. Dropping the storage without
+    /// `close()` still drains the batcher, but only as a best-effort
+    /// fallback — the durability contract is enforced by `close()`.
+    pub async fn close(&self) -> Result<(), io::Error> {
+        self.batcher.close().await.map_err(io::Error::other)
+    }
 }
 
 // ─── RaftLogReader ───────────────────────────────────────────────────────────
@@ -236,19 +253,16 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
             return Ok(());
         }
 
-        // Submit to the batcher and spawn a task to fire the callback when
-        // the batch is durable.  We return immediately so that the RaftCore
-        // task can continue processing the next proposal (pipeline support).
-        let batcher = Arc::clone(&self.batcher);
-        tokio::spawn(async move {
-            let result = batcher
-                .submit(ops)
-                .await
-                .map_err(io::Error::other);
-            callback.io_completed(result);
-        });
-
-        Ok(())
+        // Hand the ops AND the completion callback to the batcher: the
+        // worker fires `callback.io_completed` itself after the batch's
+        // `write_batch` (fsync under Strict) completes — no per-append
+        // relay task on the hot path (ADR A-0011 C1/P4).  We return
+        // immediately so that the RaftCore task can continue processing
+        // the next proposal (pipeline support).
+        self.batcher
+            .submit_with_callback(ops, callback)
+            .await
+            .map_err(io::Error::other)
     }
 
     async fn truncate_after(&mut self, log_id: Option<RrLogId>) -> Result<(), io::Error> {
@@ -623,5 +637,69 @@ mod tests {
         let remaining = s.try_get_log_entries(0..10).await.unwrap();
         assert_eq!(remaining.len(), 3);
         assert_eq!(remaining.last().unwrap().log_id.index, 3);
+    }
+
+    // ── T3: append callbacks survive close + reopen (ADR A-0011 C3) ──────
+
+    /// Build an `IOFlushed::signal` callback + its tokio receiver, the way
+    /// openraft constructs it internally.
+    fn flushed_signal() -> (
+        IOFlushed<RrTypeConfig>,
+        tokio::sync::oneshot::Receiver<Result<(), io::Error>>,
+    ) {
+        use openraft::type_config::async_runtime::{AsyncRuntime, Oneshot};
+        let (tx, rx) =
+            <<RrTypeConfig as RaftTypeConfig>::AsyncRuntime as AsyncRuntime>::Oneshot::channel();
+        (IOFlushed::signal(tx), rx)
+    }
+
+    #[tokio::test]
+    async fn test_rocks_append_close_reopen() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        {
+            let mut s = RocksLogStorage::open(&path).unwrap();
+            let mut waiters = Vec::new();
+            for i in 1..=50u64 {
+                let (callback, rx) = flushed_signal();
+                s.append(vec![make_entry(i, 1)], callback).await.unwrap();
+                waiters.push(rx);
+            }
+
+            // Graceful close: final write_batch (fsync) + every pending
+            // callback answered exactly once.
+            s.close().await.expect("close must succeed");
+
+            for rx in waiters {
+                let result = rx.await.expect("callback channel must not be dropped");
+                assert!(result.is_ok(), "callback must report Ok after close");
+            }
+            // The batcher worker has exited, so reopening needs no settle
+            // sleep (contrast: drop-drain tests above).
+        }
+
+        // Reopen and verify all 50 entries survived.
+        let mut s2 = RocksLogStorage::open(&path).unwrap();
+        let got = s2.try_get_log_entries(1..51).await.unwrap();
+        assert_eq!(got.len(), 50, "all appended entries must survive close");
+        assert_eq!(got[0].log_id.index, 1);
+        assert_eq!(got[49].log_id.index, 50);
+    }
+
+    // ── close() rejects new appends (fail-fast after closing begins) ──────
+
+    #[tokio::test]
+    async fn test_rocks_append_after_close_fails() {
+        let (mut s, _tmp) = open_storage();
+        s.blocking_append(vec![make_entry(1, 1)]).await.unwrap();
+        s.close().await.unwrap();
+
+        let (callback, _rx) = flushed_signal();
+        let result = s.append(vec![make_entry(2, 1)], callback).await;
+        assert!(result.is_err(), "append after close must fail fast");
+
+        // close() is idempotent.
+        s.close().await.unwrap();
     }
 }

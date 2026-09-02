@@ -73,6 +73,10 @@ pub struct ServeArgs {
     pub metrics_port: Option<u16>,
 
     /// Internal Raft transport for AppendEntries/Vote: `grpc` (default) or `tcp`.
+    /// `tcp` is a plaintext frame protocol with no TLS and no peer
+    /// authentication — dev/benchmark-only in v0.2.0. Selecting it requires
+    /// `--allow-insecure` AND a loopback `--listen-addr` (the TCP bind address
+    /// is derived from it); the loopback gate is NOT bypassable.
     #[arg(long = "raft-transport", env = "RR_RAFT_TRANSPORT")]
     pub raft_transport: Option<String>,
 
@@ -156,9 +160,11 @@ pub struct ServeArgs {
     pub snapshot_logs_since_last: Option<u64>,
 
     /// DANGEROUS — bypass production security gates (no TLS / no mTLS / no
-    /// admin_token). Intended only for local dev, examples, and CI.
-    /// Enabling this also emits a startup warning and sets the Prometheus
-    /// gauge `rr_security_insecure_mode = 1`.
+    /// admin_token / plaintext TCP raft transport). Intended only for local
+    /// dev, examples, and CI. Enabling this also emits a startup warning and
+    /// sets the Prometheus gauge `rr_security_insecure_mode = 1`.
+    /// NOTE: the one gate this does NOT bypass is the TCP raft loopback
+    /// restriction — `--raft-transport tcp` may never bind off-loopback.
     #[arg(long = "allow-insecure", env = "RR_ALLOW_INSECURE")]
     pub allow_insecure: bool,
 }
@@ -167,6 +173,23 @@ pub struct ServeArgs {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// Serializes tests that mutate process-wide env vars — `cargo test`
+    /// runs tests in threads sharing the process environment. Any test that
+    /// calls `std::env::set_var`/`remove_var` MUST hold this lock for its
+    /// whole body.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Removes the raft-transport env vars on drop, so a panicking test
+    /// cannot leak them into other tests.
+    struct RaftTransportEnvGuard;
+
+    impl Drop for RaftTransportEnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("RR_RAFT_TRANSPORT");
+            std::env::remove_var("RR_RAFT_TCP_PORT");
+        }
+    }
 
     #[test]
     fn cli_parses_version_subcommand() {
@@ -231,6 +254,36 @@ mod tests {
             "61001",
         ])
         .expect("parse");
+        let Command::Serve(args) = cli.command else {
+            panic!("expected Serve");
+        };
+        assert_eq!(args.raft_transport.as_deref(), Some("tcp"));
+        assert_eq!(args.raft_tcp_port, Some(61001));
+    }
+
+    #[test]
+    fn cli_reads_raft_transport_from_env() {
+        // Env layer of the config surface (clap `env = ...`). Cargo runs
+        // tests in threads sharing the process environment, so every test
+        // that mutates env vars MUST hold this lock for its whole body —
+        // otherwise a future parse test asserting defaults would race with
+        // this window.
+        let _lock = ENV_LOCK.lock().unwrap();
+        // Panic-safe cleanup: remove the vars even if the parse/assert fails.
+        let _cleanup = RaftTransportEnvGuard;
+        std::env::set_var("RR_RAFT_TRANSPORT", "tcp");
+        std::env::set_var("RR_RAFT_TCP_PORT", "61001");
+        let parsed = Cli::try_parse_from([
+            "rr-server",
+            "serve",
+            "--node-id",
+            "1",
+            "--listen-addr",
+            "127.0.0.1:51001",
+        ]);
+        std::env::remove_var("RR_RAFT_TRANSPORT");
+        std::env::remove_var("RR_RAFT_TCP_PORT");
+        let cli = parsed.expect("parse with env");
         let Command::Serve(args) = cli.command else {
             panic!("expected Serve");
         };

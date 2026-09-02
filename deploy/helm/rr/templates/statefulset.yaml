@@ -1,3 +1,29 @@
+{{- /*
+Security gate: keep the rendered manifest consistent with rr-server's
+startup security validation (validate_security_invariants, gates G1-G7).
+Configs that the server refuses at boot would CrashLoopBackOff, so refuse
+to render them here instead:
+
+  G1/G4: tls.enabled=false requires an explicit security.allowInsecure
+         opt-in (local dev only).
+  G2:    tls.enabled=true with tls.requireClientCert=false is rejected at
+         boot — mTLS is the ONLY peer-identity check for RaftService.
+  G5:    AdminService enabled without an admin token is rejected at boot,
+         so auth.adminTokenSecret.name must be set (and the Secret must
+         exist — see optional below).
+
+G7 (TCP raft bind must be loopback) is never bypassable, but this chart
+never enables the TCP raft transport.
+*/ -}}
+{{- if and (not .Values.tls.enabled) (not .Values.security.allowInsecure) -}}
+{{- fail "rr chart: insecure configuration refused. tls.enabled=false combined with security.allowInsecure=false would crash-loop at startup (rr-server requires TLS+mTLS and an admin token by default). Either configure TLS (--set tls.enabled=true --set tls.existingSecret=<name> --set tls.requireClientCert=true) or, for LOCAL DEV ONLY, explicitly opt in with --set security.allowInsecure=true" -}}
+{{- end -}}
+{{- if and .Values.tls.enabled (not .Values.tls.requireClientCert) (not .Values.security.allowInsecure) -}}
+{{- fail "rr chart: tls.enabled=true with tls.requireClientCert=false is rejected at boot (gate G2: RaftService peer identity is mTLS-only) and the pods would crash-loop. Set --set tls.requireClientCert=true (recommended) or, for LOCAL DEV ONLY, --set security.allowInsecure=true" -}}
+{{- end -}}
+{{- if and (not .Values.security.allowInsecure) (not .Values.auth.adminTokenSecret.name) -}}
+{{- fail "rr chart: auth.adminTokenSecret.name is empty and security.allowInsecure=false; rr-server refuses to boot with AdminService enabled and no admin token (gate G5). Set auth.adminTokenSecret.name to an existing Secret" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -17,6 +43,18 @@ spec:
         {{- include "rr.selectorLabels" . | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.cluster.terminationGracePeriodSeconds }}
+      # Spread pods across nodes (best effort) so a single host failure cannot
+      # take out 2 replicas and break raft quorum. Preferred, not required:
+      # single-node local clusters must still schedule.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "rr.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       initContainers:
@@ -65,6 +103,13 @@ spec:
           env:
             - name: RUST_LOG
               value: "{{ .Values.log.level }}"
+            {{- if .Values.security.allowInsecure }}
+            # DEV/LOCAL ONLY — bypasses startup security gates G1-G6 (the
+            # G7 TCP-loopback gate is never bypassed; this chart does not
+            # enable the TCP raft transport anyway).
+            - name: RR_ALLOW_INSECURE
+              value: "true"
+            {{- end }}
             {{- if .Values.auth.adminTokenSecret.name }}
             - name: RR_ADMIN_TOKEN
               valueFrom:

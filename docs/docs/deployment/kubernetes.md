@@ -71,6 +71,7 @@ helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version 0.2.0
 | `tls.enabled` | `false` | Enable TLS on gRPC |
 | `tls.existingSecret` | `""` | TLS secret name (tls.crt/tls.key/ca.crt) |
 | `tls.requireClientCert` | `false` | mTLS mode |
+| `security.allowInsecure` | `false` | DEV ONLY:渲染 `RR_ALLOW_INSECURE=true` 绕过 rr-server 启动安全 gate;与 `tls.enabled=false` 组合时模板直接 `fail` 拒绝渲染 / DEV ONLY — renders `RR_ALLOW_INSECURE=true`, bypassing startup security gates; the chart refuses to render when combined with `tls.enabled=false` |
 | `resources.*` | 500m / 512Mi request | Adjust for workload |
 
 ### TLS setup with cert-manager

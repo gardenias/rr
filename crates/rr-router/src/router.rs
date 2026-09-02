@@ -8,7 +8,7 @@ use std::sync::Arc;
 use metrics::counter;
 use rr_core::config::ConfigProvider;
 use rr_core::error::{RouterError, RrError};
-use rr_core::types::{GroupId, NodeAddr, NodeId, PartitionId, RoutingTable};
+use rr_core::types::{GroupId, PartitionId, RoutingTable};
 use tracing::instrument;
 
 /// Routes a partition ID to a Raft group ID using a [`ConfigProvider`]-backed routing table.
@@ -45,37 +45,6 @@ impl ShardRouter {
             counter!("router.route.not_found").increment(1);
         }
         result
-    }
-    /// Get the current leader node for a group.
-    ///
-    /// Returns [`RouterError::GroupNotFound`] if the group is not in the
-    /// routing table.
-    /// Returns [`RouterError::NoLeader`] if the group has no leader.
-    #[instrument(skip(self))]
-    pub async fn get_leader(&self, group_id: GroupId) -> Result<NodeId, RrError> {
-        let table = self.config.get_routing_table().await?;
-
-        let meta = table
-            .groups
-            .get(&group_id)
-            .ok_or(RrError::Router(RouterError::GroupNotFound { group_id }))?;
-
-        meta.leader
-            .ok_or(RrError::Router(RouterError::NoLeader { group_id }))
-    }
-
-    /// Get the address of the leader node for a partition.
-    ///
-    /// Combines [`route()`](Self::route) + [`get_leader()`](Self::get_leader) +
-    /// node address lookup.
-    #[instrument(skip(self))]
-    pub async fn get_leader_addr(&self, partition_id: PartitionId) -> Result<NodeAddr, RrError> {
-        let group_id = self.route(partition_id).await?;
-        let leader_id = self.get_leader(group_id).await?;
-
-        let addr = self.config.get_node_addr(leader_id).await?;
-        counter!("router.get_leader_addr.success").increment(1);
-        Ok(addr)
     }
 
     #[instrument(skip(self))]
@@ -135,59 +104,7 @@ mod tests {
         assert_eq!(group_id, 10);
     }
 
-    // ── Test 3: group not found ──────────────────────────────────────
-    #[tokio::test]
-    async fn test_get_leader_group_not_found() {
-        let provider = make_provider();
-        let router = make_router(&provider);
-
-        let result = router.get_leader(999).await;
-        assert!(result.is_err());
-
-        match result.unwrap_err() {
-            RrError::Router(RouterError::GroupNotFound { group_id }) => {
-                assert_eq!(group_id, 999);
-            }
-            other => panic!("expected GroupNotFound, got: {other}"),
-        }
-    }
-
-    // ── Test 4: get leader success ───────────────────────────────────
-    #[tokio::test]
-    async fn test_get_leader_success() {
-        let provider = make_provider();
-        provider
-            .add_partition(2, PartitionConfig::SingleId(2), 20, vec![1, 2, 3])
-            .await;
-        let router = make_router(&provider);
-
-        // MemConfigProvider sets first replica as leader
-        let leader = router.get_leader(20).await.unwrap();
-        assert_eq!(leader, 1);
-    }
-
-    // ── Test 5: get leader addr success ──────────────────────────────
-    #[tokio::test]
-    async fn test_get_leader_addr_success() {
-        let provider = make_provider();
-        provider
-            .add_partition(3, PartitionConfig::SingleId(3), 30, vec![5])
-            .await;
-        provider
-            .add_node(
-                5,
-                NodeAddr {
-                    addr: "127.0.0.1:50051".to_string(),
-                },
-            )
-            .await;
-        let router = make_router(&provider);
-
-        let addr = router.get_leader_addr(3).await.unwrap();
-        assert_eq!(addr.addr, "127.0.0.1:50051");
-    }
-
-    // ── Test 6: routing table returns full table ─────────────────────
+    // ── Test 3: routing table returns full table ─────────────────────
     #[tokio::test]
     async fn test_routing_table_returns_full_table() {
         let provider = make_provider();
@@ -218,40 +135,5 @@ mod tests {
         assert_eq!(table.nodes.len(), 1);
         assert!(table.partitions.contains_key(&1));
         assert!(table.partitions.contains_key(&2));
-    }
-
-    // ── Test 7: get leader addr partition not found ──────────────────
-    #[tokio::test]
-    async fn test_get_leader_addr_partition_not_found() {
-        let provider = make_provider();
-        let router = make_router(&provider);
-
-        let result = router.get_leader_addr(999).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RrError::Router(RouterError::PartitionNotFound { partition_id }) => {
-                assert_eq!(partition_id, 999);
-            }
-            other => panic!("expected PartitionNotFound, got: {other}"),
-        }
-    }
-
-    // ── Test 8: get leader addr node not found ───────────────────────
-    #[tokio::test]
-    async fn test_get_leader_addr_node_not_found() {
-        let provider = make_provider();
-        provider
-            .add_partition(4, PartitionConfig::SingleId(4), 40, vec![99])
-            .await;
-        // Don't add node 99 address
-        let router = make_router(&provider);
-
-        let result = router.get_leader_addr(4).await;
-        assert!(result.is_err());
-        // Should be a Config error from get_node_addr
-        match result.unwrap_err() {
-            RrError::Config(_) => {} // expected
-            other => panic!("expected Config error, got: {other}"),
-        }
     }
 }

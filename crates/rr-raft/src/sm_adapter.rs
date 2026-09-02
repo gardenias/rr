@@ -43,6 +43,34 @@ impl RrStateMachine {
             snapshot_idx: 0,
         }
     }
+
+    /// Fallible snapshot capture shared by both openraft entry points
+    /// (`get_snapshot_builder` and `try_create_snapshot_builder`).
+    ///
+    /// ADR A-0011 C6: a snapshot is either complete bytes from a successful
+    /// `inner.snapshot()` call or it does not exist — never "empty bytes +
+    /// valid meta". Callers decide how to surface the failure.
+    async fn snapshot_builder_inner(&mut self) -> Result<RrSnapshotBuilder, io::Error> {
+        let data = self
+            .inner
+            .snapshot()
+            .await
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        self.snapshot_bytes = data.clone();
+        Ok(RrSnapshotBuilder {
+            data,
+            last_applied: self.last_applied,
+            last_membership: self.last_membership.clone(),
+            snapshot_idx: self.snapshot_idx,
+            build_error: None,
+        })
+    }
+
+    /// Common failure path: log + count, then hand the error to the caller.
+    fn snapshot_build_failed(error: &io::Error) {
+        tracing::error!(error = %error, "state machine snapshot capture failed");
+        metrics::counter!("rr_snapshot_build_failures_total").increment(1);
+    }
 }
 
 impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
@@ -90,13 +118,46 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        let data = self.inner.snapshot().await.unwrap_or_default();
-        self.snapshot_bytes = data.clone();
-        RrSnapshotBuilder {
-            data,
-            last_applied: self.last_applied,
-            last_membership: self.last_membership.clone(),
-            snapshot_idx: self.snapshot_idx,
+        // Legacy entry point (signature has no `Result`). On failure return
+        // a poisoned builder so the error surfaces via `build_snapshot()`
+        // instead of producing an empty-but-valid-looking snapshot (C6).
+        match self.snapshot_builder_inner().await {
+            Ok(builder) => builder,
+            Err(e) => {
+                Self::snapshot_build_failed(&e);
+                RrSnapshotBuilder::poisoned(
+                    e,
+                    self.last_applied,
+                    self.last_membership.clone(),
+                    self.snapshot_idx,
+                )
+            }
+        }
+    }
+
+    async fn try_create_snapshot_builder(&mut self, force: bool) -> Option<Self::SnapshotBuilder> {
+        match self.snapshot_builder_inner().await {
+            Ok(builder) => Some(builder),
+            Err(e) => {
+                Self::snapshot_build_failed(&e);
+                if force {
+                    // Startup rebuild path (openraft `storage/helper.rs`
+                    // unwraps the `Option`): return a poisoned builder so
+                    // `Raft::new` fails with a diagnosable `StorageError`
+                    // instead of panicking inside openraft on `None`.
+                    Some(RrSnapshotBuilder::poisoned(
+                        e,
+                        self.last_applied,
+                        self.last_membership.clone(),
+                        self.snapshot_idx,
+                    ))
+                } else {
+                    // Policy-triggered build: defer. openraft records
+                    // `BuildSnapshotDone(None)` and retries on the next
+                    // `SnapshotPolicy` trigger.
+                    None
+                }
+            }
         }
     }
 
@@ -153,10 +214,41 @@ pub struct RrSnapshotBuilder {
     last_applied: Option<LogIdOf<RrTypeConfig>>,
     last_membership: StoredMembershipOf<RrTypeConfig>,
     snapshot_idx: u64,
+    /// Captured snapshot-capture error. When set, `build_snapshot` returns
+    /// it instead of emitting an "empty bytes + valid meta" snapshot
+    /// (ADR A-0011 C6 poisoned builder).
+    build_error: Option<io::Error>,
+}
+
+impl RrSnapshotBuilder {
+    /// A builder whose `build_snapshot` re-surfaces the capture error, so
+    /// the failure propagates through openraft's `Result` channel as a
+    /// `StorageError` instead of producing a corrupt snapshot.
+    fn poisoned(
+        error: io::Error,
+        last_applied: Option<LogIdOf<RrTypeConfig>>,
+        last_membership: StoredMembershipOf<RrTypeConfig>,
+        snapshot_idx: u64,
+    ) -> Self {
+        Self {
+            data: Vec::new(),
+            last_applied,
+            last_membership,
+            snapshot_idx,
+            build_error: Some(error),
+        }
+    }
 }
 
 impl RaftSnapshotBuilder<RrTypeConfig> for RrSnapshotBuilder {
     async fn build_snapshot(&mut self) -> Result<SnapshotOf<RrTypeConfig>, io::Error> {
+        // Borrow, don't take: a poisoned builder must keep failing on every
+        // call. openraft calls `build_snapshot` exactly once per builder
+        // today, but a `take()` would let a second call fall through and
+        // emit exactly the "empty bytes + valid meta" snapshot C6 outlaws.
+        if let Some(error) = &self.build_error {
+            return Err(io::Error::other(error.to_string()));
+        }
         let meta = SnapshotMeta {
             last_log_id: self.last_applied,
             last_membership: self.last_membership.clone(),
@@ -357,5 +449,72 @@ mod tests {
             .unwrap();
         let s2 = sm.get_current_snapshot().await.unwrap().unwrap();
         assert_eq!(s2.meta.snapshot_id, "snap-2");
+    }
+
+    // ── T5: snapshot failure propagation (ADR A-0011 C6) ─────────────────
+
+    /// State machine whose `snapshot()` always fails — exercises the
+    /// fail-closed snapshot paths.
+    struct FailingSnapshotSM;
+
+    #[async_trait::async_trait]
+    impl StateMachine for FailingSnapshotSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+            Ok(entry.to_vec())
+        }
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Err(RrError::Application(
+                "simulated snapshot failure".to_string(),
+            ))
+        }
+        async fn restore(&mut self, _snapshot: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+    }
+
+    fn make_failing_sm() -> RrStateMachine {
+        RrStateMachine::new(Box::new(FailingSnapshotSM))
+    }
+
+    /// force=false (policy-triggered): failure must return `None` so
+    /// openraft defers to the next SnapshotPolicy trigger.
+    #[tokio::test]
+    async fn test_snapshot_failure_defers_policy_build() {
+        let mut sm = make_failing_sm();
+        let builder = sm.try_create_snapshot_builder(false).await;
+        assert!(
+            builder.is_none(),
+            "policy-triggered build must defer (None) on snapshot failure"
+        );
+    }
+
+    /// force=true (startup rebuild): failure must return a poisoned builder
+    /// whose `build_snapshot()` errors — never `None` (openraft unwraps it).
+    #[tokio::test]
+    async fn test_snapshot_failure_forced_build_errors() {
+        let mut sm = make_failing_sm();
+        let builder = sm.try_create_snapshot_builder(true).await;
+        let mut builder = builder.expect("forced build must yield a poisoned builder, not None");
+        let result = builder.build_snapshot().await;
+        assert!(
+            result.is_err(),
+            "poisoned builder must surface the capture error"
+        );
+    }
+
+    /// Legacy entry point: on failure `build_snapshot()` must return Err,
+    /// never an empty-but-valid snapshot.
+    #[tokio::test]
+    async fn test_legacy_get_snapshot_builder_never_empty_on_error() {
+        let mut sm = make_failing_sm();
+        let mut builder = sm.get_snapshot_builder().await;
+        let result = builder.build_snapshot().await;
+        assert!(
+            result.is_err(),
+            "legacy builder must fail closed instead of emitting an empty snapshot"
+        );
     }
 }

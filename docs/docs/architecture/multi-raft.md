@@ -95,7 +95,7 @@ Key methods include:
 rr 通过路由表实现数据分片（Partition）到共识组（Group）的灵活映射。这种设计允许用户根据数据量和负载情况，动态地调整分片的归属。
 
 - **PartitionConfig**：定义分片的范围或 ID 规则。
-- **GroupMeta**：包含共识组的元数据，如领导者 ID 和副本成员列表。
+- **GroupMeta**：包含共识组的配置面元数据（副本成员列表）；leader 是 raft 运行时状态，由客户端经 redirect 发现。
 - **RoutingTable**：维护 `PartitionId` 到 `GroupId` 的映射，以及 `NodeId` 到网络地址的映射。
 - **ConfigProvider**：配置提供者接口，可以支持内存、文件或外部存储（如 etcd）作为配置源。
 
@@ -104,7 +104,7 @@ rr 通过路由表实现数据分片（Partition）到共识组（Group）的灵
 rr implements flexible mapping from data partitions (Partition) to consensus groups (Group) via a routing table. This design allows users to dynamically adjust partition ownership based on data volume and load.
 
 - **PartitionConfig**: Defines partition ranges or ID rules.
-- **GroupMeta**: Contains metadata for a consensus group, such as leader ID and replica member list.
+- **GroupMeta**: Contains configuration-plane metadata for a consensus group (the replica member list); the leader is raft runtime state, discovered by clients via redirects.
 - **RoutingTable**: Maintains mappings from `PartitionId` to `GroupId`, and from `NodeId` to network addresses.
 - **ConfigProvider**: An interface for configuration providers, supporting memory, files, or external stores (like etcd) as sources.
 

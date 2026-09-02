@@ -18,6 +18,7 @@
 //! | `config` | [`ConfigProvider`], [`RoutingTableChange`] |
 //! | `codec` | [`Codec`], [`BincodeCodec`] |
 //! | `error` | [`RrError`] and domain-specific error enums |
+//! | `membership` | [`MIN_VOTERS_AFTER_REMOVAL`] — change-membership quorum policy |
 //! | `types` | [`NodeId`], [`GroupId`], [`RoutingTable`], … |
 //!
 //! No networking, no storage backends, no Raft implementation — just
@@ -50,6 +51,7 @@ pub mod framed_entry;
 pub mod framed_snapshot;
 pub mod idempotency;
 pub mod ingestor;
+pub mod membership;
 pub mod output;
 pub mod service;
 pub mod state_machine;
@@ -68,6 +70,7 @@ pub use framed_snapshot::{
 };
 pub use idempotency::{ApplyOutcome, IdempotencyDecision, IdempotencyError, IdempotencyKey};
 pub use ingestor::{CommandIngestor, DynCommandIngestor, DynIngressCommand, IngressCommand};
+pub use membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 pub use output::{HandleResult, Output, OutputTarget};
 pub use service::Service;
 pub use state_machine::StateMachine;

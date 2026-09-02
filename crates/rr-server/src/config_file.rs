@@ -48,7 +48,8 @@ pub struct NodeSection {
     pub snapshot_logs_since_last: Option<u64>,
     /// DANGEROUS — bypass production security validation. Dev/CI only.
     /// See `NodeConfig::allow_insecure` rustdoc for the full list of
-    /// gates that get bypassed.
+    /// gates that get bypassed. NOTE: the TCP raft loopback gate (G7,
+    /// ADR A-0014) is NOT bypassed by this flag.
     pub allow_insecure: Option<bool>,
 }
 
@@ -64,6 +65,9 @@ pub struct StorageSection {
 pub struct ClusterSection {
     pub bootstrap: Option<bool>,
     pub peers: Option<Vec<String>>,
+    /// `grpc` (default) or `tcp`. `tcp` is plaintext with no peer
+    /// authentication: requires `allow_insecure` and a loopback
+    /// `listen_addr` (G6/G7, ADR A-0014).
     pub raft_transport: Option<String>,
 }
 
@@ -339,9 +343,7 @@ impl ResolvedConfig {
             per_caller_client_rps: args
                 .per_caller_client_rps
                 .or(file.rate_limit.per_caller_client_rps),
-            per_caller_burst: args
-                .per_caller_burst
-                .or(file.rate_limit.per_caller_burst),
+            per_caller_burst: args.per_caller_burst.or(file.rate_limit.per_caller_burst),
         };
         let allow_insecure = args.allow_insecure || file.node.allow_insecure.unwrap_or(false);
 
@@ -868,6 +870,79 @@ mod tests {
         let resolved = ResolvedConfig::resolve(&args).unwrap();
         assert!(matches!(resolved.raft_transport, RaftTransportKind::Tcp));
         assert_eq!(resolved.raft_tcp_port, Some(52001));
+    }
+
+    #[test]
+    fn raft_transport_cli_overrides_toml() {
+        // Priority: CLI flag beats TOML for both the transport kind and the
+        // TCP port. TOML says grpc, CLI says tcp → tcp wins, and the CLI
+        // port suppresses the +10000 derivation from listen_addr.
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+            raft_tcp_port = 52001
+
+            [cluster]
+            raft_transport = "grpc"
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.raft_transport = Some("tcp".to_string());
+        args.raft_tcp_port = Some(62001);
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(resolved.raft_transport, RaftTransportKind::Tcp));
+        assert_eq!(resolved.raft_tcp_port, Some(62001));
+
+        // And the reverse direction: TOML says tcp, CLI forces grpc → the
+        // TCP port is irrelevant and the transport is grpc.
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            raft_transport = "tcp"
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.raft_transport = Some("grpc".to_string());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(resolved.raft_transport, RaftTransportKind::Grpc));
+    }
+
+    #[test]
+    fn raft_transport_tcp_toml_derives_bind_inputs_for_gate() {
+        // ADR A-0014 test-matrix item 2: TOML-selected tcp transport resolves
+        // to (listen_addr, raft_tcp_port) — the inputs from which main.rs
+        // derives the single TCP bind address carried by
+        // `NodeConfig::raft_transport` into the G6/G7 gates.
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            raft_transport = "tcp"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert!(matches!(resolved.raft_transport, RaftTransportKind::Tcp));
+        // Default +10000 derivation.
+        assert_eq!(resolved.raft_tcp_port, Some(61001));
+        // The derived bind address (host from listen_addr) must be loopback —
+        // G7 would reject this config otherwise.
+        let bind_addr = format!(
+            "{}:{}",
+            resolved.listen_addr.rsplit_once(':').unwrap().0,
+            resolved.raft_tcp_port.unwrap()
+        );
+        let parsed: std::net::SocketAddr = bind_addr.parse().unwrap();
+        assert!(parsed.ip().is_loopback());
     }
 
     #[test]

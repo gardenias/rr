@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "io.github.gardenias"
-version = providers.gradleProperty("sdkVersion").getOrElse("0.1.0")
+version = providers.gradleProperty("sdkVersion").getOrElse("0.2.0")
 
 val grpcVersion: String by project
 val protobufVersion: String by project

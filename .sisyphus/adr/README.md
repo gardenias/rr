@@ -28,6 +28,10 @@
 | [A-0008](./A-0008-snapshot-strategy.md) | Snapshot strategy — periodic auto-trigger via openraft SnapshotPolicy | implemented | 2026-05-12 |
 | [A-0009](./A-0009-read-write-separation-and-sm-locking.md) | Read/write RPC separation and state machine locking model | implemented | 2026-05-09 |
 | [A-0010](./A-0010-wal-log-storage-backend.md) | WAL log-storage backend as a faster alternative to RocksDB | accepted | 2026-05-13 |
+| [A-0011](./A-0011-shutdown-durability-contract.md) | Shutdown durability contract: IoBatcher close 协议 + snapshot/offset 错误传播 | implemented | 2026-08-28 |
+| [A-0012](./A-0012-membership-quorum-guard.md) | change-membership server-side quorum guard | implemented | 2026-08-28 |
+| [A-0013](./A-0013-remove-groupmeta-leader.md) | 删除静态路由表中的 `GroupMeta.leader` 字段 | implemented | 2026-08-28 |
+| [A-0014](./A-0014-tcp-transport-security-gate.md) | TCP raft transport 的 transport-aware 安全 gate | implemented | 2026-08-28 |
 
 ## Relationship
 

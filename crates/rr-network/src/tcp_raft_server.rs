@@ -1,4 +1,18 @@
 //! TCP server for Raft AppendEntries/Vote with lightweight binary framing.
+//!
+//! # Security
+//!
+//! The `RRAF` frame protocol is **plaintext, with no TLS, no peer
+//! authentication, and no rate limiting** — any client that can reach the
+//! port can inject Vote/AppendEntries frames and interfere with leader
+//! election and replication. This transport is meant for development and
+//! trusted networks only.
+//!
+//! In the standard `rr-server` path (`NodeConfig::raft_transport =
+//! RaftTransport::Tcp`) startup gates G6/G7 (ADR A-0014) require an explicit
+//! `allow_insecure` opt-in and force the bind address to be loopback.
+//! Library users who bind [`TcpRaftServer`] directly bypass those gates:
+//! **never bind it to a non-loopback address.**
 
 use std::io;
 use std::sync::Arc;
@@ -6,7 +20,6 @@ use std::sync::Arc;
 use rr_core::types::GroupId;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
-
 
 use crate::raft_service::RaftGroupLookup;
 
@@ -89,12 +102,21 @@ where
 }
 
 /// Server-side TCP listener for Raft append/vote traffic.
+///
+/// # Security
+///
+/// Plaintext framing, no TLS, no peer authentication (see the module-level
+/// docs). Bind loopback only; the `rr-server` startup gates G6/G7
+/// (ADR A-0014) enforce this for the standard `RaftTransport::Tcp` path,
+/// but a direct [`TcpRaftServer::bind`] bypasses them.
 pub struct TcpRaftServer {
     listener: TcpListener,
     groups: Arc<dyn RaftGroupLookup>,
 }
 
 impl TcpRaftServer {
+    /// Bind the listener. `addr` must be a loopback address — this
+    /// transport has no TLS and no peer authentication (ADR A-0014 G7).
     pub async fn bind(addr: &str, groups: Arc<dyn RaftGroupLookup>) -> io::Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         Ok(Self { listener, groups })
@@ -117,10 +139,7 @@ impl TcpRaftServer {
     }
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    groups: Arc<dyn RaftGroupLookup>,
-) -> io::Result<()> {
+async fn handle_connection(stream: TcpStream, groups: Arc<dyn RaftGroupLookup>) -> io::Result<()> {
     use tokio::io::AsyncWriteExt;
     let (mut reader, mut writer) = stream.into_split();
 
@@ -166,6 +185,8 @@ async fn dispatch_frame(
                 &payload,
             ))
         }
-        _ => Err(tonic::Status::invalid_argument("unsupported tcp raft msg_type")),
+        _ => Err(tonic::Status::invalid_argument(
+            "unsupported tcp raft msg_type",
+        )),
     }
 }

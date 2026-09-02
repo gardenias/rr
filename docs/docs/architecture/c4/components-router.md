@@ -4,11 +4,11 @@ sidebar_position: 5
 
 # Level 3 — rr-router + rr-config 组件图 / Routing & Configuration
 
-rr 采用 **表格式路由（Table-based routing）** 而非哈希环。本图展示 `ShardRouter`、`ConfigProvider` 以及路由表如何协作，把一个 `partition_id` 解析到正确的 `group_id` 和 leader 地址。
+rr 采用 **表格式路由（Table-based routing）** 而非哈希环。本图展示 `ShardRouter`、`ConfigProvider` 以及路由表如何协作，把一个 `partition_id` 解析到正确的 `group_id`。
 
 ---
 
-rr uses **table-based routing** rather than hash rings. This diagram shows how `ShardRouter`, `ConfigProvider`, and the routing table cooperate to resolve a `partition_id` to the correct `group_id` and leader address.
+rr uses **table-based routing** rather than hash rings. This diagram shows how `ShardRouter`, `ConfigProvider`, and the routing table cooperate to resolve a `partition_id` to the correct `group_id`.
 
 ## 图示 / Diagram
 
@@ -24,14 +24,14 @@ Container_Ext(source, "Config Source", "In-memory / etcd / file / custom", "Prod
 
 Container_Boundary(routing_system, "Routing System") {
   Boundary(router_crate, "rr-router", "crate") {
-    Component(shard_router, "ShardRouter", "rr-router::router", "Stateless resolver. route(partition_id) → (GroupId, leader NodeId, leader addr). Caches RoutingTable snapshot; refreshes on change events")
+    Component(shard_router, "ShardRouter", "rr-router::router", "Stateless resolver. route(partition_id) → GroupId. Caches RoutingTable snapshot; refreshes on change events")
   }
 
   Boundary(config_crate, "rr-config", "crate") {
     Component(cfg_trait, "ConfigProvider (trait)", "rr-core::config", "get_routing_table() / subscribe_changes() / update_group_membership() etc.")
     Component(mem_cfg, "MemConfigProvider", "rr-config::mem", "In-process impl. tokio::sync::broadcast for change notification. Default in examples & tests")
     Component(routing_table, "RoutingTable", "rr-core::types", "Pure data: partitions, groups, nodes. Serializable. Snapshot-style: cheap to clone")
-    Component(change_ev, "RoutingTableChange", "rr-core::types", "Enum: PartitionAdded, NodeAdded, GroupMembershipChanged, LeaderChanged, NodeRemoved, etc.")
+    Component(change_ev, "RoutingTableChange", "rr-core::types", "Enum: PartitionAdded, NodeAdded, GroupMembershipChanged, NodeRemoved, etc.")
   }
 }
 
@@ -59,7 +59,7 @@ Defined in `rr-core::types`. A **pure data structure** that serializes freely. C
 | Field | Type | Purpose |
 | :--- | :--- | :--- |
 | `partitions` | `HashMap<PartitionId, PartitionConfig>` | 每个分片的所属 group + 元数据 / each partition's owning group + metadata |
-| `groups` | `HashMap<GroupId, GroupMeta>` | group 的成员 + 当前 leader / group's members + current leader |
+| `groups` | `HashMap<GroupId, GroupMeta>` | group 的成员列表 / group's member replicas |
 | `nodes` | `HashMap<NodeId, NodeAddr>` | node_id → "host:port" |
 
 ### ShardRouter
@@ -69,7 +69,7 @@ Defined in `rr-core::types`. A **pure data structure** that serializes freely. C
 1. 启动时：从 `ConfigProvider::get_routing_table()` 加载初始快照。
 2. 订阅 `RoutingTableChange` 事件，按需更新本地缓存（`ArcSwap<RoutingTable>` 或类似）。
 3. 提供查询 API：
-   - `route(partition_id) → (group_id, leader_addr)` — 热路径，无锁
+   - `route(partition_id) → group_id` — 热路径，无锁
    - `group_members(group_id) → Vec<NodeAddr>` — 用于 RaftGroupManager 启动 group
 4. 记录 routing metrics（cache hit/miss、lookup latency）。
 
@@ -79,7 +79,7 @@ Defined in `rr-core::types`. A **pure data structure** that serializes freely. C
 1. At startup: load initial snapshot from `ConfigProvider::get_routing_table()`.
 2. Subscribe to `RoutingTableChange` events; update local cache on demand (`ArcSwap<RoutingTable>` or similar).
 3. Expose query APIs:
-   - `route(partition_id) → (group_id, leader_addr)` — hot path, lock-free
+   - `route(partition_id) → group_id` — hot path, lock-free
    - `group_members(group_id) → Vec<NodeAddr>` — used by RaftGroupManager to start groups
 4. Records routing metrics (cache hit/miss, lookup latency).
 
@@ -97,7 +97,6 @@ pub trait ConfigProvider: Send + Sync + 'static {
     // Mutations (usually only called by control plane / admin):
     async fn add_node(&self, node_id: NodeId, addr: NodeAddr) -> Result<(), RrError>;
     async fn update_group_membership(&self, group_id: GroupId, members: Vec<NodeId>) -> Result<(), RrError>;
-    async fn update_leader(&self, group_id: GroupId, leader: NodeId) -> Result<(), RrError>;
     // ...
 }
 ```

@@ -1,6 +1,7 @@
 //! Error types for the rr distributed framework.
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RrError {
     #[error("raft error: {0}")]
     Raft(#[from] RaftError),
@@ -25,6 +26,7 @@ pub enum RrError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RaftError {
     #[error("not leader, current leader: id={leader:?}, addr={leader_addr:?}")]
     NotLeader {
@@ -39,9 +41,15 @@ pub enum RaftError {
     Timeout,
     #[error("raft initialization failed: {reason}")]
     InitializationFailed { reason: String },
+    #[error(
+        "membership change rejected: target voter set has {target_voters} voter(s), \
+             below minimum {min}; re-run with force to override"
+    )]
+    UnsafeMembershipChange { target_voters: usize, min: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StorageError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -52,6 +60,7 @@ pub enum StorageError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     #[error("provider unavailable: {0}")]
     ProviderUnavailable(String),
@@ -62,16 +71,16 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RouterError {
     #[error("partition not found: {partition_id}")]
     PartitionNotFound { partition_id: u64 },
     #[error("group not found: {group_id}")]
     GroupNotFound { group_id: u64 },
-    #[error("no leader for group: {group_id}")]
-    NoLeader { group_id: u64 },
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NetworkError {
     #[error("connection failed to {addr}: {reason}")]
     ConnectionFailed { addr: String, reason: String },
@@ -82,6 +91,7 @@ pub enum NetworkError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum CodecError {
     #[error("serialize failed: {0}")]
     SerializeFailed(String),

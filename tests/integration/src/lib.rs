@@ -7,6 +7,10 @@
 mod cross_tier_ingestor;
 pub mod fault_injection;
 #[cfg(test)]
+mod leader_redirect_failover;
+#[cfg(test)]
+mod membership_guard;
+#[cfg(test)]
 mod tls_auth_e2e;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -1056,6 +1060,7 @@ mod tests {
     #[tokio::test]
     async fn test_restart_persistence() {
         use openraft::storage::RaftLogStorage;
+        use openraft::RaftLogReader;
         use rr_raft::group_manager::RaftGroupManager;
         use rr_raft::rocks_log_storage::RocksLogStorage;
         use tempfile::TempDir;
@@ -1501,7 +1506,7 @@ mod tests {
         // 2. Verify leader election
         let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
         assert!(
-            leader_id >= 1 && leader_id <= 3,
+            (1..=3).contains(&leader_id),
             "leader must be one of the 3 nodes"
         );
 
@@ -1554,7 +1559,7 @@ mod tests {
         let _ = raft2.trigger().snapshot().await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let final_leader = wait_for_cluster_ready(&active, 1, 5_000).await.unwrap();
-        assert!(final_leader >= 1 && final_leader <= 3);
+        assert!((1..=3).contains(&final_leader));
 
         // 8. Graceful shutdown of remaining nodes
         for node in &active {
@@ -1925,6 +1930,7 @@ mod tests {
     #[tokio::test]
     async fn test_crash_during_write_preserves_acked_entries() {
         use openraft::storage::RaftLogStorage;
+        use openraft::RaftLogReader;
         use rr_raft::group_manager::RaftGroupManager;
         use rr_raft::rocks_log_storage::RocksLogStorage;
         use tempfile::TempDir;
@@ -1956,7 +1962,7 @@ mod tests {
                     .last_log_index
                     .expect("last_log_index after Ok client_write");
                 acked_indices.push(idx);
-                assert_eq!(resp.data, vec![i, b'!'], "EchoSM must echo {i}");
+                assert_eq!(resp.data, vec![i, b'!'].into(), "EchoSM must echo {i}");
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1984,6 +1990,115 @@ mod tests {
         assert!(
             vote.is_some(),
             "vote must persist across abrupt drop (durability invariant)"
+        );
+    }
+
+    /// E4b — Graceful-shutdown flush (ADR A-0011 C3/C4; the T4 acceptance
+    /// test of the shutdown durability contract). Single-node rocks group;
+    /// fire 20 concurrent `client_write`s WITHOUT awaiting them, then call
+    /// `stop_group` while most are still in flight. `stop_group` must:
+    ///
+    /// (a) not hang — every in-flight write resolves one way or the other;
+    /// (b) flush the IO batcher — final fsync + all pending completion
+    ///     callbacks answered before it returns;
+    /// (c) on reopen, every write that DID return `Ok` is present in the
+    ///     persisted log (acked data is never lost), and the vote survives.
+    ///
+    /// Complements `test_crash_during_write_preserves_acked_entries`: that
+    /// one exercises the abrupt-drop fallback, this one the graceful
+    /// `close()` path. Both must hold.
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_stop_group_flush_preserves_acked_and_pending() {
+        use openraft::storage::RaftLogStorage;
+        use openraft::RaftLogReader;
+        use rr_raft::group_manager::RaftGroupManager;
+        use rr_raft::rocks_log_storage::RocksLogStorage;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().to_str().unwrap().to_string();
+        let mut acked_indices: Vec<u64> = Vec::new();
+
+        {
+            let mgr = Arc::new(RaftGroupManager::new_with_rocks(
+                1,
+                echo_factory(),
+                base.clone(),
+            ));
+            mgr.start_group_rocks(1).await.unwrap();
+            let mut members = BTreeMap::new();
+            members.insert(1u64, openraft::BasicNode::default());
+            let raft = mgr.get_raft(1).await.unwrap();
+            let _ = raft.initialize(members).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+            // Fire 20 concurrent writes without awaiting each one.
+            let mut handles = Vec::new();
+            for i in 0u8..20 {
+                let raft = raft.clone();
+                handles.push(tokio::spawn(async move {
+                    raft.client_write(vec![i, b'?'].into()).await
+                }));
+            }
+
+            // Immediately stop the group while most writes are in flight.
+            // The timeout is the anti-hang assertion (C3).
+            tokio::time::timeout(std::time::Duration::from_secs(20), mgr.stop_group(1))
+                .await
+                .expect("stop_group must not hang")
+                .expect("stop_group must succeed");
+
+            // Every writer must resolve once stop_group returned Ok — if the
+            // "answer every pending completion" half of the close contract
+            // ever regresses, fail here instead of hanging to the CI timeout.
+            for h in handles {
+                if let Ok(resp) = tokio::time::timeout(std::time::Duration::from_secs(5), h)
+                    .await
+                    .expect("writer must resolve once stop_group returned Ok")
+                    .expect("writer task must not panic")
+                {
+                    acked_indices.push(resp.log_id.index);
+                }
+                // Writes rejected because shutdown began are fine — they
+                // were never acked, so nothing is owed to the client.
+            }
+        }
+
+        // Reopen the same data dir and verify durability of acked writes.
+        let rocks_path = format!("{base}/1");
+        let mut log = RocksLogStorage::open(&rocks_path)
+            .expect("rocks reopen must succeed after graceful stop_group");
+        let state = log.get_log_state().await.unwrap();
+        let last_index = state
+            .last_log_id
+            .expect("last_log_id must be Some after stop_group")
+            .index;
+        if acked_indices.is_empty() {
+            // The race can legitimately reject all 20 writes (stop_group won
+            // before any write committed). The durability assertion below is
+            // then vacuous — surface that in CI logs rather than silently.
+            eprintln!(
+                "test_stop_group_flush_preserves_acked_and_pending: all 20 writes \
+                 were rejected by the racing stop_group; acked-data assertion skipped"
+            );
+        }
+        if let Some(max_acked) = acked_indices.iter().max() {
+            assert!(
+                last_index >= *max_acked,
+                "all {} acked writes must survive graceful stop_group; \
+                 last_log_index={last_index} but max acked = {max_acked}",
+                acked_indices.len()
+            );
+        }
+
+        let vote = log
+            .read_vote()
+            .await
+            .expect("vote must be readable after graceful stop_group");
+        assert!(
+            vote.is_some(),
+            "vote must persist across graceful stop_group"
         );
     }
 
@@ -2372,7 +2487,10 @@ mod tests {
 
         let payload = b"follower-bootstrap-request".to_vec();
         let resp = client.send_request(1, payload.clone()).await.unwrap();
-        assert_eq!(resp, payload, "request via follower bootstrap must echo payload");
+        assert_eq!(
+            resp, payload,
+            "request via follower bootstrap must echo payload"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -2395,7 +2513,10 @@ mod tests {
 
         let payload = b"leader-bootstrap-request".to_vec();
         let resp = client.send_request(1, payload.clone()).await.unwrap();
-        assert_eq!(resp, payload, "request via leader bootstrap must echo payload");
+        assert_eq!(
+            resp, payload,
+            "request via leader bootstrap must echo payload"
+        );
 
         shutdown_all(&nodes).await;
     }
@@ -2447,7 +2568,7 @@ mod tests {
         let final_step_down = step_down.load(Ordering::SeqCst);
 
         assert!(
-            final_elected >= initial_elected + 1,
+            final_elected > initial_elected,
             "on_leader_elected should fire on new leader; got {final_elected}, initial was {initial_elected}"
         );
         assert!(
@@ -2474,7 +2595,10 @@ mod tests {
         let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
         let client = RrClient::connect(addrs).await.unwrap();
 
-        client.send_request(1, b"pre-update".to_vec()).await.unwrap();
+        client
+            .send_request(1, b"pre-update".to_vec())
+            .await
+            .unwrap();
 
         let raft2_before = nodes[0].group_manager().get_raft(2).await.unwrap();
         let metrics2_before = raft2_before.metrics().borrow_watched().clone();
@@ -2520,7 +2644,10 @@ mod tests {
         let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
         let client = RrClient::connect(addrs).await.unwrap();
 
-        client.send_request(1, b"pre-update".to_vec()).await.unwrap();
+        client
+            .send_request(1, b"pre-update".to_vec())
+            .await
+            .unwrap();
 
         let raft1_before = nodes[0].group_manager().get_raft(1).await.unwrap();
         let metrics1_before = raft1_before.metrics().borrow_watched().clone();

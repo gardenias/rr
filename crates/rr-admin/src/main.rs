@@ -236,6 +236,8 @@ enum GroupCommands {
     ///
     /// Members not listed in `--voters` are kept as learners
     /// (`retain = true`). Must be called on the current leader.
+    /// The server rejects a target voter set smaller than 2 with
+    /// `failed_precondition` unless `--force` is given.
     ChangeMembership {
         /// Raft group ID.
         #[arg(long)]
@@ -243,6 +245,12 @@ enum GroupCommands {
         /// Comma-separated list of voter node IDs (e.g. `1,2,3`).
         #[arg(long)]
         voters: String,
+        /// Override the server-side quorum guard that rejects a target
+        /// voter set smaller than 2. Reserved for disaster recovery
+        /// (e.g. rebuilding after permanent loss of a majority); every
+        /// forced change is recorded in the server's audit log.
+        #[arg(long)]
+        force: bool,
     },
     /// Override persisted ingestor offset for disaster recovery.
     ///
@@ -460,10 +468,7 @@ async fn main() -> Result<()> {
                             if groups.is_empty() {
                                 println!("  (no groups drained; likely remote-node no-op)");
                             } else {
-                                println!(
-                                    "  {:<10} {:<11} message",
-                                    "group_id", "transferred"
-                                );
+                                println!("  {:<10} {:<11} message", "group_id", "transferred");
                                 for g in &groups {
                                     println!(
                                         "  {:<10} {:<11} {}",
@@ -527,7 +532,11 @@ async fn main() -> Result<()> {
                                     .unwrap_or_else(|| "none".to_string());
                                 println!(
                                     "{:<10} {:<10} {:<8} {:<14} {}",
-                                    g.group_id, g.is_leader, g.current_term, g.last_log_index, leader
+                                    g.group_id,
+                                    g.is_leader,
+                                    g.current_term,
+                                    g.last_log_index,
+                                    leader
                                 );
                             }
                         }
@@ -672,7 +681,12 @@ async fn main() -> Result<()> {
                     }
                 }
                 Commands::Group {
-                    cmd: GroupCommands::ChangeMembership { group, voters },
+                    cmd:
+                        GroupCommands::ChangeMembership {
+                            group,
+                            voters,
+                            force,
+                        },
                 } => {
                     let voter_node_ids: Vec<u64> = voters
                         .split(',')
@@ -689,6 +703,7 @@ async fn main() -> Result<()> {
                             .change_membership(ChangeMembershipRequest {
                                 group_id: *group,
                                 voter_node_ids,
+                                force: *force,
                             })
                             .await,
                         "membership changed",
@@ -954,9 +969,16 @@ fn admin_action_outcome<T>(
 /// without borrowing the original input line.
 #[derive(Debug, PartialEq)]
 enum ReplCommand {
-    Get { key: String },
-    Put { key: String, value: String },
-    Delete { key: String },
+    Get {
+        key: String,
+    },
+    Put {
+        key: String,
+        value: String,
+    },
+    Delete {
+        key: String,
+    },
     Status,
     Members,
     Help,
@@ -968,7 +990,9 @@ enum ReplCommand {
         usage: &'static str,
     },
     /// A command that is not recognised.
-    Unknown { cmd: String },
+    Unknown {
+        cmd: String,
+    },
     /// Empty or whitespace-only input.
     Empty,
 }
@@ -1039,11 +1063,8 @@ fn parse_repl_line(line: &str) -> ReplCommand {
 /// Returns `Ok(None)` when the key was not present, `Ok(Some(s))` when a
 /// value was found, or an error if the bytes cannot be decoded.
 fn decode_kv_response(bytes: &[u8]) -> anyhow::Result<Option<String>> {
-    let (resp, _): (KvResponse, _) =
-        bincode::serde::decode_from_slice(bytes, standard())?;
-    Ok(resp
-        .value
-        .map(|v| String::from_utf8_lossy(&v).to_string()))
+    let (resp, _): (KvResponse, _) = bincode::serde::decode_from_slice(bytes, standard())?;
+    Ok(resp.value.map(|v| String::from_utf8_lossy(&v).to_string()))
 }
 
 // ── Interactive REPL ───────────────────────────────────────────────────────────
@@ -1269,7 +1290,8 @@ mod tests {
 
     #[test]
     fn test_parse_group_list() {
-        let cli = Cli::try_parse_from(["rr-admin", "group", "list"]).expect("should parse group list");
+        let cli =
+            Cli::try_parse_from(["rr-admin", "group", "list"]).expect("should parse group list");
         assert!(matches!(
             cli.command,
             Commands::Group {
@@ -1428,11 +1450,38 @@ mod tests {
         .expect("should parse change-membership");
         match cli.command {
             Commands::Group {
-                cmd: GroupCommands::ChangeMembership { group, voters },
+                cmd:
+                    GroupCommands::ChangeMembership {
+                        group,
+                        voters,
+                        force,
+                    },
             } => {
                 assert_eq!(group, 1);
                 assert_eq!(voters, "1,2,3");
+                assert!(!force, "force defaults to false");
             }
+            other => panic!("expected ChangeMembership, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_group_change_membership_with_force() {
+        let cli = Cli::try_parse_from([
+            "rr-admin",
+            "group",
+            "change-membership",
+            "--group",
+            "1",
+            "--voters",
+            "1",
+            "--force",
+        ])
+        .expect("should parse change-membership --force");
+        match cli.command {
+            Commands::Group {
+                cmd: GroupCommands::ChangeMembership { force, .. },
+            } => assert!(force),
             other => panic!("expected ChangeMembership, got {other:?}"),
         }
     }

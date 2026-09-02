@@ -1,3 +1,31 @@
+# rr — 3-node multi-Raft StatefulSet (raw manifests; the Helm chart lives in
+# deploy/helm/rr).
+#
+# DEFAULT = SECURE-ON. rr-server runs startup security gates G1-G7
+# (validate_security_invariants in crates/rr-server/src/node.rs): RaftService
+# without TLS, TLS without mTLS (require_client_cert), bearer auth without
+# TLS, and AdminService without TLS / without admin_token all REFUSE to boot.
+# These manifests therefore reference two Secrets that you MUST create before
+# applying (they intentionally do NOT live in this repo):
+#
+#   # TLS keypair + CA, keys must be named tls.crt / tls.key / ca.crt.
+#   # SANs must cover rr-0.rr / rr-1.rr / rr-2.rr (headless service DNS) and
+#   # the rr-client service DNS, because RaftService uses mTLS as its ONLY
+#   # peer-identity check. scripts/gen-dev-certs.sh makes dev-only certs;
+#   # use cert-manager or your PKI for anything real.
+#   kubectl create secret generic rr-tls \
+#     --from-file=tls.crt=node.pem --from-file=tls.key=node.key --from-file=ca.crt=ca.pem
+#
+#   # Admin bearer token, referenced by [auth].admin_token_env in the ConfigMap.
+#   kubectl create secret generic rr-admin-token \
+#     --from-literal=token="$(openssl rand -hex 32)"
+#
+# LOCAL PLAYGROUND ONLY (kind/minikube, no certs): uncomment the
+# RR_ALLOW_INSECURE env entry in the StatefulSet below, comment out the [tls]
+# section in the ConfigMap template, and drop the tls volume + volumeMount.
+# This bypasses six of the seven gates (G1-G6; the G7 TCP-loopback gate is
+# never bypassed) — never enable it outside a throwaway local cluster.
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -26,6 +54,14 @@ data:
 
     [auth]
     admin_token_env = "RR_ADMIN_TOKEN"
+
+    # Secure default: TLS + mTLS (required by the startup security gates —
+    # RaftService has no token path, so require_client_cert must stay true).
+    [tls]
+    cert_path = "/etc/rr/tls/tls.crt"
+    key_path  = "/etc/rr/tls/tls.key"
+    ca_path   = "/etc/rr/tls/ca.crt"
+    require_client_cert = true
 ---
 apiVersion: v1
 kind: Service
@@ -95,6 +131,18 @@ spec:
         app.kubernetes.io/name: rr
     spec:
       terminationGracePeriodSeconds: 30
+      # Spread pods across nodes (best effort) so a single host failure cannot
+      # take out 2 replicas and break raft quorum. Preferred, not required:
+      # single-node local clusters (kind/minikube) must still schedule.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: rr
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -145,12 +193,21 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["serve", "--config", "/etc/rr/config.toml"]
           env:
+            # REQUIRED in the default secure posture: a missing token means
+            # AdminService runs without auth, which the startup gates reject
+            # (optional: false on purpose so a forgotten Secret fails fast at
+            # scheduling time instead of CrashLoopBackOff at runtime).
             - name: RR_ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: rr-admin-token
                   key: token
-                  optional: true
+                  optional: false
+            # LOCAL PLAYGROUND ONLY — bypasses all five startup security
+            # gates. Also comment out [tls] in the ConfigMap template and the
+            # tls volume/volumeMount below. NEVER enable in production.
+            # - name: RR_ALLOW_INSECURE
+            #   value: "true"
             - name: RUST_LOG
               value: "info"
           ports:
@@ -177,6 +234,9 @@ spec:
               mountPath: /var/lib/rr/data
             - name: config-rendered
               mountPath: /etc/rr
+            - name: tls
+              mountPath: /etc/rr/tls
+              readOnly: true
           resources:
             requests:
               cpu: "500m"
@@ -190,6 +250,11 @@ spec:
             name: rr-config
         - name: config-rendered
           emptyDir: {}
+        # TLS keypair + CA (keys: tls.crt, tls.key, ca.crt). See the header
+        # comment for how to create it; intentionally not in this repo.
+        - name: tls
+          secret:
+            secretName: rr-tls
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -26,7 +26,7 @@ use rr_core::service::Service;
 use rr_core::state_machine::StateMachine;
 use rr_ingestor_kafka::{kafka_offset_to_request_id, MockKafkaIngestor};
 use rr_raft::group_manager::{RaftGroupManager, StateMachineFactory};
-use rr_raft::ingestor_runner::AutoIdempotency;
+use rr_raft::ingestor_runner::{AutoIdempotency, OffsetMapError};
 use rr_raft::ServiceStateMachineAdapter;
 
 /// Service that records the order in which payloads were applied.
@@ -205,7 +205,9 @@ async fn auto_idempotency_dedups_replayed_kafka_offsets() {
 
     let auto_idem = AutoIdempotency {
         request_type: "test_topic_4".into(),
-        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+        offset_to_request_id: Box::new(|b| {
+            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        }),
     };
     let dyn_ingestor: Box<dyn DynCommandIngestor> = Box::new(ingestor);
     mgr.attach_ingestor_with_auto_idempotency(4, dyn_ingestor, auto_idem)
@@ -229,7 +231,9 @@ async fn auto_idempotency_dedups_replayed_kafka_offsets() {
     }
     let replay_auto_idem = AutoIdempotency {
         request_type: "test_topic_4".into(),
-        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+        offset_to_request_id: Box::new(|b| {
+            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        }),
     };
     let dyn_replay: Box<dyn DynCommandIngestor> = Box::new(replay_ingestor);
     mgr.attach_ingestor_with_auto_idempotency(4, dyn_replay, replay_auto_idem)
@@ -296,7 +300,9 @@ async fn test_ingestor_survives_leader_switch_no_message_loss() {
 
     let auto_idem = AutoIdempotency {
         request_type: "test_topic_5".into(),
-        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+        offset_to_request_id: Box::new(|b| {
+            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        }),
     };
     let dyn_ingestor: Box<dyn DynCommandIngestor> = Box::new(ingestor);
     mgr.attach_ingestor_with_auto_idempotency(5, dyn_ingestor, auto_idem)
@@ -325,7 +331,9 @@ async fn test_ingestor_survives_leader_switch_no_message_loss() {
 
     let replay_auto_idem = AutoIdempotency {
         request_type: "test_topic_5".into(),
-        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+        offset_to_request_id: Box::new(|b| {
+            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        }),
     };
     let dyn_replay: Box<dyn DynCommandIngestor> = Box::new(replay_ingestor);
     mgr.attach_ingestor_with_auto_idempotency(5, dyn_replay, replay_auto_idem)

@@ -26,6 +26,8 @@ service AdminService {
     rpc AddLearner(AddLearnerRequest) returns (Empty);
     /// Replace the voter set of a Raft group. Removed voters are kept
     /// as learners (`retain = true`). Must be called on the leader.
+    /// The server rejects a target voter set smaller than 2 with
+    /// `failed_precondition` unless `force` is set.
     /// Returns OK on success; failures are returned as gRPC Status.
     rpc ChangeMembership(ChangeMembershipRequest) returns (Empty);
     /// Override the persisted ingestor offset for disaster recovery.
@@ -120,6 +122,12 @@ message AddLearnerRequest {
 message ChangeMembershipRequest {
     uint64 group_id = 1;
     repeated uint64 voter_node_ids = 2;
+    /// Override the server-side quorum guard that rejects a target voter
+    /// set smaller than 2 (`failed_precondition`). Reserved for disaster
+    /// recovery (e.g. rebuilding after permanent loss of a majority);
+    /// every forced acceptance emits a WARN audit event. Cannot be used
+    /// to empty the voter set — teardown goes through `node-reset`.
+    bool force = 3;
 }
 
 message ResetIngestorOffsetRequest {

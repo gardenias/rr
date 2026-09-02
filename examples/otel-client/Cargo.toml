@@ -1,6 +1,6 @@
 [package]
 name = "otel-client"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "rr example: OpenTelemetry trace context propagation through rr-client"
 

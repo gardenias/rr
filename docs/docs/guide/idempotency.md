@@ -93,7 +93,7 @@ When commands flow in via `rr-ingestor-kafka`, the framework can derive `Idempot
 
 ```rust
 use rr_ingestor_kafka::{KafkaIngestor, KafkaIngestorConfig, kafka_offset_to_request_id};
-use rr_raft::ingestor_runner::AutoIdempotency;
+use rr_raft::ingestor_runner::{AutoIdempotency, OffsetMapError};
 
 let cfg = KafkaIngestorConfig {
     bootstrap_servers: vec!["broker1:9092".into()],
@@ -106,14 +106,16 @@ mgr.attach_ingestor_with_auto_idempotency(
     Box::new(ingestor),
     AutoIdempotency {
         request_type: cfg.topic_for(group_id),         // e.g. "input_42"
-        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+        offset_to_request_id: Box::new(|b| {
+            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        }),
     },
 ).await?;
 ```
 
 With auto-idempotency on, re-fetched Kafka messages (after step-down, snapshot-driven seek lag, or network retry) are deduped by the framework — `Service::handle()` runs at most once per logical Kafka offset.
 
-The `request_type` MUST be unique per ingestor stream (recommended: the topic name). The `offset_to_request_id` closure MUST be **monotone** in offset order — hash-based mappings break the watermark by letting new offsets fall below it. Use `kafka_offset_to_request_id` for Kafka i64 offsets; it clamps negative sentinels (`INVALID_OFFSET = -1001`) to `0` so a single sentinel can't blow the watermark.
+The `request_type` MUST be unique per ingestor stream (recommended: the topic name). The `offset_to_request_id` closure MUST be **monotone** in offset order — hash-based mappings break the watermark by letting new offsets fall below it. Use `kafka_offset_to_request_id` for Kafka i64 offsets; it is **fail-closed**: decode failures and negative sentinel offsets (`INVALID_OFFSET = -1001`) return an error, and the ingestor supervisor exits without proposing or committing the offending message — a sentinel can never silently masquerade as request id `0` and poison the watermark.
 
 ---
 

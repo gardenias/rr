@@ -156,30 +156,6 @@
     },
     {
       "datasource": "${DS_PROMETHEUS}",
-      "description": "Auth rejects per service — sustained nonzero = credential abuse.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
-      },
-      "id": 6,
-      "title": "Auth reject rate",
-      "type": "timeseries",
-      "targets": [
-        {
-          "expr": "sum by (service) (rate(rr_auth_rejects_total[5m]))",
-          "legendFormat": "{{service}}"
-        }
-      ]
-    },
-    {
-      "datasource": "${DS_PROMETHEUS}",
       "description": "Per-follower replication lag heatmap. Query is explicitly predicated on rr_raft_is_leader==1 because non-leaders expose no meaningful lag and can otherwise appear as misleading zeroes.",
       "fieldConfig": {
         "defaults": {

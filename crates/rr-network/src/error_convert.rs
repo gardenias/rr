@@ -25,6 +25,9 @@
 //! * `RaftError::GroupNotFound { group_id }` — the group_id was
 //!   user-supplied.
 //! * `RouterError::*` — partition / group IDs are user-supplied.
+//! * `RaftError::UnsafeMembershipChange` — the target voter count was
+//!   user-supplied and the policy minimum is public (the voter list is
+//!   already exposed via `GetGroupMembership`).
 //! * `RrError::Application(msg)` — the user's own service produced it;
 //!   it is the user's responsibility not to leak in their own message.
 
@@ -57,6 +60,9 @@ impl IntoStatus for RrError {
                 "idempotency expired: request_type={request_type}, \
                  request_id={request_id}, watermark={watermark}"
             )),
+            // `RrError` is `#[non_exhaustive]`; future variants map to a
+            // sanitized internal error (no detail leak) until classified here.
+            _ => Status::internal("internal error"),
         }
     }
 }
@@ -92,6 +98,13 @@ impl IntoStatus for RaftError {
                 );
                 Status::failed_precondition("raft initialization failed")
             }
+            // Voter counts and the policy minimum are not sensitive:
+            // `GetGroupMembership` already exposes the voter list. Reuse the
+            // error's Display so the client message can never drift from it.
+            e @ RaftError::UnsafeMembershipChange { .. } => {
+                Status::failed_precondition(e.to_string())
+            }
+            _ => Status::internal("raft error"),
         }
     }
 }
@@ -114,6 +127,7 @@ impl IntoStatus for StorageError {
                 );
                 Status::data_loss("storage corruption")
             }
+            _ => Status::internal("storage error"),
         }
     }
 }
@@ -130,6 +144,7 @@ impl IntoStatus for ConfigError {
             }
             ConfigError::InvalidConfig(msg) => Status::invalid_argument(msg),
             ConfigError::WatchDisconnected => Status::unavailable("config watch disconnected"),
+            _ => Status::internal("config error"),
         }
     }
 }
@@ -143,9 +158,7 @@ impl IntoStatus for RouterError {
             RouterError::GroupNotFound { group_id } => {
                 Status::not_found(format!("group {group_id} not found"))
             }
-            RouterError::NoLeader { group_id } => {
-                Status::unavailable(format!("no leader for group {group_id}"))
-            }
+            _ => Status::internal("router error"),
         }
     }
 }
@@ -169,6 +182,7 @@ impl IntoStatus for NetworkError {
                 Status::internal("rpc failed")
             }
             NetworkError::Timeout => Status::deadline_exceeded("network timeout"),
+            _ => Status::internal("network error"),
         }
     }
 }
@@ -190,6 +204,7 @@ impl IntoStatus for CodecError {
                 );
                 Status::internal("deserialize failed")
             }
+            _ => Status::internal("codec error"),
         }
     }
 }
@@ -200,20 +215,20 @@ mod tests {
 
     #[test]
     fn test_not_leader_maps_to_unavailable() {
-            let err = RrError::Raft(RaftError::NotLeader {
-                leader: Some(3),
-                leader_addr: Some("127.0.0.1:9001".to_string()),
-            });
+        let err = RrError::Raft(RaftError::NotLeader {
+            leader: Some(3),
+            leader_addr: Some("127.0.0.1:9001".to_string()),
+        });
         let status = err.into_status();
         assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 
     #[test]
     fn test_not_leader_no_leader_maps_to_unavailable() {
-            let err = RrError::Raft(RaftError::NotLeader {
-                leader: None,
-                leader_addr: None,
-            });
+        let err = RrError::Raft(RaftError::NotLeader {
+            leader: None,
+            leader_addr: None,
+        });
         let status = err.into_status();
         assert_eq!(status.code(), tonic::Code::Unavailable);
         assert!(status.message().contains("no leader"));
@@ -250,6 +265,21 @@ mod tests {
     }
 
     #[test]
+    fn test_unsafe_membership_change_maps_to_failed_precondition() {
+        let err = RrError::Raft(RaftError::UnsafeMembershipChange {
+            target_voters: 1,
+            min: 2,
+        });
+        let status = err.into_status();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let msg = status.message();
+        assert!(
+            msg.contains('1') && msg.contains('2'),
+            "client message must name the target voter count and the minimum; got: {msg}"
+        );
+    }
+
+    #[test]
     fn test_config_invalid_maps_to_invalid_argument() {
         let err = RrError::Config(ConfigError::InvalidConfig("bad".to_string()));
         let status = err.into_status();
@@ -261,13 +291,6 @@ mod tests {
         let err = RrError::Storage(StorageError::Corruption("corrupt".to_string()));
         let status = err.into_status();
         assert_eq!(status.code(), tonic::Code::DataLoss);
-    }
-
-    #[test]
-    fn test_router_no_leader_maps_to_unavailable() {
-        let err = RrError::Router(RouterError::NoLeader { group_id: 5 });
-        let status = err.into_status();
-        assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 
     #[test]

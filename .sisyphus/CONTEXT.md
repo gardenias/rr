@@ -5,12 +5,13 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-05-13 (A-0005/A-0009 implemented; A-0010 WAL ADR accepted)
-**Current phase**: ADR follow-through (Phase 4 wrap-up — only A-0010 implementation remains)
-**Active plan**: `.sisyphus/plans/rr-wal-impl.md` (deferred; awaits release-build profile)
-**Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut.
-**Main branch HEAD**: prior commits unpushed + new A-0005/A-0009 wire-up + A-0010 design
-**Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`)
+**Last updated**: 2026-08-29 (Phase 0 全部落地:WS-1~WS-7 实施完成,测试全绿;ADR A-0011~A-0014 → implemented)
+**Current phase**: v0.2.0 RC 准备(剩余:RC 并行项——audit 配对、docs 漂移、linearizable read 集成测试、subtle/指纹加强;随后可靠性专项 R-1~R-8)
+**Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(主路线图;子计划:rr-durability-hardening.md、rr-reliability-program.md;rr-wal-impl.md 仍 deferred)
+**Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut — 11 个 P0 阻塞项见路线图 Phase 0
+**Main branch HEAD**: `ba69cc8` (linearizable reads + per-caller rate limiting + WAL ADR)
+**Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
+**Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`);Oracle 判断已并入 8-16 review
 **Latest Momus review**: 2026-05-13 (`bg_a0e5a6d2`) on rr-wal-impl.md — pending
 
 ---
@@ -21,6 +22,29 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.1
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-08-29 — Phase 0 发布阻塞项全部落地(WS-1~WS-7 实施)
+
+- **WS-1 CI 真实性**:test-rocks 传 `rr-storage/rocks,integration/rocks` + 修复 3 个 rocks 持久化测试的 bit-rot(从未编译所致);chaos job 正名 `external-broker`;bench job 启用 rocks benches;grafana 幽灵 panel(`rr_auth_rejects_total`)删除;clippy job 补 rocks 覆盖(连带修掉 rr-perf-bench 10 个存量 lint 与 integration rocks-gated 代码 4 个);coverage job 同步修 feature 传播。3 个持久化测试本地实测真跑真绿。
+- **WS-2 部署制品**:Dockerfile rust 1.88 + HEALTHCHECK(/ready)+ 补 `COPY tools`(latent 构建阻断);K8s 默认 TLS Secret + 必需 admin_token + pod anti-affinity,头部注释给本地 insecure 开法;Helm `security.allowInsecure`(默认 false,与 `tls.enabled=false` 组合时模板 fail)+ anti-affinity;compose healthcheck + `service_healthy`,insecure opt-in 单一来源上移到 compose env。helm/kubectl/compose 全部实测验证。
+- **WS-3 版本/API**:`workspace.package.version = "0.2.0"` 全仓单一来源(20 个 manifest);7 个错误 enum 加 `#[non_exhaustive]`(`BatchOp`/`ApplyOutcome` 评审后有意不加);新建 `semver-checks.yml`(baseline rc2,v0.2.0 前非阻塞);`.sisyphus/checklists/v0.2.0-api-freeze.md` 落地。
+- **WS-4 durability(ADR A-0011 → implemented)**:`try_create_snapshot_builder(force)` 错误通道(poisoned builder)+ `rr_snapshot_build_failures_total`;`kafka_offset_to_request_id`/`OffsetToRequestId` Result 化 + ingestor supervisor fail-closed + `rr_ingestor_offset_map_failures_total`;`IoBatcher` tracked spawn + 显式 `close()`(drain→final fsync→应答 pending→join,幂等 30s deadline);删 per-append relay spawn;`stop_group` await flush(签名不变);新测试 T1–T6(核心 T4 `test_stop_group_flush_preserves_acked_and_pending`)。rr-raft rocks 130/130 绿。
+- **WS-5 TCP gate(ADR A-0014 → implemented)**:`RaftTransport{Grpc,Tcp{bind_addr}}` 入 `NodeConfig`;G6(TCP 必须显式 allow_insecure)入聚合;G7(bind 必须 loopback)为硬 gate、**allow_insecure 不可绕过**(短路前置);main.rs `replace_port` 单一事实源穿线;6 条 gate 单测全绿。
+- **WS-6 quorum guard(ADR A-0012 → implemented)**:守卫落 `admin.rs:537-638`(存在性→空集合→quorum;目标 voter<2 拒,n→0 永不放行);`force` proto(wire-additive)+ CLI `--force` + warn 级 `force_accepted` audit;`rr_core::membership::MIN_VOTERS_AFTER_REMOVAL=2` 单一定义;`UnsafeMembershipChange` → failed_precondition;e2e `membership_guard.rs`(3→1 拒/3→2 成/2→1 force 成)绿。遗留:watch-loop NodeRemoved 路径无守卫(A-0012 follow-up)。
+- **WS-7 删 GroupMeta.leader(ADR A-0013 → implemented)**:字段/`get_leader*`/`NoLeader`/metric 全删,全部调用点清理;serde 防线测试(旧 leader 键静默忽略);新 e2e `leader_redirect_failover.rs`(kill leader → client redirect 收敛)绿;`dispatch.rs` 的 `leader_node_id:0` 占位加约束注释。
+- **治理**:CHANGELOG `[Unreleased]` 增收"发布加固批次";invariants.md 闭环标注(WS-4/5/6/7);CONTEXT.md Wave 8 不实记载已修正(quorum-loss check 当时并不存在)。
+- **新发现(pre-existing,已立项建议)**:`rr-client` `send_request_inner` 在 server 回 `success=false` 且无 `leader_info` 时静默返回 Ok(空 payload)——静默假成功,待修;`dynamic-*.md`/`leader-flapping.md` 仍描述虚构的 `update_leader`/`LeaderChanged` 模型,并入 RC docs 漂移清单。
+- **验证**:`cargo check/clippy/test --workspace --all-targets --features rocks` 全绿(clippy `-D warnings` 零告警);未做任何 git 变更,GitNexus 索引待 commit 后 `npx gitnexus analyze` 刷新。
+
+### Session 2026-08-28 — v0.2.0 发布加固规划(设计先行,未改代码)
+
+- **输入**:2026-08-16 全量 review(11 个 P0,`.sisyphus/evidence/rr-full-review-2026-08-16.md`,基线 HEAD=`ba69cc8` 与当前一致)+ 2026-08-28 架构全景归档(`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)。
+- **主路线图** `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`:Phase 0 发布阻塞 WS-1(CI 真实性)/WS-2(部署制品)/WS-3(版本对齐+API freeze)/WS-4(正确性三连+durability 契约)/WS-5(TCP gate)/WS-6(quorum guard)/WS-7(删 `GroupMeta.leader`);Phase RC:WS-8 invariants.md + audit 配对 + docs 漂移;Phase 1:可靠性专项。关键路径 WS-1 → WS-4 → RC。
+- **新增 ADR(均 proposed)**:A-0011 shutdown durability 契约(IoBatcher tracked spawn + 显式 close;snapshot 经 `try_create_snapshot_builder` 错误通道;offset→request_id Result 化;含 openraft 钉版源码核实的否决备选)/ A-0012 membership quorum guard(目标 voter<2 拒绝,n→0 不可 force;`force` wire-additive + audit;`UnsafeMembershipChange` 错误)/ A-0013 删除 `GroupMeta.leader`(核实结论:etcd 从不持久化该 struct,存量数据零迁移;redirect 缓存机制已存在)/ A-0014 TCP transport 安全 gate(G6 显式 allow_insecure + G7 强制 loopback 且不可绕过;明确不给 TCP 加 TLS)。
+- **新增 plan**:`.sisyphus/plans/rr-durability-hardening.md`(6 阶段,T4 stop_group flush 重启测试为核心)+ `.sisyphus/plans/rr-reliability-program.md`(R-1~R-8,合计 26~34 人日,跨 RC/0.2.1/0.3.0)。
+- **新增 docs**:`docs/docs/reference/invariants.md` v1——8 条 advertised 属性的不变量链 + 强制点(file:line 已核实)+ 现有测试 + 缺口→工作流对照表;定位为 living document。
+- **修正义务登记**:CONTEXT.md 原 Wave 8 "服务端 quorum-loss check" 记载与代码不符,已在 A-0012 Decision §8 登记为实施期修正项。
+- 本 session 纯文档产出,未修改任何源码;下一步:按路线图 WS-1/WS-2/WS-3 并行开工。
 
 ### Session 2026-05-13 — A-0005 + A-0009 implemented; A-0010 WAL ADR accepted
 
@@ -239,7 +263,7 @@ P3（已修）：
 
 **Wave 8 — admin add_learner + change_membership** (`89abdf3`)
 - proto: AddLearner / ChangeMembership / GetGroupMembership RPCs + types
-- rr-server: AdminServiceImpl 实现，含空 voter 拒绝、quorum-loss check
+- rr-server: AdminServiceImpl 实现，含空 voter 拒绝(~~quorum-loss check~~ 修正 2026-08-29:当时**并未**实现 server 端 quorum 守卫,此行为不实记载;守卫由 ADR A-0012 于 2026-08-29 实际落地,见 `admin.rs::change_membership`)
 - rr-admin: `group add-learner / change-membership / membership` 命令
 - 4 unit + 3 CLI parse tests
 

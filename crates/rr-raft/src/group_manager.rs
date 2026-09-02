@@ -142,8 +142,7 @@ impl RaftGroupManager {
     ) -> Self {
         info!(
             node_id,
-            port_offset,
-            "creating RaftGroupManager (tcp raft transport mode)"
+            port_offset, "creating RaftGroupManager (tcp raft transport mode)"
         );
         Self {
             node_id,
@@ -246,17 +245,46 @@ impl RaftGroupManager {
             in_flight_writes: Arc::new(AtomicUsize::new(0)),
         }));
 
-        match self.groups.entry(group_id) {
+        // Never hold the dashmap shard write-lock (the Entry guard) across
+        // an await: the duplicate path below awaits raft.shutdown() and
+        // log_storage.close(), which can take up to close_timeout on a
+        // wedged batcher and would stall every group hashing to this shard.
+        // The guard is dropped when the match ends.
+        let is_duplicate = match self.groups.entry(group_id) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(state);
+                entry.insert(Arc::clone(&state));
+                false
             }
-            dashmap::mapref::entry::Entry::Occupied(_) => {
-                let raft = { state.lock().await.node.raft.clone() };
-                let _ = raft.shutdown().await;
-                return Err(RrError::Application(format!(
-                    "group {group_id} already exists"
-                )));
+            dashmap::mapref::entry::Entry::Occupied(_) => true,
+        };
+
+        if is_duplicate {
+            #[cfg(feature = "rocks")]
+            let (raft, log_storage_close) = {
+                let state = state.lock().await;
+                (
+                    state.node.raft.clone(),
+                    state.node.log_storage_close.clone(),
+                )
+            };
+            #[cfg(not(feature = "rocks"))]
+            let raft = { state.lock().await.node.raft.clone() };
+            let _ = raft.shutdown().await;
+            // Flush the duplicate node's batcher too, otherwise this
+            // error path leaks an unflushed batcher (ADR A-0011 C3).
+            #[cfg(feature = "rocks")]
+            if let Some(log_storage) = log_storage_close {
+                if let Err(e) = log_storage.close().await {
+                    tracing::warn!(
+                        group_id,
+                        error = %e,
+                        "register_node: failed to close duplicate group's log storage"
+                    );
+                }
             }
+            return Err(RrError::Application(format!(
+                "group {group_id} already exists"
+            )));
         }
 
         debug!(group_id, node_id = self.node_id, "started raft group");
@@ -355,6 +383,13 @@ impl RaftGroupManager {
     /// [`crate::ingestor_runner`] supervisor and [`crate::metrics_ticker`]
     /// are stopped first so background tasks cannot observe a torn-down
     /// raft instance.
+    ///
+    /// For RocksDB-backed groups the log-storage batcher is then
+    /// explicitly closed: ADR A-0011 C3 — when `stop_group` returns `Ok`,
+    /// the append source (RaftCore) has stopped, every queued append has
+    /// been folded into a final fsynced `write_batch`, and every pending
+    /// completion callback has been answered. In-memory groups skip this
+    /// step (nothing to flush).
     #[instrument(skip(self))]
     pub async fn stop_group(&self, group_id: GroupId) -> Result<(), RrError> {
         let (_, state) = self
@@ -426,6 +461,26 @@ impl RaftGroupManager {
         raft.shutdown()
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
+
+        // ADR A-0011 C3: the append source (RaftCore) is stopped; now drain
+        // the sink. `close()` waits for the batcher's final fsync and for
+        // every pending completion callback to be answered.
+        #[cfg(feature = "rocks")]
+        {
+            let log_storage_close = state.lock().await.node.log_storage_close.clone();
+            if let Some(log_storage) = log_storage_close {
+                log_storage.close().await.map_err(|e| {
+                    tracing::error!(
+                        group_id,
+                        error = %e,
+                        "stop_group: log storage close failed; pending appends may not be flushed"
+                    );
+                    RrError::Application(format!(
+                        "stop_group({group_id}): log storage close failed: {e}"
+                    ))
+                })?;
+            }
+        }
 
         info!(group_id, node_id = self.node_id, "stopped raft group");
         let node_id = self.node_id;
@@ -499,7 +554,10 @@ impl RaftGroupManager {
     /// `request_type` MUST be unique per ingestor stream (recommended:
     /// the topic name). `offset_to_request_id` MUST be monotone in
     /// offset order — see [`crate::ingestor_runner::OffsetToRequestId`]
-    /// for why hash-based mappings break the watermark.
+    /// for why hash-based mappings break the watermark. Mapping failures
+    /// are fail-closed (ADR A-0011 C7): the offending message is neither
+    /// proposed nor committed and the ingestor supervisor exits with an
+    /// error.
     pub async fn attach_ingestor_with_auto_idempotency(
         self: &Arc<Self>,
         group_id: GroupId,
@@ -559,8 +617,7 @@ impl RaftGroupManager {
                 "output runner already attached to group {group_id}"
             )));
         }
-        let handle =
-            crate::output_runner::spawn(self.clone(), group_id, rr_client, kafka_producer);
+        let handle = crate::output_runner::spawn(self.clone(), group_id, rr_client, kafka_producer);
         guard.output_handle = Some(handle);
         info!(group_id, "attached output runner");
         Ok(())
@@ -901,36 +958,30 @@ impl RaftGroupManager {
             .get(&group_id)
             .map(|entry| Arc::clone(entry.value()))
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
-        let control = state
-            .lock()
-            .await
-            .outbox_control
-            .clone()
-            .ok_or_else(|| {
-                RrError::Application(format!(
-                    "group {group_id} state machine does not support outbox"
-                ))
-            })?;
+        let control = state.lock().await.outbox_control.clone().ok_or_else(|| {
+            RrError::Application(format!(
+                "group {group_id} state machine does not support outbox"
+            ))
+        })?;
         Ok(control.pending_outputs())
     }
 
     /// Advance output sent watermark for a group.
-    pub async fn advance_output_watermark(&self, group_id: GroupId, seq: u64) -> Result<(), RrError> {
+    pub async fn advance_output_watermark(
+        &self,
+        group_id: GroupId,
+        seq: u64,
+    ) -> Result<(), RrError> {
         let state = self
             .groups
             .get(&group_id)
             .map(|entry| Arc::clone(entry.value()))
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
-        let control = state
-            .lock()
-            .await
-            .outbox_control
-            .clone()
-            .ok_or_else(|| {
-                RrError::Application(format!(
-                    "group {group_id} state machine does not support outbox"
-                ))
-            })?;
+        let control = state.lock().await.outbox_control.clone().ok_or_else(|| {
+            RrError::Application(format!(
+                "group {group_id} state machine does not support outbox"
+            ))
+        })?;
         control.advance_watermark(seq);
         Ok(())
     }

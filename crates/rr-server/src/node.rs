@@ -25,15 +25,49 @@ use rr_raft::group_manager::RaftGroupManager;
 use rr_router::router::ShardRouter;
 
 use crate::admin::AdminServiceImpl;
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, RaftTransport};
 use crate::health::{spawn_http_server, ReadinessFlag};
 
 /// Validate the production security invariants. Returns `Err` describing
 /// every gate that is violated unless `config.allow_insecure` opts out.
 ///
-/// Aggregates ALL violations into a single error message so operators
-/// fix the config in one pass rather than chasing them one at a time.
+/// Two evaluation phases (ADR A-0014):
+///
+/// 1. **G7 (hard)**: a TCP raft transport may only bind loopback. This runs
+///    unconditionally — it is the first deliberate exception to the
+///    "`allow_insecure` short-circuits every gate" pattern, because the TCP
+///    frame protocol has no TLS and no peer authentication whatsoever, so
+///    there is no configuration in which an off-loopback plaintext TCP raft
+///    listener is acceptable (see ADR A-0014 §Option E).
+/// 2. **G1–G6**: skipped when `allow_insecure` is set, otherwise ALL
+///    violations are aggregated into a single error message so operators
+///    fix the config in one pass rather than chasing them one at a time.
 fn validate_security_invariants(config: &NodeConfig) -> Result<(), RrError> {
+    if let RaftTransport::Tcp { bind_addr } = &config.raft_transport {
+        // Fail closed: an unparsable bind address cannot be proven loopback.
+        // (The rr-server binary path can never produce one — `listen_addr`
+        // is validated as a `SocketAddr` by `NodeConfig::validate` and the
+        // TCP bind is derived from it — but library embedders set this field
+        // directly.)
+        let is_loopback = bind_addr
+            .parse::<std::net::SocketAddr>()
+            .map(|addr| addr.ip().is_loopback())
+            .unwrap_or(false);
+        if !is_loopback {
+            return Err(RrError::Config(ConfigError::InvalidConfig(format!(
+                "rr-server refuses to start: raft_transport = tcp plans to bind \
+                 '{bind_addr}', which is not a loopback address (127.0.0.0/8 or \
+                 ::1). The TCP raft frame protocol carries AppendEntries/Vote in \
+                 plaintext with no TLS and no peer authentication of any kind, \
+                 so it is restricted to loopback. NOTE: --allow-insecure does \
+                 NOT bypass this gate — it is the one safety gate that applies \
+                 in every mode (ADR A-0014). Bind the gRPC listen_addr to a \
+                 loopback address (the TCP bind address is derived from it), \
+                 or use raft_transport = grpc."
+            ))));
+        }
+    }
+
     if config.allow_insecure {
         return Ok(());
     }
@@ -87,6 +121,24 @@ fn validate_security_invariants(config: &NodeConfig) -> Result<(), RrError> {
             "AdminService is enabled but admin_token is not set. Anyone reaching \
              the admin port can transfer leadership or trigger snapshots; this \
              is a cluster-wide DoS vector.",
+        );
+    }
+
+    // G6: the TCP raft transport has no TLS and no peer authentication in
+    // its frame protocol, so it always requires an explicit insecure opt-in
+    // — even when the gRPC face is fully TLS/mTLS compliant (AppendEntries/
+    // Vote travel over the plaintext TCP port; only InstallSnapshot falls
+    // back to gRPC). The loopback part of the TCP rules (G7) is enforced
+    // unconditionally above, before the `allow_insecure` short-circuit.
+    if matches!(config.raft_transport, RaftTransport::Tcp { .. }) {
+        violations.push(
+            "Raft transport is TCP (raft_transport = tcp): the TCP frame protocol \
+             has no TLS and no peer authentication of any kind, so in v0.2.0 it is \
+             a dev/benchmark-only transport. Correctly configured gRPC TLS/mTLS \
+             does NOT cover it. To proceed, explicitly opt in with \
+             --allow-insecure / RR_ALLOW_INSECURE=1 / [node].allow_insecure=true. \
+             (The TCP bind address must additionally be loopback; that gate is \
+             hard and cannot be bypassed.)",
         );
     }
 
@@ -179,8 +231,7 @@ impl RrNode {
         }
 
         let prom_handle = if config.metrics_port.is_some() {
-            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
-                .build_recorder();
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
             let _ = metrics::set_global_recorder(recorder);
             info!("Prometheus recorder installed (metrics served via HTTP observability port)");
@@ -720,11 +771,7 @@ mod tests {
         ) -> Result<ClientWriteResult, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }
-        async fn submit_read(
-            &self,
-            _: u64,
-            _: Vec<u8>,
-        ) -> Result<Vec<u8>, tonic::Status> {
+        async fn submit_read(&self, _: u64, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }
         async fn submit_linearizable_read(
@@ -1107,6 +1154,147 @@ mod tests {
         assert!(
             msg.contains("AdminService"),
             "missing admin violation: {msg}"
+        );
+    }
+
+    // ── G6/G7: TCP raft transport gates (ADR A-0014) ────────────────────────
+
+    #[test]
+    fn validate_security_tcp_requires_allow_insecure_despite_grpc_tls() {
+        // Core regression for P0#4 scenario 1: gRPC TLS/mTLS fully compliant
+        // must NOT mask the plaintext TCP transport — G6 still rejects.
+        let cfg = make_config(1, "127.0.0.1:50110")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_tls(tls_with_mtls())
+            .with_raft_transport(RaftTransport::Tcp {
+                bind_addr: "127.0.0.1:60110".to_string(),
+            });
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("G6 must reject tcp transport without allow_insecure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("raft_transport = tcp"),
+            "expected TCP transport violation, got: {msg}"
+        );
+        assert!(
+            msg.contains("--allow-insecure"),
+            "expected allow_insecure guidance, got: {msg}"
+        );
+        // The gRPC face is compliant, so gates 1/2 must NOT fire — G6 is the
+        // only violation in the aggregate.
+        assert!(
+            !msg.contains("RaftService is enabled but TLS"),
+            "gRPC-compliant config must not trip gate 1: {msg}"
+        );
+        assert!(
+            !msg.contains("require_client_cert"),
+            "gRPC-compliant config must not trip gate 2: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_tcp_loopback_with_allow_insecure_passes() {
+        // Positive path: TCP + explicit allow_insecure + loopback bind → Ok.
+        for bind_addr in ["127.0.0.1:60111", "[::1]:60111"] {
+            let cfg = make_config(1, "127.0.0.1:50111")
+                .with_raft_lookup(Arc::new(DummyRaftLookup))
+                .with_allow_insecure(true)
+                .with_raft_transport(RaftTransport::Tcp {
+                    bind_addr: bind_addr.to_string(),
+                });
+            let _node = RrNode::new(cfg).unwrap_or_else(|e| {
+                panic!("tcp + allow_insecure + loopback ({bind_addr}) must pass: {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn validate_security_tcp_non_loopback_rejected_even_with_allow_insecure() {
+        // G7 is the one gate allow_insecure cannot bypass: wildcard,
+        // routable, and IPv6-unspecified binds are all rejected.
+        for bind_addr in ["0.0.0.0:60112", "192.168.1.10:60112", "[::]:60112"] {
+            let cfg = make_config(1, "127.0.0.1:50112")
+                .with_raft_lookup(Arc::new(DummyRaftLookup))
+                .with_allow_insecure(true)
+                .with_raft_transport(RaftTransport::Tcp {
+                    bind_addr: bind_addr.to_string(),
+                });
+            let err = RrNode::new(cfg).err().unwrap_or_else(|| {
+                panic!("G7 must reject non-loopback bind {bind_addr} despite allow_insecure")
+            });
+            let msg = err.to_string();
+            assert!(msg.contains("loopback"), "expected loopback error: {msg}");
+            assert!(
+                msg.contains("NOT bypass"),
+                "error must state allow_insecure cannot bypass G7: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_security_tcp_without_tls_aggregates_grpc_and_tcp_violations() {
+        // TCP + no allow_insecure + no TLS: gate 1 (gRPC face) and G6 (TCP
+        // face) both fire and are aggregated in one message.
+        let cfg = make_config(1, "127.0.0.1:50113")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_raft_transport(RaftTransport::Tcp {
+                bind_addr: "127.0.0.1:60113".to_string(),
+            });
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject tcp without tls and without allow_insecure");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("RaftService is enabled but TLS"),
+            "missing gRPC gate-1 violation: {msg}"
+        );
+        assert!(
+            msg.contains("raft_transport = tcp"),
+            "missing G6 violation: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_tcp_wildcard_bind_rejected_without_allow_insecure() {
+        // ADR startup-test leg 1: 0.0.0.0 bind + no allow_insecure → Err, and
+        // because G7 is evaluated before the allow_insecure short-circuit,
+        // the readable loopback guidance is what the operator sees (even
+        // though G6 would also have fired).
+        let cfg = make_config(1, "0.0.0.0:50114")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_tls(tls_with_mtls())
+            .with_raft_transport(RaftTransport::Tcp {
+                bind_addr: "0.0.0.0:60114".to_string(),
+            });
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("G7 must reject wildcard bind without allow_insecure");
+        let msg = err.to_string();
+        assert!(msg.contains("loopback"), "expected loopback error: {msg}");
+        assert!(
+            msg.contains("raft_transport = grpc"),
+            "expected grpc fallback guidance: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_security_tcp_unparseable_bind_addr_rejected() {
+        // Library-embedder misuse: a bind_addr that is not a `host:port`
+        // `SocketAddr` cannot be proven loopback — fail closed (G7), even
+        // with allow_insecure set.
+        let cfg = make_config(1, "127.0.0.1:50115")
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_allow_insecure(true)
+            .with_raft_transport(RaftTransport::Tcp {
+                bind_addr: "not-a-socket-addr".to_string(),
+            });
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("G7 must fail closed on unparsable bind_addr");
+        assert!(
+            err.to_string().contains("loopback"),
+            "expected loopback error, got: {err}"
         );
     }
 

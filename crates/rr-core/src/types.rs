@@ -18,10 +18,16 @@ pub enum PartitionConfig {
     Range { start: u64, end: u64 },
 }
 
+/// Configuration-plane metadata for a Raft group.
+///
+/// This is **static placement metadata only** — which nodes replicate the
+/// group. It deliberately carries no raft runtime state: the current leader
+/// is known only to the raft runtime (openraft metrics) and is discovered by
+/// clients via `NotLeader` / `LeaderInfo` redirects, never via the routing
+/// table (see ADR A-0013).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroupMeta {
     pub group_id: GroupId,
-    pub leader: Option<NodeId>,
     pub replicas: Vec<NodeId>,
 }
 
@@ -75,9 +81,37 @@ mod tests {
     fn test_group_meta() {
         let meta = GroupMeta {
             group_id: 1,
-            leader: Some(1),
             replicas: vec![1, 2, 3],
         };
+        assert_eq!(meta.group_id, 1);
         assert_eq!(meta.replicas.len(), 3);
+    }
+
+    #[test]
+    fn test_group_meta_json_shape_has_no_leader_key() {
+        // ADR A-0013: `GroupMeta` is configuration-plane metadata — the JSON
+        // shape must stay free of any runtime leader state.
+        let meta = GroupMeta {
+            group_id: 7,
+            replicas: vec![1, 2, 3],
+        };
+        let wire = serde_json::to_string(&meta).unwrap();
+        assert_eq!(wire, r#"{"group_id":7,"replicas":[1,2,3]}"#);
+    }
+
+    #[test]
+    fn test_group_meta_deserialize_ignores_legacy_leader_key() {
+        // ADR A-0013: payloads serialized before the field removal may still
+        // carry a `"leader"` key; serde must silently ignore it (the struct
+        // has no `deny_unknown_fields`).
+        let legacy = r#"{"group_id":7,"leader":1,"replicas":[1,2,3]}"#;
+        let meta: GroupMeta = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            meta,
+            GroupMeta {
+                group_id: 7,
+                replicas: vec![1, 2, 3]
+            }
+        );
     }
 }

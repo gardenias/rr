@@ -1,6 +1,6 @@
 [package]
 name = "rr-ingestor-kafka"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 description = "Kafka CommandIngestor backend for the rr distributed Multi-Raft framework"

@@ -25,7 +25,6 @@ use rr_raft::io_batcher::IoBatcher;
 use rr_raft::{IoBatcherConfig, RrTypeConfig};
 use rr_storage::rocks::RocksStorage;
 use tokio::sync::Mutex;
-use bincode;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -69,54 +68,46 @@ fn bench_tps_sequential(c: &mut Criterion) {
 
     for n in [10usize, 50, 100] {
         // no-batching: each proposal gets its own write_batch + fsync
-        group.bench_with_input(
-            BenchmarkId::new("no_batching", n),
-            &n,
-            |b, &count| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += rt.block_on(async {
-                            let tmp = tempfile::TempDir::new().unwrap();
-                            let storage = Arc::new(Mutex::new(
-                                rr_raft::rocks_log_storage::RocksLogStorage::open_with_config(
-                                    tmp.path().to_str().unwrap(),
-                                    IoBatcherConfig::no_batching(),
-                                )
-                                .unwrap(),
-                            ));
-                            run_sequential(&storage, count).await
-                        });
-                    }
-                    total
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("no_batching", n), &n, |b, &count| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    total += rt.block_on(async {
+                        let tmp = tempfile::TempDir::new().unwrap();
+                        let storage = Arc::new(Mutex::new(
+                            rr_raft::rocks_log_storage::RocksLogStorage::open_with_config(
+                                tmp.path().to_str().unwrap(),
+                                IoBatcherConfig::no_batching(),
+                            )
+                            .unwrap(),
+                        ));
+                        run_sequential(&storage, count).await
+                    });
+                }
+                total
+            });
+        });
 
         // batched: proposals accumulate in the batcher window before fsync
-        group.bench_with_input(
-            BenchmarkId::new("batched_500us", n),
-            &n,
-            |b, &count| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += rt.block_on(async {
-                            let tmp = tempfile::TempDir::new().unwrap();
-                            let storage = Arc::new(Mutex::new(
-                                rr_raft::rocks_log_storage::RocksLogStorage::open_with_config(
-                                    tmp.path().to_str().unwrap(),
-                                    IoBatcherConfig::new(Duration::from_micros(500), 512),
-                                )
-                                .unwrap(),
-                            ));
-                            run_sequential(&storage, count).await
-                        });
-                    }
-                    total
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("batched_500us", n), &n, |b, &count| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    total += rt.block_on(async {
+                        let tmp = tempfile::TempDir::new().unwrap();
+                        let storage = Arc::new(Mutex::new(
+                            rr_raft::rocks_log_storage::RocksLogStorage::open_with_config(
+                                tmp.path().to_str().unwrap(),
+                                IoBatcherConfig::new(Duration::from_micros(500), 512),
+                            )
+                            .unwrap(),
+                        ));
+                        run_sequential(&storage, count).await
+                    });
+                }
+                total
+            });
+        });
     }
 
     group.finish();
@@ -143,14 +134,14 @@ fn bench_tps_concurrent_batcher(c: &mut Criterion) {
             |b, &count| {
                 b.iter_custom(|iters| {
                     use rr_core::storage::BatchOp;
-                    use rr_core::storage::StorageEngine;
 
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
                         total += rt.block_on(async {
                             let tmp = tempfile::TempDir::new().unwrap();
-                            let rocks =
-                                Arc::new(RocksStorage::open_default(tmp.path().to_str().unwrap()).unwrap());
+                            let rocks = Arc::new(
+                                RocksStorage::open_default(tmp.path().to_str().unwrap()).unwrap(),
+                            );
                             let batcher = Arc::new(IoBatcher::new(
                                 Arc::clone(&rocks),
                                 IoBatcherConfig::new(Duration::from_micros(500), 1024),
@@ -165,9 +156,11 @@ fn bench_tps_concurrent_batcher(c: &mut Criterion) {
                                     tokio::spawn(async move {
                                         let entry = make_entry(i + 1);
                                         let key = (i + 1).to_be_bytes().to_vec();
-                                        let value =
-                                            bincode::serde::encode_to_vec(&entry, bincode::config::standard())
-                                                .unwrap();
+                                        let value = bincode::serde::encode_to_vec(
+                                            &entry,
+                                            bincode::config::standard(),
+                                        )
+                                        .unwrap();
                                         b.submit(vec![BatchOp::Put {
                                             cf: "raft_log".to_string(),
                                             key,

@@ -16,13 +16,13 @@ use openraft::raft::AppendEntriesResponse;
 use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
-use openraft::SnapshotPolicy;
 use openraft::type_config::alias::SnapshotOf;
 use openraft::type_config::alias::VoteOf;
 use openraft::BasicNode;
 use openraft::Config;
 use openraft::OptionalSend;
 use openraft::Raft;
+use openraft::SnapshotPolicy;
 
 use rr_core::error::{ConfigError, RaftError, RrError};
 use rr_core::state_machine::StateMachine;
@@ -38,6 +38,11 @@ pub struct RaftNode {
     pub group_id: GroupId,
     /// The underlying openraft instance.
     pub raft: Raft<RrTypeConfig, RrStateMachine>,
+    /// Close handle for the RocksDB-backed log storage, retained so
+    /// `RaftGroupManager::stop_group` can flush pending appends after
+    /// `raft.shutdown()` (ADR A-0011 C3). `None` for in-memory storage.
+    #[cfg(feature = "rocks")]
+    pub(crate) log_storage_close: Option<crate::rocks_log_storage::RocksLogStorage>,
 }
 
 impl RaftNode {
@@ -86,7 +91,12 @@ impl RaftNode {
                 })
             })?;
 
-        Ok(Self { group_id, raft })
+        Ok(Self {
+            group_id,
+            raft,
+            #[cfg(feature = "rocks")]
+            log_storage_close: None,
+        })
     }
 
     /// Create a new `RaftNode` for single-node clusters using `NoopNetworkFactory`.
@@ -165,6 +175,9 @@ impl RaftNode {
                     reason: format!("failed to open RocksLogStorage at {rocks_path}: {e}"),
                 })
             })?;
+        // Keep a cheap clone (Arc inside) as the close handle: `stop_group`
+        // flushes the batcher after `raft.shutdown()` (ADR A-0011 C3).
+        let log_storage_close = Some(log_storage.clone());
         let sm = RrStateMachine::new(state_machine);
         let network = network_factory;
 
@@ -176,7 +189,11 @@ impl RaftNode {
                 })
             })?;
 
-        Ok(Self { group_id, raft })
+        Ok(Self {
+            group_id,
+            raft,
+            log_storage_close,
+        })
     }
 }
 

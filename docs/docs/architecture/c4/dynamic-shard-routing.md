@@ -2,7 +2,7 @@
 sidebar_position: 11
 ---
 
-# Dynamic — Shard Routing (Partition → Group → Leader)
+# Dynamic — Shard Routing (Partition → Group)
 
 每个请求都携带一个 `partition_id`。rr 需要把它解析成**"该发给哪个节点的哪个 Raft group"**。本图展示完整的解析链路和缓存策略。
 
@@ -16,14 +16,14 @@ Every request carries a `partition_id`. rr must resolve it into **"which Raft gr
 @startuml
 !include <C4/C4_Dynamic.puml>
 
-title Dynamic Diagram - Partition → Group → Leader Resolution
+title Dynamic Diagram - Partition → Group Resolution
 
 Container(client, "rr-client SDK", "Rust library", "User application")
 
 Container_Boundary(node, "rr-server Node (any)") {
   Component(grpc, "ClientServiceImpl", "rr-network", "gRPC handler")
   Component(dispatch, "ClientDispatchImpl", "rr-server", "Request dispatcher")
-  Component(router, "ShardRouter", "rr-router", "Partition → group → leader resolver")
+  Component(router, "ShardRouter", "rr-router", "Partition → group resolver")
   Component(table, "Cached RoutingTable", "rr-core::types", "ArcSwap snapshot")
 }
 
@@ -33,9 +33,8 @@ Rel(client, grpc, "1. ClientRequest(partition_id=42)", "gRPC")
 Rel(grpc, dispatch, "2. dispatch(request)")
 Rel(dispatch, router, "3. route(42)")
 
-Rel(router, table, "4a. lookup partitions[42] → GroupMeta{group_id=7, leader=node_2}")
-Rel(router, table, "4b. lookup nodes[node_2] → addr='host-2:51001'")
-Rel(router, dispatch, "5. ResolvedRoute{group_id=7, leader_node=2, leader_addr='host-2:51001'}")
+Rel(router, table, "4. lookup partitions[42] → group_id=7")
+Rel(router, dispatch, "5. group_id=7 (leader redirect, if any, comes from the raft runtime)")
 
 Rel(cfg, table, "(async) RoutingTableChange events keep snapshot fresh")
 
@@ -59,9 +58,8 @@ group #LightBlue COLD PATH — first request after boot
   Node -> Router : route(42)
   Router -> Snap : load() → RoutingTable snapshot
   Snap --> Router : &RoutingTable
-  Router -> Router : partitions.get(&42) → GroupMeta{group_id:7, members:[1,2,3], leader:2}
-  Router -> Router : nodes.get(&2) → NodeAddr("host-2:51001")
-  Router --> Node : Resolved(group=7, leader_id=2, addr="host-2:51001")
+  Router -> Router : partitions.get(&42) → group_id=7 (GroupMeta{group_id:7, replicas:[1,2,3]})
+  Router --> Node : group_id=7
 
   alt This node IS leader of group 7
     Node -> Raft : client_write on G7
@@ -81,9 +79,9 @@ group #LightGreen HOT PATH — subsequent requests for partition 42
 end
 
 group #Wheat CHANGE — routing table updates
-  Cfg -> Snap : broadcast RoutingTableChange::LeaderChanged{group:7, leader:3}
+  Cfg -> Snap : broadcast RoutingTableChange::GroupMembershipChanged{group:7, replicas:[1,2,4]}
   Snap -> Snap : ArcSwap::store(new RoutingTable)
-  note over Router : Next route(42) sees leader=3 without locking\n(ArcSwap gives us lock-free snapshot reads)
+  note over Router : Next route(42) sees the updated snapshot without locking\n(ArcSwap gives us lock-free snapshot reads)
 end
 @enduml
 ```
@@ -91,19 +89,19 @@ end
 ## 查询的两层 / The Two Layers
 
 ### 层 1: 服务端路由（ShardRouter）/ Layer 1: Server-side routing
-每个 rr-server 都有 `ShardRouter`。它拿到一个 `partition_id`，返回 `(group_id, leader_addr)`。
+每个 rr-server 都有 `ShardRouter`。它拿到一个 `partition_id`，返回所属的 `group_id`。路由表不携带 leader 信息——leader 发现全部交给客户端 redirect（见层 2）。
 
-Every rr-server has a `ShardRouter`. Given a `partition_id`, returns `(group_id, leader_addr)`.
+Every rr-server has a `ShardRouter`. Given a `partition_id`, it returns the owning `group_id`. The routing table carries no leader information — leader discovery is entirely client-side via redirects (see Layer 2).
 
 **特性 / Characteristics**:
-- **O(1) 查询**：两次 HashMap lookup（partition → group → node_addr）
+- **O(1) 查询**：一次 HashMap lookup（partition → group）
 - **无锁读**：通过 `ArcSwap<RoutingTable>` 实现
 - **最终一致**：路由表变更通过 `ConfigProvider::subscribe_changes` 异步传播
 - **per-node**：每个节点独立缓存；热路径不跨节点通信
 
 ---
 
-- **O(1) lookup**: two HashMap lookups (partition → group → node_addr)
+- **O(1) lookup**: a single HashMap lookup (partition → group)
 - **Lock-free reads**: via `ArcSwap<RoutingTable>`
 - **Eventually consistent**: routing table changes propagate asynchronously via `ConfigProvider::subscribe_changes`
 - **Per-node**: each node caches independently; hot path has zero inter-node traffic
@@ -113,20 +111,19 @@ Every rr-server has a `ShardRouter`. Given a `partition_id`, returns `(group_id,
 
 `RrClient` additionally maintains its own `HashMap<GroupId, CachedLeader>` — avoiding the follower-then-redirect roundtrip on every request.
 
-**注意这**两个缓存可能不同步**：**
+**注意**：路由表从不携带 leader 信息——客户端的 leader cache 是系统里唯一的 leader 视图，由 `leader_info` 重定向刷新：
 
-**Note these two caches may drift**:
+**Note**: the routing table never carries leader information — the client-side leader cache is the only leader view in the system, refreshed by `leader_info` redirects:
 
-| 场景 / Scenario | Server-side | Client-side | 结果 / Outcome |
-| :--- | :--- | :--- | :--- |
-| Leader changed recently | Updated (got broadcast) | Stale | Client gets ForwardToLeader → updates |
-| Leader changed very recently | Stale (not yet broadcast) | Stale | Client sends to old leader → old leader knows it stepped down → returns error → client retries, eventually hits new leader |
-| Partition added | Updated | Missing | Client gets ClusterInfo refresh → updates |
+| 场景 / Scenario | Client-side cache | 结果 / Outcome |
+| :--- | :--- | :--- |
+| Leader changed | Stale | Client sends to old leader → gets a `leader_info` redirect (or a connection failure) → updates cache → retries |
+| Partition added | Missing | Client gets ClusterInfo refresh → updates |
 
 **设计原则 / Design principle**：
-*宁可让两层缓存短暂不一致，也不要在热路径上加锁。*
+*宁可让客户端缓存短暂 stale，也不要把易变的 leader 运行时状态放进配置面路由表。*
 
-*Allow brief inconsistency between the two caches rather than locking the hot path.*
+*Allow the client cache to go briefly stale rather than putting volatile leader runtime state into the configuration-plane routing table.*
 
 ## 为什么 partition_id 来自客户端？/ Why Does partition_id Come From Client?
 
@@ -160,23 +157,16 @@ let resp = client.send_request(partition_id, payload).await?;
 
 | 事件 / Event | How ShardRouter Finds Out |
 | :--- | :--- |
-| Leader election completes | `RoutingTableChange::LeaderChanged` broadcast (if ConfigProvider wired to Raft events) |
 | Membership change (add learner → promote) | `RoutingTableChange::GroupMembershipChanged` |
 | New partition created | `RoutingTableChange::PartitionAdded` |
 | Node address changes | `RoutingTableChange::NodeAddrUpdated` |
 | Node removed (decommission) | `RoutingTableChange::NodeRemoved` |
 
-如果 `ConfigProvider` 没有与 Raft 事件连接（例如 `MemConfigProvider` 默认不自动追踪 leader 变化），`ShardRouter` 可能返回**陈旧的 leader**。这种情况下：
-- 客户端会收到 `ForwardToLeader`（老 leader 仍在本地——但不再是 leader），
-- 或者老 leader 已 step down 并返回 `NotLeader` 错误，
-- 最终自然收敛到正确的 leader，代价是几次额外 RPC。
+Leader 选举不会产生路由表事件——leader 是 raft 运行时状态，不进入配置面。客户端把请求发给任一节点；若该节点不是 leader，server 从 raft 运行时拿到真实 leader 并返回 `leader_info` 重定向（或旧 leader 已宕机时连接失败），客户端更新 leader cache 并重试，最终收敛到正确的 leader，代价是几次额外 RPC。
 
 ---
 
-If `ConfigProvider` isn't wired to Raft events (e.g., default `MemConfigProvider` does not auto-track leader changes), `ShardRouter` may return a **stale leader**. In that case:
-- The client gets `ForwardToLeader` (the old leader locally — but not the real leader anymore),
-- Or the former leader has stepped down and returns `NotLeader`,
-- Eventually it converges on the real leader at the cost of a few extra RPCs.
+Leader elections never produce routing-table events — the leader is raft runtime state and stays out of the configuration plane. The client sends its request to any node; if that node is not the leader, the server learns the real leader from the raft runtime and returns a `leader_info` redirect (or the connection fails if the old leader is down); the client updates its leader cache and retries, converging on the real leader at the cost of a few extra RPCs.
 
 ## 相关 / Related
 

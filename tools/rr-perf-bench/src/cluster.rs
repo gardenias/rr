@@ -10,9 +10,9 @@ use tokio::process::{Child, Command};
 #[derive(Clone, Debug)]
 pub struct NodePorts {
     pub id: u64,
-    pub grpc: u16,   // client + raft gRPC
-    pub admin: u16,  // admin gRPC (rr-admin target)
-    pub metrics: u16, // HTTP /health /metrics
+    pub grpc: u16,     // client + raft gRPC
+    pub admin: u16,    // admin gRPC (rr-admin target)
+    pub metrics: u16,  // HTTP /health /metrics
     pub raft_tcp: u16, // tcp raft append/vote
 }
 
@@ -105,13 +105,14 @@ impl Cluster {
             let path = tmp.path().to_owned();
             (Some(tmp), path)
         } else {
-            std::fs::create_dir_all(&cfg.data_dir)
-                .context("create data dir")?;
+            std::fs::create_dir_all(&cfg.data_dir).context("create data dir")?;
             (None, cfg.data_dir.clone())
         };
 
         let port_base = cfg.port_base;
-        let ports: Vec<NodePorts> = (1..=3).map(|id| NodePorts::for_node(id, port_base)).collect();
+        let ports: Vec<NodePorts> = (1..=3)
+            .map(|id| NodePorts::for_node(id, port_base))
+            .collect();
         let mut nodes = Vec::new();
 
         for (i, p) in ports.iter().enumerate() {
@@ -129,7 +130,8 @@ impl Cluster {
                 cfg.storage,
                 cfg.durability,
                 cfg.use_tcp_transport,
-                cfg.log_to_files.then(|| log_dir.join(format!("node{}.log", p.id))),
+                cfg.log_to_files
+                    .then(|| log_dir.join(format!("node{}.log", p.id))),
             )
             .await
             .with_context(|| format!("spawn node {}", p.id))?;
@@ -142,7 +144,7 @@ impl Cluster {
 
         // Wrap in Cluster now so Drop fires if anything below fails,
         // killing all spawned children automatically.
-        let mut cluster = Cluster {
+        let cluster = Cluster {
             nodes,
             ports: ports.clone(),
             _data_dir: data_dir_owned,
@@ -184,13 +186,15 @@ impl Cluster {
     }
 
     /// Send SIGKILL to the current leader. Returns its node_id.
+    // Reserved for the crash-recovery / soak harness (reliability program R-4/R-8).
+    #[allow(dead_code)]
     pub async fn kill_leader(&mut self) -> Result<u64> {
         let leader_id = self.find_leader_id().await?;
         let node = self
             .nodes
             .iter_mut()
             .find(|n| n.ports.id == leader_id)
-            .ok_or_else(|| anyhow!("leader node {} not in list", leader_id))?;
+            .ok_or_else(|| anyhow!("leader node {leader_id} not in list"))?;
         node.child.kill().await.context("kill leader process")?;
         Ok(leader_id)
     }
@@ -205,7 +209,7 @@ impl Cluster {
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        bail!("no leader elected within {}s", timeout_secs)
+        bail!("no leader elected within {timeout_secs}s")
     }
 
     /// Graceful shutdown (SIGTERM all nodes).
@@ -231,10 +235,14 @@ impl Cluster {
                 &self.admin_bin,
                 &admin_addr,
                 &[
-                    "group", "add-learner",
-                    "--group", "1",
-                    "--node-id", &p.id.to_string(),
-                    "--addr", &format!("127.0.0.1:{}", p.grpc),
+                    "group",
+                    "add-learner",
+                    "--group",
+                    "1",
+                    "--node-id",
+                    &p.id.to_string(),
+                    "--addr",
+                    &format!("127.0.0.1:{}", p.grpc),
                 ],
             )
             .await
@@ -245,9 +253,12 @@ impl Cluster {
             &self.admin_bin,
             &admin_addr,
             &[
-                "group", "change-membership",
-                "--group", "1",
-                "--voters", "1,2,3",
+                "group",
+                "change-membership",
+                "--group",
+                "1",
+                "--voters",
+                "1,2,3",
             ],
         )
         .await
@@ -260,10 +271,14 @@ impl Cluster {
         for p in &self.ports {
             let out = Command::new(&self.admin_bin)
                 .args([
-                    "--addr", &p.admin_addr(),
-                    "--output", "json",
-                    "group", "status",
-                    "--group", "1",
+                    "--addr",
+                    &p.admin_addr(),
+                    "--output",
+                    "json",
+                    "group",
+                    "status",
+                    "--group",
+                    "1",
                 ])
                 .output()
                 .await?;
@@ -277,6 +292,9 @@ impl Cluster {
     }
 }
 
+// Process-spawn parameter bag; grouping into a struct adds indirection without
+// payoff for this internal helper.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_server(
     bin: &Path,
     ports: &NodePorts,
@@ -367,7 +385,7 @@ async fn wait_tcp(addr: &str, timeout_secs: u64) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    bail!("timeout waiting for TCP port {}", addr)
+    bail!("timeout waiting for TCP port {addr}")
 }
 
 /// Locate the rr-server/rr-admin binaries.

@@ -34,6 +34,11 @@
 //! Errors from `mgr.write_batch` (e.g. the leader stepped down between
 //! poll and write) cause the poll loop to exit cleanly; the
 //! supervisor parks waiting for the next leadership transition.
+//!
+//! Offset→request-id mapping failures are **fail-closed** (ADR A-0011
+//! C7): the offending message is neither proposed nor committed and the
+//! supervisor task exits with an error (same path as a `seed_offset`
+//! failure), leaving the poison message for an operator to handle.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,13 +62,43 @@ use crate::type_config::RrTypeConfig;
 type RrRaftMetrics = openraft::RaftMetrics<RrTypeConfig>;
 type RrMetricsRx = openraft::type_config::alias::WatchReceiverOf<RrTypeConfig, RrRaftMetrics>;
 
+/// Error returned by an [`OffsetToRequestId`] mapping when the offset
+/// bytes cannot be converted into a monotone `u64` request id.
+///
+/// A mapping failure is fail-closed (ADR A-0011 C7): the ingestor
+/// supervisor exits with an error instead of proposing a command whose
+/// request id regressed below the idempotency watermark or collided with
+/// another message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetMapError(String);
+
+impl OffsetMapError {
+    /// Create a mapping error from any displayable diagnostic (e.g. the
+    /// backend-specific error of `kafka_offset_to_request_id`).
+    pub fn new(message: impl std::fmt::Display) -> Self {
+        Self(message.to_string())
+    }
+}
+
+impl std::fmt::Display for OffsetMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OffsetMapError {}
+
 /// Closure that converts an opaque ingestor offset (bincode bytes) to
 /// a monotonic `u64` for use as an [`IdempotencyKey::request_id`].
 /// The framework requires monotonicity: hash-derived IDs would let new
 /// offsets fall below the watermark and be wrongly rejected as
-/// `Expired`. For Kafka, see
+/// `Expired`. The mapping MUST NOT silently degrade unparseable input
+/// (e.g. by returning `0`): that would regress the watermark or collide
+/// with a legitimate first message. Return [`OffsetMapError`] instead and
+/// the supervisor exits fail-closed without proposing or committing the
+/// offending message. For Kafka, see
 /// `rr_ingestor_kafka::kafka_offset_to_request_id`.
-pub type OffsetToRequestId = Box<dyn Fn(&[u8]) -> u64 + Send + Sync>;
+pub type OffsetToRequestId = Box<dyn Fn(&[u8]) -> Result<u64, OffsetMapError> + Send + Sync>;
 
 /// Auto-idempotency configuration for an ingestor attached via
 /// [`RaftGroupManager::attach_ingestor_with_auto_idempotency`].
@@ -80,7 +115,10 @@ pub struct AutoIdempotency {
     /// `request_type` because the watermark is per-type.
     pub request_type: String,
     /// Maps the bincode offset bytes to a `u64`. MUST be monotone in
-    /// offset order (hash-based mappings break the watermark).
+    /// offset order (hash-based mappings break the watermark). On
+    /// unparseable or sentinel offsets it MUST return [`OffsetMapError`]
+    /// — the runner then exits fail-closed (no propose, no offset
+    /// commit) rather than guessing an id (ADR A-0011 C7).
     pub offset_to_request_id: OffsetToRequestId,
 }
 
@@ -221,7 +259,7 @@ async fn supervise(
             &mut metrics_rx,
             &mut cancel_rx,
         )
-        .await;
+        .await?;
 
         if *cancel_rx.borrow() {
             debug!(group_id, "ingestor supervisor cancelled after step-down");
@@ -339,16 +377,16 @@ async fn run_poll_loop(
     batch_size: usize,
     metrics_rx: &mut RrMetricsRx,
     cancel_rx: &mut watch::Receiver<bool>,
-) {
+) -> Result<(), RrError> {
     let mut backoff = INITIAL_POLL_BACKOFF;
     loop {
         if *cancel_rx.borrow() || !is_leader(metrics_rx) {
-            return;
+            return Ok(());
         }
 
         let poll_started = std::time::Instant::now();
         let batch_result = tokio::select! {
-            _ = cancel_rx.changed() => return,
+            _ = cancel_rx.changed() => return Ok(()),
             _ = metrics_rx.changed() => continue,
             r = ingestor.poll_bytes(batch_size) => r,
         };
@@ -376,9 +414,9 @@ async fn run_poll_loop(
 
         if batch.is_empty() {
             tokio::select! {
-                _ = cancel_rx.changed() => return,
+                _ = cancel_rx.changed() => return Ok(()),
                 _ = metrics_rx.changed() => {
-                    if !is_leader(metrics_rx) { return; }
+                    if !is_leader(metrics_rx) { return Ok(()); }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {}
             }
@@ -391,7 +429,30 @@ async fn run_poll_loop(
         for cmd in batch {
             let mut entry = FramedEntry::from_payload(cmd.payload).with_offset(cmd.offset.clone());
             if let Some(cfg) = auto_idem {
-                let request_id = (cfg.offset_to_request_id)(&cmd.offset);
+                let request_id = match (cfg.offset_to_request_id)(&cmd.offset) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        // Fail-closed (ADR A-0011 C7): a message whose offset
+                        // cannot be mapped is never proposed and its offset is
+                        // never committed; the supervisor exits like it does
+                        // on seed_offset failure, so a poison message cannot
+                        // hot-loop and is left for an operator to handle.
+                        tracing::error!(
+                            group_id,
+                            error = %e,
+                            "ingestor: offset→request_id mapping failed; supervisor exiting \
+                             fail-closed without proposing or committing this message"
+                        );
+                        metrics::counter!(
+                            "rr_ingestor_offset_map_failures_total",
+                            "group_id" => group_id.to_string()
+                        )
+                        .increment(1);
+                        return Err(RrError::Application(format!(
+                            "ingestor offset→request_id mapping failed: {e}"
+                        )));
+                    }
+                };
                 entry =
                     entry.with_idem_key(IdempotencyKey::new(cfg.request_type.clone(), request_id));
             }
@@ -428,7 +489,7 @@ async fn run_poll_loop(
                         got = responses.len(),
                         "ingestor: write_batch response count mismatch; treating as step-down"
                     );
-                    return;
+                    return Ok(());
                 }
 
                 for offset in commit_offsets {
@@ -455,7 +516,7 @@ async fn run_poll_loop(
                     dropped,
                     "ingestor: batch write failed; likely stepped down"
                 );
-                return;
+                return Ok(());
             }
         }
     }
@@ -698,14 +759,82 @@ mod tests {
             offset_to_request_id: Box::new(|bytes| {
                 let (i, _): (u64, _) =
                     bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-                        .unwrap_or((0, 0));
-                i
+                        .map_err(OffsetMapError::new)?;
+                Ok(i)
             }),
         };
         assert_eq!(auto_idem.request_type, "test_topic");
         let mut buf = Vec::new();
         bincode::serde::encode_into_std_write(42_u64, &mut buf, bincode::config::standard())
             .unwrap();
-        assert_eq!((auto_idem.offset_to_request_id)(&buf), 42);
+        assert_eq!((auto_idem.offset_to_request_id)(&buf).unwrap(), 42);
+        // Empty bytes cannot decode as a bincode u64 → Err.
+        assert!((auto_idem.offset_to_request_id)(b"").is_err());
+    }
+
+    /// Ingestor whose offsets always fail the `offset_to_request_id`
+    /// mapping — the supervisor must exit fail-closed (ADR A-0011 C7).
+    struct UnmappableOffsetIngestor {
+        commits: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl CommandIngestor for UnmappableOffsetIngestor {
+        type Offset = u64;
+
+        async fn seek(&mut self, _offset: Option<u64>) -> Result<(), RrError> {
+            Ok(())
+        }
+
+        async fn poll(&mut self, _max: usize) -> Result<Vec<IngressCommand<u64>>, RrError> {
+            Ok(vec![IngressCommand {
+                offset: 0,
+                payload: b"poison".to_vec(),
+            }])
+        }
+
+        async fn commit_applied(&mut self, _offset: u64) -> Result<(), RrError> {
+            self.commits.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_exits_on_offset_map_failure() {
+        let mgr = make_single_node_leader().await;
+        let raft = mgr.get_raft(1).await.unwrap();
+        let log_index_before = raft.metrics().borrow_watched().last_log_index;
+
+        let commits = Arc::new(AtomicU64::new(0));
+        let ingestor = UnmappableOffsetIngestor {
+            commits: Arc::clone(&commits),
+        };
+        let auto_idem = AutoIdempotency {
+            request_type: "poison_topic".into(),
+            offset_to_request_id: Box::new(|_| Err(OffsetMapError::new("unmappable offset"))),
+        };
+        let handle =
+            spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), Some(auto_idem), 1);
+
+        // The supervisor must terminate (fail-closed), not hot-loop.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while handle.is_running() {
+            if std::time::Instant::now() > deadline {
+                panic!("supervisor must exit on offset→request_id mapping failure (C7)");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            commits.load(Ordering::SeqCst),
+            0,
+            "no offset may be committed when mapping fails"
+        );
+        assert_eq!(
+            raft.metrics().borrow_watched().last_log_index,
+            log_index_before,
+            "nothing may be proposed when mapping fails"
+        );
+        handle.stop().await;
     }
 }

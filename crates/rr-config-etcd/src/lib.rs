@@ -397,21 +397,15 @@ impl ConfigProvider for EtcdConfigProvider {
             if key.starts_with(&groups_prefix(&self.cluster_id)) {
                 let group_id = parse_group_id_from_key(&self.cluster_id, key)?;
                 let replicas: Vec<NodeId> = decode_json(kv.value(), "decode group entry")?;
-                table.groups.insert(
-                    group_id,
-                    GroupMeta {
-                        group_id,
-                        leader: replicas.first().copied(),
-                        replicas,
-                    },
-                );
+                table
+                    .groups
+                    .insert(group_id, GroupMeta { group_id, replicas });
             }
         }
 
         for (_, group_id) in table.partitions.values() {
             table.groups.entry(*group_id).or_insert_with(|| GroupMeta {
                 group_id: *group_id,
-                leader: None,
                 replicas: Vec::new(),
             });
         }

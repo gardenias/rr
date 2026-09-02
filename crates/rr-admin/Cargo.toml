@@ -1,9 +1,10 @@
 [package]
 name = "rr-admin"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]
+rr-core = { path = "../rr-core" }
 rr-network = { path = "../rr-network" }
 tokio.workspace = true
 tonic.workspace = true

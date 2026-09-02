@@ -29,7 +29,7 @@ use kv_store::KvService;
 use rr_core::ingestor::DynCommandIngestor;
 use rr_ingestor_kafka::{kafka_offset_to_request_id, MockKafkaHandle, MockKafkaIngestor};
 use rr_raft::group_manager::{RaftGroupManager, StateMachineFactory};
-use rr_raft::ingestor_runner::AutoIdempotency;
+use rr_raft::ingestor_runner::{AutoIdempotency, OffsetMapError};
 use rr_raft::ServiceStateMachineAdapter;
 
 const GROUP_ID: u64 = 1;
@@ -69,7 +69,9 @@ async fn run() -> Result<()> {
 
     let auto_idem = AutoIdempotency {
         request_type: format!("input_{GROUP_ID}"),
-        offset_to_request_id: Box::new(kafka_offset_to_request_id),
+        offset_to_request_id: Box::new(|b| {
+            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        }),
     };
     mgr.attach_ingestor_with_auto_idempotency(GROUP_ID, ingestor, auto_idem)
         .await?;
@@ -87,7 +89,9 @@ async fn run() -> Result<()> {
         replay_dyn,
         AutoIdempotency {
             request_type: format!("input_{GROUP_ID}"),
-            offset_to_request_id: Box::new(kafka_offset_to_request_id),
+            offset_to_request_id: Box::new(|b| {
+                kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+            }),
         },
     )
     .await?;

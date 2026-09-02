@@ -1,6 +1,6 @@
 [package]
 name = "rr-perf-bench"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 publish = false
 description = "Integration performance benchmark for rr: 3-process Raft cluster, real gRPC traffic"

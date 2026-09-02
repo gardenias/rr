@@ -51,7 +51,6 @@ impl MemConfigProvider {
             .insert(partition_id, (config.clone(), group_id));
         table.groups.entry(group_id).or_insert_with(|| GroupMeta {
             group_id,
-            leader: replicas.first().copied(),
             replicas: replicas.clone(),
         });
         // Ignore send error — no subscribers is OK.
@@ -94,13 +93,11 @@ impl MemConfigProvider {
         let mut table = self.routing_table.write().await;
         if let Some(group) = table.groups.get_mut(&group_id) {
             group.replicas = replicas.clone();
-            group.leader = replicas.first().copied();
         } else {
             table.groups.insert(
                 group_id,
                 GroupMeta {
                     group_id,
-                    leader: replicas.first().copied(),
                     replicas: replicas.clone(),
                 },
             );
@@ -167,7 +164,6 @@ mod tests {
         assert!(matches!(cfg, PartitionConfig::SingleId(1)));
         // Group should have been created
         let group = table.groups.get(&100).unwrap();
-        assert_eq!(group.leader, Some(1));
         assert_eq!(group.replicas, vec![1, 2, 3]);
     }
 
@@ -393,6 +389,5 @@ mod tests {
         let table = provider.get_routing_table().await.unwrap();
         let group = table.groups.get(&51).unwrap();
         assert_eq!(group.replicas, vec![1, 2, 3, 4]);
-        assert_eq!(group.leader, Some(1));
     }
 }

@@ -297,24 +297,6 @@ client using a wrong partition.
 
 ---
 
-#### `router.get_leader_addr.success`
-
-`ShardRouter::get_leader_addr()` 成功解析到一个 leader 地址时 +1。与 `router.route.not_found` 配对，可用于计算路由查找成功率。
-
----
-
-Incremented by 1 when `ShardRouter::get_leader_addr()` successfully resolves a leader
-address for a group. Pair with `router.route.not_found` to compute routing-lookup
-success rate.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-router/src/router.rs` — `get_leader_addr()` |
-
----
-
 ### Client-side (rr-client, emitted by applications that embed the SDK)
 
 #### `rr_client_request_duration_seconds`
@@ -399,8 +381,8 @@ histogram_quantile(0.99, sum by (le, group_id) (rate(rr_proposal_duration_second
 # 当前集群所有 leader / All current leaders in the cluster
 rr_raft_is_leader == 1
 
-# 路由失败率 / Routing failure rate
-rate(router_route_not_found[1m]) / (rate(router_route_not_found[1m]) + rate(router_get_leader_addr_success[1m]))
+# 路由失败速率 / Routing lookup failures per second
+rate(router_route_not_found[1m])
 
 # 连接池不稳定性 / Connection-pool churn
 sum(rate(rr_channel_reconnects_total[5m])) by (node_id)

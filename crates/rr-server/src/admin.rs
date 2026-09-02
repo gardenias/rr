@@ -15,6 +15,8 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use rr_core::config::ConfigProvider;
+use rr_core::error::RaftError;
+use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 use rr_core::types::NodeId;
 use rr_network::audit::AUDIT_TARGET;
 use rr_network::error_convert::IntoStatus;
@@ -206,7 +208,10 @@ impl AdminService for AdminServiceImpl {
             .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
         let metrics = raft.metrics().borrow_watched().clone();
         let last_snapshot_index = metrics.snapshot.as_ref().map(|log_id| log_id.index);
-        let last_snapshot_term = metrics.snapshot.as_ref().map(|log_id| log_id.leader_id.term);
+        let last_snapshot_term = metrics
+            .snapshot
+            .as_ref()
+            .map(|log_id| log_id.leader_id.term);
 
         // openraft 0.10 metrics expose the latest completed snapshot id,
         // but not an explicit "building snapshot" runtime flag.
@@ -412,7 +417,9 @@ impl AdminService for AdminServiceImpl {
             }
 
             let membership = metrics.membership_config.membership();
-            let target = membership.voter_ids().find(|node_id| *node_id != self.node_id);
+            let target = membership
+                .voter_ids()
+                .find(|node_id| *node_id != self.node_id);
             let Some(target_node_id) = target else {
                 groups.push(GroupDrainStatus {
                     group_id,
@@ -539,6 +546,7 @@ impl AdminService for AdminServiceImpl {
         let peer = peer_from_request(&request);
         let req = request.into_inner();
         let voters: BTreeSet<NodeId> = req.voter_node_ids.iter().copied().collect();
+        let force = req.force;
         info!(
             target: AUDIT_TARGET,
             op = "ChangeMembership",
@@ -546,9 +554,32 @@ impl AdminService for AdminServiceImpl {
             node_id = self.node_id,
             group_id = req.group_id,
             voter_count = voters.len(),
+            force,
             result = "started",
             "admin rpc — mutation"
         );
+        // 1. Group existence (same not_found semantics as `get_group_membership`).
+        let raft = match self.group_manager.get_raft(req.group_id).await {
+            Some(raft) => raft,
+            None => {
+                let status = Status::not_found(format!("group {} not found", req.group_id));
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                return Err(status);
+            }
+        };
+        // 2. Empty voter set: rejected unconditionally. `force` does NOT
+        //    bypass this — n→0 is group teardown and must go through
+        //    `node-reset`, not change-membership (ADR A-0012 §4).
         if voters.is_empty() {
             let msg = "voter_node_ids must not be empty";
             info!(
@@ -563,6 +594,55 @@ impl AdminService for AdminServiceImpl {
             );
             return Err(Status::invalid_argument(msg));
         }
+        // 3. Quorum guard (ADR A-0012): reject target voter sets below
+        //    MIN_VOTERS_AFTER_REMOVAL unless the operator passed `force`.
+        //    The membership view is read from the same source as
+        //    `GetGroupMembership` (leader's `raft.metrics()`); the
+        //    decision itself depends only on the target size — openraft's
+        //    full-replacement semantics make each applied request
+        //    self-sufficient, so no TOCTOU composition is possible.
+        let current_voters = {
+            let metrics = raft.metrics().borrow_watched().clone();
+            metrics.membership_config.membership().voter_ids().count()
+        };
+        if !membership_change_is_safe(voters.len()) {
+            if force {
+                warn!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    node_id = self.node_id,
+                    group_id = req.group_id,
+                    force = true,
+                    current_voters,
+                    target_voters = voters.len(),
+                    // The exact set being forced, not just its size — the
+                    // audit trail must reconstruct WHICH voters were forced.
+                    voters = ?voters,
+                    result = "force_accepted",
+                    "quorum guard overridden by operator"
+                );
+            } else {
+                let status = RaftError::UnsafeMembershipChange {
+                    target_voters: voters.len(),
+                    min: MIN_VOTERS_AFTER_REMOVAL,
+                }
+                .into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                return Err(status);
+            }
+        }
+        // 4. Guard passed — apply through the manager.
         let outcome = self
             .group_manager
             .change_membership(req.group_id, voters)
@@ -854,8 +934,8 @@ impl AdminService for AdminServiceImpl {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use rr_config::mem::MemConfigProvider;
     use bincode::config::standard;
+    use rr_config::mem::MemConfigProvider;
     use rr_core::error::RrError;
     use rr_core::service::Service;
     use rr_core::state_machine::StateMachine;
@@ -915,6 +995,63 @@ mod tests {
         let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
         let config_provider = Arc::new(MemConfigProvider::new());
         AdminServiceImpl::new(1, "127.0.0.1:9090".to_string(), mgr, config_provider)
+    }
+
+    /// Start and initialize a single-node group so `change_membership`
+    /// requests reach the quorum guard with a committed membership view
+    /// (and the node is the group's leader, so a guarded pass-through
+    /// can actually be applied by raft).
+    async fn make_admin_service_with_group() -> AdminServiceImpl {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        let mut members = std::collections::BTreeMap::new();
+        members.insert(1u64, openraft::BasicNode::default());
+        mgr.init_cluster(1, members).await.unwrap();
+        let raft = mgr.get_raft(1).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let metrics = raft.metrics().borrow_watched().clone();
+            if metrics.current_leader == Some(1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "single-node self-election timed out"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let config_provider = Arc::new(MemConfigProvider::new());
+        AdminServiceImpl::new(1, "127.0.0.1:9090".to_string(), mgr, config_provider)
+    }
+
+    /// In-memory `MakeWriter` so tests can assert on the `rr::audit`
+    /// event stream a handler emits.
+    #[derive(Clone, Default)]
+    struct AuditBuf {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for AuditBuf {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AuditBuf {
+        type Writer = AuditBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl AuditBuf {
+        fn contents(&self) -> String {
+            String::from_utf8(self.bytes.lock().unwrap().clone()).unwrap()
+        }
     }
 
     #[test]
@@ -988,16 +1125,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_change_membership_empty_voters_rejected() {
-        let svc = make_admin_service();
-        let result = svc
-            .change_membership(Request::new(ChangeMembershipRequest {
-                group_id: 1,
-                voter_node_ids: vec![],
-            }))
-            .await;
-        assert!(result.is_err());
-        let status = result.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        let svc = make_admin_service_with_group().await;
+        // n→0 is teardown, not a membership change: rejected regardless
+        // of `force` (operators use `node-reset` instead — ADR A-0012 §4).
+        for force in [false, true] {
+            let result = svc
+                .change_membership(Request::new(ChangeMembershipRequest {
+                    group_id: 1,
+                    voter_node_ids: vec![],
+                    force,
+                }))
+                .await;
+            let status = result.expect_err("empty voter set must be rejected");
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "force={force} must not bypass the empty-set check"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1007,10 +1152,129 @@ mod tests {
             .change_membership(Request::new(ChangeMembershipRequest {
                 group_id: 99,
                 voter_node_ids: vec![1, 2, 3],
+                force: false,
             }))
             .await;
         let err = result.expect_err("expected change_membership to fail for unknown group");
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_quorum_guard_rejects_below_minimum() {
+        let svc = make_admin_service_with_group().await;
+        let result = svc
+            .change_membership(Request::new(ChangeMembershipRequest {
+                group_id: 1,
+                voter_node_ids: vec![1],
+                force: false,
+            }))
+            .await;
+        let status = result.expect_err("target voter set below minimum must be rejected");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let msg = status.message();
+        assert!(
+            msg.contains("has 1 voter") && msg.contains("minimum 2"),
+            "message must name the target voter count and the minimum; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_guard_allows_target_at_minimum() {
+        let svc = make_admin_service_with_group().await;
+        let result = svc
+            .change_membership(Request::new(ChangeMembershipRequest {
+                group_id: 1,
+                voter_node_ids: vec![1, 2],
+                force: false,
+            }))
+            .await;
+        // The guard must let a ≥ MIN_VOTERS_AFTER_REMOVAL target through.
+        // The request may still fail deeper in raft (node 2 is not a
+        // learner in this single-node fixture) — anything but
+        // FailedPrecondition proves the guard passed it on.
+        match result {
+            Ok(_) => {}
+            Err(status) => assert_ne!(
+                status.code(),
+                tonic::Code::FailedPrecondition,
+                "guard must not block a 2-voter target"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_force_overrides_guard() {
+        let svc = make_admin_service_with_group().await;
+        // Single-node group: target {1} equals the current voter set, so
+        // once the guard is bypassed the raft call itself succeeds —
+        // proving the request reached the manager.
+        svc.change_membership(Request::new(ChangeMembershipRequest {
+            group_id: 1,
+            voter_node_ids: vec![1],
+            force: true,
+        }))
+        .await
+        .expect("force must bypass the quorum guard and reach raft");
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_force_accepted_audit_event() {
+        let buf = AuditBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let svc = make_admin_service_with_group().await;
+        svc.change_membership(Request::new(ChangeMembershipRequest {
+            group_id: 1,
+            voter_node_ids: vec![1],
+            force: true,
+        }))
+        .await
+        .expect("force must bypass the quorum guard");
+
+        let out = buf.contents();
+        assert!(
+            out.contains(AUDIT_TARGET) && out.contains("force_accepted"),
+            "force override must emit a force_accepted audit event on {AUDIT_TARGET}; got:\n{out}"
+        );
+        assert!(
+            out.contains("force=true"),
+            "force_accepted event must carry force=true; got:\n{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_change_membership_guard_rejection_audit_event() {
+        let buf = AuditBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let svc = make_admin_service_with_group().await;
+        let result = svc
+            .change_membership(Request::new(ChangeMembershipRequest {
+                group_id: 1,
+                voter_node_ids: vec![1],
+                force: false,
+            }))
+            .await;
+        assert_eq!(
+            result.expect_err("guard must reject").code(),
+            tonic::Code::FailedPrecondition
+        );
+
+        let out = buf.contents();
+        assert!(
+            out.contains(AUDIT_TARGET) && out.contains("membership change rejected"),
+            "guard rejection must emit a failed audit event with the reason; got:\n{out}"
+        );
     }
 
     #[tokio::test]
