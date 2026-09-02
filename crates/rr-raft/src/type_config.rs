@@ -1,6 +1,5 @@
 //! TypeConfig for openraft via `declare_raft_types!`.
 
-use std::io::Cursor;
 use std::ops::Deref;
 
 use openraft::BasicNode;
@@ -75,7 +74,6 @@ openraft::declare_raft_types!(
         LeaderId     = openraft::impls::leader_id_adv::LeaderId<Self::Term, Self::NodeId>,
         Vote         = openraft::impls::Vote<Self::LeaderId>,
         Entry        = openraft::Entry<<Self::LeaderId as openraft::vote::RaftLeaderId>::Committed, Self::D, Self::NodeId, Self::Node>,
-        SnapshotData = Cursor<Vec<u8>>,
         AsyncRuntime = TokioRuntime,
 );
 

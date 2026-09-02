@@ -1901,13 +1901,24 @@ mod tests {
 
         injector.restore(followers[0]);
 
-        let restored = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            raft.client_write(b"quorum-restored".to_vec().into()),
-        )
-        .await;
+        // openraft ≥ 0.10.0-alpha.32 fast-fails proposals while the leader lease
+        // is stale; after the partition heals, the lease re-arms only after a
+        // successful heartbeat round. Poll within the deadline instead of a
+        // single-shot write.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let restored = loop {
+            match raft.client_write(b"quorum-restored".to_vec().into()).await {
+                Ok(resp) => break Ok(resp),
+                Err(e) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break Err(e);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        };
         assert!(
-            matches!(restored, Ok(Ok(_))),
+            restored.is_ok(),
             "write must succeed once quorum is restored, got {restored:?}"
         );
 

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::io::Cursor;
 use std::sync::Arc;
 
 use openraft::error::RPCError;
@@ -9,6 +10,7 @@ use openraft::error::ReplicationClosed;
 use openraft::error::StreamingError;
 use openraft::error::Unreachable;
 use openraft::network::v2::RaftNetworkV2;
+use openraft::network::NetSnapshot;
 use openraft::network::RPCOption;
 use openraft::network::RaftNetworkFactory;
 use openraft::raft::AppendEntriesRequest;
@@ -62,6 +64,7 @@ impl RaftNode {
     ) -> Result<Self, RrError>
     where
         NF: RaftNetworkFactory<RrTypeConfig> + 'static,
+        NF::Network: NetSnapshot<RrTypeConfig, SnapshotData = Cursor<Vec<u8>>>,
     {
         let config = Arc::new(
             Config {
@@ -152,6 +155,7 @@ impl RaftNode {
     ) -> Result<Self, RrError>
     where
         NF: RaftNetworkFactory<RrTypeConfig> + 'static,
+        NF::Network: NetSnapshot<RrTypeConfig, SnapshotData = Cursor<Vec<u8>>>,
     {
         let config = Arc::new(
             Config {
@@ -214,6 +218,8 @@ impl RaftNetworkFactory<RrTypeConfig> for NoopNetworkFactory {
 pub struct NoopNetwork;
 
 impl RaftNetworkV2<RrTypeConfig> for NoopNetwork {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn append_entries(
         &mut self,
         _rpc: AppendEntriesRequest<RrTypeConfig>,
@@ -227,7 +233,7 @@ impl RaftNetworkV2<RrTypeConfig> for NoopNetwork {
     async fn full_snapshot(
         &mut self,
         _vote: VoteOf<RrTypeConfig>,
-        _snapshot: SnapshotOf<RrTypeConfig>,
+        _snapshot: SnapshotOf<RrTypeConfig, Self::SnapshotData>,
         _cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<RrTypeConfig>, StreamingError<RrTypeConfig>> {

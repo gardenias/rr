@@ -327,7 +327,7 @@ impl AdminService for AdminServiceImpl {
             return Err(Status::failed_precondition(message));
         }
 
-        match raft.trigger().elect().await {
+        match raft.trigger().elect(false).await {
             Ok(()) => {
                 info!(
                     target: AUDIT_TARGET,

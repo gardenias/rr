@@ -5,6 +5,7 @@
 
 use std::io;
 use std::io::BufReader;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -392,6 +393,8 @@ impl TcpRaftNetwork {
 }
 
 impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<RrTypeConfig>,
@@ -449,7 +452,7 @@ impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<RrTypeConfig>,
-        snapshot: SnapshotOf<RrTypeConfig>,
+        snapshot: SnapshotOf<RrTypeConfig, Self::SnapshotData>,
         cancel: impl std::future::Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<RrTypeConfig>, StreamingError<RrTypeConfig>> {

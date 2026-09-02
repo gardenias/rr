@@ -12,6 +12,7 @@
 //! prost annotations and builds the tonic gRPC client inline. The wire format
 //! is identical to `rr.raft.*` from the `.proto` definitions.
 
+use std::io::Cursor;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -412,6 +413,8 @@ impl GrpcRaftNetwork {
 }
 
 impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
+    type SnapshotData = Cursor<Vec<u8>>;
+
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<RrTypeConfig>,
@@ -491,7 +494,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<RrTypeConfig>,
-        snapshot: SnapshotOf<RrTypeConfig>,
+        snapshot: SnapshotOf<RrTypeConfig, Self::SnapshotData>,
         _cancel: impl std::future::Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
         _option: RPCOption,
     ) -> Result<SnapshotResponse<RrTypeConfig>, StreamingError<RrTypeConfig>> {
@@ -626,6 +629,7 @@ mod tests {
         let rpc = VoteRequest::<RrTypeConfig> {
             vote: Vote::new(1, 1),
             last_log_id: None,
+            leadership_transfer: false,
         };
 
         let result = network

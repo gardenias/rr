@@ -28,7 +28,8 @@ pub struct RrStateMachine {
     last_membership: StoredMembershipOf<RrTypeConfig>,
     /// Cached snapshot bytes from the inner state machine.
     snapshot_bytes: Vec<u8>,
-    /// Snapshot index counter for unique IDs.
+    /// Counts installed snapshots (openraft's `SnapshotMeta` no longer
+    /// carries a `snapshot_id`; kept so tests can observe installs).
     snapshot_idx: u64,
 }
 
@@ -61,7 +62,6 @@ impl RrStateMachine {
             data,
             last_applied: self.last_applied,
             last_membership: self.last_membership.clone(),
-            snapshot_idx: self.snapshot_idx,
             build_error: None,
         })
     }
@@ -74,6 +74,7 @@ impl RrStateMachine {
 }
 
 impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
+    type SnapshotData = Cursor<Vec<u8>>;
     type SnapshotBuilder = RrSnapshotBuilder;
 
     async fn applied_state(
@@ -129,7 +130,6 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
                     e,
                     self.last_applied,
                     self.last_membership.clone(),
-                    self.snapshot_idx,
                 )
             }
         }
@@ -149,7 +149,6 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
                         e,
                         self.last_applied,
                         self.last_membership.clone(),
-                        self.snapshot_idx,
                     ))
                 } else {
                     // Policy-triggered build: defer. openraft records
@@ -161,14 +160,10 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         }
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> Result<Cursor<Vec<u8>>, io::Error> {
-        Ok(Cursor::new(Vec::new()))
-    }
-
     async fn install_snapshot(
         &mut self,
         meta: &SnapshotMetaOf<RrTypeConfig>,
-        snapshot: Cursor<Vec<u8>>,
+        snapshot: Self::SnapshotData,
     ) -> Result<(), io::Error> {
         let data = snapshot.into_inner();
         self.inner
@@ -184,7 +179,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
     async fn get_current_snapshot(
         &mut self,
-    ) -> Result<Option<SnapshotOf<RrTypeConfig>>, io::Error> {
+    ) -> Result<Option<SnapshotOf<RrTypeConfig, Self::SnapshotData>>, io::Error> {
         let data = self
             .inner
             .snapshot()
@@ -198,7 +193,6 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         let meta = SnapshotMeta {
             last_log_id: self.last_applied,
             last_membership: self.last_membership.clone(),
-            snapshot_id: format!("snap-{}", self.snapshot_idx),
         };
 
         Ok(Some(Snapshot {
@@ -213,7 +207,6 @@ pub struct RrSnapshotBuilder {
     data: Vec<u8>,
     last_applied: Option<LogIdOf<RrTypeConfig>>,
     last_membership: StoredMembershipOf<RrTypeConfig>,
-    snapshot_idx: u64,
     /// Captured snapshot-capture error. When set, `build_snapshot` returns
     /// it instead of emitting an "empty bytes + valid meta" snapshot
     /// (ADR A-0011 C6 poisoned builder).
@@ -228,20 +221,22 @@ impl RrSnapshotBuilder {
         error: io::Error,
         last_applied: Option<LogIdOf<RrTypeConfig>>,
         last_membership: StoredMembershipOf<RrTypeConfig>,
-        snapshot_idx: u64,
     ) -> Self {
         Self {
             data: Vec::new(),
             last_applied,
             last_membership,
-            snapshot_idx,
             build_error: Some(error),
         }
     }
 }
 
 impl RaftSnapshotBuilder<RrTypeConfig> for RrSnapshotBuilder {
-    async fn build_snapshot(&mut self) -> Result<SnapshotOf<RrTypeConfig>, io::Error> {
+    type SnapshotData = Cursor<Vec<u8>>;
+
+    async fn build_snapshot(
+        &mut self,
+    ) -> Result<SnapshotOf<RrTypeConfig, Self::SnapshotData>, io::Error> {
         // Borrow, don't take: a poisoned builder must keep failing on every
         // call. openraft calls `build_snapshot` exactly once per builder
         // today, but a `take()` would let a second call fall through and
@@ -252,7 +247,6 @@ impl RaftSnapshotBuilder<RrTypeConfig> for RrSnapshotBuilder {
         let meta = SnapshotMeta {
             last_log_id: self.last_applied,
             last_membership: self.last_membership.clone(),
-            snapshot_id: format!("snap-{}", self.snapshot_idx),
         };
 
         Ok(Snapshot {
@@ -348,21 +342,9 @@ mod tests {
             data, b"hello world",
             "snapshot must contain accumulated state"
         );
-        assert_eq!(snap.meta.snapshot_id, "snap-0");
         assert_eq!(
             snap.meta.last_log_id,
             Some(LogId::new(CommittedLeaderId::new(1, 1), 2))
-        );
-    }
-
-    /// begin_receiving_snapshot returns an empty cursor.
-    #[tokio::test]
-    async fn test_begin_receiving_snapshot_empty() {
-        let mut sm = make_sm();
-        let cursor = sm.begin_receiving_snapshot().await.unwrap();
-        assert!(
-            cursor.into_inner().is_empty(),
-            "fresh snapshot buffer must be empty"
         );
     }
 
@@ -376,7 +358,6 @@ mod tests {
         let meta: SnapshotMetaOf<RrTypeConfig> = SnapshotMeta {
             last_log_id: Some(LogId::new(CommittedLeaderId::new(1, 1), 10)),
             last_membership: StoredMembership::default(),
-            snapshot_id: "snap-42".to_string(),
         };
 
         sm.install_snapshot(&meta, Cursor::new(snap_data.clone()))
@@ -387,7 +368,7 @@ mod tests {
         let current = sm.get_current_snapshot().await.unwrap().unwrap();
         assert_eq!(current.snapshot.into_inner(), snap_data);
         assert_eq!(current.meta.last_log_id, meta.last_log_id);
-        assert_eq!(current.meta.snapshot_id, "snap-1"); // idx incremented to 1
+        assert_eq!(sm.snapshot_idx, 1); // idx incremented to 1
     }
 
     /// Full round-trip: apply entries, build snapshot, create fresh SM, install snapshot.
@@ -436,19 +417,16 @@ mod tests {
         let meta: SnapshotMetaOf<RrTypeConfig> = SnapshotMeta {
             last_log_id: Some(LogId::new(CommittedLeaderId::new(1, 1), 5)),
             last_membership: StoredMembership::default(),
-            snapshot_id: "snap-x".to_string(),
         };
         sm.install_snapshot(&meta, Cursor::new(b"data1".to_vec()))
             .await
             .unwrap();
-        let s1 = sm.get_current_snapshot().await.unwrap().unwrap();
-        assert_eq!(s1.meta.snapshot_id, "snap-1");
+        assert_eq!(sm.snapshot_idx, 1);
 
         sm.install_snapshot(&meta, Cursor::new(b"data2".to_vec()))
             .await
             .unwrap();
-        let s2 = sm.get_current_snapshot().await.unwrap().unwrap();
-        assert_eq!(s2.meta.snapshot_id, "snap-2");
+        assert_eq!(sm.snapshot_idx, 2);
     }
 
     // ── T5: snapshot failure propagation (ADR A-0011 C6) ─────────────────
