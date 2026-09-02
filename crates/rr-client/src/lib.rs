@@ -349,11 +349,11 @@ impl RrClient {
                 Ok(mut client) => match client.read_local(tonic_req).await {
                     Ok(resp) => return Ok(resp.into_inner().payload),
                     Err(e) => {
-                        last_error = Some(RrError::Network(NetworkError::RpcFailed(
-                            e.to_string(),
-                        )));
+                        last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
                         if attempt + 1 < max_attempts {
-                            let delay = self.retry_config.retry_delay_ms
+                            let delay = self
+                                .retry_config
+                                .retry_delay_ms
                                 .saturating_mul(2u64.saturating_pow(attempt.min(20)));
                             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         }
@@ -366,7 +366,9 @@ impl RrClient {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            RrError::Network(NetworkError::RpcFailed("all read attempts exhausted".into()))
+            RrError::Network(NetworkError::RpcFailed(
+                "all read attempts exhausted".into(),
+            ))
         }))
     }
 
@@ -428,11 +430,11 @@ impl RrClient {
                         return Ok(inner.payload);
                     }
                     Err(e) => {
-                        last_error = Some(RrError::Network(NetworkError::RpcFailed(
-                            e.to_string(),
-                        )));
+                        last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
                         if attempt + 1 < max_attempts {
-                            let delay = self.retry_config.retry_delay_ms
+                            let delay = self
+                                .retry_config
+                                .retry_delay_ms
                                 .saturating_mul(2u64.saturating_pow(attempt.min(20)));
                             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         }
@@ -553,10 +555,10 @@ impl RrClient {
             };
 
             let request = ClientRequest {
-                            partition_id: group_id,
-                            payload: payload.clone(),
-                            idem_key: idem_key.clone().map(idem_key_to_proto),
-                        };
+                partition_id: group_id,
+                payload: payload.clone(),
+                idem_key: idem_key.clone().map(idem_key_to_proto),
+            };
 
             let tonic_req = match self.build_request(request) {
                 Ok(req) => req,
@@ -722,8 +724,7 @@ impl RrClient {
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, RrError> {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.send_request(group_id, payload))
+            tokio::runtime::Handle::current().block_on(self.send_request(group_id, payload))
         })
     }
 
@@ -742,14 +743,9 @@ impl RrClient {
     }
 
     /// Blocking stale read.  See [`read`] and [`send_request_blocking`].
-    pub fn read_blocking(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-    ) -> Result<Vec<u8>, RrError> {
+    pub fn read_blocking(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.read(group_id, payload))
+            tokio::runtime::Handle::current().block_on(self.read(group_id, payload))
         })
     }
 
@@ -761,8 +757,7 @@ impl RrClient {
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, RrError> {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.read_linearizable(group_id, payload))
+            tokio::runtime::Handle::current().block_on(self.read_linearizable(group_id, payload))
         })
     }
 
@@ -772,12 +767,8 @@ impl RrClient {
     ///
     /// `callback` is invoked on a tokio worker thread when the response
     /// (or error) arrives.  The calling context is never blocked.
-    pub fn send_request_reactive<F>(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-        callback: F,
-    ) where
+    pub fn send_request_reactive<F>(&self, group_id: GroupId, payload: Vec<u8>, callback: F)
+    where
         F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
     {
         let client = self.clone();
@@ -803,12 +794,8 @@ impl RrClient {
     }
 
     /// Reactive stale read.  See [`send_request_reactive`].
-    pub fn read_reactive<F>(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-        callback: F,
-    ) where
+    pub fn read_reactive<F>(&self, group_id: GroupId, payload: Vec<u8>, callback: F)
+    where
         F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
     {
         let client = self.clone();
@@ -818,12 +805,8 @@ impl RrClient {
     }
 
     /// Reactive linearizable read.  See [`send_request_reactive`].
-    pub fn read_linearizable_reactive<F>(
-        &self,
-        group_id: GroupId,
-        payload: Vec<u8>,
-        callback: F,
-    ) where
+    pub fn read_linearizable_reactive<F>(&self, group_id: GroupId, payload: Vec<u8>, callback: F)
+    where
         F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
     {
         let client = self.clone();
@@ -1113,33 +1096,48 @@ mod tests {
     async fn blocking_send_returns_error_when_no_server() {
         let client = RrClient::connect_with_config(
             vec!["localhost:1".to_string()],
-            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+            RetryConfig {
+                max_retries: 0,
+                retry_delay_ms: 10,
+            },
         )
         .await
         .expect("connect");
 
         let result = client.send_request_blocking(1, b"ping".to_vec());
-        assert!(result.is_err(), "blocking send to unreachable addr must fail");
+        assert!(
+            result.is_err(),
+            "blocking send to unreachable addr must fail"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_read_returns_error_when_no_server() {
         let client = RrClient::connect_with_config(
             vec!["localhost:1".to_string()],
-            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+            RetryConfig {
+                max_retries: 0,
+                retry_delay_ms: 10,
+            },
         )
         .await
         .expect("connect");
 
         let result = client.read_blocking(1, b"q".to_vec());
-        assert!(result.is_err(), "blocking read to unreachable addr must fail");
+        assert!(
+            result.is_err(),
+            "blocking read to unreachable addr must fail"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn blocking_send_propagates_network_error_kind() {
         let client = RrClient::connect_with_config(
             vec!["localhost:1".to_string()],
-            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+            RetryConfig {
+                max_retries: 0,
+                retry_delay_ms: 10,
+            },
         )
         .await
         .expect("connect");
@@ -1160,7 +1158,10 @@ mod tests {
     async fn reactive_send_fires_callback_on_error() {
         let client = RrClient::connect_with_config(
             vec!["localhost:1".to_string()],
-            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+            RetryConfig {
+                max_retries: 0,
+                retry_delay_ms: 10,
+            },
         )
         .await
         .expect("connect");
@@ -1170,22 +1171,25 @@ mod tests {
             let _ = tx.send(result);
         });
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx,
-        )
-        .await
-        .expect("callback must fire within 5s")
-        .expect("oneshot sender must not be dropped");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("callback must fire within 5s")
+            .expect("oneshot sender must not be dropped");
 
-        assert!(result.is_err(), "reactive send to unreachable addr must fire error callback");
+        assert!(
+            result.is_err(),
+            "reactive send to unreachable addr must fire error callback"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reactive_send_returns_immediately() {
         let client = RrClient::connect_with_config(
             vec!["localhost:1".to_string()],
-            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+            RetryConfig {
+                max_retries: 0,
+                retry_delay_ms: 10,
+            },
         )
         .await
         .expect("connect");
@@ -1207,7 +1211,10 @@ mod tests {
     async fn reactive_multiple_callbacks_all_fire() {
         let client = RrClient::connect_with_config(
             vec!["localhost:1".to_string()],
-            RetryConfig { max_retries: 0, retry_delay_ms: 10 },
+            RetryConfig {
+                max_retries: 0,
+                retry_delay_ms: 10,
+            },
         )
         .await
         .expect("connect");

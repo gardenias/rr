@@ -39,53 +39,44 @@ fn bench_sequential_single(c: &mut Criterion) {
     group.sample_size(20);
 
     for n in [10usize, 100] {
-        group.bench_with_input(
-            BenchmarkId::new("no_batching", n),
-            &n,
-            |b, &count| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        let tmp = tempfile::TempDir::new().unwrap();
-                        let storage = Arc::new(Mutex::new(
-                            RocksLogStorage::open_with_config(
-                                tmp.path().to_str().unwrap(),
-                                IoBatcherConfig::no_batching(),
-                            )
-                            .unwrap(),
-                        ));
-                        for i in 1u64..=(count as u64) {
-                            storage
-                                .lock()
-                                .await
-                                .blocking_append(vec![make_entry(i)])
-                                .await
-                                .unwrap();
-                        }
-                    });
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("batched_bulk", n),
-            &n,
-            |b, &count| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        let tmp = tempfile::TempDir::new().unwrap();
-                        let mut storage = RocksLogStorage::open_with_config(
+        group.bench_with_input(BenchmarkId::new("no_batching", n), &n, |b, &count| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let tmp = tempfile::TempDir::new().unwrap();
+                    let storage = Arc::new(Mutex::new(
+                        RocksLogStorage::open_with_config(
                             tmp.path().to_str().unwrap(),
-                            IoBatcherConfig::new(Duration::from_micros(500), 512),
+                            IoBatcherConfig::no_batching(),
                         )
-                        .unwrap();
-                        // All entries in one blocking_append → 1 fsync via batcher
-                        let entries: Vec<_> =
-                            (1u64..=(count as u64)).map(make_entry).collect();
-                        storage.blocking_append(entries).await.unwrap();
-                    });
+                        .unwrap(),
+                    ));
+                    for i in 1u64..=(count as u64) {
+                        storage
+                            .lock()
+                            .await
+                            .blocking_append(vec![make_entry(i)])
+                            .await
+                            .unwrap();
+                    }
                 });
-            },
-        );
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("batched_bulk", n), &n, |b, &count| {
+            b.iter(|| {
+                rt.block_on(async {
+                    let tmp = tempfile::TempDir::new().unwrap();
+                    let mut storage = RocksLogStorage::open_with_config(
+                        tmp.path().to_str().unwrap(),
+                        IoBatcherConfig::new(Duration::from_micros(500), 512),
+                    )
+                    .unwrap();
+                    // All entries in one blocking_append → 1 fsync via batcher
+                    let entries: Vec<_> = (1u64..=(count as u64)).map(make_entry).collect();
+                    storage.blocking_append(entries).await.unwrap();
+                });
+            });
+        });
     }
 
     group.finish();

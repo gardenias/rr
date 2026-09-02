@@ -232,7 +232,12 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
     }
 
     async fn handle_and_collect_outputs(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        let result = self.service.read().await.handle_with_outputs(payload).await?;
+        let result = self
+            .service
+            .read()
+            .await
+            .handle_with_outputs(payload)
+            .await?;
         self.append_outputs(result.outputs);
         Ok(result.response)
     }
@@ -442,7 +447,8 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
                 *self
                     .outbox_state
                     .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = OutboxRuntimeState::default();
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    OutboxRuntimeState::default();
                 snapshot.to_vec()
             }
         };
@@ -964,14 +970,15 @@ mod tests {
 
     #[tokio::test]
     async fn apply_collects_outputs_and_assigns_monotonic_seq() {
-        let svc = MockService::new(b"resp".to_vec()).with_outputs(vec![rr_core::output::Output::new(
-            "idem:0",
-            rr_core::output::OutputTarget::RaftWrite {
-                addrs: vec!["127.0.0.1:50051".to_string()],
-                group_id: 9,
-            },
-            b"out".to_vec(),
-        )]);
+        let svc =
+            MockService::new(b"resp".to_vec()).with_outputs(vec![rr_core::output::Output::new(
+                "idem:0",
+                rr_core::output::OutputTarget::RaftWrite {
+                    addrs: vec!["127.0.0.1:50051".to_string()],
+                    group_id: 9,
+                },
+                b"out".to_vec(),
+            )]);
         let mut adapter = ServiceStateMachineAdapter::new(7, svc);
 
         adapter.apply(b"req").await.unwrap();
@@ -983,14 +990,15 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_restore_roundtrip_preserves_outbox_state() {
-        let svc = MockService::new(b"resp".to_vec()).with_outputs(vec![rr_core::output::Output::new(
-            "idem:1",
-            rr_core::output::OutputTarget::RaftWrite {
-                addrs: vec!["127.0.0.1:50051".to_string()],
-                group_id: 9,
-            },
-            b"out".to_vec(),
-        )]);
+        let svc =
+            MockService::new(b"resp".to_vec()).with_outputs(vec![rr_core::output::Output::new(
+                "idem:1",
+                rr_core::output::OutputTarget::RaftWrite {
+                    addrs: vec!["127.0.0.1:50051".to_string()],
+                    group_id: 9,
+                },
+                b"out".to_vec(),
+            )]);
         let mut adapter1 = ServiceStateMachineAdapter::new(7, svc);
         adapter1.apply(b"req").await.unwrap();
 

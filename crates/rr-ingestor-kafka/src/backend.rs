@@ -49,9 +49,7 @@ impl From<KafkaIngestorError> for RrError {
             KafkaIngestorError::Config(_) | KafkaIngestorError::MissingSecret { .. } => {
                 RrError::Config(rr_core::error::ConfigError::InvalidConfig(e.to_string()))
             }
-            KafkaIngestorError::Kafka(_) => {
-                RrError::Application(format!("kafka: {e}"))
-            }
+            KafkaIngestorError::Kafka(_) => RrError::Application(format!("kafka: {e}")),
         }
     }
 }

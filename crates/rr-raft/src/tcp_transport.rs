@@ -81,9 +81,11 @@ where
     }
 
     let msg_type = header[5];
-    let request_id = u64::from_be_bytes(header[6..14].try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "invalid request_id field")
-    })?);
+    let request_id = u64::from_be_bytes(
+        header[6..14]
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid request_id field"))?,
+    );
     let group_id = u64::from_be_bytes(
         header[14..22]
             .try_into()
@@ -140,9 +142,15 @@ impl TcpConn {
             let config = build_tcp_client_tls_config(&tls_paths)?;
             let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
             let server_name = derive_server_name(addr, &tls_paths)?;
-            let tls_stream = connector.connect(server_name, tcp_stream).await.map_err(|e| {
-                io::Error::new(io::ErrorKind::ConnectionAborted, format!("tls connect: {e}"))
-            })?;
+            let tls_stream = connector
+                .connect(server_name, tcp_stream)
+                .await
+                .map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        format!("tls connect: {e}"),
+                    )
+                })?;
             Box::new(tls_stream)
         } else {
             Box::new(tcp_stream)
@@ -442,12 +450,12 @@ impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
         &mut self,
         vote: VoteOf<RrTypeConfig>,
         snapshot: SnapshotOf<RrTypeConfig>,
-        cancel: impl std::future::Future<Output = ReplicationClosed>
-            + openraft::OptionalSend
-            + 'static,
+        cancel: impl std::future::Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<RrTypeConfig>, StreamingError<RrTypeConfig>> {
-        self.grpc.full_snapshot(vote, snapshot, cancel, option).await
+        self.grpc
+            .full_snapshot(vote, snapshot, cancel, option)
+            .await
     }
 }
 
@@ -464,7 +472,10 @@ fn split_host_port(addr: &str) -> io::Result<(String, u16)> {
         .rsplit_once(':')
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "address missing port"))?;
     let port = port.parse::<u16>().map_err(|e| {
-        io::Error::new(io::ErrorKind::InvalidInput, format!("invalid port in addr: {e}"))
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid port in addr: {e}"),
+        )
     })?;
     Ok((host.to_string(), port))
 }

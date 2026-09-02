@@ -16,15 +16,11 @@ fn bench_framing_encode(c: &mut Criterion) {
         let payload = vec![0u8; payload_size];
         let entry = FramedEntry::from_payload(payload);
 
-        group.bench_with_input(
-            BenchmarkId::new("plain", payload_size),
-            &entry,
-            |b, e| {
-                b.iter(|| {
-                    criterion::black_box(e.encode().unwrap());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("plain", payload_size), &entry, |b, e| {
+            b.iter(|| {
+                criterion::black_box(e.encode().unwrap());
+            });
+        });
 
         let key = IdempotencyKey {
             request_type: "write".to_string(),
@@ -60,15 +56,11 @@ fn bench_framing_decode(c: &mut Criterion) {
             .encode()
             .unwrap();
 
-        group.bench_with_input(
-            BenchmarkId::new("plain", payload_size),
-            &bytes,
-            |b, raw| {
-                b.iter(|| {
-                    criterion::black_box(FramedEntry::decode(raw).unwrap());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("plain", payload_size), &bytes, |b, raw| {
+            b.iter(|| {
+                criterion::black_box(FramedEntry::decode(raw).unwrap());
+            });
+        });
     }
 
     group.finish();

@@ -88,8 +88,8 @@ pub fn spawn(
 ) -> OutputHandle {
     let (stop_tx, stop_rx) = oneshot::channel();
     let join = tokio::spawn(async move {
-        let kafka: Arc<dyn KafkaProducer> = kafka_producer
-            .unwrap_or_else(|| Arc::new(NoopKafkaProducer) as Arc<dyn KafkaProducer>);
+        let kafka: Arc<dyn KafkaProducer> =
+            kafka_producer.unwrap_or_else(|| Arc::new(NoopKafkaProducer) as Arc<dyn KafkaProducer>);
         if let Err(e) = supervise(manager, group_id, rr_client, kafka, stop_rx).await {
             warn!(group_id, error = %e, "output runner supervisor exited with error");
         }
@@ -399,7 +399,9 @@ mod tests {
             },
             b"order-payload".to_vec(),
         );
-        dispatch_one(&output, None, producer.as_ref()).await.unwrap();
+        dispatch_one(&output, None, producer.as_ref())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

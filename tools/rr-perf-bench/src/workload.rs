@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rr_client::RrClient;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::metrics::{Metrics, MetricsSnapshot};
 
@@ -58,8 +58,7 @@ pub async fn run_s2_pipeline_sweep(
 
     for &depth in levels {
         let snap =
-            run_reactive_pipeline(Arc::clone(&client), payload_size, depth, duration, warmup)
-                .await;
+            run_reactive_pipeline(Arc::clone(&client), payload_size, depth, duration, warmup).await;
         results.push((depth, snap));
 
         // Cool-down between levels to let the cluster stabilize
@@ -116,15 +115,11 @@ async fn run_reactive_pipeline(
 
                 // Reactive: returns immediately; callback fires on a tokio
                 // worker thread when the cluster responds.
-                client.send_request_reactive(
-                    PARTITION_ID,
-                    (*payload).clone(),
-                    move |result| {
-                        drop(permit); // release slot → unblocks firing loop
-                        inf.fetch_sub(1, Ordering::Relaxed);
-                        let _ = tx_cb.send((t0, t0.elapsed(), result.is_ok()));
-                    },
-                );
+                client.send_request_reactive(PARTITION_ID, (*payload).clone(), move |result| {
+                    drop(permit); // release slot → unblocks firing loop
+                    inf.fetch_sub(1, Ordering::Relaxed);
+                    let _ = tx_cb.send((t0, t0.elapsed(), result.is_ok()));
+                });
             }
         }
     };

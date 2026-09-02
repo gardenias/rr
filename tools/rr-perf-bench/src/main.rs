@@ -11,7 +11,7 @@ mod metrics;
 mod report;
 mod workload;
 
-use cluster::{Cluster, ClusterConfig, DurabilityKind, StorageKind, find_bin};
+use cluster::{find_bin, Cluster, ClusterConfig, DurabilityKind, StorageKind};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -142,11 +142,16 @@ async fn main() -> Result<()> {
         "  storage={:?}  durability={:?}  payload={}B",
         cfg.storage, cfg.durability, args.payload
     );
-    println!("  warmup={}s  measure={}s", args.warmup_secs, args.duration_secs);
+    println!(
+        "  warmup={}s  measure={}s",
+        args.warmup_secs, args.duration_secs
+    );
     println!();
     print!("Starting 3-node cluster … ");
 
-    let cluster = Cluster::start(&cfg).await.context("cluster startup failed")?;
+    let cluster = Cluster::start(&cfg)
+        .await
+        .context("cluster startup failed")?;
     let addrs = cluster.all_grpc_addrs();
 
     println!("done");
@@ -161,13 +166,8 @@ async fn main() -> Result<()> {
     match args.scenario {
         Scenario::S1 | Scenario::All => {
             print!("S1 serial … ");
-            let m = workload::run_s1_serial(
-                Arc::clone(&client),
-                args.payload,
-                duration,
-                warmup,
-            )
-            .await;
+            let m =
+                workload::run_s1_serial(Arc::clone(&client), args.payload, duration, warmup).await;
             report::print_s1(&m.snapshot(), args.payload);
         }
         _ => {}

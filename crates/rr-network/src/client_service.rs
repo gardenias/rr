@@ -336,10 +336,10 @@ mod tests {
         let svc = ClientServiceImpl::new(Arc::new(MockDispatch::failing()));
 
         let proto_req = ClientRequest {
-                    partition_id: 7,
-                    payload: vec![10, 20],
-                    idem_key: None,
-                };
+            partition_id: 7,
+            payload: vec![10, 20],
+            idem_key: None,
+        };
 
         let result =
             client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
@@ -387,10 +387,10 @@ mod tests {
         let svc = ClientServiceImpl::new(Arc::new(MockDispatch::success()));
 
         let proto_req = ClientRequest {
-                    partition_id: 1,
-                    payload: vec![42],
-                    idem_key: None,
-                };
+            partition_id: 1,
+            payload: vec![42],
+            idem_key: None,
+        };
 
         let result =
             client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
@@ -407,10 +407,10 @@ mod tests {
         let svc = ClientServiceImpl::new(Arc::new(MockDispatch::with_leader_info()));
 
         let proto_req = ClientRequest {
-                    partition_id: 5,
-                    payload: vec![],
-                    idem_key: None,
-                };
+            partition_id: 5,
+            payload: vec![],
+            idem_key: None,
+        };
 
         let result =
             client_service_server::ClientService::request(&svc, tonic::Request::new(proto_req))
@@ -472,13 +472,10 @@ mod tests {
             partition_id: 7,
             payload: b"q".to_vec(),
         };
-        let resp = client_service_server::ClientService::read_local(
-            &svc,
-            tonic::Request::new(req),
-        )
-        .await
-        .unwrap()
-        .into_inner();
+        let resp = client_service_server::ClientService::read_local(&svc, tonic::Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
         assert!(resp.payload.starts_with(b"q-stale"));
     }
 
@@ -489,13 +486,11 @@ mod tests {
             partition_id: 9,
             payload: b"q".to_vec(),
         };
-        let resp = client_service_server::ClientService::read_linearizable(
-            &svc,
-            tonic::Request::new(req),
-        )
-        .await
-        .unwrap()
-        .into_inner();
+        let resp =
+            client_service_server::ClientService::read_linearizable(&svc, tonic::Request::new(req))
+                .await
+                .unwrap()
+                .into_inner();
         assert!(resp.payload.starts_with(b"q-lin"));
         assert!(resp.leader_info.is_none());
     }
@@ -512,11 +507,7 @@ mod tests {
         ) -> Result<ClientWriteResult, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }
-        async fn submit_read(
-            &self,
-            _: u64,
-            _: Vec<u8>,
-        ) -> Result<Vec<u8>, tonic::Status> {
+        async fn submit_read(&self, _: u64, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
             Err(tonic::Status::unimplemented(""))
         }
         async fn submit_linearizable_read(
@@ -542,13 +533,11 @@ mod tests {
             partition_id: 3,
             payload: b"q".to_vec(),
         };
-        let resp = client_service_server::ClientService::read_linearizable(
-            &svc,
-            tonic::Request::new(req),
-        )
-        .await
-        .unwrap()
-        .into_inner();
+        let resp =
+            client_service_server::ClientService::read_linearizable(&svc, tonic::Request::new(req))
+                .await
+                .unwrap()
+                .into_inner();
         assert!(resp.payload.is_empty());
         let leader = resp
             .leader_info

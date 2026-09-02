@@ -351,9 +351,8 @@ mod tests {
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .unwrap();
-        let request = format!(
-            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
-        );
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut header_buf = Vec::new();
