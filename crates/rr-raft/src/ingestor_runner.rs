@@ -134,6 +134,20 @@ pub const INITIAL_POLL_BACKOFF: Duration = Duration::from_millis(100);
 /// roughly twice a minute.
 pub const MAX_POLL_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Maximum time to wait for one `write_batch` call to finish streaming its
+/// per-entry responses. openraft's `client_write_many` response stream can
+/// stall indefinitely across a leadership transition (neither yielding nor
+/// erroring); without a deadline the poll loop wedges forever *while the
+/// node is still leader*, silently halting ingestion (found in the
+/// container lab: ingestion froze mid-topic with a healthy cluster).
+///
+/// On timeout the batch is treated like a step-down drop: offsets are NOT
+/// marked consumed, the poll loop exits, and the supervisor (still leader)
+/// re-seeds from the raft-log-authoritative applied offset, so entries that
+/// actually committed are skipped and everything else is re-fetched —
+/// auto-idempotency absorbs any edge double-apply.
+pub const BATCH_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Returned by [`IngestorSupervisor::detach`] to allow the caller to
 /// `await` the supervisor task to completion. Useful in tests; in
 /// production the framework just drops it.
@@ -385,9 +399,16 @@ async fn run_poll_loop(
         }
 
         let poll_started = std::time::Instant::now();
+        // NOTE: do NOT select on `metrics_rx.changed()` here — openraft's
+        // metrics channel fires on every replication-progress update (many
+        // times per second on a healthy cluster), so an in-flight
+        // `poll_bytes` would be canceled over and over and never complete
+        // (found in the container lab with a real broker: ingestion starved
+        // at a deterministic offset while the cluster stayed healthy).
+        // Step-down is detected at the loop top and right after the batch
+        // returns, before writing.
         let batch_result = tokio::select! {
             _ = cancel_rx.changed() => return Ok(()),
-            _ = metrics_rx.changed() => continue,
             r = ingestor.poll_bytes(batch_size) => r,
         };
         metrics::histogram!(
@@ -411,6 +432,13 @@ async fn run_poll_loop(
             }
         };
         backoff = INITIAL_POLL_BACKOFF;
+
+        // Leadership may have changed while the (uncancellable) poll was in
+        // flight — re-check before proposing; a dropped batch is re-fetched
+        // after the next seed, and auto-idempotency absorbs any overlap.
+        if *cancel_rx.borrow() || !is_leader(metrics_rx) {
+            return Ok(());
+        }
 
         if batch.is_empty() {
             tokio::select! {
@@ -473,7 +501,32 @@ async fn run_poll_loop(
             continue;
         }
 
-        match mgr.write_batch(group_id, payloads).await {
+        let batch_outcome = match tokio::time::timeout(
+            BATCH_WRITE_TIMEOUT,
+            mgr.write_batch(group_id, payloads),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_elapsed) => {
+                let dropped = commit_offsets.len() as u64;
+                metrics::counter!(
+                    "rr_ingestor_step_down_drops_total",
+                    "group_id" => group_id.to_string()
+                )
+                .increment(dropped);
+                warn!(
+                    group_id,
+                    dropped,
+                    timeout_ms = BATCH_WRITE_TIMEOUT.as_millis() as u64,
+                    "ingestor: batch write timed out; treating as step-down — offsets not \
+                     consumed, supervisor re-seeds from the authoritative raft log offset"
+                );
+                return Ok(());
+            }
+        };
+
+        match batch_outcome {
             Ok(responses) => {
                 if responses.len() != commit_offsets.len() {
                     let dropped = commit_offsets.len() as u64;
