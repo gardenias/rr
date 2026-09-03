@@ -12,23 +12,21 @@
 //! cargo run -p counter
 //! ```
 //!
-//! ## Multi-node cluster — bootstrap the first node:
+//! ## Multi-node cluster — every node gets the FULL roster as `id@addr` pairs:
 //! ```text
-//! cargo run -p counter -- --node-id 1 --port 52001 --bootstrap
-//! ```
-//!
-//! ## Multi-node cluster — join additional nodes:
-//! ```text
-//! cargo run -p counter -- --node-id 2 --port 52002 --peers 127.0.0.1:52001
-//! cargo run -p counter -- --node-id 3 --port 52003 --peers 127.0.0.1:52001,127.0.0.1:52002
+//! cargo run -p counter -- --node-id 1 --port 52001 --bootstrap --peers 1@127.0.0.1:52001,2@127.0.0.1:52002,3@127.0.0.1:52003
+//! cargo run -p counter -- --node-id 2 --port 52002 --peers 1@127.0.0.1:52001,2@127.0.0.1:52002,3@127.0.0.1:52003
+//! cargo run -p counter -- --node-id 3 --port 52003 --peers 1@127.0.0.1:52001,2@127.0.0.1:52002,3@127.0.0.1:52003
 //! ```
 //!
 //! ## Arguments:
-//! - `--node-id <N>`       — Node ID (u64). Defaults to 1 for single-node demo.
-//! - `--port <PORT>`       — gRPC listen port. Defaults to 52001.
-//! - `--peers <ADDR,...>`  — Comma-separated peer addresses for multi-node mode.
-//! - `--bootstrap`         — Bootstrap as cluster leader (only on first node).
-//! - `--demo`              — Run counter demo and exit (default when no args given).
+//! - `--node-id <N>`         — Node ID (u64). Defaults to 1 for single-node demo.
+//! - `--port <PORT>`         — gRPC listen port. Defaults to 52001.
+//!                             The admin API is served on PORT + 1000 (52001 → 53001).
+//! - `--peers <ID@ADDR,...>` — Full cluster roster, comma-separated `id@addr` pairs
+//!                             (must include this node). Empty means single-node roster.
+//! - `--bootstrap`           — Initialize Raft membership (run on exactly one node).
+//! - `--demo`                — Run counter demo and exit (default when no args given).
 //!
 //! # Architecture
 //!
@@ -192,7 +190,8 @@ struct CliConfig {
     #[arg(long, default_value_t = 52001)]
     port: u16,
 
-    /// Comma-separated peer addresses for multi-node mode.
+    /// Full cluster roster as comma-separated `id@addr` pairs (must include
+    /// this node). Empty means single-node roster.
     #[arg(long, value_delimiter = ',')]
     peers: Vec<String>,
 
@@ -307,29 +306,20 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     // ── Build shared config provider ────────────────────────────────────────
     let config_provider = Arc::new(MemConfigProvider::new());
 
-    // Register this node
-    config_provider
-        .add_node(
-            cli.node_id,
-            rr_core::types::NodeAddr {
-                addr: listen_addr.clone(),
-            },
-        )
-        .await;
+    // Parse the full cluster roster (`id@addr` pairs, including this node).
+    let roster = parse_roster(&cli.peers, cli.node_id, &listen_addr)?;
 
-    // Register partition 1 → group 1
-    let all_node_ids: Vec<NodeId> = if cli.bootstrap {
-        vec![cli.node_id]
-    } else {
-        let mut ids = vec![cli.node_id];
-        for (i, _peer) in cli.peers.iter().enumerate() {
-            let peer_id = (i + 1) as NodeId;
-            if peer_id != cli.node_id {
-                ids.push(peer_id);
-            }
-        }
-        ids
-    };
+    // Register every node so all members share the same routing table.
+    for (id, addr) in &roster {
+        config_provider
+            .add_node(*id, rr_core::types::NodeAddr { addr: addr.clone() })
+            .await;
+    }
+
+    // Register partition 1 → group 1 with the full replica set (sorted IDs).
+    // Every node therefore starts group 1 during `RrNode::start`; non-bootstrap
+    // groups stay uninitialized until the leader's AppendEntries arrive.
+    let all_node_ids: Vec<NodeId> = roster.keys().copied().collect();
 
     config_provider
         .add_partition(1, PartitionConfig::SingleId(1), 1, all_node_ids.clone())
@@ -376,31 +366,35 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     .with_group_manager(Arc::clone(&mgr))
     .with_raft_lookup(lookup)
     .with_client_dispatch(dispatch)
+    .with_admin_port(cli.port + 1000)
     .with_allow_insecure(true);
 
     let node = Arc::new(RrNode::new(config)?);
     node.start().await?;
     info!("Node {} started — listening on {listen_addr}", cli.node_id);
 
-    // ── Bootstrap or initialize cluster ────────────────────────────────────
+    // ── Bootstrap cluster membership ───────────────────────────────────────
     if cli.bootstrap {
+        // Initialize group 1 with the FULL voter set. openraft dials the other
+        // voters via their `BasicNode.addr`; their groups are already started
+        // (but uninitialized) by `RrNode::start`, so they join as soon as the
+        // leader's AppendEntries arrive.
         let raft = node
             .group_manager()
             .get_raft(1)
             .await
             .ok_or_else(|| anyhow!("group 1 not started"))?;
 
-        let mut members = BTreeMap::new();
-        members.insert(
-            cli.node_id,
-            BasicNode {
-                addr: listen_addr.clone(),
-            },
+        let members: BTreeMap<NodeId, BasicNode> = roster
+            .iter()
+            .map(|(id, addr)| (*id, BasicNode { addr: addr.clone() }))
+            .collect();
+
+        initialize_with_retry(&raft, members).await?;
+        info!(
+            "Cluster bootstrapped on node {} — voters: {:?}",
+            cli.node_id, all_node_ids
         );
-        let _ = raft.initialize(members).await; // idempotent
-        info!("Cluster bootstrapped on node {}", cli.node_id);
-    } else if !cli.peers.is_empty() {
-        info!("Joining existing cluster via peers: {:?}", cli.peers);
     }
 
     // ── Keep node running until Ctrl-C ──────────────────────────────────────
@@ -413,6 +407,75 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     node.shutdown().await?;
     info!("Node {} shut down cleanly.", cli.node_id);
     Ok(())
+}
+
+// ── Cluster bootstrap helpers ─────────────────────────────────────────────
+
+/// Parse `--peers` entries of the form `id@addr` into a node-ID → addr roster.
+///
+/// The roster must cover the FULL cluster, including this node; an empty
+/// `--peers` means a single-node roster. Bare `addr` entries (no `id@`) are
+/// rejected — guessing node IDs from list order breaks as soon as the order
+/// differs between terminals.
+fn parse_roster(
+    peers: &[String],
+    self_id: NodeId,
+    self_addr: &str,
+) -> Result<BTreeMap<NodeId, String>> {
+    let mut roster = BTreeMap::new();
+    for entry in peers {
+        let (id, addr) = entry.split_once('@').ok_or_else(|| {
+            anyhow!("invalid --peers entry '{entry}': expected <node-id>@<addr>")
+        })?;
+        let id: NodeId = id
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("invalid --peers entry '{entry}': node id must be a u64"))?;
+        let addr = addr.trim();
+        if addr.is_empty() {
+            return Err(anyhow!("invalid --peers entry '{entry}': empty address"));
+        }
+        if roster.insert(id, addr.to_string()).is_some() {
+            return Err(anyhow!("invalid --peers: duplicate node id {id}"));
+        }
+    }
+
+    if roster.is_empty() {
+        // No --peers → single-node roster (e.g. `--bootstrap` alone).
+        roster.insert(self_id, self_addr.to_string());
+    } else if !roster.contains_key(&self_id) {
+        return Err(anyhow!(
+            "--peers roster must include this node ({self_id}@{self_addr})"
+        ));
+    }
+    Ok(roster)
+}
+
+/// Initialize the Raft group, retrying until it succeeds or the deadline hits.
+///
+/// Users start their terminals sequentially, so transient failures while the
+/// cluster comes up are retried every 500 ms for up to 30 s. A `NotAllowed`
+/// rejection means the group is already initialized — treat it as success.
+async fn initialize_with_retry(raft: &RaftInstance, members: BTreeMap<NodeId, BasicNode>) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match raft.initialize(members.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(openraft::error::RaftError::APIError(
+                openraft::error::InitializeError::NotAllowed(_),
+            )) => {
+                info!("Raft group 1 already initialized");
+                return Ok(());
+            }
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow!("raft initialize failed after retries: {e}"));
+                }
+                info!("raft initialize not ready yet ({e}); retrying in 500ms");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
 }
 
 // ── Demo helpers ────────────────────────────────────────────────────────────
