@@ -39,9 +39,10 @@ done
 : "${LEADER:?no leader after 60s}"
 log "leader=kv-$LEADER"
 
-# Continuous client load inside the lab network.
+# Continuous client load inside the lab network. (No --rm: logs must
+# outlive the container for the end-of-run summary.)
 log "starting load generator…"
-$COMPOSE --profile bench run -d --name rr-lab-soak-load --rm bench \
+$COMPOSE --profile bench run -d --name rr-lab-soak-load bench \
   --cluster-addrs=kv-1:51001,kv-2:51001,kv-3:51001 \
   --scenario=s2 --concurrency "$CONCURRENCY" --payload "$PAYLOAD" \
   --warmup-secs=10 --duration-secs="$DURATION" >/dev/null
@@ -79,8 +80,9 @@ done
 
 log "load window over; collecting bench summary…"
 docker logs rr-lab-soak-load >"$REPORT_DIR/soak-$TS.bench.log" 2>&1 || true
-bench_err_rows=$(grep -E '^  [0-9]+ +[0-9]' "$REPORT_DIR/soak-$TS.bench.log" | awk '{if ($NF != "0") bad++} END {print bad+0}')
-bench_err_total=$(grep -E '^  [0-9]+ +[0-9]' "$REPORT_DIR/soak-$TS.bench.log" | awk '{s+=$NF} END {print s+0}')
+# awk alone (no grep) — an empty/unmatched log must not abort under `set -e`.
+bench_err_rows=$(awk '/^  [0-9]+ +[0-9]/ {if ($NF != "0") bad++} END {print bad+0}' "$REPORT_DIR/soak-$TS.bench.log" 2>/dev/null || echo 0)
+bench_err_total=$(awk '/^  [0-9]+ +[0-9]/ {s+=$NF} END {print s+0}' "$REPORT_DIR/soak-$TS.bench.log" 2>/dev/null || echo 0)
 term_at_end=$(docker exec kv-1 rr-admin --addr 127.0.0.1:52001 --output json group status --group 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["current_term"])')
 elections=$((term_at_end - term_at_start))
 
