@@ -4,13 +4,14 @@
 //! serialize openraft RPCs with bincode, send them over gRPC proto stubs,
 //! and deserialize the responses.
 //!
-//! # Cyclic dependency note
+//! # Self-contained transport
 //!
-//! `rr-network` depends on `rr-raft` (for `RrTypeConfig` in the server-side
-//! handler), so `rr-raft` **cannot** depend on `rr-network`. To break the
-//! cycle, this module re-defines the proto message types locally with matching
-//! prost annotations and builds the tonic gRPC client inline. The wire format
-//! is identical to `rr.raft.*` from the `.proto` definitions.
+//! This module re-defines the raft RPC message types locally with matching
+//! prost annotations and builds the tonic gRPC client inline, keeping
+//! rr-raft's outbound raft transport self-contained. The wire format is
+//! identical to the `rr.raft.*` services implemented by `rr-network`.
+//! (`rr-network` itself depends only on `rr-core`; the workspace dependency
+//! direction here is `rr-raft` → `rr-client` → `rr-network`.)
 
 use std::io::Cursor;
 use std::sync::Arc;
