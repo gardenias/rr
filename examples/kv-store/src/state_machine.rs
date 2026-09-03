@@ -79,6 +79,21 @@ impl StateMachine for KvStateMachine {
                 self.store.remove(&key);
                 KvResponse::none()
             }
+            KvRequest::Increment { key, delta } => {
+                debug!(%key, delta, "KvStateMachine Increment");
+                // Same semantics as KvService: counters are decimal UTF-8
+                // strings; an unparseable existing value counts as 0.
+                let current: i64 = self
+                    .store
+                    .get(&key)
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let next = current + delta;
+                let encoded = next.to_string().into_bytes();
+                self.store.insert(key, encoded.clone());
+                KvResponse::some(encoded)
+            }
         };
 
         self.last_applied = Some(index);

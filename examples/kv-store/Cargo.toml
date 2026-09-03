@@ -12,6 +12,7 @@ rr-storage = { path = "../../crates/rr-storage" }
 rr-network = { path = "../../crates/rr-network" }
 rr-router = { path = "../../crates/rr-router" }
 rr-client = { path = "../../crates/rr-client" }
+rr-ingestor-kafka = { path = "../../crates/rr-ingestor-kafka", optional = true }
 tokio.workspace = true
 serde.workspace = true
 bincode.workspace = true
@@ -20,6 +21,12 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 openraft = { workspace = true, features = ["serde"] }
+
+[features]
+# Default builds without librdkafka / cmake; `--kafka-brokers` then fails
+# fast with a rebuild hint. Add the `rdkafka` feature for real Kafka ingest.
+default = []
+rdkafka = ["dep:rr-ingestor-kafka", "rr-ingestor-kafka/rdkafka"]
 
 [[bin]]
 name = "kv-store"

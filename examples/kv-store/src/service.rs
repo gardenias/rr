@@ -66,6 +66,21 @@ impl Service for KvService {
                 self.store.write().await.remove(&key);
                 KvResponse::none()
             }
+            KvRequest::Increment { key, delta } => {
+                debug!(%key, delta, "KV Increment");
+                let mut guard = self.store.write().await;
+                // Counters are stored as decimal UTF-8 strings; anything that
+                // does not parse (e.g. raw bytes from a `Put`) counts as 0.
+                let current: i64 = guard
+                    .get(&key)
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let next = current + delta;
+                let encoded = next.to_string().into_bytes();
+                guard.insert(key, encoded.clone());
+                KvResponse::some(encoded)
+            }
         };
 
         let encoded = bincode::serde::encode_to_vec(&response, standard())
@@ -148,6 +163,50 @@ mod tests {
         let get = encode_req(KvRequest::Get { key: "x".into() });
         let resp = decode_resp(svc.handle(get).await.unwrap());
         assert_eq!(resp.value, None);
+    }
+
+    #[tokio::test]
+    async fn test_increment_creates_key() {
+        let svc = KvService::new();
+        let inc = encode_req(KvRequest::Increment {
+            key: "counter".into(),
+            delta: 1,
+        });
+        let resp = decode_resp(svc.handle(inc).await.unwrap());
+        assert_eq!(resp.value, Some(b"1".to_vec()));
+
+        // The counter is stored as decimal UTF-8, readable via a plain Get.
+        let get = encode_req(KvRequest::Get {
+            key: "counter".into(),
+        });
+        let resp = decode_resp(svc.handle(get).await.unwrap());
+        assert_eq!(resp.value, Some(b"1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_increment_existing_key() {
+        let svc = KvService::new();
+        for delta in [5, 3, -2] {
+            let inc = encode_req(KvRequest::Increment {
+                key: "counter".into(),
+                delta,
+            });
+            svc.handle(inc).await.unwrap();
+        }
+
+        // 5 + 3 - 2 = 6, returned by the last Increment and stored for Get.
+        let inc = encode_req(KvRequest::Increment {
+            key: "counter".into(),
+            delta: 10,
+        });
+        let resp = decode_resp(svc.handle(inc).await.unwrap());
+        assert_eq!(resp.value, Some(b"16".to_vec()));
+
+        let get = encode_req(KvRequest::Get {
+            key: "counter".into(),
+        });
+        let resp = decode_resp(svc.handle(get).await.unwrap());
+        assert_eq!(resp.value, Some(b"16".to_vec()));
     }
 
     #[tokio::test]

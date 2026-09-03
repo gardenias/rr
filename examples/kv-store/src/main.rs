@@ -14,14 +14,35 @@
 //! cargo run -p kv-store -- --node-id 3 --port 51003 --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
 //! ```
 //!
+//! ## Container-style run — bind all interfaces, advertise via the roster:
+//! ```text
+//! kv-store --node-id 1 --listen-addr 0.0.0.0 --port 51001 --metrics-port 9100 \
+//!     --bootstrap --peers 1@kv-1:51001,2@kv-2:51001,3@kv-3:51001
+//! ```
+//!
+//! ## With Kafka input (requires `--features rdkafka`):
+//! ```text
+//! cargo run -p kv-store --features rdkafka -- --node-id 1 --bootstrap \
+//!     --kafka-brokers redpanda:9092 --kafka-topic-prefix input_
+//! ```
+//!
 //! ## Arguments:
-//! - `--node-id <N>`         — Node ID (u64). Defaults to 1 for single-node demo.
-//! - `--port <PORT>`         — gRPC listen port. Defaults to 51001.
-//!                             The admin API is served on PORT + 1000 (51001 → 52001).
-//! - `--peers <ID@ADDR,...>` — Full cluster roster, comma-separated `id@addr` pairs
-//!                             (must include this node). Empty means single-node roster.
-//! - `--bootstrap`           — Initialize Raft membership (run on exactly one node).
-//! - `--demo`                — Run KV demo writes and exit (default when no args given).
+//! - `--node-id <N>`            — Node ID (u64). Defaults to 1 for single-node demo.
+//! - `--port <PORT>`            — gRPC listen port. Defaults to 51001.
+//!                                The admin API is served on PORT + 1000 (51001 → 52001).
+//! - `--listen-addr <HOST>`     — gRPC bind host. Defaults to 127.0.0.1. Affects binding
+//!                                only; the advertised address always comes from `--peers`
+//!                                (single-node runs stay on 127.0.0.1).
+//! - `--peers <ID@ADDR,...>`    — Full cluster roster, comma-separated `id@addr` pairs
+//!                                (must include this node). Empty means single-node roster.
+//! - `--metrics-port <PORT>`    — Also serve /health, /ready and Prometheus /metrics
+//!                                over HTTP on this port. Off by default.
+//! - `--kafka-brokers <A,...>`  — Comma-separated bootstrap brokers; consumes group 1's
+//!                                command topic with framework-managed exactly-once apply.
+//!                                Requires a binary built with `--features rdkafka`.
+//! - `--kafka-topic-prefix <P>` — Topic prefix; group 1 consumes `{P}1`. Default `input_`.
+//! - `--bootstrap`              — Initialize Raft membership (run on exactly one node).
+//! - `--demo`                   — Run KV demo writes and exit (default when no args given).
 //!
 //! # Architecture
 //!
@@ -63,7 +84,11 @@ use kv_store::types::{KvRequest, KvResponse};
 struct CliConfig {
     node_id: NodeId,
     port: u16,
+    listen_addr: String,
     peers: Vec<String>,
+    metrics_port: Option<u16>,
+    kafka_brokers: Option<Vec<String>>,
+    kafka_topic_prefix: String,
     bootstrap: bool,
     demo: bool,
 }
@@ -77,7 +102,11 @@ impl CliConfig {
             return Self {
                 node_id: 1,
                 port: 51001,
+                listen_addr: "127.0.0.1".to_string(),
                 peers: vec![],
+                metrics_port: None,
+                kafka_brokers: None,
+                kafka_topic_prefix: "input_".to_string(),
                 bootstrap: false,
                 demo: true,
             };
@@ -85,7 +114,11 @@ impl CliConfig {
 
         let mut node_id: NodeId = 1;
         let mut port: u16 = 51001;
+        let mut listen_addr = "127.0.0.1".to_string();
         let mut peers: Vec<String> = vec![];
+        let mut metrics_port: Option<u16> = None;
+        let mut kafka_brokers: Option<Vec<String>> = None;
+        let mut kafka_topic_prefix = "input_".to_string();
         let mut bootstrap = false;
         let mut demo = false;
         let mut i = 0;
@@ -100,9 +133,26 @@ impl CliConfig {
                     i += 1;
                     port = args[i].parse().expect("--port must be a u16");
                 }
+                "--listen-addr" => {
+                    i += 1;
+                    listen_addr = args[i].clone();
+                }
                 "--peers" => {
                     i += 1;
                     peers = args[i].split(',').map(|s| s.trim().to_string()).collect();
+                }
+                "--metrics-port" => {
+                    i += 1;
+                    metrics_port = Some(args[i].parse().expect("--metrics-port must be a u16"));
+                }
+                "--kafka-brokers" => {
+                    i += 1;
+                    kafka_brokers =
+                        Some(args[i].split(',').map(|s| s.trim().to_string()).collect());
+                }
+                "--kafka-topic-prefix" => {
+                    i += 1;
+                    kafka_topic_prefix = args[i].clone();
                 }
                 "--bootstrap" => bootstrap = true,
                 "--demo" => demo = true,
@@ -116,7 +166,11 @@ impl CliConfig {
         Self {
             node_id,
             port,
+            listen_addr,
             peers,
+            metrics_port,
+            kafka_brokers,
+            kafka_topic_prefix,
             bootstrap,
             demo,
         }
@@ -209,20 +263,30 @@ async fn run_demo() -> Result<()> {
 // ── Multi-node mode (with gRPC server) ───────────────────────────────────────
 
 async fn run_node(cli: CliConfig) -> Result<()> {
-    let listen_addr = format!("127.0.0.1:{}", cli.port);
-    info!(
-        node_id = cli.node_id,
-        addr = %listen_addr,
-        peers = ?cli.peers,
-        bootstrap = cli.bootstrap,
-        "=== rr KV-Store multi-node starting ==="
-    );
+    // Fail fast when --kafka-brokers was passed to a binary without rdkafka.
+    check_kafka_support(&cli)?;
+
+    // The bind address comes from --listen-addr; the address advertised to
+    // peers comes exclusively from the roster (--peers), so containers can
+    // bind 0.0.0.0 while peers dial the roster hostname. With no --peers the
+    // single-node roster stays on loopback regardless of --listen-addr.
+    let bind_addr = format!("{}:{}", cli.listen_addr, cli.port);
+    let self_advertise = format!("127.0.0.1:{}", cli.port);
 
     // ── Build shared config provider ──────────────────────────────────────────
     let config_provider = Arc::new(MemConfigProvider::new());
 
     // Parse the full cluster roster (`id@addr` pairs, including this node).
-    let roster = parse_roster(&cli.peers, cli.node_id, &listen_addr)?;
+    let roster = parse_roster(&cli.peers, cli.node_id, &self_advertise)?;
+
+    info!(
+        node_id = cli.node_id,
+        bind_addr = %bind_addr,
+        advertise_addr = %roster[&cli.node_id],
+        peers = ?cli.peers,
+        bootstrap = cli.bootstrap,
+        "=== rr KV-Store multi-node starting ==="
+    );
 
     // Register every node so all members share the same routing table.
     for (id, addr) in &roster {
@@ -265,22 +329,29 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
 
-    let config = NodeConfig::new(
-        cli.node_id,
-        listen_addr.clone(),
-        storage,
-        provider,
-        dummy_factory,
-    )
-    .with_group_manager(Arc::clone(&mgr))
-    .with_raft_lookup(lookup)
-    .with_client_dispatch(dispatch)
-    .with_admin_port(cli.port + 1000)
-    .with_allow_insecure(true);
+    let config = NodeConfig::new(cli.node_id, bind_addr.clone(), storage, provider, dummy_factory)
+        .with_group_manager(Arc::clone(&mgr))
+        .with_raft_lookup(lookup)
+        .with_client_dispatch(dispatch)
+        .with_admin_port(cli.port + 1000)
+        .with_allow_insecure(true);
+    let config = match cli.metrics_port {
+        Some(port) => config.with_metrics_port(port),
+        None => config,
+    };
 
     let node = Arc::new(RrNode::new(config)?);
     node.start().await?;
-    info!("Node {} started — listening on {listen_addr}", cli.node_id);
+    info!(
+        "Node {} started — binding {bind_addr}, advertising {}",
+        cli.node_id, roster[&cli.node_id]
+    );
+    if let Some(port) = cli.metrics_port {
+        info!(
+            "Node {} serving /health /ready /metrics on 0.0.0.0:{port}",
+            cli.node_id
+        );
+    }
 
     // ── Bootstrap cluster membership ─────────────────────────────────────────
     if cli.bootstrap {
@@ -306,6 +377,14 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         );
     }
 
+    // ── Optional Kafka ingest (rdkafka builds only) ──────────────────────────
+    // Group 1 exists by now: `RrNode::start` started it on every node and the
+    // bootstrap node initialized membership. The framework supervisor runs the
+    // consumer's poll loop only while this node leads the group, so attaching
+    // on every node is safe.
+    #[cfg(feature = "rdkafka")]
+    attach_kafka_ingestor(&cli, &mgr).await?;
+
     // ── Keep node running until Ctrl-C ────────────────────────────────────────
     info!("Node {} running. Press Ctrl-C to shut down.", cli.node_id);
     tokio::signal::ctrl_c()
@@ -315,6 +394,76 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     info!("Shutting down node {}...", cli.node_id);
     node.shutdown().await?;
     info!("Node {} shut down cleanly.", cli.node_id);
+    Ok(())
+}
+
+// ── Kafka ingest (optional; requires `--features rdkafka`) ───────────────────
+
+/// Fail fast when `--kafka-brokers` was passed to a binary built without the
+/// `rdkafka` feature — there is no Kafka backend to serve the request.
+#[cfg(not(feature = "rdkafka"))]
+fn check_kafka_support(cli: &CliConfig) -> Result<()> {
+    if cli.kafka_brokers.is_some() {
+        return Err(anyhow!(
+            "--kafka-brokers requires Kafka support, but this binary was built \
+             without it — rebuild with `cargo build -p kv-store --features rdkafka`"
+        ));
+    }
+    // Only the rdkafka build reads this field; keep non-rdkafka builds
+    // warning-free.
+    let _ = &cli.kafka_topic_prefix;
+    Ok(())
+}
+
+/// rdkafka builds accept `--kafka-brokers` unconditionally; validation happens
+/// in [`KafkaIngestor::new`](rr_ingestor_kafka::KafkaIngestor).
+#[cfg(feature = "rdkafka")]
+fn check_kafka_support(_cli: &CliConfig) -> Result<()> {
+    Ok(())
+}
+
+/// Wire the configured Kafka topic into Raft group 1 with framework-managed
+/// exactly-once apply (`Kafka at-least-once + offset dedup`).
+#[cfg(feature = "rdkafka")]
+async fn attach_kafka_ingestor(cli: &CliConfig, mgr: &Arc<RaftGroupManager>) -> Result<()> {
+    use rr_ingestor_kafka::{kafka_offset_to_request_id, KafkaIngestor, KafkaIngestorConfig};
+    use rr_raft::ingestor_runner::{AutoIdempotency, OffsetMapError};
+
+    const GROUP_ID: u64 = 1;
+
+    let Some(brokers) = &cli.kafka_brokers else {
+        return Ok(());
+    };
+
+    let cfg = KafkaIngestorConfig {
+        bootstrap_servers: brokers.clone(),
+        topic_pattern: format!("{}{{group_id}}", cli.kafka_topic_prefix),
+        ..Default::default()
+    };
+    let topic = cfg.topic_for(GROUP_ID);
+
+    let ingestor = KafkaIngestor::new(GROUP_ID, cfg)
+        .await
+        .map_err(|e| anyhow!("failed to create Kafka ingestor: {e}"))?;
+
+    mgr.attach_ingestor_with_auto_idempotency(
+        GROUP_ID,
+        Box::new(ingestor),
+        AutoIdempotency {
+            request_type: topic.clone(),
+            offset_to_request_id: Box::new(|b| {
+                kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+            }),
+        },
+    )
+    .await
+    .map_err(|e| anyhow!("failed to attach Kafka ingestor to group {GROUP_ID}: {e}"))?;
+
+    info!(
+        brokers = ?brokers,
+        topic = %topic,
+        "Kafka ingest armed for group {GROUP_ID} (leader-exclusive consumption)"
+    );
     Ok(())
 }
 
