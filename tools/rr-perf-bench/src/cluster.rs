@@ -46,11 +46,15 @@ pub struct ClusterConfig {
     pub storage: StorageKind,
     pub durability: DurabilityKind,
     pub log_to_files: bool,
-    /// Base port for the 3-node cluster.  Node n uses ports
+    /// Number of voter nodes in the cluster (1, 3 or 5).
+    pub members: u8,
+    /// Base port for the cluster.  Node n uses ports
     /// `base + (n-1)*10 + {1,2,3,4}` for gRPC / admin / metrics / raft_tcp.
     /// Default 47000 (avoids the 51000 range used by other tools).
     pub port_base: u16,
     pub use_tcp_transport: bool,
+    /// Optional per-node client rate limit (req/s), passed as `--client-rps`.
+    pub client_rps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +80,7 @@ impl DurabilityKind {
     }
 }
 
-/// Handle for the running 3-node cluster.
+/// Handle for the running cluster.
 pub struct Cluster {
     nodes: Vec<RunningNode>,
     pub ports: Vec<NodePorts>,
@@ -98,7 +102,7 @@ struct RunningNode {
 }
 
 impl Cluster {
-    /// Start a 3-node cluster: spawn, bootstrap, wait for leader.
+    /// Start the cluster: spawn, bootstrap, wait for leader.
     pub async fn start(cfg: &ClusterConfig) -> Result<Self> {
         let (data_dir_owned, base_dir) = if cfg.data_dir.as_os_str().is_empty() {
             let tmp = TempDir::new().context("create tempdir")?;
@@ -110,7 +114,7 @@ impl Cluster {
         };
 
         let port_base = cfg.port_base;
-        let ports: Vec<NodePorts> = (1..=3)
+        let ports: Vec<NodePorts> = (1..=u64::from(cfg.members))
             .map(|id| NodePorts::for_node(id, port_base))
             .collect();
         let mut nodes = Vec::new();
@@ -130,6 +134,7 @@ impl Cluster {
                 cfg.storage,
                 cfg.durability,
                 cfg.use_tcp_transport,
+                cfg.client_rps,
                 cfg.log_to_files
                     .then(|| log_dir.join(format!("node{}.log", p.id))),
             )
@@ -163,7 +168,7 @@ impl Cluster {
             }
         }
 
-        // Bootstrap: add nodes 2 and 3 as learners then promote
+        // Bootstrap: add remaining nodes as learners, then promote to voters
         cluster.bootstrap_cluster().await?;
 
         // Wait until a leader is elected
@@ -180,7 +185,7 @@ impl Cluster {
         Ok(cluster)
     }
 
-    /// gRPC addresses for all 3 nodes (for RrClient bootstrap list).
+    /// gRPC addresses for all nodes (for RrClient bootstrap list).
     pub fn all_grpc_addrs(&self) -> Vec<String> {
         self.ports.iter().map(|p| p.grpc_addr()).collect()
     }
@@ -225,6 +230,11 @@ impl Cluster {
     // ── private helpers ────────────────────────────────────────────────────
 
     async fn bootstrap_cluster(&self) -> Result<()> {
+        // A single-node group self-initializes via --bootstrap; nothing to do.
+        if self.ports.len() == 1 {
+            return Ok(());
+        }
+
         let admin_addr = self.ports[0].admin_addr();
 
         // Give node 1 a moment to finish raft.initialize() after bootstrap
@@ -249,6 +259,12 @@ impl Cluster {
             .with_context(|| format!("add-learner node {}", p.id))?;
         }
 
+        let voters = self
+            .ports
+            .iter()
+            .map(|p| p.id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         run_admin(
             &self.admin_bin,
             &admin_addr,
@@ -258,11 +274,11 @@ impl Cluster {
                 "--group",
                 "1",
                 "--voters",
-                "1,2,3",
+                voters.as_str(),
             ],
         )
         .await
-        .context("change-membership to 3 voters")?;
+        .with_context(|| format!("change-membership to voters {voters}"))?;
 
         Ok(())
     }
@@ -303,6 +319,7 @@ async fn spawn_server(
     storage: StorageKind,
     durability: DurabilityKind,
     use_tcp_transport: bool,
+    client_rps: Option<u32>,
     log_file: Option<PathBuf>,
 ) -> Result<Child> {
     let mut cmd = Command::new(bin);
@@ -339,6 +356,10 @@ async fn spawn_server(
             .arg("tcp")
             .arg("--raft-tcp-port")
             .arg(ports.raft_tcp.to_string());
+    }
+
+    if let Some(rps) = client_rps {
+        cmd.arg("--client-rps").arg(rps.to_string());
     }
 
     if let Some(log_path) = log_file {

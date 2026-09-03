@@ -11,6 +11,30 @@ pub type SharedClient = Arc<RrClient>;
 
 const PARTITION_ID: u64 = 1;
 
+/// Which client operation the reactive pipeline fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpKind {
+    Write,
+    ReadLocal,
+    ReadLinearizable,
+}
+
+/// Read path under test in S3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadKind {
+    Local,
+    Linearizable,
+}
+
+impl ReadKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReadKind::Local => "local",
+            ReadKind::Linearizable => "linearizable",
+        }
+    }
+}
+
 /// S1: serial blocking writes — one in-flight at a time.
 ///
 /// Exercises the **blocking** SDK interface (`send_request_blocking`).
@@ -57,8 +81,15 @@ pub async fn run_s2_pipeline_sweep(
     let mut results = Vec::new();
 
     for &depth in levels {
-        let snap =
-            run_reactive_pipeline(Arc::clone(&client), payload_size, depth, duration, warmup).await;
+        let snap = run_reactive_pipeline(
+            Arc::clone(&client),
+            payload_size,
+            depth,
+            duration,
+            warmup,
+            OpKind::Write,
+        )
+        .await;
         results.push((depth, snap));
 
         // Cool-down between levels to let the cluster stabilize
@@ -68,17 +99,58 @@ pub async fn run_s2_pipeline_sweep(
     results
 }
 
+/// S3: read-path sweep — local (stale) reads vs linearizable reads.
+///
+/// Exercises the **reactive** read interfaces (`read_reactive` and
+/// `read_linearizable_reactive`).  Both read kinds run over the same
+/// concurrency levels; rows come back grouped by kind (all `local`
+/// levels first, then `linearizable`).
+pub async fn run_s3_read_sweep(
+    client: SharedClient,
+    payload_size: usize,
+    levels: &[usize],
+    duration: Duration,
+    warmup: Duration,
+) -> Vec<(ReadKind, usize, MetricsSnapshot)> {
+    let mut results = Vec::new();
+
+    for (kind, op) in [
+        (ReadKind::Local, OpKind::ReadLocal),
+        (ReadKind::Linearizable, OpKind::ReadLinearizable),
+    ] {
+        for &depth in levels {
+            let snap = run_reactive_pipeline(
+                Arc::clone(&client),
+                payload_size,
+                depth,
+                duration,
+                warmup,
+                op,
+            )
+            .await;
+            results.push((kind, depth, snap));
+
+            // Cool-down between levels to let the cluster stabilize
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    results
+}
+
 /// Core reactive pipeline: `pipeline_depth` requests always in-flight via callbacks.
 ///
-/// Uses a [`Semaphore`] to cap concurrency and `send_request_reactive` so the
-/// firing loop awaits only the semaphore (not the network).  Each callback
-/// drops its permit upon completion, unblocking the next fire immediately.
+/// Uses a [`Semaphore`] to cap concurrency and the reactive SDK call for `op`
+/// so the firing loop awaits only the semaphore (not the network).  Each
+/// callback drops its permit upon completion, unblocking the next fire
+/// immediately.
 async fn run_reactive_pipeline(
     client: SharedClient,
     payload_size: usize,
     pipeline_depth: usize,
     duration: Duration,
     warmup: Duration,
+    op: OpKind,
 ) -> MetricsSnapshot {
     let payload = Arc::new(vec![0u8; payload_size]);
     let measure_start = Instant::now() + warmup;
@@ -115,10 +187,10 @@ async fn run_reactive_pipeline(
 
                 // Reactive: returns immediately; callback fires on a tokio
                 // worker thread when the cluster responds.
-                client.send_request_reactive(PARTITION_ID, (*payload).clone(), move |result| {
+                fire_op(&client, op, (*payload).clone(), move |ok| {
                     drop(permit); // release slot → unblocks firing loop
                     inf.fetch_sub(1, Ordering::Relaxed);
-                    let _ = tx_cb.send((t0, t0.elapsed(), result.is_ok()));
+                    let _ = tx_cb.send((t0, t0.elapsed(), ok));
                 });
             }
         }
@@ -138,4 +210,47 @@ async fn run_reactive_pipeline(
 
     tokio::join!(fire_loop, record_loop);
     m.snapshot()
+}
+
+/// Sample-log the first few failures of the process at WARN (the SDK read
+/// paths don't log retry failures themselves) — without this a benchmark run
+/// can report thousands of errors with zero diagnosable detail.
+fn log_op_error<E: std::fmt::Display>(op: OpKind, e: &E) {
+    static LOGGED: AtomicUsize = AtomicUsize::new(0);
+    let n = LOGGED.fetch_add(1, Ordering::Relaxed);
+    if n < 5 {
+        tracing::warn!(op = ?op, error = %e, "bench op failed (sampled)");
+    }
+}
+
+/// Fire one reactive `op` against the cluster; `callback` receives the
+/// success flag on a tokio worker thread when the cluster responds.
+fn fire_op(
+    client: &RrClient,
+    op: OpKind,
+    payload: Vec<u8>,
+    callback: impl FnOnce(bool) + Send + 'static,
+) {
+    match op {
+        OpKind::Write => client.send_request_reactive(PARTITION_ID, payload, move |r| {
+            if let Err(e) = &r {
+                log_op_error(op, e);
+            }
+            callback(r.is_ok())
+        }),
+        OpKind::ReadLocal => client.read_reactive(PARTITION_ID, payload, move |r| {
+            if let Err(e) = &r {
+                log_op_error(op, e);
+            }
+            callback(r.is_ok())
+        }),
+        OpKind::ReadLinearizable => {
+            client.read_linearizable_reactive(PARTITION_ID, payload, move |r| {
+                if let Err(e) = &r {
+                    log_op_error(op, e);
+                }
+                callback(r.is_ok())
+            })
+        }
+    }
 }

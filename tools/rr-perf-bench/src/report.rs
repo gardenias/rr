@@ -1,4 +1,5 @@
 use crate::metrics::MetricsSnapshot;
+use crate::workload::ReadKind;
 
 fn fmt_us(us: u64) -> String {
     if us >= 1_000 {
@@ -52,6 +53,37 @@ pub fn print_s2_header(payload_bytes: usize, duration_secs: u64) {
 pub fn print_s2_row(concurrency: usize, snap: &MetricsSnapshot) {
     println!(
         "  {conc:<12} {tps:<12} {p50:<12} {p95:<12} {p99:<12} {p999:<12} {err}",
+        conc = concurrency,
+        tps = fmt_tps(snap.tps),
+        p50 = fmt_us(snap.p50_us),
+        p95 = fmt_us(snap.p95_us),
+        p99 = fmt_us(snap.p99_us),
+        p999 = fmt_us(snap.p999_us),
+        err = snap.err,
+    );
+}
+
+pub fn print_s3_header(payload_bytes: usize, duration_secs: u64) {
+    println!();
+    println!("── S3: Read-Path Sweep (local vs linearizable) ─────────────────────");
+    println!("  payload={payload_bytes}B  window={duration_secs}s (excl. warmup)");
+    println!(
+        "  {kind:<14} {conc:<12} {tps:<12} {p50:<12} {p95:<12} {p99:<12} {p999:<12} Errors",
+        kind = "ReadKind",
+        conc = "Concurrency",
+        tps = "TPS",
+        p50 = "p50",
+        p95 = "p95",
+        p99 = "p99",
+        p999 = "p999",
+    );
+    println!("  {}", "─".repeat(95));
+}
+
+pub fn print_s3_row(kind: ReadKind, concurrency: usize, snap: &MetricsSnapshot) {
+    println!(
+        "  {kind:<14} {conc:<12} {tps:<12} {p50:<12} {p95:<12} {p99:<12} {p999:<12} {err}",
+        kind = kind.as_str(),
         conc = concurrency,
         tps = fmt_tps(snap.tps),
         p50 = fmt_us(snap.p50_us),

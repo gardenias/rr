@@ -16,12 +16,16 @@ use cluster::{find_bin, Cluster, ClusterConfig, DurabilityKind, StorageKind};
 #[derive(Parser, Debug)]
 #[command(
     name = "rr-perf-bench",
-    about = "Integration perf benchmark: 3-process rr cluster, real gRPC traffic"
+    about = "Integration perf benchmark: local rr cluster (1/3/5 processes), real gRPC traffic"
 )]
 struct Args {
     /// Scenario(s) to run.
     #[arg(long, value_enum, default_value = "all")]
     scenario: Scenario,
+
+    /// Number of cluster nodes (voters).
+    #[arg(long, default_value = "3", value_parser = parse_members)]
+    members: u8,
 
     /// Warmup duration before measuring (seconds).
     #[arg(long, default_value = "5")]
@@ -35,7 +39,7 @@ struct Args {
     #[arg(long, default_value = "128")]
     payload: usize,
 
-    /// Concurrency levels for S2, comma-separated.
+    /// Concurrency levels for S2/S3, comma-separated.
     #[arg(long, default_value = "1,10,50,100,200,500")]
     concurrency: String,
 
@@ -64,19 +68,26 @@ struct Args {
     #[arg(long, env = "RR_ADMIN_BIN")]
     admin_bin: Option<PathBuf>,
 
-    /// Base port for the 3-node cluster (node n uses base+(n-1)*10+{1,2,3}).
+    /// Base port for the cluster (node n uses base+(n-1)*10+{1,2,3}).
     #[arg(long, default_value = "47000")]
     port_base: u16,
 
     /// Use TCP Raft transport for AppendEntries/Vote (snapshot still gRPC).
     #[arg(long)]
     use_tcp_transport: bool,
+
+    /// Optional per-service client-side rate limit (requests/sec) passed to
+    /// every rr-server node (`--client-rps`). Use to measure the cluster
+    /// under self-protecting backpressure.
+    #[arg(long)]
+    client_rps: Option<u32>,
 }
 
 #[derive(Clone, ValueEnum, Debug)]
 enum Scenario {
     S1,
     S2,
+    S3,
     All,
 }
 
@@ -93,8 +104,26 @@ enum DurabilityArg {
     TestOnly,
 }
 
+fn parse_members(s: &str) -> Result<u8, String> {
+    match s.parse::<u8>() {
+        Ok(v @ (1 | 3 | 5)) => Ok(v),
+        _ => Err(format!("expected 1, 3 or 5, got '{s}'")),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Client-side diagnostics (retry/redirect decisions) are invisible without
+    // a subscriber. Default to `warn`; override with RUST_LOG, e.g.
+    // `RUST_LOG=rr_client=debug`.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+
     let args = Args::parse();
 
     let server_bin = match args.server_bin {
@@ -133,8 +162,10 @@ async fn main() -> Result<()> {
         storage,
         durability,
         log_to_files: args.log_servers,
+        members: args.members,
         port_base: args.port_base,
         use_tcp_transport: args.use_tcp_transport,
+        client_rps: args.client_rps,
     };
 
     println!("=== rr-perf-bench ===");
@@ -147,7 +178,7 @@ async fn main() -> Result<()> {
         args.warmup_secs, args.duration_secs
     );
     println!();
-    print!("Starting 3-node cluster … ");
+    print!("Starting {}-node cluster … ", cfg.members);
 
     let cluster = Cluster::start(&cfg)
         .await
@@ -186,6 +217,24 @@ async fn main() -> Result<()> {
             .await;
             for (k, snap) in &results {
                 report::print_s2_row(*k, snap);
+            }
+        }
+        _ => {}
+    }
+
+    match args.scenario {
+        Scenario::S3 | Scenario::All => {
+            report::print_s3_header(args.payload, args.duration_secs);
+            let results = workload::run_s3_read_sweep(
+                Arc::clone(&client),
+                args.payload,
+                &concurrency_levels,
+                duration,
+                warmup,
+            )
+            .await;
+            for (kind, k, snap) in &results {
+                report::print_s3_row(*kind, *k, snap);
             }
         }
         _ => {}

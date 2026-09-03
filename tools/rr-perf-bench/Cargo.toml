@@ -3,7 +3,7 @@ name = "rr-perf-bench"
 version.workspace = true
 edition = "2021"
 publish = false
-description = "Integration performance benchmark for rr: 3-process Raft cluster, real gRPC traffic"
+description = "Integration performance benchmark for rr: local 1/3/5-process Raft cluster, real gRPC traffic"
 
 [[bin]]
 name = "rr-perf-bench"
@@ -17,3 +17,5 @@ clap       = { version = "4", features = ["derive", "env"] }
 serde_json = { workspace = true }
 tempfile   = { workspace = true }
 hdrhistogram = "7"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
