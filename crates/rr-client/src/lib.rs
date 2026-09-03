@@ -85,6 +85,13 @@ impl Default for RetryConfig {
 pub struct RrClient {
     bootstrap_addrs: Vec<String>,
     channel_pool: ChannelPool,
+    /// Addr-keyed gRPC channel cache. Dialing a fresh TCP/H2 connection per
+    /// RPC (the previous behavior) collapses under concurrency: ephemeral
+    /// port / listen-backlog exhaustion on loopback, and accept-flood
+    /// starvation on servers. Channels are created lazily on first use and
+    /// reused; a cached channel is evicted on `Code::Unavailable` so the
+    /// next attempt redials.
+    channels: Arc<RwLock<HashMap<String, Channel>>>,
     leader_cache: Arc<RwLock<HashMap<GroupId, (NodeId, String)>>>,
     retry_config: RetryConfig,
     tls_config: Option<TlsConfig>,
@@ -197,6 +204,7 @@ impl RrClientBuilder {
         Ok(RrClient {
             bootstrap_addrs: self.bootstrap_addrs,
             channel_pool: ChannelPool::new(),
+            channels: Arc::new(RwLock::new(HashMap::new())),
             leader_cache: Arc::new(RwLock::new(HashMap::new())),
             retry_config: self.retry_config,
             tls_config: self.tls_config,
@@ -262,6 +270,12 @@ impl RrClient {
     }
 
     async fn connect_to_addr(&self, addr: &str) -> Result<ClientServiceClient<Channel>, RrError> {
+        // Cache hit: reuse the existing H2 channel (clone is cheap and shares
+        // the underlying connection).
+        if let Some(channel) = self.channels.read().await.get(addr) {
+            return Ok(ClientServiceClient::new(channel.clone()));
+        }
+
         let scheme = if self.tls_config.is_some() {
             "https"
         } else {
@@ -288,7 +302,19 @@ impl RrClient {
                 reason: e.to_string(),
             })
         })?;
+        // Concurrent first-dials race here; last writer wins, the dropped
+        // channel's connection closes — harmless.
+        self.channels
+            .write()
+            .await
+            .insert(addr.to_string(), channel.clone());
         Ok(ClientServiceClient::new(channel))
+    }
+
+    /// Drop a cached channel after a transport-level failure so the next
+    /// attempt redials instead of reusing a broken connection.
+    async fn evict_channel(&self, addr: &str) {
+        self.channels.write().await.remove(addr);
     }
 
     fn build_request<T>(&self, body: T) -> Result<tonic::Request<T>, RrError> {
@@ -350,6 +376,9 @@ impl RrClient {
                     Ok(resp) => return Ok(resp.into_inner().payload),
                     Err(e) => {
                         last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
+                        if e.code() == tonic::Code::Unavailable {
+                            self.evict_channel(&addr).await;
+                        }
                         if attempt + 1 < max_attempts {
                             let delay = self
                                 .retry_config
@@ -431,6 +460,9 @@ impl RrClient {
                     }
                     Err(e) => {
                         last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
+                        if e.code() == tonic::Code::Unavailable {
+                            self.evict_channel(&addr).await;
+                        }
                         if attempt + 1 < max_attempts {
                             let delay = self
                                 .retry_config
@@ -620,6 +652,9 @@ impl RrClient {
                         "rpc failed"
                     );
                     self.remove_cached_leader(group_id).await;
+                    if status.code() == tonic::Code::Unavailable {
+                        self.evict_channel(&addr).await;
+                    }
                     last_error = Some(RrError::Network(NetworkError::RpcFailed(
                         status.message().to_string(),
                     )));
@@ -697,6 +732,9 @@ impl RrClient {
                         message = %status.message(),
                         "get_cluster_info rpc failed"
                     );
+                    if status.code() == tonic::Code::Unavailable {
+                        self.evict_channel(addr).await;
+                    }
                     last_error = Some(RrError::Network(NetworkError::RpcFailed(
                         status.message().to_string(),
                     )));
