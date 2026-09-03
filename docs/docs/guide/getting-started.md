@@ -41,7 +41,7 @@ rr-storage = { path = "../rr/crates/rr-storage" }
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
-bincode = { version = "2.0.0-rc.3", features = ["serde"] }
+bincode = { version = "2.0.0", features = ["serde"] }
 ```
 
 ---
@@ -84,7 +84,7 @@ The `Service` trait is the core abstraction in `rr`, defining business logic and
 ```rust
 use async_trait::async_trait;
 use bincode::config::standard;
-use rr_core::error::RrError;
+use rr_core::error::{CodecError, RrError};
 use rr_core::service::Service;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,7 +99,7 @@ pub struct KvService {
 impl Service for KvService {
     async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
         let (req, _): (KvRequest, _) = bincode::serde::decode_from_slice(&request, standard())
-            .map_err(|e| RrError::Codec(e.to_string()))?;
+            .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
 
         let response = match req {
             KvRequest::Put { key, value } => {
@@ -116,19 +116,23 @@ impl Service for KvService {
             }
         };
 
-        Ok(bincode::serde::encode_to_vec(&response, standard())?)
+        let encoded = bincode::serde::encode_to_vec(&response, standard())
+            .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))?;
+        Ok(encoded)
     }
 
     fn name(&self) -> &str { "kv-store" }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
         let guard = self.store.read().await;
-        Ok(bincode::serde::encode_to_vec(&*guard, standard())?)
+        bincode::serde::encode_to_vec(&*guard, standard())
+            .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))
     }
 
     async fn restore(&mut self, data: &[u8]) -> Result<(), RrError> {
-        let (restored, _): (HashMap<String, Vec<u8>>, _) = 
-            bincode::serde::decode_from_slice(data, standard())?;
+        let (restored, _): (HashMap<String, Vec<u8>>, _) =
+            bincode::serde::decode_from_slice(data, standard())
+                .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
         *self.store.write().await = restored;
         Ok(())
     }
@@ -159,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // 将 Service 包装为状态机 / Wrap Service as a StateMachine
     let sm_factory = Box::new(|group_id| {
-        Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
+        Box::new(ServiceStateMachineAdapter::new(group_id, KvService::default()))
     });
 
     let config = NodeConfig::new(
@@ -181,32 +185,194 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-## 运行示例 / Running the Example
+## 运行示例 / Running the Examples
 
-你可以直接运行项目中的 `kv-store` 示例来查看效果。
+以下三条路径均已在本机实测通过，建议按顺序尝试。
 
-You can run the built-in `kv-store` example to see it in action.
+All three run paths below are verified against live runs — try them in order.
+
+### 运行 1：零配置演示 / Run 1: Zero-Config Demo
 
 ```bash
-# 克隆并构建 / Clone and build
 git clone <repo>
 cd rr
-cargo build
-
-# 启动单节点模式 / Start single node mode
-cargo run -p kv-store -- --node-id 1 --port 51001 --bootstrap
-
-# 启动 3 节点集群（在 3 个终端中运行） / Start a 3-node cluster (run in 3 terminals)
-
-# 终端 1: 引导首个节点 / Terminal 1: Bootstrap first node
-cargo run -p kv-store -- --node-id 1 --port 51001 --bootstrap
-
-# 终端 2: 加入第二个节点 / Terminal 2: Join second node
-cargo run -p kv-store -- --node-id 2 --port 51002 --peers 127.0.0.1:51001
-
-# 终端 3: 加入第三个节点 / Terminal 3: Join third node
-cargo run -p kv-store -- --node-id 3 --port 51003 --peers 127.0.0.1:51001,127.0.0.1:51002
+cargo run -p kv-store
 ```
+
+无参数运行时，`kv-store` 在进程内初始化一个单副本 Raft 组，自选举为 leader，依次执行一组 KV 操作后自动退出（不启动 gRPC 服务，约 0.2s）。
+
+With no arguments, `kv-store` initializes a single-replica Raft group in-process, elects itself leader, runs a set of KV operations, then exits (no gRPC server, ~0.2s).
+
+预期输出（裁剪后）/ Expected output (trimmed):
+
+```text
+INFO === rr KV-Store demo (single-node, no gRPC) ===
+INFO PUT hello = "world"
+INFO GET hello = "world"
+INFO PUT counter = "1"
+INFO DEL hello
+INFO GET hello = <not found>
+INFO GET counter = "1"
+INFO === rr KV-Store demo complete ===
+```
+
+成功标准：以退出码 0 结束，最后一行为 `=== rr KV-Store demo complete ===`。
+
+Success criterion: exits with code 0, ending with `=== rr KV-Store demo complete ===`.
+
+### 运行 2：单节点服务器 + REPL 客户端 / Run 2: Single-Node Server + REPL Client
+
+```bash
+# 终端 1：引导一个常驻 gRPC 节点（阻塞运行，Ctrl-C 停止）
+# Terminal 1: bootstrap a long-running gRPC node (blocks until Ctrl-C)
+cargo run -p kv-store -- --node-id 1 --port 51001 --bootstrap
+# 日志出现 "Cluster bootstrapped on node 1" 即就绪
+# ready when the log shows "Cluster bootstrapped on node 1"
+
+# 终端 2：用 rr-admin REPL 作为 KV 客户端连接
+# Terminal 2: connect the rr-admin REPL as a KV client
+cargo run -p rr-admin -- repl --addr 127.0.0.1:51001 --group 1
+```
+
+实测会话 / Verified session:
+
+```text
+> put alpha one
+OK
+> get alpha
+one
+> delete alpha
+OK
+> get alpha
+(nil)
+```
+
+:::warning
+REPL 的 KV 操作（`put`/`get`/`delete`）必须指向 `kv-store` 的监听端口 **51001**（KvService 状态机，真实的 KV 语义）。管理命令在 **Admin 端口**上：每个 kv-store 节点在 `port + 1000`（本例 52001）提供 AdminService，例如 `cargo run -p rr-admin -- --addr 127.0.0.1:52001 group status --group 1`。
+
+For KV operations (`put`/`get`/`delete`), the REPL must target kv-store's listen port **51001** (KvService state machine, real KV semantics). Admin commands live on the **admin port**: every kv-store node serves AdminService on `port + 1000` (52001 here) — e.g. `cargo run -p rr-admin -- --addr 127.0.0.1:52001 group status --group 1`.
+:::
+
+:::note
+想直接看多节点共识？跳到运行 3 —— `kv-store` 支持真实的三节点集群（`--peers` 携带全量 `id@addr` 花名册）。
+
+Want to jump straight to multi-node consensus? See Run 3 — `kv-store` supports a real three-node cluster (`--peers` carries a full `id@addr` roster).
+:::
+
+### 运行 3：三节点 kv-store 共识集群 / Run 3: Three-Node kv-store Consensus Cluster
+
+`kv-store` 示例可以组成真实的多节点共识集群（实测通过，含故障转移）。`--peers` 携带全量 `id@addr` 花名册（必须包含本节点），三个终端使用同一份花名册：
+
+The `kv-store` example forms a real multi-node consensus cluster (verified, including failover). `--peers` carries the full `id@addr` roster (which must include the node itself), identical across all three terminals:
+
+```bash
+# 终端 1 — 引导节点 / Terminal 1 — bootstrap node
+cargo run -p kv-store -- --node-id 1 --port 51001 --bootstrap --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
+
+# 终端 2 / Terminal 2
+cargo run -p kv-store -- --node-id 2 --port 51002 --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
+
+# 终端 3 / Terminal 3
+cargo run -p kv-store -- --node-id 3 --port 51003 --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
+```
+
+引导节点日志出现 `Cluster bootstrapped on node 1 — voters: [1, 2, 3]`；其余节点的 Raft 组保持未初始化状态，由 leader 通过日志复制自动接管。每个节点的 Admin 端口为 `port + 1000`（即 52001/52002/52003）。验证：
+
+The bootstrap node logs `Cluster bootstrapped on node 1 — voters: [1, 2, 3]`; the other nodes' Raft groups stay uninitialized until the leader takes over via log replication. Each node's admin port is `port + 1000` (52001/52002/52003). Verify:
+
+```bash
+cargo run -p rr-admin -- --addr 127.0.0.1:52001 group status --group 1      # leader_node_id=1
+cargo run -p rr-admin -- --addr 127.0.0.1:52001 group membership --group 1  # Voters: 1,2,3
+
+# 在 leader 的监听端口上做 KV 读写 / KV reads & writes on the leader's listen port
+cargo run -p rr-admin -- repl --addr 127.0.0.1:51001 --group 1
+# rr> put k1 v1   → OK
+# rr> get k1      → v1
+# 之后三个节点 group status 的 last_log_index 同步推进 / then last_log_index advances on all three
+```
+
+故障转移（实测）：Ctrl-C 掉 leader，几秒内幸存节点选出新 leader（term 递增）；向新 leader 的监听端口写入成功，已提交数据保留。
+
+Failover (verified): Ctrl-C the leader — within seconds the survivors elect a new one (term increments); writes to the new leader's listen port succeed and committed data survives.
+
+:::warning
+写入必须发往 **leader** 的监听端口（REPL 不会自动跟随 leader 重定向）；REPL 中 `put` 打印 `OK` 只代表传输成功，复制进度以各节点 `group status` 的 `last_log_index` 为准。
+
+Writes must go to the **leader's** listen port (the REPL does not follow leader redirects); a `put` printing `OK` only means transport success — verify replication via `last_log_index` in each node's `group status`.
+:::
+
+### 运行 4：stock `rr-server` 三节点集群 / Run 4: Three-Node Cluster with Stock `rr-server`
+
+这是实测通过的多节点路径，使用 stock `rr-server` 与 `rr-admin` 二进制。
+
+This is the verified multi-node path, using the stock `rr-server` and `rr-admin` binaries.
+
+```bash
+# 终端 1 — 节点 1（引导）/ Terminal 1 — node 1 (bootstrap)
+cargo run -p rr-server -- serve --node-id 1 --listen-addr 127.0.0.1:51001 --admin-port 52001 --bootstrap --allow-insecure
+
+# 终端 2 — 节点 2 / Terminal 2 — node 2
+cargo run -p rr-server -- serve --node-id 2 --listen-addr 127.0.0.1:51002 --admin-port 52002 --peers 127.0.0.1:51001 --allow-insecure
+
+# 终端 3 — 节点 3 / Terminal 3 — node 3
+cargo run -p rr-server -- serve --node-id 3 --listen-addr 127.0.0.1:51003 --admin-port 52003 --peers 127.0.0.1:51001,127.0.0.1:51002 --allow-insecure
+```
+
+然后通过节点 1 的 **Admin 端口**（52001）组建 Raft 组：
+
+Then form the Raft group via node 1's **admin port** (52001):
+
+```bash
+cargo run -p rr-admin -- --addr 127.0.0.1:52001 group add-learner --group 1 --node-id 2 --addr 127.0.0.1:51002
+cargo run -p rr-admin -- --addr 127.0.0.1:52001 group add-learner --group 1 --node-id 3 --addr 127.0.0.1:51003
+cargo run -p rr-admin -- --addr 127.0.0.1:52001 group change-membership --group 1 --voters 1,2,3
+```
+
+三条命令均返回 `success=true`。随后在每个节点的 Admin 端口上执行 `group status`，三个节点结果一致（`leader_node_id=1`，`last_log_index` 相同）：
+
+All three commands return `success=true`. `group status` against each node's admin port then agrees across all three (`leader_node_id=1`, same `last_log_index`):
+
+```bash
+cargo run -p rr-admin -- --addr 127.0.0.1:52001 group status --group 1
+cargo run -p rr-admin -- --addr 127.0.0.1:52002 group status --group 1
+cargo run -p rr-admin -- --addr 127.0.0.1:52003 group status --group 1
+```
+
+向 leader 的监听端口（51001）写入后，三个节点的 `last_log_index` 同步推进，即复制成功。
+
+After a write to the leader's listen port (51001), `last_log_index` advances on all three nodes — replication is working.
+
+:::warning 必读注意事项 / Must-read caveats
+以下均经实测验证 / All verified against live runs:
+
+- **`--peers` 与共识组建无关**：它只填充本地路由表（peer 的节点 ID 按列表顺序猜测，见 `crates/rr-server/src/main.rs:295-310`）；Raft 组实际由上面的 `add-learner` + `change-membership` 命令组建。
+- **写请求必须发往 leader 的监听端口**（51001）：stock `ClientDispatchImpl` 不会把请求转发给 leader，发往 follower 会返回 `success=false`（REPL 显示 "Error: request not successful"）。
+- **REPL 中 `put` 打印 `OK` ≠ 已提交**：它只表示传输成功，不检查 raft 的 success 标志（`crates/rr-admin/src/main.rs:1174`）。请通过每个节点 `group status` 的 `last_log_index` 验证复制。
+- **stock `rr-server` 是冒烟服务**：内置 EchoStateMachine，`get <key>` 会回显 key 本身（即使该 key 从未写入），不是 KV 语义。
+- **端口职责分离**：AdminService 只在 `--admin-port` 上提供；ClientService 只在 `--listen-addr` 上提供。
+- **`GetClusterInfo` 是占位实现**：只返回真实的 group id 列表，`leader_node_id` 恒为 0、副本列表为空（`crates/rr-server/src/dispatch.rs:191-207`）。查询真实拓扑请用 Admin 端口上的 `group status` / `group membership`。
+
+- **`--peers` is irrelevant to consensus formation**: it only seeds the local routing table (peer node IDs are guessed by list index — see `crates/rr-server/src/main.rs:295-310`); the Raft group is actually formed by the `add-learner` + `change-membership` commands above.
+- **Client writes must go to the leader's listen port** (51001): the stock `ClientDispatchImpl` does not forward to the leader — a follower returns `success=false` ("Error: request not successful" in the REPL).
+- **`put` printing `OK` in the REPL ≠ committed**: it only means transport success, without checking the raft success flag (`crates/rr-admin/src/main.rs:1174`). Verify replication via `last_log_index` in `group status` on every node.
+- **Stock `rr-server` is a smoke service**: the built-in EchoStateMachine makes `get <key>` echo the key itself (even for never-written keys) — not KV semantics.
+- **Ports have separate roles**: AdminService is served only on `--admin-port`; ClientService only on `--listen-addr`.
+- **`GetClusterInfo` is a placeholder**: only the group id list is real — `leader_node_id` is always 0 and the replica list is empty (`crates/rr-server/src/dispatch.rs:191-207`). Use `group status` / `group membership` on the admin port for real topology.
+:::
+
+:::note 配置文件方式 / Config-file variant
+单节点 stock 服务器也可以用配置文件启动，但必须额外加两个 flag：
+
+A single-node stock server can also start from a config file, but two extra flags are required:
+
+```bash
+cargo run -p rr-server -- serve --config examples/config/single-node.toml --allow-insecure --admin-port 52001
+```
+
+`single-node.toml` 未设置 `allow_insecure`（TLS 安全门会拒绝明文启动，直接退出），且 `admin_port` 被注释掉（不加 flag 时 `rr-admin` 默认的 52001 连不上）。`examples/config/3node-cluster-node{1,2,3}.toml` 是**多机部署模板**（需要 `rocks` feature 构建、TLS 证书与可解析主机名），不是本地快速启动。
+
+`single-node.toml` does not set `allow_insecure` (the TLS safety gate refuses plaintext startup and the process exits) and has `admin_port` commented out (without the flag, rr-admin's default 52001 cannot connect). `examples/config/3node-cluster-node{1,2,3}.toml` are **multi-machine deployment templates** (they need a `rocks`-feature build, TLS certs, and resolvable hostnames) — not a local quickstart.
+:::
 
 ---
 
@@ -238,19 +404,17 @@ When enabled:
 
 ---
 
-## 接下来发生什么 / What Happens Next
+## 示例一览 / Examples Overview
 
-当集群启动后：
-1. **节点 1** 作为 Leader 引导集群。
-2. **节点 2 和 3** 作为 Follower 加入。
-3. 集群完成 **Leader 选举**。
-4. 现在你可以通过客户端 SDK 或内置演示程序向集群发送写请求。
+仓库共提供 5 个示例，建议从 `kv-store` 开始：
 
-When the cluster starts:
-1. **Node 1** bootstraps as the leader.
-2. **Nodes 2 and 3** join as followers.
-3. **Leader election** completes.
-4. The cluster is ready to handle write requests via the Client SDK or built-in demo.
+The repository ships 5 examples — start with `kv-store`:
+
+- **`examples/kv-store`** — 本文使用的 KV 示例：零配置演示 + 单节点/三节点 gRPC 集群。**从这里开始。** / The KV example used in this guide: zero-config demo + single-node/three-node gRPC cluster. **Start here.**
+- **`examples/counter`** — 分布式计数器（Increment/Get/Reset）；与 kv-store 相同的多节点花名册模式（默认端口 52001+，Admin 端口 53001+）。/ Distributed counter (Increment/Get/Reset); same multi-node roster pattern as kv-store (default ports 52001+, admin 53001+).
+- **`examples/etcd-config-quickstart`** — 以 etcd v3 作为 ConfigProvider；需要本地 `localhost:2379` 运行 etcd（端点硬编码于 `examples/etcd-config-quickstart/src/main.rs:15`）。/ etcd v3-backed ConfigProvider; requires etcd running at `localhost:2379` (endpoint hardcoded at `examples/etcd-config-quickstart/src/main.rs:15`).
+- **`examples/kv-store-kafka`** — Kafka ingestor 演示：Kafka 风格命令流写入 Raft 组，自动幂等（默认使用内存 MockKafkaIngestor）。/ Kafka ingestor demo: a Kafka-style command stream into a Raft group with auto-idempotency (uses the in-memory MockKafkaIngestor by default).
+- **`examples/otel-client`** — 本地 traceparent 传播演示（stdout exporter），不连接集群。/ Local traceparent propagation demo (stdout exporter); does not connect to a cluster.
 
 ---
 
@@ -263,5 +427,6 @@ Dive deeper into `rr`'s core concepts:
 - [Service Trait 指南 / Service Trait Guide](/guide/service-trait)
 - [StateMachine Trait 指南 / StateMachine Trait Guide](/guide/state-machine-trait)
 - [Client SDK 使用 / Client SDK Guide](/guide/client-sdk)
+- [部署指南 / Deployment Guide](../deployment/deployment.md)
 - [Admin API 参考 / Admin API Reference](/reference/admin-api)
 - [Metrics 参考 / Metrics Reference](/reference/metrics-reference)
