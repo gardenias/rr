@@ -31,17 +31,17 @@ Container_Boundary(follower, "Follower Node (lagging)") {
   Component(f_svc, "User Service", "rr-core::Service", "Implements restore()")
 }
 
-ContainerDb(f_disk, "Follower Disk", "Local SSD", "RocksDB data dir")
+ContainerDb(f_disk, "Follower Disk", "Local SSD", "Raft log only (rocks feature). Snapshots are NOT persisted — they live in memory (see below)")
 
 Rel(l_raft, l_raft, "1. Detect follower too far behind (next_index < log_start_index)")
-Rel(l_raft, l_sm, "2. Get or build snapshot (bincode-serialized user state)")
+Rel(l_raft, l_sm, "2. Get or re-capture snapshot (bincode-serialized user state, in-memory)")
 Rel(l_sm, l_net, "3. Start InstallSnapshot stream")
 
 Rel(l_net, f_grpc, "4. Stream SnapshotChunk[0..N]", "gRPC streaming")
 Rel(f_grpc, f_raft, "5. Assemble & deliver full snapshot")
-Rel(f_raft, f_sm, "6. apply_snapshot(meta, data)")
+Rel(f_raft, f_sm, "6. install_snapshot(meta, data)")
 Rel(f_sm, f_svc, "7. Service::restore(data)")
-Rel(f_sm, f_disk, "8. Persist snapshot + update last_applied")
+Rel(f_sm, f_sm, "8. Update in-memory last_applied + cached snapshot bytes (no disk write)")
 
 Rel(f_raft, l_raft, "9. InstallSnapshotResponse(success, last_applied)", "gRPC")
 Rel(l_raft, f_raft, "10. Resume AppendEntries from last_applied+1", "gRPC")
@@ -62,7 +62,6 @@ participant FNet as "RaftServiceImpl\n(on Follower)"
 participant F as "Follower\n(RaftNode G7)"
 participant FSM as "Follower SM\n(RrStateMachine)"
 participant FSvc as "User Service\n(on Follower)"
-participant FDisk as "Follower Disk"
 
 note over L, F : Normal replication attempts fail — follower's next_index < log_start_index
 L -> F : AppendEntries(prev_log_idx=50)
@@ -82,15 +81,15 @@ end
 L -> LNet : install_snapshot_stream(meta, data)
 LNet -> FNet : gRPC InstallSnapshot stream opens
 
-loop For each chunk (e.g. 1 MB each)
+loop For each chunk (CHUNK_SIZE = 64 KiB)
   LNet -> FNet : SnapshotChunk { offset, bytes, done? }
 end
 
 FNet -> F : Full snapshot assembled
-F -> FSM : apply_snapshot(meta, full_data)
+F -> FSM : install_snapshot(meta, full_data)
 FSM -> FSvc : Service::restore(&data)
 FSvc --> FSM : Ok
-FSM -> FDisk : persist snapshot blob + metadata
+note over FSM : snapshots live in MEMORY only:\nlast_applied / membership / cached bytes updated in-place;\nnothing is persisted to disk by RrStateMachine
 FSM --> F : Ok, last_applied = meta.last_log_id
 
 F --> L : InstallSnapshotResponse(success, last_applied = meta.last_log_id)
@@ -134,14 +133,14 @@ Follower receives heartbeats but bandwidth is too low to fetch logs in time; eve
 
 **调优建议 / Tuning tips**:
 
-- **Chunk size**: 1 MB per chunk 对大多数场景是好的起点。太小→太多 RPC 开销；太大→GC/内存压力。
-- **snapshot_policy**: openraft 的 `max_in_memory_logs` 控制触发快照的日志阈值。设得太高→快照不及时；太低→频繁快照占用 CPU。
+- **Chunk size**: 固定 64 KiB（`CHUNK_SIZE = 65_536`，`rr-raft/src/network_factory.rs`；`AdminService.OnlineBackup` 也是 64 KiB）。太小→太多 RPC 开销；太大→GC/内存压力。
+- **snapshot_policy**: openraft 的 `SnapshotPolicy::LogsSinceLast(N)` 控制触发快照的日志阈值，rr 默认 `N = 50_000`（`rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST`，可用 `--snapshot-logs-since-last` 调整）。设得太高→快照不及时；太低→频繁快照占用 CPU。
 - **rate-limit on transfer**: 在 `GrpcRaftNetwork` 中为大快照传输限流，避免影响正常客户端流量。rr 目前**不内置**限流——这是生产强化时需要添加的。
 
 ---
 
-- **Chunk size**: 1 MB per chunk is a good starting point for most workloads. Too small → RPC overhead; too large → GC / memory pressure.
-- **snapshot_policy**: openraft's `max_in_memory_logs` triggers snapshot creation. Too high → snapshots too infrequent; too low → frequent snapshot CPU cost.
+- **Chunk size**: fixed at 64 KiB (`CHUNK_SIZE = 65_536`, `rr-raft/src/network_factory.rs`; `AdminService.OnlineBackup` also uses 64 KiB). Too small → RPC overhead; too large → GC / memory pressure.
+- **snapshot_policy**: openraft's `SnapshotPolicy::LogsSinceLast(N)` triggers snapshot creation; rr defaults to `N = 50_000` (`rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST`, tunable via `--snapshot-logs-since-last`). Too high → snapshots too infrequent; too low → frequent snapshot CPU cost.
 - **Rate limit on transfer**: throttle large snapshot transfers in `GrpcRaftNetwork` so client traffic isn't starved. rr does **not** currently implement rate limiting — a production hardening item.
 
 ## 快照与用户 Service 的契约 / Snapshot Contract with User Service
@@ -175,14 +174,16 @@ impl Service for MyService {
 1. **`snapshot()` 必须一致** —— 不能混合多个时间点的状态。通常用 `RwLock::read()` 快照化整个状态。
 2. **`restore()` 必须清空现有状态** —— 否则会把 leader 已丢弃的陈旧条目留下。
 3. **序列化格式稳定** —— 版本升级时需要处理旧格式兼容（字段添加/删除）。推荐使用 `bincode` + `#[serde(default)]`。
-4. **不阻塞 Raft 任务** —— `snapshot()` 对大状态可能很慢；rr 将其在 `tokio::task::spawn_blocking` 中运行（详见 `sm_adapter.rs`）。
+4. **不阻塞 Raft 任务** —— `snapshot()` 对大状态可能很慢。rr **不会**把它放进 `spawn_blocking`：捕获在 openraft 的状态机任务里直接 `.await`（见 `sm_adapter.rs` 的 `snapshot_builder_inner`），所以实现应自身保持高效。
+5. **快照不持久化** —— `RrStateMachine` 的快照只存在于内存（`snapshot_bytes` 缓存 + `get_current_snapshot()` 每次从用户 Service 重新捕获）。重启后**没有**快照可加载：rocks 模式靠日志重放恢复状态；mem 模式重启即丢失全部状态，只能靠重新加入集群从 leader 同步。
 
 ---
 
 1. **`snapshot()` must be consistent** — must not mix state from multiple points in time. Typically use `RwLock::read()` to snapshot the whole state.
 2. **`restore()` must replace existing state** — otherwise you leak stale entries the leader already discarded.
 3. **Stable serialization format** — version upgrades need backward-compat handling (field add/remove). `bincode` + `#[serde(default)]` recommended.
-4. **Do not block the Raft task** — `snapshot()` can be slow for large state; rr runs it inside `tokio::task::spawn_blocking` (see `sm_adapter.rs`).
+4. **Do not block the Raft task** — `snapshot()` can be slow for large state. rr does **not** run it in `spawn_blocking`: capture is `.await`ed directly in openraft's state machine task (see `snapshot_builder_inner` in `sm_adapter.rs`), so implementations should be efficient on their own.
+5. **Snapshots are not persisted** — `RrStateMachine` snapshots live in memory only (the `snapshot_bytes` cache, plus `get_current_snapshot()` re-capturing from the user Service on every call). After a restart there is **no** snapshot to load: rocks mode recovers state by log replay; mem mode loses all state on restart and can only re-sync from the leader by rejoining the cluster.
 
 ## 相关 / Related
 

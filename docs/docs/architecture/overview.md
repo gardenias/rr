@@ -24,6 +24,18 @@ rr is a distributed multi-Raft consensus framework built with Rust. Its primary 
 
 rr adopts a multi-Raft design philosophy. Unlike traditional single-Raft instances, rr allows multiple Raft consensus groups to run on a single node. This design significantly improves horizontal scalability and concurrency, making it an ideal choice for building high-availability systems like distributed databases and lock services.
 
+## rr 解决什么问题 / What Problem Does rr Solve
+
+[openraft](https://github.com/datafuselabs/openraft) 这样的共识库给你的是**一个** Raft 组的引擎——日志存储、状态机、网络传输三大 trait 都需要自己实现。而一个生产级的分片系统远不止于此。如果直接从 openraft 出发，你必须自行构建：单节点上的**多共识组生命周期管理**、**分片路由表**（Partition → Group → Node）、**gRPC 网络层与连接池**、**客户端 leader 发现与重定向**、**框架级幂等去重**、以及成员变更编排、备份、限流、TLS 等**运维工具链**。rr 存在的意义就是把这一整块"从共识库到生产系统"的gap一次性补齐，并且各组件之间已经完成集成与联测。
+
+**rr 不适合你的场景**：你需要 SQL、事务或二级索引（rr 是共识框架，不是数据库）；你需要 AP 语义或指望"加副本扩展写吞吐"（Raft 是 CP，单组写入不随副本数扩展，multi-raft 靠跨组分片扩展）；单个 etcd / rqlite / consul 已能满足需求；或你需要跨地域低延迟写入（quorum 往返是硬下限）。更详细的对比见 [与 openraft 的关系](./openraft-relationship.md) 与 [常见问题](../faq.md)。
+
+---
+
+A consensus library like [openraft](https://github.com/datafuselabs/openraft) gives you the engine for **one** Raft group — and you implement the log storage, state machine, and network transport traits yourself. A production sharded system needs far more. Starting from raw openraft, you would have to build on your own: **multi-group lifecycle management** on each node, a **shard routing table** (Partition → Group → Node), the **gRPC networking layer with connection pooling**, **client-side leader discovery and redirect**, **framework-level idempotency and dedup**, plus an **operational toolchain** — membership orchestration, backup, rate limiting, TLS. rr exists to close this entire "from consensus library to production system" gap in one integrated, jointly tested stack.
+
+**rr is not for you if**: you need SQL, transactions, or secondary indexes (rr is a consensus framework, not a database); you need AP semantics or expect "more replicas to scale writes" (Raft is CP; a single group's writes do not scale with replica count — multi-raft scales by sharding across groups); a single etcd / rqlite / consul already covers you; or you need low-latency cross-region writes (quorum round-trips are a hard floor). See [Relationship with openraft](./openraft-relationship.md) and the [FAQ](../faq.md) for detailed comparisons.
+
 ## 核心概念 / Key Concepts
 
 | 概念 / Concept | 描述 / Description |
@@ -33,7 +45,7 @@ rr adopts a multi-Raft design philosophy. Unlike traditional single-Raft instanc
 | **Partition (分片)** | 数据路由的最小单位，映射到具体的共识组，由 `PartitionId` 标识。 |
 | **Leader/Follower** | Raft 角色，只有 Leader 节点可以处理写请求。 |
 | **RoutingTable (路由表)** | 维护分片到节点、分片到共识组的映射关系。 |
-| **ConfigProvider (配置提供者)** | 提供动态配置更新的抽象接口，支持内存、文件或外部存储。 |
+| **ConfigProvider (配置提供者)** | 提供动态配置更新的抽象接口；内置实现为内存版（`MemConfigProvider`）和基于 etcd 的只读实现（`EtcdConfigProvider`）。 |
 
 ## 系统架构 / System Architecture
 
@@ -84,8 +96,8 @@ Rel(router, config, "Loads routing table")
 
 ## 与 openraft 的关系 / Relationship with openraft
 
-rr 并不是从零开始实现 Raft 算法，而是深度封装了 [openraft](https://github.com/datafuselabs/openraft) (v0.9.x)。rr 在 openraft 之上添加了多共识组管理、gRPC 网络层、自动化的路由发现以及统一的生命周期管理，从而提供了一个开箱即用的分布式框架。
+rr 并不是从零开始实现 Raft 算法，而是深度封装了 [openraft](https://github.com/datafuselabs/openraft) (v0.10.0-alpha.34)。rr 在 openraft 之上添加了多共识组管理、gRPC 网络层、自动化的路由发现以及统一的生命周期管理，从而提供了一个开箱即用的分布式框架。
 
 ---
 
-rr is not a Raft implementation from scratch. Instead, it deeply wraps [openraft](https://github.com/datafuselabs/openraft) (v0.9.x). rr adds multi-group management, a gRPC networking layer, automated routing discovery, and unified lifecycle management on top of openraft to provide an out-of-the-box distributed framework.
+rr is not a Raft implementation from scratch. Instead, it deeply wraps [openraft](https://github.com/datafuselabs/openraft) (v0.10.0-alpha.34). rr adds multi-group management, a gRPC networking layer, automated routing discovery, and unified lifecycle management on top of openraft to provide an out-of-the-box distributed framework.

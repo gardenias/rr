@@ -4,11 +4,11 @@ sidebar_position: 7
 
 # Deployment — 部署拓扑 / Production Deployment Topology
 
-本图展示一个典型的**三节点生产部署**：rr-server 运行在独立主机上，带持久化 RocksDB 存储，监听分离的 Raft/Client 与 Admin 端口，由 Prometheus 抓取指标，由运维通过 rr-admin CLI 管理。
+本图展示一个典型的**三节点生产部署**：rr-server 运行在独立主机上，监听分离的 Raft/Client 与 Admin 端口，由 Prometheus 抓取指标，由运维通过 rr-admin CLI 管理。存储注意：stock 二进制目前始终使用**内存** raft 日志（`RaftGroupManager::new_with_network`）；RocksDB raft 日志持久化（每 group 独立实例，`{base_path}/{group_id}`）仅在集成测试中接线，尚未由二进制启用。
 
 ---
 
-This diagram shows a typical **three-node production deployment**: rr-server running on separate hosts with persistent RocksDB storage, listening on separated Raft/Client and Admin ports, scraped by Prometheus, administered via rr-admin CLI.
+This diagram shows a typical **three-node production deployment**: rr-server running on separate hosts, listening on separated Raft/Client and Admin ports, scraped by Prometheus, administered via rr-admin CLI. Storage note: the stock binary currently always uses **in-memory** raft logs (`RaftGroupManager::new_with_network`); RocksDB raft-log persistence (one independent instance per group at `{base_path}/{group_id}`) is only wired in integration tests, not yet enabled by the binary.
 
 ## 图示 / Diagram
 
@@ -31,7 +31,7 @@ Deployment_Node(ops_zone, "Operator Workstation", "Developer/SRE laptop or basti
 Deployment_Node(cluster_zone, "rr Cluster", "VPC / 3 availability zones") {
   Deployment_Node(host1, "Node Host 1", "Linux, AZ-a") {
     Container(rr1, "rr-server #1", "Rust binary", "node_id=1, listen=:51001, admin=:52001, metrics=:9100")
-    ContainerDb(disk1, "Data Volume 1", "Local SSD / EBS", "/var/lib/rr/data — RocksDB log + snapshots")
+    ContainerDb(disk1, "Data Volume 1", "Local SSD / EBS", "/var/lib/rr/data — RocksDB (rocks feature; not wired by the stock binary today)")
   }
   Deployment_Node(host2, "Node Host 2", "Linux, AZ-b") {
     Container(rr2, "rr-server #2", "Rust binary", "node_id=2, listen=:51001, admin=:52001, metrics=:9100")
@@ -118,29 +118,52 @@ Simpler firewall rules — a single gRPC port handles both intra-cluster and ext
 
 ```bash
 # Node 1 — bootstrap (first and only time)
-rr-server \
-  --node-id 1 --listen 0.0.0.0:51001 \
+rr-server serve \
+  --node-id 1 --listen-addr 0.0.0.0:51001 \
   --admin-port 52001 --metrics-port 9100 \
   --data-dir /var/lib/rr/data \
-  --bootstrap
+  --bootstrap \
+  --allow-insecure   # DEV ONLY — see note below; in production configure TLS instead
 
-# Nodes 2 and 3 — join existing cluster
-rr-server \
-  --node-id 2 --listen 0.0.0.0:51001 \
+# Nodes 2 and 3 — start with a peer list
+rr-server serve \
+  --node-id 2 --listen-addr 0.0.0.0:51001 \
   --admin-port 52001 --metrics-port 9100 \
   --data-dir /var/lib/rr/data \
-  --peers host-1:51001
+  --peers host-1:51001 \
+  --allow-insecure
 
-rr-server \
-  --node-id 3 --listen 0.0.0.0:51001 \
+rr-server serve \
+  --node-id 3 --listen-addr 0.0.0.0:51001 \
   --admin-port 52001 --metrics-port 9100 \
   --data-dir /var/lib/rr/data \
-  --peers host-1:51001,host-2:51001
+  --peers host-1:51001,host-2:51001 \
+  --allow-insecure
 ```
 
-> **注意**：`--bootstrap` 标志**只应使用一次**——集群的首次初始化。重启已有节点时不要使用此标志。
+> **注意 / Notes**：
 >
-> **Note**: `--bootstrap` should be used **exactly once** — at cluster initialization. Do NOT use when restarting an existing node.
+> - `--bootstrap` 标志**只应使用一次**——集群的首次初始化（把 group 1 初始化为单成员集群）。重启已有节点时不要使用此标志。
+> - **未配置 TLS 时生产安全门禁会拒绝启动**：RaftService / AdminService 无 TLS、AdminService 无 `admin_token` 等都会触发拒绝（`RrNode::new` 的 `validate_security_invariants`）。开发/CI 环境必须显式传 `--allow-insecure`（或 `RR_ALLOW_INSECURE=1`）；生产环境应配置 `--tls-cert/--tls-key/--tls-ca`（RaftService 还需 `--tls-require-client-cert` 做 mTLS）并设置 admin token。
+> - **`--peers` 不会把新节点自动加入 raft group**。它只做一件事：把 peer 地址列表**按位置猜测 node id**（第 i 个 peer → id `i+1`）并写入本节点的内存路由表（group 1 的 replicas），使 `start()` 在本地启动该 group。raft 成员关系仍需手动变更——在已有 leader 上执行：
+>
+>   ```bash
+>   # 先把新节点加为 learner，等它追赶上日志
+>   rr-admin --addr host-1:52001 group add-learner --group 1 --node-id 2 --addr host-2:51001
+>   # 再提升为 voter（joint consensus）
+>   rr-admin --addr host-1:52001 group change-membership --group 1 --voters 1,2
+>   ```
+>
+> - `--bootstrap` should be used **exactly once** — at cluster initialization (initializes group 1 as a single-member cluster). Do NOT use when restarting an existing node.
+> - **Without TLS, the production safety gates refuse startup**: RaftService / AdminService without TLS, AdminService without `admin_token`, etc. all trigger rejection (`validate_security_invariants` in `RrNode::new`). Dev/CI must explicitly pass `--allow-insecure` (or `RR_ALLOW_INSECURE=1`); production should configure `--tls-cert/--tls-key/--tls-ca` (RaftService additionally requires `--tls-require-client-cert` for mTLS) and set an admin token.
+> - **`--peers` does NOT auto-join the node into any raft group.** It only writes the peer list into this node's in-memory routing table with node ids **guessed by list position** (i-th peer → id `i+1`), so that `start()` starts the group locally. The raft membership change is still a manual step — run against the existing leader:
+>
+>   ```bash
+>   # Add the new node as a learner first, let it catch up
+>   rr-admin --addr host-1:52001 group add-learner --group 1 --node-id 2 --addr host-2:51001
+>   # Then promote it to voter (joint consensus)
+>   rr-admin --addr host-1:52001 group change-membership --group 1 --voters 1,2
+>   ```
 
 ## 失败模式 / Failure Modes
 
@@ -164,12 +187,17 @@ Scrape these from Prometheus to establish a baseline:
 
 | Metric | Meaning | Alert Threshold (example) |
 | :--- | :--- | :--- |
-| `rr_raft_term` | Current Raft term per group | Term increasing > 3× / hour = unstable leadership |
-| `rr_client_request_duration_seconds` | p99 client request latency | > 200 ms for 5 min |
-| `rr_raft_log_append_rate` | Entries appended per second | Sudden drop = replication stall |
-| `rr_raft_snapshot_in_progress` | Snapshot transfers underway | > 0 for extended time = slow catch-up |
-| `rr_raft_leader_elections_total` | Cumulative elections | Rate > 1/min = flapping |
+| `rr_raft_current_term{group_id}` | Current Raft term per group | Term increasing > 3× / hour = unstable leadership |
+| `rr_raft_is_leader{group_id}` | 1 on the node's leading groups, 0 otherwise | Sum per group ≠ 1 = no leader / split brain symptom |
+| `rr_proposal_duration_seconds{group_id}` | Proposal latency histogram (client_write → committed) | p99 > 200 ms for 5 min |
+| `rr_raft_replication_lag{group_id, follower_node_id}` | Leader-side per-follower log lag (emitted only on leaders) | Sustained > 0 = slow follower catching up |
+| `rr_snapshot_installs_total` | Cumulative snapshot installs | Rate spike = followers repeatedly falling behind compaction |
+| `rr_client_retries_total{group_id}` | Client-side retry counter (emitted by the app process using rr-client) | Rate > 1/min = leader flapping / network issues |
 | `up{job="rr"}` | Node liveness | Any node down > 1 min |
+
+> 客户端指标（`rr_client_*`，如 `rr_client_request_duration_seconds`、`rr_client_retries_total`）由使用 rr-client 的**应用进程**暴露，而非 rr-server。完整指标清单见 [metrics-reference.md](../../reference/metrics-reference.md)。
+>
+> Client metrics (`rr_client_*`, e.g. `rr_client_request_duration_seconds`, `rr_client_retries_total`) are exposed by the **application process** using rr-client, not by rr-server. See [metrics-reference.md](../../reference/metrics-reference.md) for the full catalog.
 
 ## 相关 / Related
 

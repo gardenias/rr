@@ -28,19 +28,19 @@ System_Boundary(client_side, "Client Side") {
 }
 
 System_Boundary(cluster, "rr Cluster (N nodes)") {
-  Container(rr_node, "rr-server Node", "Rust binary built from examples/* or custom server", "Hosts multiple Raft groups, serves Client + Raft + Admin gRPC on a single port (51001 by convention) plus admin port")
-  ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-node: Raft log, state machine data, metadata, snapshots (enabled by rocks feature)")
+  Container(rr_node, "rr-server Node", "Rust binary built from examples/* or custom server", "Hosts multiple Raft groups; serves Client + Raft gRPC on listen_addr (51001 by convention), Admin gRPC on a separate admin_port, /metrics on metrics_port")
+  ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-group independent RocksDB at {base_path}/{group_id} (rocks feature). Caveat: the stock binary never wires RocksDB raft-log storage — used today only by integration tests")
 }
 
 System_Ext(prometheus, "Prometheus", "Scrapes /metrics over HTTP")
 System_Ext(config_store, "External ConfigProvider", "etcd / file / custom - optional in prod")
 
 Rel(end_user, user_app, "Sends domain requests", "Any protocol")
-Rel(user_app, rr_node, "Submits ClientRequest, receives ClusterInfo / LeaderRedirect", "gRPC / HTTP2")
+Rel(user_app, rr_node, "Submits ClientRequest, receives leader_info redirect / ClusterInfo (group ids only; leader & replicas are placeholders)", "gRPC / HTTP2")
 Rel(admin_cli, rr_node, "Queries status, triggers snapshot, transfers leader", "gRPC (AdminService)")
 
 Rel_U(rr_node, rr_node, "Raft RPCs (AppendEntries, Vote, InstallSnapshot)", "gRPC / HTTP2")
-Rel(rr_node, rocks, "Reads/writes log, CF-scoped", "File I/O")
+Rel(rr_node, rocks, "Reads/writes raft log (per-group instance; not wired by stock binary)", "File I/O")
 Rel(rr_node, config_store, "Loads routing table, subscribes to changes", "ConfigProvider trait")
 Rel(rr_node, prometheus, "Exposes metrics", "HTTP /metrics")
 
@@ -65,7 +65,7 @@ LAYOUT_WITH_LEGEND()
 
 | External | Role |
 | :--- | :--- |
-| **RocksDB Data Dir** | Per-node persistent storage (Raft log + state machine). Not a separate process — a library embedded in rr-server writing to local disk. Shown here for deployment clarity. |
+| **RocksDB Data Dir** | Per-group persistent Raft log storage (`{base_path}/{group_id}`, one independent RocksDB per group). Not a separate process — a library embedded in the node writing to local disk. **Caveat**: the stock `rr-server` binary always uses in-memory raft-log storage (`RaftGroupManager::new_with_network`); RocksDB raft-log persistence is currently exercised only by integration tests. Shown here for deployment clarity. |
 | **Prometheus** | Optional metrics scraper |
 | **External ConfigProvider** | Optional production source of routing table (vs. in-process `MemConfigProvider` used in dev/tests) |
 
@@ -91,23 +91,23 @@ For internal breakdown of each crate, see the [Component-level diagrams](./compo
 
 | From → To | Protocol | Service / Port | Purpose |
 | :--- | :--- | :--- | :--- |
-| User App → rr-server | gRPC | `ClientService` @ 51001 | `Request(ClientRequest)`, `GetClusterInfo()` |
-| rr-admin → rr-server | gRPC | `AdminService` @ `admin_port` | Node/group status, snapshots, leader transfer, metrics |
+| User App → rr-server | gRPC | `ClientService` @ 51001 | `Request`, `ReadLocal`, `ReadLinearizable`, `GetClusterInfo` |
+| rr-admin → rr-server | gRPC | `AdminService` @ `admin_port` | Node/group status, snapshots, leader transfer, membership, backup, metrics |
 | rr-server ↔ rr-server | gRPC (bidirectional) | `RaftService` @ 51001 | `AppendEntries`, `Vote`, `InstallSnapshot` (streaming) |
 | Prometheus → rr-server | HTTP | `/metrics` @ `metrics_port` | Metrics scraping |
-| rr-server → Disk | File I/O (RocksDB) | Local path | Raft log persistence, snapshots |
-| rr-server → ConfigProvider | Trait call | Impl-defined | Load routing table, subscribe to `RoutingTableChange` |
+| rr-server → Disk | File I/O (RocksDB) | Local path | Raft log persistence (rocks feature; not wired by the stock binary — see above) |
+| rr-server → ConfigProvider | Trait call | Impl-defined | Load routing table (`get_routing_table`), watch `RoutingTableChange` stream |
 
 **关键点 / Key points**:
 
 1. **一个端口承载两种服务** — `RaftService` 与 `ClientService` 默认共享同一个 gRPC 端口（51001）。这简化部署，但生产环境可配置 `admin_port` 与 `metrics_port` 单独暴露。
-2. **客户端是"智能客户端"** — `RrClient` 会缓存每个 group 的 leader 地址，在收到 `ForwardToLeader` 错误时自动重定向并指数退避重试。
+2. **客户端是"智能客户端"** — `RrClient` 会缓存每个 group 的 leader 地址，在收到携带 `leader_info` 的重定向响应（`success=false`）时自动更新缓存、退避后重试。
 3. **没有独立网关 / 代理** — 集群没有独立的路由层；任何节点都能接收客户端请求并路由到正确 group 的 leader。
 
 ---
 
 1. **One port hosts two services** — `RaftService` and `ClientService` share the same gRPC port (51001 by default). This simplifies deployment, but in production the `admin_port` and `metrics_port` can be exposed separately.
-2. **Smart client** — `RrClient` caches each group's leader address and, upon receiving a `ForwardToLeader` error, auto-redirects with exponential backoff.
+2. **Smart client** — `RrClient` caches each group's leader address and, upon receiving a redirect response carrying `leader_info` (`success=false`), updates its cache and retries after a backoff.
 3. **No dedicated gateway / proxy** — there is no separate routing tier; any node can receive a client request and route it to the correct group's leader.
 
 ## 下钻 / Drill-down

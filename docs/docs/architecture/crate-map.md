@@ -41,10 +41,12 @@ package "Foundation" {
 
 package "Infrastructure" {
   [rr-config] <<infra>>
+  [rr-config-etcd] <<infra>>
   [rr-storage] <<infra>>
   [rr-raft] <<infra>>
   [rr-network] <<infra>>
   [rr-router] <<infra>>
+  [rr-ingestor-kafka] <<infra>>
 }
 
 package "Orchestration" {
@@ -53,14 +55,19 @@ package "Orchestration" {
 
 package "Application" {
   [rr-client] <<app>>
+  [rr-admin] <<app>>
 }
 
 [rr-config] --> [rr-core]
+[rr-config-etcd] --> [rr-core]
 [rr-storage] --> [rr-core]
 [rr-raft] --> [rr-core]
 [rr-raft] --> [rr-storage]
+[rr-raft] --> [rr-client]
 [rr-network] --> [rr-core]
 [rr-router] --> [rr-core]
+[rr-router] --> [rr-config]
+[rr-ingestor-kafka] --> [rr-core]
 
 [rr-server] --> [rr-core]
 [rr-server] --> [rr-raft]
@@ -71,6 +78,8 @@ package "Application" {
 
 [rr-client] --> [rr-core]
 [rr-client] --> [rr-network]
+[rr-admin] --> [rr-core]
+[rr-admin] --> [rr-network]
 @enduml
 ```
 
@@ -80,24 +89,29 @@ package "Application" {
 | :--- | :--- | :--- | :--- |
 | **rr-core** | 基础层 / Foundation | 错误类型、核心 Trait 和公共类型。 | RrError, NodeId, GroupId, Service, StateMachine, StorageEngine, ConfigProvider |
 | **rr-config** | 基础设施 / Infrastructure | 基于内存的配置提供者实现。 | MemConfigProvider |
+| **rr-config-etcd** | 基础设施 / Infrastructure | 基于 etcd 的配置提供者（只读：路由表读取与变更 watch）。 | EtcdConfigProvider |
 | **rr-storage** | 基础设施 / Infrastructure | 存储引擎实现（内存及 RocksDB）。 | MemStorage, RocksStorage (开启 `rocks` 特性时) |
 | **rr-raft** | 基础设施 / Infrastructure | 基于 openraft 的共识引擎。 | RaftGroupManager, RaftNode, RrTypeConfig |
 | **rr-network** | 基础设施 / Infrastructure | 基于 gRPC 的网络传输层。 | RaftServiceImpl, ClientServiceImpl, ChannelPool, BearerInterceptor, RateLimitInterceptor |
 | **rr-router** | 基础设施 / Infrastructure | 处理分片到节点的路由逻辑。 | ShardRouter |
+| **rr-ingestor-kafka** | 基础设施 / Infrastructure | Kafka 命令摄入（`CommandIngestor`）后端；默认仅含内存 mock，真实后端需开启 `rdkafka` 特性。 | KafkaIngestor, MockKafkaIngestor, KafkaIngestorConfig |
 | **rr-client** | 应用层 / Application | 客户端 SDK。 | RrClient, RetryConfig |
+| **rr-admin** | 应用层 / Application | 运维 CLI（AdminService 的 gRPC 客户端），支持备份、节点下线与重置等。 | 二进制 crate（无库类型） |
 | **rr-server** | 编排层 / Orchestration | 顶层节点的生命周期管理。 | RrNode, NodeConfig |
 
 ## 特性标志 / Feature Flags
 
 rr 提供了灵活的特性标志（Feature Flags）来控制依赖：
 
-- **`rocks` 特性**: 在 `rr-storage` 和 `rr-raft` 中可用。启用后，支持使用 RocksDB 作为持久化存储后端，并提供 RocksDB 驱动的 Raft 日志存储。
+- **`rocks` 特性**: 在 `rr-storage`、`rr-raft` 和 `rr-server` 中可用（`rr-server` 的 `rocks` 等价于同时开启 `rr-storage/rocks` 与 `rr-raft/rocks`）。启用后，支持使用 RocksDB 作为持久化存储后端，并提供 RocksDB 驱动的 Raft 日志存储（`RocksLogStorage`）。
+- **`defensive` 特性**: 在 `rr-raft` 中可用。启用后为日志存储增加防御性一致性校验；不重新编译也可以在运行时通过环境变量 `RR_STORE_DEFENSIVE=on` 开启。
 
 ---
 
 rr provides flexible feature flags to control dependencies:
 
-- **`rocks` feature**: Available in `rr-storage` and `rr-raft`. When enabled, it allows using RocksDB as a persistent storage backend and provides RocksDB-backed Raft log storage.
+- **`rocks` feature**: Available in `rr-storage`, `rr-raft`, and `rr-server` (rr-server's `rocks` simply forwards to `rr-storage/rocks` and `rr-raft/rocks`). When enabled, it allows using RocksDB as a persistent storage backend and provides RocksDB-backed Raft log storage (`RocksLogStorage`).
+- **`defensive` feature**: Available in `rr-raft`. Adds defensive consistency checks to log storage; it can also be turned on at runtime via the `RR_STORE_DEFENSIVE=on` environment variable without recompiling.
 
 ## 分层架构描述 / Layering Description
 

@@ -115,13 +115,19 @@ Key interface methods include:
 - **Key Encoding**: For numeric keys like Raft log indices, big-endian encoding is used to ensure byte order in RocksDB matches logical order, enabling correct range scans.
 - **Serialization**: Raft types and metadata are serialized using `bincode` v2.
 
+:::warning 当前限制 / Current Limitation
+`rocks` 特性提供 RocksDB 后端与 `RocksLogStorage`，但**官方 rr-server 二进制尚未将 Raft 日志接入 RocksDB**：二进制始终通过 `RaftGroupManager::new_with_network` 使用内存版 `RrLogStorage`；`--storage rocks` 打开的 `RocksStorage` 仅落入 `NodeConfig.storage_engine`，而该字段目前没有任何消费者。RocksDB 日志持久化目前只在集成测试中生效（`RaftGroupManager::new_with_rocks` / `start_group_rocks`），或由库使用方自行接线。
+
+The `rocks` feature provides the RocksDB backend and `RocksLogStorage`, but **the stock rr-server binary does not wire Raft logs to RocksDB yet**: it always uses the in-memory `RrLogStorage` via `RaftGroupManager::new_with_network`; the `RocksStorage` opened by `--storage rocks` only lands in `NodeConfig.storage_engine`, which currently has no consumer. RocksDB log persistence currently takes effect only in integration tests (`RaftGroupManager::new_with_rocks` / `start_group_rocks`), or when library users wire it up themselves.
+:::
+
 ## 列族 / Column Families
 
 rr 框架使用列族来隔离逻辑上的数据域，避免不同类型的数据相互干扰，并允许为不同类型的数据配置不同的存储策略。
 
 - `raft_log`：存储 Raft 组的日志条目。
 - `state_machine`：存储用户定义的业务状态机数据。
-- `metadata`：存储节点元数据，如当前任期（current_term）、投票信息（voted_for）以及快照元数据。
+- `metadata`：存储 Raft 日志元数据，仅含两个键：`vote`（bincode 序列化的 Vote，任期与投票对象存储在一起）和 `last_purged`（最近一次日志清理的位置）。快照元数据不落盘（见下文"快照处理"）。
 
 ---
 
@@ -129,7 +135,7 @@ The rr framework uses column families to isolate logical data domains, preventin
 
 - `raft_log`: Stores log entries for Raft groups.
 - `state_machine`: Stores user-defined business state machine data.
-- `metadata`: Stores node metadata, such as `current_term`, `voted_for`, and snapshot metadata.
+- `metadata`: Stores Raft log metadata with exactly two keys: `vote` (a bincode-serialized Vote, holding term and voted_for together) and `last_purged` (the position of the last log purge). Snapshot metadata is not persisted (see "Snapshot Handling" below).
 
 ## Raft 日志存储 / Raft Log Storage
 
@@ -153,7 +159,7 @@ Both adhere to Raft's consistency requirements, ensuring sequential log writing 
 
 `RrStateMachine` 封装了用户状态机的快照逻辑：
 
-- **触发机制**：OpenRaft 根据配置的 `max_in_memory_logs` 自动触发快照创建。
+- **触发机制**：OpenRaft 根据快照策略 `SnapshotPolicy::LogsSinceLast(N)` 自动触发快照创建——每追加 N 条日志触发一次；N 默认为 50_000，可通过 `NodeConfig::snapshot_logs_since_last` 覆盖。
 - **序列化**：快照数据通过 `bincode` v2 进行序列化。
 - **安装快照**：当新节点加入或落后节点同步时，框架会通过网络传输快照，并调用状态机的 `restore` 方法进行恢复。
 
@@ -161,6 +167,6 @@ Both adhere to Raft's consistency requirements, ensuring sequential log writing 
 
 `RrStateMachine` wraps the snapshot logic for user state machines:
 
-- **Triggering**: OpenRaft automatically triggers snapshot creation based on the configured `max_in_memory_logs`.
+- **Triggering**: OpenRaft automatically triggers snapshot creation based on the configured `SnapshotPolicy::LogsSinceLast(N)` — one snapshot every N appended log entries; N defaults to 50_000 and can be overridden via `NodeConfig::snapshot_logs_since_last`.
 - **Serialization**: Snapshot data is serialized via `bincode` v2.
 - **Snapshot Installation**: When a new node joins or a lagging node synchronizes, the framework transfers snapshots over the network and invokes the state machine's `restore` method.

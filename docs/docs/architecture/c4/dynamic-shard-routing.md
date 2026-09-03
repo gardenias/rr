@@ -23,20 +23,18 @@ Container(client, "rr-client SDK", "Rust library", "User application")
 Container_Boundary(node, "rr-server Node (any)") {
   Component(grpc, "ClientServiceImpl", "rr-network", "gRPC handler")
   Component(dispatch, "ClientDispatchImpl", "rr-server", "Request dispatcher")
-  Component(router, "ShardRouter", "rr-router", "Partition → group resolver")
-  Component(table, "Cached RoutingTable", "rr-core::types", "ArcSwap snapshot")
+  Component(router, "ShardRouter", "rr-router", "Partition → group resolver (no local cache)")
+  Component(cfg, "ConfigProvider", "rr-config", "Source of truth; full table cloned per call")
 }
-
-Container_Ext(cfg, "ConfigProvider", "rr-config", "Source of truth")
 
 Rel(client, grpc, "1. ClientRequest(partition_id=42)", "gRPC")
 Rel(grpc, dispatch, "2. dispatch(request)")
 Rel(dispatch, router, "3. route(42)")
 
-Rel(router, table, "4. lookup partitions[42] → group_id=7")
+Rel(router, cfg, "4. get_routing_table() → clone full table; partitions[42] → group_id=7")
 Rel(router, dispatch, "5. group_id=7 (leader redirect, if any, comes from the raft runtime)")
 
-Rel(cfg, table, "(async) RoutingTableChange events keep snapshot fresh")
+Rel(cfg, router, "(no subscription in the router — RrNode's watch loop consumes RoutingTableChange events)")
 
 @enduml
 ```
@@ -49,39 +47,39 @@ autonumber
 participant Client as "rr-client SDK"
 participant Node as "rr-server Node"
 participant Router as "ShardRouter"
-participant Snap as "ArcSwap<RoutingTable>"
 participant Cfg as "ConfigProvider"
 participant Raft as "RaftGroupManager"
 
 group #LightBlue COLD PATH — first request after boot
   Client -> Node : ClientRequest(partition=42)
   Node -> Router : route(42)
-  Router -> Snap : load() → RoutingTable snapshot
-  Snap --> Router : &RoutingTable
-  Router -> Router : partitions.get(&42) → group_id=7 (GroupMeta{group_id:7, replicas:[1,2,3]})
+  Router -> Cfg : get_routing_table() — clones the FULL table
+  Cfg --> Router : RoutingTable
+  Router -> Router : partitions.get(&42) → group_id=7
   Router --> Node : group_id=7
 
   alt This node IS leader of group 7
     Node -> Raft : client_write on G7
     Raft --> Node : response
-    Node --> Client : ClientWriteResponse
+    Node --> Client : ClientResponse{success=true, payload}
   else This node is NOT leader
-    Node --> Client : ForwardToLeader{node_id:2, addr:"host-2:51001"}
+    Node -> Raft : client_write fails (ForwardToLeader from openraft)
+    Node --> Client : ClientResponse{success=false, leader_info={node_id:2, addr:"host-2:51001"}}
   end
 end
 
 group #LightGreen HOT PATH — subsequent requests for partition 42
   Client -> Client : leader_cache[group=7] hit → use "host-2:51001"
   Client -> Node : direct to node_2
-  note over Node : (same route() resolution happens on each node\n— but resolution is O(1) hashmap lookup)
+  note over Node : (same route() resolution happens on each node:\nfull-table clone + O(1) hashmap lookup per request)
   Node -> Raft : client_write
-  Raft --> Client : ClientWriteResponse
+  Raft --> Client : ClientResponse{success=true, payload}
 end
 
 group #Wheat CHANGE — routing table updates
-  Cfg -> Snap : broadcast RoutingTableChange::GroupMembershipChanged{group:7, replicas:[1,2,4]}
-  Snap -> Snap : ArcSwap::store(new RoutingTable)
-  note over Router : Next route(42) sees the updated snapshot without locking\n(ArcSwap gives us lock-free snapshot reads)
+  note over Cfg : The table is mutated out-of-band (MemConfigProvider\ninherent methods / external store), NOT via the trait.
+  Cfg -> Cfg : emit RoutingTableChange::GroupMembershipChanged{group_id:7, replicas:[1,2,4]}
+  note over Node : RrNode's watch loop consumes the event\n(start/stop groups as needed). The router holds no state —\nits NEXT route(42) call simply clones the updated table.
 end
 @enduml
 ```
@@ -94,22 +92,22 @@ end
 Every rr-server has a `ShardRouter`. Given a `partition_id`, it returns the owning `group_id`. The routing table carries no leader information — leader discovery is entirely client-side via redirects (see Layer 2).
 
 **特性 / Characteristics**:
-- **O(1) 查询**：一次 HashMap lookup（partition → group）
-- **无锁读**：通过 `ArcSwap<RoutingTable>` 实现
-- **最终一致**：路由表变更通过 `ConfigProvider::subscribe_changes` 异步传播
-- **per-node**：每个节点独立缓存；热路径不跨节点通信
+- **无本地缓存**：每次 `route()` 都通过 `get_routing_table()` 克隆整张表，再做一次 HashMap 查询
+- **读到即最新**：因为没有缓存，router 永远看到 provider 当前的表；"最终一致"只存在于**跨节点**传播层面（各节点 provider 各自更新）
+- **变更通知**：`ConfigProvider::watch_changes()` 的事件流由 `RrNode` 的 watch loop 消费（用于启停 group），router 本身不订阅
+- **per-node**：每个节点独立持有 provider；热路径不跨节点通信
 
 ---
 
-- **O(1) lookup**: a single HashMap lookup (partition → group)
-- **Lock-free reads**: via `ArcSwap<RoutingTable>`
-- **Eventually consistent**: routing table changes propagate asynchronously via `ConfigProvider::subscribe_changes`
-- **Per-node**: each node caches independently; hot path has zero inter-node traffic
+- **No local cache**: every `route()` clones the whole table via `get_routing_table()`, then does a single HashMap lookup
+- **Reads are always current**: with no cache, the router always sees the provider's current table; "eventual consistency" exists only at the **cross-node** propagation level (each node's provider updates independently)
+- **Change notification**: the `ConfigProvider::watch_changes()` event stream is consumed by `RrNode`'s watch loop (to start/stop groups); the router itself does not subscribe
+- **Per-node**: each node holds its own provider; the hot path has zero inter-node traffic
 
 ### 层 2: 客户端 leader 缓存 / Layer 2: Client-side leader cache
-`RrClient` 额外维护自己的 `HashMap<GroupId, CachedLeader>`——避免每次请求都先打到 follower 再被重定向。
+`RrClient` 额外维护自己的 `HashMap<GroupId, (NodeId, String)>`（无时间戳、无 TTL）——避免每次请求都先打到 follower 再被重定向。
 
-`RrClient` additionally maintains its own `HashMap<GroupId, CachedLeader>` — avoiding the follower-then-redirect roundtrip on every request.
+`RrClient` additionally maintains its own `HashMap<GroupId, (NodeId, String)>` (no timestamp, no TTL) — avoiding the follower-then-redirect roundtrip on every request.
 
 **注意**：路由表从不携带 leader 信息——客户端的 leader cache 是系统里唯一的 leader 视图，由 `leader_info` 重定向刷新：
 
@@ -118,7 +116,7 @@ Every rr-server has a `ShardRouter`. Given a `partition_id`, it returns the owni
 | 场景 / Scenario | Client-side cache | 结果 / Outcome |
 | :--- | :--- | :--- |
 | Leader changed | Stale | Client sends to old leader → gets a `leader_info` redirect (or a connection failure) → updates cache → retries |
-| Partition added | Missing | Client gets ClusterInfo refresh → updates |
+| Partition / group added | Missing entry | Client round-robins the bootstrap list; the first response (success or `leader_info` redirect) fills the cache. `GetClusterInfo` is not usable for discovery — the stock implementation returns placeholder leader/replica fields |
 
 **设计原则 / Design principle**：
 *宁可让客户端缓存短暂 stale，也不要把易变的 leader 运行时状态放进配置面路由表。*
@@ -155,12 +153,18 @@ let resp = client.send_request(partition_id, payload).await?;
 
 ## 路由表失效场景 / Routing Table Invalidation Scenarios
 
-| 事件 / Event | How ShardRouter Finds Out |
-| :--- | :--- |
-| Membership change (add learner → promote) | `RoutingTableChange::GroupMembershipChanged` |
-| New partition created | `RoutingTableChange::PartitionAdded` |
-| Node address changes | `RoutingTableChange::NodeAddrUpdated` |
-| Node removed (decommission) | `RoutingTableChange::NodeRemoved` |
+`RoutingTableChange` 共 6 个变体（`rr-core::config`）。ShardRouter 不订阅事件——它的**下一次** `route()` 调用会克隆到已更新的表。事件的实际消费者是 `RrNode` 的 watch loop（据此启停 group）：
+
+`RoutingTableChange` has 6 variants (`rr-core::config`). The ShardRouter does not subscribe — its **next** `route()` call simply clones the updated table. The actual consumer of the events is `RrNode`'s watch loop (which starts/stops groups accordingly):
+
+| 事件 / Event | Variant | RrNode watch loop reaction |
+| :--- | :--- | :--- |
+| New partition created | `PartitionAdded { partition_id, config, group_id }` | Start the group locally if this node is in its replicas |
+| Partition removed | `PartitionRemoved { partition_id }` | Logged only |
+| Partition config updated | `PartitionUpdated { partition_id, config, group_id }` | Logged only |
+| Node added | `NodeAdded { node_id, addr }` | Try `add_learner` for the node on all local groups |
+| Node removed (decommission) | `NodeRemoved { node_id }` | `change_membership` to drop the node from all local groups |
+| Membership change (add learner → promote) | `GroupMembershipChanged { group_id, replicas }` | Start the group if now a replica; stop it if no longer one |
 
 Leader 选举不会产生路由表事件——leader 是 raft 运行时状态，不进入配置面。客户端把请求发给任一节点；若该节点不是 leader，server 从 raft 运行时拿到真实 leader 并返回 `leader_info` 重定向（或旧 leader 已宕机时连接失败），客户端更新 leader cache 并重试，最终收敛到正确的 leader，代价是几次额外 RPC。
 

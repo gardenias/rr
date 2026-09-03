@@ -4,7 +4,7 @@ tags: [architecture, raft, write-path, performance]
 up: "[[00-moc/architecture]]"
 status: active
 created: 2026-05-12
-updated: 2026-05-12
+updated: 2026-09-03
 ---
 
 # 完整写入链路
@@ -249,7 +249,7 @@ Raft 协议保证：
 |---|---|---|---|
 | Raft 日志 | `raft_log` | Strict: fsync/batch；ReplicatedOnly: WAL only | IoBatcher 写入；snapshot 后被 purge |
 | Raft 元数据 | `metadata` | 每次写 fsync | vote / last_purged（写入频率极低）|
-| 业务快照 | OS 文件 | write-then-rename 原子写 | openraft 管理；用于 InstallSnapshot |
+| 业务快照 | 仅内存（`RrStateMachine` 内的 `snapshot_bytes`） | 不落盘；`get_current_snapshot()` 每次从用户 `Service` 重新捕获 | openraft 管理；用于 InstallSnapshot；重启后状态机靠日志重放恢复 |
 
 ### IoBatcher Group Commit 效果
 
@@ -267,7 +267,7 @@ Raft 协议保证：
 | gRPC accept loop | 1/server | 否 | 接受 HTTP/2 连接 |
 | gRPC request task | 1/request | 否（await oneshot） | 解码 ClientRequest，等待 Raft 提交 |
 | **RaftCore Task** | 1/group | 否 | Raft 核心：log_id 分配、提交协调、apply 触发 |
-| **IoBatcher Task** | 1/group | 是（内部 spawn_blocking）| Group commit：积累多提案，单次 write_batch |
+| **IoBatcher Task** | 1/group | 否（RocksDB 写由 `RocksStorage` 内的 spawn_blocking 执行）| Group commit：积累多提案，单次 write_batch |
 | RaftNetwork Task | 1/follower/group | 否 | 向每个 Follower 流式发送 AppendEntries |
 | **SM Worker Task** | 1/group | 取决于 Service::handle | decode → 幂等 → Service::handle |
 | metrics ticker | 1/group | 否 | 每 5s 发射 replication lag 指标 |
@@ -280,3 +280,4 @@ Raft 协议保证：
 | Date | Change |
 |---|---|
 | 2026-05-12 | 初始版本，基于 session 架构深度分析 |
+| 2026-09-03 | 修正存储边界表：业务快照仅保存在内存（不落盘），重启后状态机经日志重放恢复 |

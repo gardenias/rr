@@ -23,6 +23,7 @@ rr 的网络通信建立在 `tonic` (Rust gRPC 框架) 和 `prost` (Protocol Buf
 - **三个 proto 服务**：`RaftService`（内部 Raft RPC）、`ClientService`（客户端请求）、`AdminService`（运维操作）。
 - **二进制负载**：为了解耦网络层与 Raft 核心逻辑，Raft 消息（如 `AppendEntries`）使用 `bincode` 序列化为二进制字节流，并封装在 proto 消息的 `bytes` 字段中。
 - **双 server 拓扑**：`RrNode::start()` 直接调用 `tonic::transport::Server::builder()`：`RaftService` + `ClientService` + tonic-health 注册到 `listen_addr` 上的主 server；`AdminService` 在配置 `admin_port` 时启动独立 `tonic::Server`，避免管理流量挤占共识带宽。
+- **实验性 TCP 传输**：除 gRPC 外，`RaftTransport::Tcp` 提供实验性的明文 TCP 传输，用自定义 `RRAF` 二进制帧承载 `AppendEntries`/`Vote`；`InstallSnapshot` 始终回退到 gRPC。该帧协议无 TLS、无对端认证，仅限开发/基准测试场景——启用需显式设置 `allow_insecure`，且绑定地址被强制为 loopback。
 
 ---
 
@@ -31,6 +32,7 @@ rr's network communication is built on `tonic` (a Rust gRPC framework) and `pros
 - **Three proto services**: `RaftService` (internal Raft RPCs), `ClientService` (client requests), and `AdminService` (operator commands).
 - **Binary Payloads**: To decouple the network layer from Raft core logic, Raft messages (e.g., `AppendEntries`) are serialized with `bincode` into binary byte streams and wrapped in the `bytes` fields of proto messages.
 - **Dual-server topology**: `RrNode::start()` calls `tonic::transport::Server::builder()` directly. The main server (bound to `listen_addr`) hosts `RaftService` + `ClientService` + tonic-health. When `admin_port` is configured, a **separate** `tonic::Server` hosts `AdminService` so admin traffic cannot starve consensus bandwidth.
+- **Experimental TCP transport**: Besides gRPC, `RaftTransport::Tcp` provides an experimental plaintext TCP transport that carries `AppendEntries`/`Vote` in a custom `RRAF` binary framing; `InstallSnapshot` always falls back to gRPC. The frame protocol has no TLS and no peer authentication, and is meant for development/benchmarking only — enabling it requires an explicit `allow_insecure` opt-in, and the bind address is forced to loopback.
 
 ## 架构图 / Architecture Diagram
 
@@ -59,7 +61,7 @@ Container_Boundary(raft_net, "Raft Networking") {
 }
 
 Container_Ext(remote_node, "Remote Node", "rr-server", "Peer in same Raft group")
-Component(channel_pool, "ChannelPool", "rr-network", "Shared tonic Channel cache")
+Component(channel_pool, "ChannelPool", "rr-raft (local)", "Shared tonic Channel cache")
 
 Rel(rr_client, client_svc_impl, "gRPC ClientRequest")
 Rel(rr_node, raft_svc_impl, "registers on listen_addr")
@@ -83,7 +85,7 @@ LAYOUT_WITH_LEGEND()
 
 - **重用机制**：维护到远程节点的 gRPC 通道（Channel），实现连接复用。
 - **并发安全**：内部使用 `DashMap<NodeId, Channel>`，支持无锁的并发访问。
-- **延迟创建**：通道在第一次使用时按需创建，并在连接失败时自动移除。
+- **延迟创建**：通道在第一次使用时通过 `get_or_connect(node_id, addr)` 按需创建；失效通道经 `remove(node_id)` 移除——`GrpcRaftNetwork` 仅在 RPC 返回 `Code::Unavailable` 时才驱逐通道。
 
 ---
 
@@ -91,7 +93,7 @@ To avoid the overhead of establishing a new TCP connection for every Raft RPC, r
 
 - **Reuse Mechanism**: It maintains reusable gRPC channels to remote nodes, enabling connection persistence.
 - **Concurrent Safety**: Uses `DashMap<NodeId, Channel>` internally for lock-free concurrent access.
-- **Lazy Creation**: Channels are created on-demand during the first use and are automatically removed upon connection failure.
+- **Lazy Creation**: Channels are created on-demand via `get_or_connect(node_id, addr)` on first use; stale channels are dropped via `remove(node_id)` — `GrpcRaftNetwork` only evicts a channel when an RPC fails with `Code::Unavailable`.
 
 ## Raft 服务 / Raft Service
 
@@ -113,7 +115,7 @@ To avoid the overhead of establishing a new TCP connection for every Raft RPC, r
 
 `ClientServiceImpl` 负责处理来自 SDK 的客户端请求。
 
-- **请求类型**：主要处理 `ClientRequest`（读写操作）和 `GetClusterInfo`（获取集群拓扑）。
+- **请求类型**：共四个 RPC——`Request`（写请求）、`ReadLocal`（本地副本读，绕过共识，可能读到旧数据）、`ReadLinearizable`（基于 ReadIndex 的线性化读）和 `GetClusterInfo`（集群拓扑；当前实现仅 group_id 列表为真实数据，leader/副本字段为占位值，客户端实际经重定向发现领导者）。
 - **调度逻辑**：使用 `ClientDispatch` trait。`ClientDispatchImpl` 会通过 `ShardRouter` 确定分片所在的 Raft 组，然后执行 `client_write`。
 - **领导者重定向**：如果当前节点不是该组的 Leader，它会返回 Leader 的地址信息，供客户端 SDK 进行透明重定向。
 
@@ -121,7 +123,7 @@ To avoid the overhead of establishing a new TCP connection for every Raft RPC, r
 
 `ClientServiceImpl` is responsible for handling client requests from the SDK.
 
-- **Request Types**: Primarily handles `ClientRequest` (read/write operations) and `GetClusterInfo` (fetching cluster topology).
+- **Request Types**: Four RPCs in total — `Request` (write requests), `ReadLocal` (local replica reads bypassing consensus, may return stale data), `ReadLinearizable` (linearizable reads via ReadIndex), and `GetClusterInfo` (cluster topology; in the current implementation only the group_id list is real — leader/replica fields are placeholders, and clients discover leaders via redirects).
 - **Dispatch Logic**: Uses the `ClientDispatch` trait. `ClientDispatchImpl` determines the Raft group where the shard resides via `ShardRouter`, then executes `client_write`.
 - **Leader Redirect**: If the current node is not the Leader of the group, it returns the Leader's address information, enabling transparent redirection by the client SDK.
 
@@ -130,13 +132,13 @@ To avoid the overhead of establishing a new TCP connection for every Raft RPC, r
 `GrpcNetworkFactory` 是连接 `openraft` 库与 rr 网络实现的桥梁。
 
 - **Trait 实现**：实现了 openraft 的 `RaftNetworkFactory` 接口，为每个远程节点创建 `GrpcRaftNetwork` 实例。
-- **网络抽象**：`GrpcRaftNetwork` 负责将 openraft 的 RPC 调用转换为 gRPC 消息，并通过 `ChannelPool` 发送出去。
-- **循环依赖处理**：为了打破 `rr-network` 与 `rr-raft` 之间的循环依赖，网络工厂在本地重新定义了兼容的 proto 消息结构。
+- **网络抽象**：`GrpcRaftNetwork` 负责将 openraft 的 RPC 调用转换为 gRPC 消息，并通过本地 `ChannelPool` 发送出去。
+- **本地定义避免跨 crate 依赖**：`rr-network` 只依赖 `rr-core`（实际依赖方向为 `rr-raft` → `rr-client` → `rr-network`，不存在循环依赖）。为了让 Raft RPC 客户端留在 `rr-raft` 内部、无需依赖 `rr-network`，网络工厂在本地重新定义了与 `rr.raft.*` 线格式兼容（prost 注解一致）的 proto 消息结构，并内嵌一个本地 `ChannelPool`（与 `rr_network::ChannelPool` 功能相同）。
 
 ---
 
 `GrpcNetworkFactory` serves as the bridge between the `openraft` library and rr's network implementation.
 
 - **Trait Implementation**: Implements openraft's `RaftNetworkFactory` interface, creating `GrpcRaftNetwork` instances for each remote node.
-- **Network Abstraction**: `GrpcRaftNetwork` is responsible for converting openraft RPC calls into gRPC messages and sending them via the `ChannelPool`.
-- **Cycle Handling**: To break the circular dependency between `rr-network` and `rr-raft`, the network factory redefines compatible proto message structures locally.
+- **Network Abstraction**: `GrpcRaftNetwork` is responsible for converting openraft RPC calls into gRPC messages and sending them via the local `ChannelPool`.
+- **Local Definitions Avoid Cross-Crate Dependency**: `rr-network` depends only on `rr-core` (the actual dependency direction is `rr-raft` → `rr-client` → `rr-network`; no circular dependency exists). To keep the Raft RPC client inside `rr-raft` without depending on `rr-network`, the network factory redefines wire-compatible proto message structures locally (prost annotations matching `rr.raft.*`) and embeds a local `ChannelPool` (functionally identical to `rr_network::ChannelPool`).

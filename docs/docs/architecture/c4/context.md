@@ -26,13 +26,13 @@ System(rr_service, "rr-based Service", "Distributed service (e.g. KV store) runn
 
 System_Ext(prometheus, "Prometheus", "Time-series metrics DB. Scrapes per-node /metrics")
 System_Ext(config_store, "External ConfigProvider (optional)", "etcd / file / custom source for routing table in production")
-SystemDb_Ext(disk, "Local Disk", "Per-node data directory for RocksDB log & state (when rocks feature is enabled)")
+SystemDb_Ext(disk, "Local Disk", "Per-group RocksDB instances for raft log (rocks feature; not wired by the stock binary)")
 
 Rel(end_user, rr_service, "Uses (e.g. GET/PUT keys)", "gRPC via rr-client SDK")
 Rel(developer, rr_service, "Builds & deploys", "cargo, config, topology")
 Rel(operator, rr_service, "Administers", "rr-admin CLI / gRPC")
 Rel(rr_service, prometheus, "Exposes metrics", "HTTP /metrics")
-Rel(rr_service, disk, "Persists Raft log, snapshots, state", "File I/O via RocksDB")
+Rel(rr_service, disk, "Persists Raft log (rocks feature)", "File I/O via per-group RocksDB")
 Rel(rr_service, config_store, "Loads routing table, watches changes", "ConfigProvider trait")
 
 LAYOUT_WITH_LEGEND()
@@ -72,18 +72,18 @@ rr 节点通过内置的 `metrics-exporter-prometheus` 在 HTTP `/metrics` 端�
 rr nodes expose metrics at HTTP `/metrics` via the built-in `metrics-exporter-prometheus` (request latencies, Raft terms, log append rates, etc.). Prometheus scrapes them periodically.
 
 ### External ConfigProvider (optional)
-默认 `MemConfigProvider` 将路由表存储在进程内存中，仅适合开发。生产环境通常需要自定义 `ConfigProvider`，从 etcd、配置文件或其他外部源加载并监听变化。
+默认 `MemConfigProvider` 将路由表存储在进程内存中，仅适合开发。生产环境可用 workspace 自带的 `rr-config-etcd`（`EtcdConfigProvider`，**只读**——rr 从不写回 etcd），或自行实现 `ConfigProvider` 从其他外部源加载并监听变化。
 
 ---
 
-The default `MemConfigProvider` keeps the routing table in process memory — suitable only for development. Production typically requires a custom `ConfigProvider` that loads from and watches etcd, config files, or another external source.
+The default `MemConfigProvider` keeps the routing table in process memory — suitable only for development. In production you can use the workspace-provided `rr-config-etcd` (`EtcdConfigProvider`, **read-only** — rr never writes back to etcd), or implement `ConfigProvider` yourself to load from and watch another external source.
 
 ### Local Disk
-启用 `rocks` feature 后，每个节点将 Raft 日志、元数据、状态机数据持久化到本地文件系统（通常是 SSD）。数据目录路径由 `NodeConfig` 指定。
+启用 `rocks` feature 后，rr-raft 可将每个 group 的 Raft 日志持久化到本地文件系统（通常是 SSD）——**每个 group 一个独立的 RocksDB 实例**，路径为 `{base_path}/{group_id}`。注意：stock `rr-server` 二进制目前不会接线 RocksDB raft 日志（仅集成测试使用）；`--data-dir` 是 CLI/配置文件层的概念，`NodeConfig` 本身没有 `data_dir` 字段。状态机快照不持久化——只存于内存，重启后靠日志重放恢复。
 
 ---
 
-When the `rocks` feature is enabled, each node persists Raft log, metadata, and state machine data to the local filesystem (typically an SSD). The data directory path is specified in `NodeConfig`.
+With the `rocks` feature, rr-raft can persist each group's Raft log to the local filesystem (typically an SSD) — **one independent RocksDB instance per group** at `{base_path}/{group_id}`. Note: the stock `rr-server` binary currently never wires RocksDB raft-log storage (only integration tests use it); `--data-dir` is a CLI/config-file-layer concept — `NodeConfig` itself has no `data_dir` field. State machine snapshots are not persisted — they live in memory only, and state is recovered by log replay after a restart.
 
 ## 未显式建模的内容 / What's Intentionally Out of Scope
 

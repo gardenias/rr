@@ -31,7 +31,6 @@ Container_Boundary(n3, "Node 3 (Follower)") {
   Component(n3_raft, "RaftNode G7", "rr-raft", "openraft core")
 }
 
-Container_Ext(cfg, "ConfigProvider", "rr-config", "Routing table source")
 Container_Ext(client, "rr-client", "Rust library", "User application")
 
 Rel(n2_raft, n2_raft, "1. Election timeout → Candidate, term += 1")
@@ -40,8 +39,7 @@ Rel(n2_raft, n1_raft, "3. VoteRequest (may fail - unreachable)", "gRPC")
 Rel(n3_raft, n2_raft, "4. VoteResponse(granted=true)", "gRPC")
 Rel(n2_raft, n2_raft, "5. Quorum (2/3) → Leader")
 Rel(n2_raft, n3_raft, "6. AppendEntries heartbeat", "gRPC")
-Rel(n2_raft, cfg, "7. update_leader(G7, node=2) (if configured)")
-Rel(cfg, client, "8. ClusterInfo eventually reflects new leader", "gRPC GetClusterInfo")
+Rel(client, n2_raft, "7. Clients learn the new leader via leader_info redirects (routing table never carries leader state)", "gRPC")
 
 @enduml
 ```
@@ -54,7 +52,6 @@ autonumber
 participant N1 as "Node 1 (Leader,\nthen crashes)"
 participant N2 as "Node 2 (Follower)"
 participant N3 as "Node 3 (Follower)"
-participant Cfg as "ConfigProvider"
 participant Client as "rr-client\n(user app)"
 
 note over N1, N3 : Normal steady state: N1 sends heartbeats at interval T
@@ -80,15 +77,13 @@ N2 -> N2 : state = Leader\ninitialize next_index[], match_index[]
 N2 -> N3 : AppendEntries (empty, heartbeat with new term)
 N3 --> N2 : ack
 
-note over N2 : Optional: notify ConfigProvider if configured
-N2 -> Cfg : update_leader(group=7, leader=N2)
-Cfg --> Cfg : broadcast RoutingTableChange::LeaderChanged
+note over N2, Client : Nothing writes the new leader to ConfigProvider —\nthe routing table has no leader field (ADR A-0013).\nGetClusterInfo only returns group ids (leader_node_id=0 placeholder),\nso clients learn the leader exclusively via redirects.
 
-note over Client : Next request lands on old leader (N1)\n→ connection fails\n→ client tries next bootstrap → N3\n→ N3 returns ForwardToLeader{N2}
+note over Client : Next request lands on old leader (N1)\n→ connection fails\n→ client tries next bootstrap → N3\n→ N3 returns a redirect response (success=false + leader_info{N2})
 Client -> N3 : ClientRequest(partition=42)
-N3 --> Client : ForwardToLeader{node_id=2, addr=host-2:51001}
-Client -> N2 : ClientRequest (retry)
-N2 --> Client : ClientWriteResponse
+N3 --> Client : ClientResponse{success=false, leader_info={node_id=2, addr=host-2:51001}}
+Client -> N2 : ClientRequest (retry, after backoff)
+N2 --> Client : ClientResponse{success=true, payload}
 @enduml
 ```
 
@@ -112,10 +107,10 @@ rr **does not** weaken these guarantees — it uses openraft as-is, adding multi
 
 | Parameter | Typical Value | Tradeoff |
 | :--- | :--- | :--- |
-| `heartbeat_interval` | 50–100 ms | Lower = faster failure detection, higher = less network chatter |
-| `election_timeout_min` | 150 ms | Must be > 2× heartbeat_interval |
-| `election_timeout_max` | 300 ms | Randomized per-node to prevent split votes |
-| `max_in_memory_logs` | 1000 | Triggers snapshot creation |
+| `heartbeat_interval` | 50 ms (rr default) | Lower = faster failure detection, higher = less network chatter |
+| `election_timeout_min` | 150 ms (rr default) | Must be > 2× heartbeat_interval |
+| `election_timeout_max` | 300 ms (rr default) | Randomized per-node to prevent split votes |
+| `snapshot_policy` | `SnapshotPolicy::LogsSinceLast(50_000)` (rr default, `rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST`) | Entries logged since last snapshot before triggering a new one |
 
 **错误配置的后果 / Consequences of misconfiguration**:
 - `election_timeout < heartbeat_interval` → 不必要的选举，集群颠簸
@@ -177,4 +172,4 @@ rr, via **independent openraft tasks and independent randomized timeouts**, keep
 ## 相关 / Related
 
 - 客户端如何感知 leader 变化：[dynamic-put-request.md](./dynamic-put-request.md)
-- ConfigProvider 如何传播 leader 变更：[dynamic-config-update.md](./dynamic-config-update.md)
+- 路由表变更（不含 leader——leader 是 raft 运行时状态）：[dynamic-config-update.md](./dynamic-config-update.md)

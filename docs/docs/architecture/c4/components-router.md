@@ -19,29 +19,29 @@ rr uses **table-based routing** rather than hash rings. This diagram shows how `
 title Component Diagram - rr-router + rr-config
 
 Container_Ext(rr_server, "rr-server", "Rust binary", "Owns & queries the router")
-Container_Ext(rr_client, "rr-client SDK", "Rust library", "Queries cluster info via GetClusterInfo RPC")
+Container_Ext(rr_client, "rr-client SDK", "Rust library", "Queries group ids via GetClusterInfo RPC (leader/replicas are placeholders)")
 Container_Ext(source, "Config Source", "In-memory / etcd / file / custom", "Production-varies backing store")
 
 Container_Boundary(routing_system, "Routing System") {
   Boundary(router_crate, "rr-router", "crate") {
-    Component(shard_router, "ShardRouter", "rr-router::router", "Stateless resolver. route(partition_id) → GroupId. Caches RoutingTable snapshot; refreshes on change events")
+    Component(shard_router, "ShardRouter", "rr-router::router", "Stateless resolver. route(partition_id) → GroupId. No local cache — every call clones the full RoutingTable via ConfigProvider")
   }
 
   Boundary(config_crate, "rr-config", "crate") {
-    Component(cfg_trait, "ConfigProvider (trait)", "rr-core::config", "get_routing_table() / subscribe_changes() / update_group_membership() etc.")
-    Component(mem_cfg, "MemConfigProvider", "rr-config::mem", "In-process impl. tokio::sync::broadcast for change notification. Default in examples & tests")
-    Component(routing_table, "RoutingTable", "rr-core::types", "Pure data: partitions, groups, nodes. Serializable. Snapshot-style: cheap to clone")
-    Component(change_ev, "RoutingTableChange", "rr-core::types", "Enum: PartitionAdded, NodeAdded, GroupMembershipChanged, NodeRemoved, etc.")
+    Component(cfg_trait, "ConfigProvider (trait)", "rr-core::config", "Read-only: get_routing_table() / watch_changes() / get_node_addr()")
+    Component(mem_cfg, "MemConfigProvider", "rr-config::mem", "In-process impl. Adds inherent mutation methods; tokio::sync::broadcast for change notification. Default in examples & tests")
+    Component(routing_table, "RoutingTable", "rr-core::types", "Pure data: partitions, groups, nodes. Serializable. Cloned in full on every read")
+    Component(change_ev, "RoutingTableChange", "rr-core::config", "Enum: PartitionAdded, PartitionRemoved, PartitionUpdated, NodeAdded, NodeRemoved, GroupMembershipChanged")
   }
 }
 
 Rel(rr_server, shard_router, "route(partition_id) for client writes")
-Rel(rr_client, rr_server, "GetClusterInfo() → RoutingTable snapshot", "gRPC")
+Rel(rr_client, rr_server, "GetClusterInfo() → group ids (leader_node_id=0, empty replicas — placeholder)", "gRPC")
 
-Rel(shard_router, cfg_trait, "Initial load + subscribe_changes()")
-Rel(shard_router, routing_table, "Holds cached snapshot")
-Rel(cfg_trait, routing_table, "Returns on get/update")
-Rel(cfg_trait, change_ev, "Broadcasts on mutation")
+Rel(shard_router, cfg_trait, "get_routing_table() on every route() call")
+Rel(shard_router, routing_table, "Clones full table per request (no cache)")
+Rel(cfg_trait, routing_table, "Returns full table on get_routing_table()")
+Rel(cfg_trait, change_ev, "Streams via watch_changes() (delivery is impl-defined)")
 Rel(mem_cfg, cfg_trait, "Implements")
 Rel(mem_cfg, source, "For MemConfigProvider: kept in-process. Production impls load from source")
 
@@ -58,53 +58,58 @@ Defined in `rr-core::types`. A **pure data structure** that serializes freely. C
 
 | Field | Type | Purpose |
 | :--- | :--- | :--- |
-| `partitions` | `HashMap<PartitionId, PartitionConfig>` | 每个分片的所属 group + 元数据 / each partition's owning group + metadata |
-| `groups` | `HashMap<GroupId, GroupMeta>` | group 的成员列表 / group's member replicas |
-| `nodes` | `HashMap<NodeId, NodeAddr>` | node_id → "host:port" |
+| `partitions` | `HashMap<PartitionId, (PartitionConfig, GroupId)>` | 每个分片的配置 + 所属 group / each partition's config + owning group |
+| `groups` | `HashMap<GroupId, GroupMeta>` | group 的成员列表（`group_id` + `replicas`，不含 leader——leader 是 raft 运行时状态）/ group's member replicas (`group_id` + `replicas`; no leader — leader is raft runtime state) |
+| `nodes` | `HashMap<NodeId, NodeAddr>` | node_id → `NodeAddr { addr: "host:port" }` |
 
 ### ShardRouter
 `crates/rr-router/src/router.rs`
 
 **职责 / Responsibilities**:
-1. 启动时：从 `ConfigProvider::get_routing_table()` 加载初始快照。
-2. 订阅 `RoutingTableChange` 事件，按需更新本地缓存（`ArcSwap<RoutingTable>` 或类似）。
-3. 提供查询 API：
-   - `route(partition_id) → group_id` — 热路径，无锁
-   - `group_members(group_id) → Vec<NodeAddr>` — 用于 RaftGroupManager 启动 group
-4. 记录 routing metrics（cache hit/miss、lookup latency）。
+1. 无启动加载、无本地缓存：每次 `route()` 都通过 `ConfigProvider::get_routing_table()` **完整克隆**当前路由表，然后做一次 HashMap 查询。
+2. 不订阅变更事件——监听 `watch_changes()` 并按事件启停 group 的循环在 `RrNode`（`rr-server::node`）里，不在 router 里。
+3. 查询 API 仅两个：
+   - `route(partition_id) → Result<GroupId>` — 热路径；未命中返回 `PartitionNotFound`
+   - `routing_table() → Result<RoutingTable>` — 返回完整表（`RrNode::start()` 启动 group 时使用）
+4. 路由指标只有一个计数器：`router.route.not_found`（未命中时 +1）。
 
 ---
 
 **Responsibilities**:
-1. At startup: load initial snapshot from `ConfigProvider::get_routing_table()`.
-2. Subscribe to `RoutingTableChange` events; update local cache on demand (`ArcSwap<RoutingTable>` or similar).
-3. Expose query APIs:
-   - `route(partition_id) → group_id` — hot path, lock-free
-   - `group_members(group_id) → Vec<NodeAddr>` — used by RaftGroupManager to start groups
-4. Records routing metrics (cache hit/miss, lookup latency).
+1. No startup load, no local cache: every `route()` call **clones the full routing table** via `ConfigProvider::get_routing_table()`, then does a single HashMap lookup.
+2. No change subscription — the loop that watches `watch_changes()` and starts/stops groups lives in `RrNode` (`rr-server::node`), not in the router.
+3. Exactly two query APIs:
+   - `route(partition_id) → Result<GroupId>` — hot path; a miss returns `PartitionNotFound`
+   - `routing_table() → Result<RoutingTable>` — returns the full table (used by `RrNode::start()` to start groups)
+4. A single routing metric: the `router.route.not_found` counter (incremented on miss).
 
 ### ConfigProvider trait
-定义在 `rr-core::config`。抽象了 **路由表的来源和变更通知**：
+定义在 `rr-core::config`。抽象了 **路由表的来源和变更通知**。trait 是**只读的**——恰有三个方法：
 
-Defined in `rr-core::config`. Abstracts **where the routing table comes from and how changes are delivered**:
+Defined in `rr-core::config`. Abstracts **where the routing table comes from and how changes are delivered**. The trait is **read-only** — exactly three methods:
 
 ```rust
 #[async_trait]
-pub trait ConfigProvider: Send + Sync + 'static {
-    async fn get_routing_table(&self) -> Result<RoutingTable, RrError>;
-    async fn subscribe_changes(&self) -> BoxStream<'static, RoutingTableChange>;
-
-    // Mutations (usually only called by control plane / admin):
-    async fn add_node(&self, node_id: NodeId, addr: NodeAddr) -> Result<(), RrError>;
-    async fn update_group_membership(&self, group_id: GroupId, members: Vec<NodeId>) -> Result<(), RrError>;
-    // ...
+pub trait ConfigProvider: Send + Sync {
+    /// Get the current full routing table.
+    async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
+    /// Subscribe to routing table change events as a stream.
+    async fn watch_changes(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError>;
+    /// Get the gRPC address for a specific node.
+    async fn get_node_addr(&self, node_id: NodeId) -> Result<NodeAddr, ConfigError>;
 }
 ```
+
+**trait 上没有写方法。** `add_partition` / `add_node` / `update_group_membership` 等变更方法只存在于具体实现 `MemConfigProvider` 的 inherent impl 上，供嵌入方或测试直接调用。
+
+**There are no write methods on the trait.** Mutation methods like `add_partition` / `add_node` / `update_group_membership` exist only as inherent methods on the concrete `MemConfigProvider`, called directly by the embedding application or tests.
 
 ### MemConfigProvider
 `crates/rr-config/src/mem.rs`
 
-默认实现。内部持有 `Arc<RwLock<RoutingTable>>` 和 `tokio::sync::broadcast::Sender<RoutingTableChange>`。所有变更：
+默认实现。内部持有 `Arc<RwLock<RoutingTable>>` 和 `tokio::sync::broadcast::Sender<RoutingTableChange>`。变更方法（`add_partition` / `remove_partition` / `add_node` / `remove_node` / `update_group_membership`）是该类型的 **inherent 方法**（不属于 trait），每个都：
 
 1. 加写锁修改 `RoutingTable`
 2. 广播变更事件
@@ -116,7 +121,7 @@ pub trait ConfigProvider: Send + Sync + 'static {
 
 ---
 
-Default implementation. Internally holds `Arc<RwLock<RoutingTable>>` + `tokio::sync::broadcast::Sender<RoutingTableChange>`. All mutations:
+Default implementation. Internally holds `Arc<RwLock<RoutingTable>>` + `tokio::sync::broadcast::Sender<RoutingTableChange>`. The mutation methods (`add_partition` / `remove_partition` / `add_node` / `remove_node` / `update_group_membership`) are **inherent methods** of this type (not part of the trait); each one:
 
 1. Acquire write lock, mutate `RoutingTable`
 2. Broadcast the change event
