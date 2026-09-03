@@ -40,11 +40,16 @@ impl ReadKind {
 /// Exercises the **blocking** SDK interface (`send_request_blocking`).
 /// The OS thread is occupied for the entire round-trip; this measures
 /// the minimum achievable per-request latency with zero concurrency.
+///
+/// When `progress` is set, prints an interim line every interval: elapsed
+/// time, ok/err counters and instantaneous TPS since the previous line
+/// (counters only — cheap and safe for long runs).
 pub async fn run_s1_serial(
     client: SharedClient,
     payload_size: usize,
     duration: Duration,
     warmup: Duration,
+    progress: Option<Duration>,
 ) -> Metrics {
     let payload = vec![0u8; payload_size];
 
@@ -55,12 +60,32 @@ pub async fn run_s1_serial(
 
     let m = Metrics::new();
     let deadline = Instant::now() + duration;
+    let mut last_print = Instant::now();
+    let mut last_ok = 0u64;
     while Instant::now() < deadline {
         let t0 = Instant::now();
         let ok = client
             .send_request_blocking(PARTITION_ID, payload.clone())
             .is_ok();
         m.record(t0.elapsed(), ok);
+
+        if let Some(interval) = progress {
+            let now = Instant::now();
+            let window = now.duration_since(last_print);
+            if window >= interval {
+                let ok_now = m.ok_count();
+                let tps = (ok_now - last_ok) as f64 / window.as_secs_f64();
+                println!(
+                    "  [progress] elapsed={:.0}s  ok={}  err={}  tps={:.0}",
+                    m.elapsed().as_secs_f64(),
+                    ok_now,
+                    m.err_count(),
+                    tps
+                );
+                last_print = now;
+                last_ok = ok_now;
+            }
+        }
     }
     m
 }

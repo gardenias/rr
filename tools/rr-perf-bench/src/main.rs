@@ -16,12 +16,33 @@ use cluster::{find_bin, Cluster, ClusterConfig, DurabilityKind, StorageKind};
 #[derive(Parser, Debug)]
 #[command(
     name = "rr-perf-bench",
-    about = "Integration perf benchmark: local rr cluster (1/3/5 processes), real gRPC traffic"
+    about = "Integration perf benchmark: spawn a local rr cluster (1/3/5 processes) or attach to an already-running one via --cluster-addrs; real gRPC traffic"
 )]
 struct Args {
     /// Scenario(s) to run.
     #[arg(long, value_enum, default_value = "all")]
     scenario: Scenario,
+
+    /// Attach to an already-running cluster (comma-separated host:port list,
+    /// e.g. a Docker Compose stack) instead of spawning local rr-server
+    /// processes. No binaries are needed and nothing is shut down afterwards.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        conflicts_with_all = [
+            "members",
+            "storage",
+            "durability",
+            "client_rps",
+            "use_tcp_transport",
+            "port_base",
+            "server_bin",
+            "admin_bin",
+            "log_servers",
+            "data_dir",
+        ]
+    )]
+    cluster_addrs: Option<Vec<String>>,
 
     /// Number of cluster nodes (voters).
     #[arg(long, default_value = "3", value_parser = parse_members)]
@@ -81,6 +102,12 @@ struct Args {
     /// under self-protecting backpressure.
     #[arg(long)]
     client_rps: Option<u32>,
+
+    /// Print an interim progress line every N seconds during S1 (elapsed,
+    /// ok/err counters, instantaneous TPS since the previous line).
+    /// Useful for long runs; S2/S3 already print per-level tables.
+    #[arg(long)]
+    progress_secs: Option<u64>,
 }
 
 #[derive(Clone, ValueEnum, Debug)]
@@ -126,25 +153,6 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let server_bin = match args.server_bin {
-        Some(p) => p,
-        None => find_bin("rr-server", "RR_SERVER_BIN")?,
-    };
-    let admin_bin = match args.admin_bin {
-        Some(p) => p,
-        None => find_bin("rr-admin", "RR_ADMIN_BIN")?,
-    };
-
-    let storage = match args.storage {
-        StorageArg::Mem => StorageKind::Mem,
-        StorageArg::Rocks => StorageKind::Rocks,
-    };
-    let durability = match args.durability {
-        DurabilityArg::Strict => DurabilityKind::Strict,
-        DurabilityArg::ReplicatedOnly => DurabilityKind::ReplicatedOnly,
-        DurabilityArg::TestOnly => DurabilityKind::TestOnly,
-    };
-
     let concurrency_levels: Vec<usize> = args
         .concurrency
         .split(',')
@@ -154,51 +162,100 @@ async fn main() -> Result<()> {
 
     let warmup = Duration::from_secs(args.warmup_secs);
     let duration = Duration::from_secs(args.duration_secs);
-
-    let cfg = ClusterConfig {
-        server_bin,
-        admin_bin,
-        data_dir: PathBuf::from(&args.data_dir),
-        storage,
-        durability,
-        log_to_files: args.log_servers,
-        members: args.members,
-        port_base: args.port_base,
-        use_tcp_transport: args.use_tcp_transport,
-        client_rps: args.client_rps,
-    };
+    let progress = args.progress_secs.map(Duration::from_secs);
 
     println!("=== rr-perf-bench ===");
-    println!(
-        "  storage={:?}  durability={:?}  payload={}B",
-        cfg.storage, cfg.durability, args.payload
-    );
+    println!("  payload={}B", args.payload);
     println!(
         "  warmup={}s  measure={}s",
         args.warmup_secs, args.duration_secs
     );
-    println!();
-    print!("Starting {}-node cluster … ", cfg.members);
 
-    let cluster = Cluster::start(&cfg)
-        .await
-        .context("cluster startup failed")?;
-    let addrs = cluster.all_grpc_addrs();
+    let (client, cluster) = match &args.cluster_addrs {
+        Some(addrs) => {
+            let addrs: Vec<String> = addrs.iter().map(|a| a.trim().to_string()).collect();
+            println!("  mode: external cluster ({})", addrs.join(", "));
+            println!();
 
-    println!("done");
-    println!("  nodes: {}", addrs.join(", "));
+            let client = Arc::new(
+                RrClient::connect(addrs)
+                    .await
+                    .context("RrClient connect failed")?,
+            );
+            (client, None)
+        }
+        None => {
+            let server_bin = match args.server_bin {
+                Some(p) => p,
+                None => find_bin("rr-server", "RR_SERVER_BIN")?,
+            };
+            let admin_bin = match args.admin_bin {
+                Some(p) => p,
+                None => find_bin("rr-admin", "RR_ADMIN_BIN")?,
+            };
 
-    let client = Arc::new(
-        RrClient::connect(addrs)
-            .await
-            .context("RrClient connect failed")?,
-    );
+            let storage = match args.storage {
+                StorageArg::Mem => StorageKind::Mem,
+                StorageArg::Rocks => StorageKind::Rocks,
+            };
+            let durability = match args.durability {
+                DurabilityArg::Strict => DurabilityKind::Strict,
+                DurabilityArg::ReplicatedOnly => DurabilityKind::ReplicatedOnly,
+                DurabilityArg::TestOnly => DurabilityKind::TestOnly,
+            };
+
+            let cfg = ClusterConfig {
+                server_bin,
+                admin_bin,
+                data_dir: PathBuf::from(&args.data_dir),
+                storage,
+                durability,
+                log_to_files: args.log_servers,
+                members: args.members,
+                port_base: args.port_base,
+                use_tcp_transport: args.use_tcp_transport,
+                client_rps: args.client_rps,
+            };
+
+            println!(
+                "  mode: spawned cluster  storage={:?}  durability={:?}",
+                cfg.storage, cfg.durability
+            );
+            println!();
+            print!("Starting {}-node cluster … ", cfg.members);
+
+            let cluster = Cluster::start(&cfg)
+                .await
+                .context("cluster startup failed")?;
+            let addrs = cluster.all_grpc_addrs();
+
+            println!("done");
+            println!("  nodes: {}", addrs.join(", "));
+
+            let client = Arc::new(
+                RrClient::connect(addrs)
+                    .await
+                    .context("RrClient connect failed")?,
+            );
+            (client, Some(cluster))
+        }
+    };
 
     match args.scenario {
         Scenario::S1 | Scenario::All => {
-            print!("S1 serial … ");
-            let m =
-                workload::run_s1_serial(Arc::clone(&client), args.payload, duration, warmup).await;
+            if progress.is_some() {
+                println!("S1 serial …");
+            } else {
+                print!("S1 serial … ");
+            }
+            let m = workload::run_s1_serial(
+                Arc::clone(&client),
+                args.payload,
+                duration,
+                warmup,
+                progress,
+            )
+            .await;
             report::print_s1(&m.snapshot(), args.payload);
         }
         _ => {}
@@ -241,9 +298,11 @@ async fn main() -> Result<()> {
     }
 
     println!();
-    println!("Shutting down cluster …");
-    cluster.shutdown().await;
-    println!("done.");
+    if let Some(cluster) = cluster {
+        println!("Shutting down cluster …");
+        cluster.shutdown().await;
+        println!("done.");
+    }
 
     Ok(())
 }

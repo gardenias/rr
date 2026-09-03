@@ -19,6 +19,7 @@ members = [
     "benches",
     "crates/rr-admin",
     "tools/rr-perf-bench",
+    "tools/rr-lab-producer",
 ]
 resolver = "2"
 [workspace.package]

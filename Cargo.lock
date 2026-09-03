@@ -1806,6 +1806,7 @@ dependencies = [
  "rr-client",
  "rr-config",
  "rr-core",
+ "rr-ingestor-kafka",
  "rr-network",
  "rr-raft",
  "rr-router",
@@ -3300,6 +3301,20 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rr-lab-producer"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "clap",
+ "kv-store",
+ "rdkafka",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

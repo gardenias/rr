@@ -1,0 +1,26 @@
+[package]
+name = "rr-lab-producer"
+version.workspace = true
+edition = "2021"
+publish = false
+description = "Lab traffic producer: drives a real Kafka-compatible broker (e.g. Redpanda) with a deterministic, verifiable KvRequest command stream for the rr Kafka-ingestor path"
+
+[[bin]]
+name = "rr-lab-producer"
+path = "src/main.rs"
+
+[dependencies]
+kv-store = { path = "../../examples/kv-store" }
+bincode = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Same version + features as crates/rr-ingestor-kafka so the whole workspace
+# builds one librdkafka (cmake-build compiles it from source — cmake required).
+[dependencies.rdkafka]
+version = "0.36"
+default-features = false
+features = ["cmake-build", "tokio", "ssl-vendored", "sasl"]
