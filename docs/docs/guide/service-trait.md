@@ -105,6 +105,24 @@ pub trait Service: Send + Sync {
 }
 ```
 
+## 默认方法 / Default Methods
+
+除上述四个核心方法外，`Service` 还提供以下带默认实现的方法，可按需覆盖：
+
+- `handle_with_outputs(request)`：与 `handle` 类似，但允许在请求提交后以至少一次（at-least-once）语义附带投递输出（见 ADR A-0007）。默认委托给 `handle()` 并返回空输出。
+- `on_leader_elected(group_id)`：当本节点成为该组的 Leader 时调用，适合启动仅 Leader 使用的资源（如挂接 Kafka ingestor、预热缓存）。默认为 no-op。
+- `on_step_down(group_id)`：当本节点卸任 Leader 时调用，适合停止仅 Leader 使用的资源。默认为 no-op。
+- `shutdown()`：在 Raft 组停止前调用，适合 flush 状态、关闭连接或释放外部资源。默认为 no-op。
+
+---
+
+Beyond the four core methods above, `Service` provides the following defaulted methods you can override as needed:
+
+- `handle_with_outputs(request)`: like `handle`, but may also emit outputs delivered at-least-once after the apply commits (see ADR A-0007). Defaults to delegating to `handle()` with empty outputs.
+- `on_leader_elected(group_id)`: called when this node becomes the group's leader — the right place to start leader-only resources (e.g. attach a Kafka ingestor, pre-warm caches). Default is a no-op.
+- `on_step_down(group_id)`: called when this node steps down from leadership — the right place to stop leader-only resources. Default is a no-op.
+- `shutdown()`: called before the Raft group is stopped — flush state, close connections, or release external resources. Default is a no-op.
+
 ## 完整的 KvService 示例 / Complete KvService Example
 
 以下是一个典型的 `KvService` 实现（参考自 `examples/kv-store/src/service.rs`）：

@@ -92,9 +92,9 @@ histogram_quantile(0.99, sum by (le) (rate(rr_proposal_duration_seconds_bucket[5
 
 ### 4. 配置抖动 / Config oscillation
 
-**证据**: ConfigProvider 反复广播 `RoutingTableChange::LeaderChanged` 事件，各节点都以为别人是 leader。
+**证据**: ConfigProvider 反复广播 `RoutingTableChange::GroupMembershipChanged`（或 `NodeAdded`/`NodeRemoved` 抖动）事件，各节点的 watch loop 不断 start/stop raft group，leader 随之反复上下台。
 
-**Fix**: 检查 ConfigProvider 实现是否把 *观察到* 的 leader 误写回 routing table（形成反馈回路）。`MemConfigProvider` 不应该这样；自定义实现可能有 bug。
+**Fix**: 检查 ConfigProvider 实现是否在配置面反复改写 membership 或节点地址（形成抖动回路）。注意路由表**不包含** leader 信息（ADR A-0013：leader 是 raft 运行时状态，客户端经 redirect 发现），所以 leader 抖动不可能来自路由表写回——它只会来自 membership/节点事件的反复变更。`MemConfigProvider` 不会自发产生这类事件；自定义实现可能有 bug。
 
 ### 5. 时钟跳变 / Clock jumps
 

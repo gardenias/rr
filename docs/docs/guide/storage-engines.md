@@ -80,7 +80,7 @@ let storage = MemStorage::new();
 在 `Cargo.toml` 中配置：
 ```toml
 [dependencies]
-rr-storage = { version = "0.1.0", features = ["rocks"] }
+rr-storage = { version = "0.2.0", features = ["rocks"] }
 ```
 
 编译和测试：
@@ -145,19 +145,19 @@ safety guarantees.
 | `DurabilityPolicy::ReplicatedOnly` | `"replicated_only"` | WAL written, no fsync | ⚠️ Only with replication ≥ 3 + external backup |
 | `DurabilityPolicy::TestOnly` | `"test_only"` | No WAL, no fsync | ❌ Tests only |
 
-**v0.3.0 rename**: 旧名称 `Balanced` / `Fast` 被重命名为
+**v0.2.0 rename**: 旧名称 `Balanced` / `Fast` 被重命名为
 `ReplicatedOnly` / `TestOnly` 以更明确表达意图。旧名仍作为 `#[deprecated]`
 alias 保留一个 minor version；TOML / CLI 也接受旧字符串
-（`"balanced"` / `"fast"`）但会在启动时发出 deprecation warning。在 v0.4.0
+（`"balanced"` / `"fast"`）但会在启动时发出 deprecation warning。在 v0.3.0
 之前请迁移到新名。
 
 ---
 
-**v0.3.0 rename**: the old variants `Balanced` / `Fast` were renamed to
+**v0.2.0 rename**: the old variants `Balanced` / `Fast` were renamed to
 `ReplicatedOnly` / `TestOnly` for clearer intent. The old names remain as
 `#[deprecated]` aliases for one minor version; TOML / CLI still accept the
 old strings (`"balanced"` / `"fast"`) but emit a deprecation warning at
-startup. Migrate to the new names before v0.4.0.
+startup. Migrate to the new names before v0.3.0.
 
 `RocksStorage::open()` 在 policy 不是 `Strict` 时也会在启动日志里发一条
 `tracing::warn!`，提醒 ops 这个节点违反了 Raft 的持久性契约。

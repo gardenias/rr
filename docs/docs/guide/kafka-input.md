@@ -5,7 +5,7 @@ description: Drive an rr Raft group from a Kafka topic with leader-exclusive con
 
 # Kafka Input — `rr-ingestor-kafka`
 
-> **Available since**: v0.3.0 — see [v0.2 → v0.3 migration guide](../deployment/v0.2-to-v0.3-migration.md).
+> **Available since**: v0.3.0 (in development on `main`, not yet tagged — see the [v0.2 → v0.3 Migration Guide](../deployment/v0.2-to-v0.3-migration.md)).
 > **Reference ADR**: [A-0001](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0001-command-ingestor-abstraction.md).
 
 The `rr-ingestor-kafka` crate makes a Kafka topic a first-class write source for an rr Raft group: only the current leader of group `G` reads from `input_{G}` (single partition); followers receive every command via Raft log replication. Combined with the [framework idempotency layer](idempotency.md), Kafka's at-least-once delivery becomes **exactly-once apply** at the user `Service::handle()`.
@@ -197,10 +197,10 @@ Pair `rr_ingestor_step_down_drops_total` with `rr_idempotency_replays_total` to 
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `rr_ingestor_seed_failures_total > 0` | Corrupt persisted offset OR broker unreachable at promotion | Check broker health; if persistent, may need `rr-admin reset-ingestor-offset` (planned for 0.3.x) |
+| `rr_ingestor_seed_failures_total > 0` | Corrupt persisted offset OR broker unreachable at promotion | Check broker health; if persistent, use `rr-admin group reset-ingestor-offset --group <G> --offset <N>` to override the persisted offset (`--offset -1` clears it) |
 | Endless `ingestor poll failed; backing off` warnings | Broker outage | Backoff capped at 30s; consensus is unaffected. Restore broker. |
 | `rr_idempotency_collisions_total > 0` with auto-idempotency | Two ingestors attached to the same group with the same `request_type` | Ensure `topic_for(group_id)` is unique per stream |
-| Out-of-range seek silently consumes from earliest | Kafka retention trimmed past `last_applied_offset` | **P1, planned 0.3.x**: validate against `fetch_watermarks` before seek. Until then, monitor lag externally. |
+| Out-of-range seek warning in logs | Kafka retention trimmed past `last_applied_offset` | The backend validates seeks against `fetch_watermarks` before consuming; if the watermark fetch itself fails it logs `fetch_watermarks failed; skipping seek-range validation` and proceeds — monitor lag externally |
 
 ---
 
@@ -208,7 +208,7 @@ Pair `rr_ingestor_step_down_drops_total` with `rr_idempotency_replays_total` to 
 
 - **No bundled Pulsar / NATS / RocketMQ backends** — only Kafka. Other backends are out-of-tree (community contributions welcome).
 - **Single partition per group** is mandatory; the framework explicitly does not support partition-fanout. To shard load, use multiple groups (each its own topic).
-- **`P0-1` follow-up** — seed_offset reads from snapshot, not the live state machine; on rapid leader transitions where the snapshot lags applied state, re-fetched messages are deduped by auto-idempotency but consume Kafka I/O. Pure perf concern (correctness preserved by auto-idempotency); resolution planned for 0.3.x.
+- **`P0-1` resolved** — `seed_offset` first calls `refresh_snapshot_if_stale()`, which triggers a fresh snapshot and waits (up to a bounded deadline) when the latest snapshot lags `last_applied`, so a newly-promoted leader no longer re-fetches large lagging ranges from Kafka. Any residual re-fetch is still deduped by auto-idempotency at apply time.
 
 ---
 

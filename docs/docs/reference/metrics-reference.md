@@ -208,7 +208,7 @@ Incremented by 1 when the node finishes startup (all subsystems wired, gRPC serv
 | :--- | :--- |
 | 类型 / Type | Counter |
 | 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-server/src/node.rs` — `serve()` |
+| 记录位置 / Recorded in | `rr-server/src/node.rs` — `start()` |
 
 ---
 

@@ -47,9 +47,11 @@ dependency pinned to a tag**.
 `rr` is a private GitHub repo. Consumers must (1) have read access via SSH
 key or HTTPS PAT, (2) add `.cargo/config.toml` with
 `net.git-fetch-with-cli = true` so Cargo uses the system `git` binary for
-auth, and (3) use **Rust ≥ 1.88** — rr's declared `rust-version = "1.82"` is
-stale. Transitive deps pull in `clap_lex` (requires `edition2024`, stable in
-1.85) and `validit` (uses `let_chains`, stable in 1.88).
+auth, and (3) use **Rust ≥ 1.98** — rr's workspace declares
+`rust-version = "1.98"` (required by edition2024 and recent stable
+features), and the repo-root `rust-toolchain.toml` pins that toolchain
+automatically. Pin `channel = "1.98"` or newer in your own project's
+`rust-toolchain.toml`.
 
 ### 典型的 workspace `Cargo.toml`
 
@@ -60,7 +62,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.98"
 
 [workspace.dependencies]
 # ─── rr framework (lock all crates to the same tag) ──────────────────────
@@ -75,7 +77,7 @@ rr-network = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2"
 rr-router  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
 
 # ─── rr 公共 API 暴露的依赖 —— 版本必须与 rr 对齐 ────────────────────────
-openraft           = { version = "0.9.21", features = ["serde"] }
+openraft           = { version = "= 0.10.0-alpha.34", features = ["serde"] }
 tokio              = { version = "1", features = ["full"] }
 serde              = { version = "1", features = ["derive"] }
 bincode            = { version = "2.0.0", features = ["serde"] }
@@ -177,8 +179,8 @@ crate 发版。
 
 ```
 error[E0308]: mismatched types
- = note: expected struct `openraft::BasicNode` (0.9.21)
-         found    struct `openraft::BasicNode` (0.9.0)
+ = note: expected struct `openraft::BasicNode` (0.10.0-alpha.34)
+         found    struct `openraft::BasicNode` (0.9.21)
 ```
 
 同一个 crate 的两个不同 patch 版本在 Cargo 看来是两个完全不同的类型。

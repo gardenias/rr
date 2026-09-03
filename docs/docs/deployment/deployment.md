@@ -91,9 +91,9 @@ RUST_LOG=info ./target/release/kv-store \
 
 Ensuring data safety and recoverability is critical:
 
-- **快照 (Snapshots)**: `openraft` 会根据 `max_in_memory_logs` 配置自动创建快照。
+- **快照 (Snapshots)**: `openraft` 会按 `SnapshotPolicy::LogsSinceLast(N)`（默认 50_000 条日志，可通过 `NodeConfig::snapshot_logs_since_last` 调整）自动创建快照。注意快照仅保存在内存中，不随重启持久化（详见 [持久化与恢复](../architecture/durability.md)）。
 - **RocksDB 备份**: 如果使用 RocksDB，可以使用其自带的备份 API 或直接对数据目录进行文件系统级快照。
-- **恢复 (Restore)**: 恢复时，只需将备份的数据目录放回原位并重启节点，`rr` 会自动从快照和日志中恢复状态。
+- **恢复 (Restore)**: 恢复时，只需将备份的数据目录放回原位并重启节点，`rr` 会通过重放 Raft 日志恢复状态机状态。
 
 ---
 

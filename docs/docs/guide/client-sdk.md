@@ -82,6 +82,20 @@ let response_bytes = client.send_request(1, payload).await?;
 let (response, _): (KvResponse, _) = bincode::serde::decode_from_slice(&response_bytes, bincode::config::standard())?;
 ```
 
+### 读取路径 / Read Paths
+
+除了写入用的 `send_request`，`RrClient` 还提供两种读取 API：
+
+- `read(group_id, payload)` — 本地/过期读（stale read）：由任一副本直接应答，不经过 Raft 共识，延迟最低，但数据可能略落后于最新已提交的写入。
+- `read_linearizable(group_id, payload)` — 线性一致读：服务端通过 Raft ReadIndex 确认提交进度后再应答；若打到 follower 会自动重定向到 leader 并重试。
+
+---
+
+Besides `send_request` for writes, `RrClient` offers two read APIs:
+
+- `read(group_id, payload)` — stale/local read: served directly by any replica without Raft consensus; lowest latency, but the data may lag slightly behind the latest committed write.
+- `read_linearizable(group_id, payload)` — linearizable read: the server confirms the commit index via Raft ReadIndex before answering; follower redirects to the leader are retried automatically.
+
 ## 自动领导者重定向 / Auto Leader Redirect
 
 `RrClient` 实现了透明的领导者重定向逻辑：
@@ -102,16 +116,22 @@ let (response, _): (KvResponse, _) = bincode::serde::decode_from_slice(&response
 
 ## 集群信息 / Cluster Info
 
-你可以使用 `get_cluster_info()` 获取集群的拓扑信息。它会尝试连接引导地址，直到有一个节点响应。
+你可以使用 `get_cluster_info()` 获取集群的组列表。它会尝试连接引导地址，直到有一个节点响应。
 
 ---
 
-You can use `get_cluster_info()` to retrieve cluster topology information. It attempts to connect to the bootstrap addresses until one node responds.
+You can use `get_cluster_info()` to retrieve the cluster's group list. It attempts to connect to the bootstrap addresses until one node responds.
 
 ```rust
 let cluster_info = client.get_cluster_info().await?;
-println!("Nodes in cluster: {:?}", cluster_info.nodes);
+println!("Groups in cluster: {:?}", cluster_info.groups);
 ```
+
+:::caution
+服务端目前为 `ClusterInfo` 返回的是占位数据：每个 `GroupInfo` 只有 `group_id` 是真实值，`leader_node_id` 恒为 `0`，`replica_node_ids` 为空。需要真实的 leader / 成员信息时请使用 Admin API（`rr-admin`）。
+
+The server currently returns placeholder data for `ClusterInfo`: in each `GroupInfo` only `group_id` is real — `leader_node_id` is always `0` and `replica_node_ids` is empty. Use the Admin API (`rr-admin`) when you need real leader / membership information.
+:::
 
 ## 错误处理 / Error Handling
 

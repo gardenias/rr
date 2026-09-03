@@ -184,7 +184,7 @@ impl StateMachine for KvStateMachine {
 
 `rr` 遵循标准的 Raft 快照流程：
 
-1. **触发**: 当已提交日志数量超过 `max_in_memory_logs` 配置时，`openraft` 触发快照创建。
+1. **触发**: 当自上次快照以来已提交的日志数量超过 `SnapshotPolicy::LogsSinceLast(N)` 阈值（默认 50_000，可通过 `NodeConfig::snapshot_logs_since_last` 调整）时，`openraft` 触发快照创建。
 2. **构建**: `RrSnapshotBuilder::build_snapshot()` 调用你的 `StateMachine::snapshot()` 方法。
 3. **编码**: 状态机返回序列化后的 `Vec<u8>` 字节流。
 4. **传输**: 如果有节点进度落后太远，Leader 通过 `InstallSnapshot` RPC 将快照发送给 Follower。
@@ -194,7 +194,7 @@ impl StateMachine for KvStateMachine {
 
 `rr` follows the standard Raft snapshot workflow:
 
-1. **Trigger**: When the number of committed logs exceeds the `max_in_memory_logs` configuration, `openraft` triggers snapshot creation.
+1. **Trigger**: When the number of logs committed since the last snapshot exceeds the `SnapshotPolicy::LogsSinceLast(N)` threshold (default 50_000, tunable via `NodeConfig::snapshot_logs_since_last`), `openraft` triggers snapshot creation.
 2. **Build**: `RrSnapshotBuilder::build_snapshot()` calls your `StateMachine::snapshot()` method.
 3. **Encode**: The state machine returns a serialized `Vec<u8>` byte stream.
 4. **Transfer**: If a node falls too far behind, the Leader sends the snapshot to the Follower via `InstallSnapshot` RPCs.

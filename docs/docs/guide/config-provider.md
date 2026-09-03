@@ -120,13 +120,36 @@ config.add_partition(
 ).await;
 ```
 
-## 实现自定义提供者 / Implementing a Custom Provider
+## etcd 配置提供者 / EtcdConfigProvider
 
-要实现自定义的 `ConfigProvider`（例如基于 etcd）：
+`rr-config-etcd` crate 提供了基于 etcd v3 的生产级后端 `EtcdConfigProvider`：
 
 ---
 
-To implement a custom `ConfigProvider` (e.g., based on etcd):
+The `rr-config-etcd` crate provides a production-grade etcd v3 backend, `EtcdConfigProvider`:
+
+```rust
+use rr_config_etcd::EtcdConfigProvider;
+
+// 构造函数会立即验证与 etcd 的连通性
+// The constructor validates connectivity to etcd immediately
+let provider = EtcdConfigProvider::new(
+    vec!["http://localhost:2379".to_string()], // etcd endpoints
+    "default".to_string(), // cluster_id，用于 key 前缀隔离 / cluster_id, used as key-prefix isolation
+).await?;
+```
+
+- **只读实现 / Read-only**：`EtcdConfigProvider` 只实现 `get_routing_table` / `watch_changes` / `get_node_addr`。rr 永远不会把路由信息写回 etcd——路由表由外部工具或运维流程写入 etcd，rr 只负责消费。 / It implements only `get_routing_table` / `watch_changes` / `get_node_addr`. rr never writes routing state back to etcd — the routing table is provisioned into etcd by external tooling or operator workflows, and rr only consumes it.
+- **Key 布局 / Key layout**：`/rr/{cluster_id}/nodes/{node_id}`、`/rr/{cluster_id}/partitions/{partition_id}`、`/rr/{cluster_id}/groups/{group_id}/replicas`。
+- **示例 / Example**：`examples/etcd-config-quickstart` 演示了完整的读取 + watch 流程，运行前需要在 `localhost:2379` 启动一个 etcd v3 实例。 / `examples/etcd-config-quickstart` demonstrates the full read + watch flow; it requires an etcd v3 instance running at `localhost:2379`.
+
+## 实现自定义提供者 / Implementing a Custom Provider
+
+要实现自定义的 `ConfigProvider`（例如基于 ZooKeeper 或 Consul）：
+
+---
+
+To implement a custom `ConfigProvider` (e.g., based on ZooKeeper or Consul):
 
 1. 为你的存储后端实现 `ConfigProvider` trait。
 2. 在 `watch_changes` 中，利用后端的监听机制（如 etcd watch）返回一个事件流。

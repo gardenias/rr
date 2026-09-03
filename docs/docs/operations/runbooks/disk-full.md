@@ -88,7 +88,7 @@ Then you CANNOT take it offline without losing availability. Options:
 
 In order of likelihood:
 
-1. **log growth outpacing snapshots** — 检查 `rr_raft_last_log_index` 与 `rr_snapshot_installs_total` 的比率。正常应每 `max_in_memory_logs` 条目一次快照。如果 snapshot 间隔过大，`openraft` 的 snapshot policy 可能配置太保守。
+1. **log growth outpacing snapshots** — 检查 `rr_raft_last_log_index` 与 `rr_snapshot_installs_total` 的比率。正常应每 `snapshot_logs_since_last`（`SnapshotPolicy::LogsSinceLast(N)`，默认 50_000）条目一次快照。如果 snapshot 间隔过大，快照阈值可能配置太保守。
 2. **compaction backlog** — 在 RocksDB `LOG` (`/var/lib/rr/data/LOG`) 里 grep `compaction`；若看到 "Slowdown" 或 "Stop" 条目，说明 L0 堆积。需要调高 `max_background_jobs` 或 `level_zero_stop_trigger`。
 3. **runaway write rate** — Prometheus `rate(rr_proposal_duration_seconds_count[5m])` 是否比平时高 10×？若是，上游问题（应用 bug、流量激增），不单纯是 rr 问题。
 4. **非 rr 租户** — 同一 volume 上的其他进程（日志、core dump、其他数据库）。`ncdu /var/lib/rr/..`。
@@ -97,8 +97,9 @@ In order of likelihood:
 
 1. **log growth outpacing snapshots** — check `rr_raft_last_log_index`
    vs `rr_snapshot_installs_total`. Normal behavior: snapshot every
-   `max_in_memory_logs` entries. If the gap is too large, openraft's
-   snapshot policy is set too conservatively.
+   `snapshot_logs_since_last` entries (`SnapshotPolicy::LogsSinceLast(N)`,
+   default 50_000). If the gap is too large, the snapshot threshold is
+   set too conservatively.
 2. **compaction backlog** — grep `compaction` in RocksDB's `LOG` at
    `/var/lib/rr/data/LOG`. "Slowdown" or "Stop" entries indicate L0
    pile-up. Raise `max_background_jobs` or

@@ -5,7 +5,7 @@ description: Exactly-once apply on top of at-least-once delivery via (request_ty
 
 # Framework Idempotency
 
-> **Available since**: v0.3.0 — see [v0.2 → v0.3 migration guide](../deployment/v0.2-to-v0.3-migration.md).
+> **Available since**: v0.3.0 (in development on `main`, not yet tagged — see the [v0.2 → v0.3 Migration Guide](../deployment/v0.2-to-v0.3-migration.md)).
 > **Reference ADR**: [A-0003](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0003-framework-idempotency-layer.md).
 
 The idempotency layer turns rr's *at-least-once* client retries (and Kafka's at-least-once delivery) into **exactly-once apply** semantics for the user `Service::handle()`. Clients opt in per request by attaching an `IdempotencyKey`; requests without a key go through the existing path unchanged.
@@ -65,7 +65,7 @@ When `decide(key)` is consulted on `apply`, one of four outcomes is returned:
 use rr_client::RrClient;
 use rr_core::idempotency::IdempotencyKey;
 
-let client = RrClient::connect(&["node1:50051"]).await?;
+let client = RrClient::connect(vec!["node1:50051".to_string()]).await?;
 
 // Without idempotency (legacy path, double-apply on retry possible):
 let resp = client.send_request(group_id, payload.clone()).await?;
