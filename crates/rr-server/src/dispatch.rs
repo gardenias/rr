@@ -145,7 +145,15 @@ impl ClientDispatch for ClientDispatchImpl {
         self.group_manager
             .local_read(group_id, payload)
             .await
-            .map_err(|e| tonic::Status::internal(e.to_string()))
+            .map_err(|e| {
+                tracing::error!(
+                    partition_id,
+                    group_id,
+                    error = %e,
+                    "local_read failed (detail sanitized for client)"
+                );
+                tonic::Status::internal("local read failed")
+            })
     }
 
     #[instrument(skip(self, payload), fields(payload_len = payload.len()))]

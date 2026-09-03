@@ -10,8 +10,9 @@
 
 use async_trait::async_trait;
 use rr_core::error::RrError;
-use rr_core::state_machine::StateMachine;
+use rr_core::state_machine::{StateMachine, StateMachineReader};
 use rr_core::types::LogIndex;
+use std::sync::Arc;
 
 /// A minimal state machine that echoes the committed entry back as the response.
 ///
@@ -34,6 +35,19 @@ impl Default for EchoStateMachine {
     }
 }
 
+/// Read handle that echoes the read payload back, mirroring `apply`'s echo
+/// semantics. Lets the stock `rr-server` binary serve `ReadLocal` /
+/// `ReadLinearizable` for smoke tests and benchmarks instead of failing with
+/// "state machine does not support local read".
+struct EchoReader;
+
+#[async_trait]
+impl StateMachineReader for EchoReader {
+    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        Ok(payload)
+    }
+}
+
 #[async_trait]
 impl StateMachine for EchoStateMachine {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
@@ -50,6 +64,10 @@ impl StateMachine for EchoStateMachine {
 
     async fn last_applied(&self) -> Option<LogIndex> {
         self.last_applied
+    }
+
+    fn read_handle(&self) -> Option<Arc<dyn StateMachineReader>> {
+        Some(Arc::new(EchoReader))
     }
 }
 
@@ -76,5 +94,12 @@ mod tests {
         let mut sm = EchoStateMachine::new();
         sm.restore(b"anything").await.unwrap();
         assert_eq!(sm.apply(b"x").await.unwrap(), b"x".to_vec());
+    }
+
+    #[tokio::test]
+    async fn echo_read_handle_echoes_payload() {
+        let sm = EchoStateMachine::new();
+        let reader = sm.read_handle().expect("echo SM must expose a read handle");
+        assert_eq!(reader.read(b"ping".to_vec()).await.unwrap(), b"ping".to_vec());
     }
 }
