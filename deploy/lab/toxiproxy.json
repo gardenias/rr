@@ -1,0 +1,5 @@
+[
+  { "name": "kv1", "listen": "0.0.0.0:15101", "upstream": "kv-1:51001", "enabled": true },
+  { "name": "kv2", "listen": "0.0.0.0:15102", "upstream": "kv-2:51001", "enabled": true },
+  { "name": "kv3", "listen": "0.0.0.0:15103", "upstream": "kv-3:51001", "enabled": true }
+]

@@ -1,0 +1,261 @@
+# rr local lab — 3-node kv-store cluster + Redpanda (Kafka API) + Prometheus + Grafana.
+#
+# 仅本地实验环境 / LOCAL LAB ONLY: no TLS, no auth, kv-store runs with
+# allow_insecure. Never reuse outside a local lab.
+#
+# Usage (repo root):
+#   docker compose -f deploy/lab/docker-compose.yml up -d --build
+#   docker compose -f deploy/lab/docker-compose.yml --profile bench run --rm bench
+#   docker compose -f deploy/lab/docker-compose.yml --profile produce run -d --name rr-lab-producer --rm producer
+#   docker compose -f deploy/lab/docker-compose.yml down -v
+#
+# Chaos mode (adds toxiproxy between nodes): see docker-compose.chaos.yml.
+#
+# NOTE: kv-store's hand-rolled CLI parser only accepts `--flag value` (two
+# argv items), NOT `--flag=value` — keep the command lists in split form.
+
+name: rrlab
+
+x-kv-common: &kv-common
+  build:
+    context: ../..
+    dockerfile: deploy/lab/Dockerfile
+  image: rr-lab:dev
+  networks: [rrlab]
+  # All nodes use the same internal ports; identity comes from the hostname.
+  # Admin gRPC = port+1000 = 52001; metrics/HTTP = 9100.
+  environment:
+    RUST_LOG: "info"
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 12
+    start_period: 15s
+
+services:
+  kv-1:
+    <<: *kv-common
+    container_name: kv-1
+    hostname: kv-1
+    command:
+      - "--node-id"
+      - "1"
+      - "--bootstrap"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+    ports:
+      - "51101:51001"
+      - "52101:52001"
+      - "9111:9100"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  kv-2:
+    <<: *kv-common
+    container_name: kv-2
+    hostname: kv-2
+    command:
+      - "--node-id"
+      - "2"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+    ports:
+      - "51102:51001"
+      - "52102:52001"
+      - "9112:9100"
+    depends_on:
+      kv-1:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  kv-3:
+    <<: *kv-common
+    container_name: kv-3
+    hostname: kv-3
+    command:
+      - "--node-id"
+      - "3"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+    ports:
+      - "51103:51001"
+      - "52103:52001"
+      - "9113:9100"
+    depends_on:
+      kv-2:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    hostname: redpanda
+    networks: [rrlab]
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=redpanda:9092
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    ports:
+      - "19092:9092"
+    healthcheck:
+      # Healthchecks bypass the image entrypoint — call rpk by full path.
+      test: ["CMD", "/usr/bin/rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  # One-shot helper: create the ingestor topic input_1 (single partition,
+  # per the rr-ingestor-kafka design). Runs to completion and exits.
+  topic-init:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: topic-init
+    networks: [rrlab]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    # NOTE: the image entrypoint prepends `rpk`; -X passes global config.
+    command:
+      - topic
+      - create
+      - input_1
+      - -p
+      - "1"
+      - -r
+      - "1"
+      - -X
+      - brokers=redpanda:9092
+    restart: "no"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    networks: [rrlab]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/prometheus/rr-recording-rules.yml:/etc/prometheus/rr/recording-rules.yml:ro
+      - ../observability/prometheus/rr-alerts.yml:/etc/prometheus/rr/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    networks: [rrlab]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/rr-cluster-overview.json:/var/lib/grafana/dashboards/rr-cluster-overview.json:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  # On-demand command producer (Kafka input path): writes Increment/Put
+  # commands to input_1 at a fixed rate. Start with:
+  #   docker compose -f deploy/lab/docker-compose.yml --profile produce run -d --name rr-lab-producer --rm producer
+  producer:
+    image: rr-lab:dev
+    container_name: rr-lab-producer
+    networks: [rrlab]
+    profiles: ["produce"]
+    entrypoint: ["/usr/local/bin/rr-lab-producer"]
+    command:
+      - "--brokers"
+      - "redpanda:9092"
+      - "--topic"
+      - "input_1"
+      - "--rate"
+      - "500"
+      - "--total"
+      - "0"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      kv-1:
+        condition: service_healthy
+
+  # On-demand load generator, runs INSIDE the lab network so in-cluster
+  # hostnames (and leader-redirect addresses) resolve. Not started by default:
+  #   docker compose -f deploy/lab/docker-compose.yml --profile bench run --rm bench [args]
+  bench:
+    image: rr-lab:dev
+    container_name: rr-lab-bench
+    networks: [rrlab]
+    profiles: ["bench"]
+    entrypoint: ["/usr/local/bin/rr-perf-bench"]
+    command:
+      - "--cluster-addrs=kv-1:51001,kv-2:51001,kv-3:51001"
+      - "--scenario=all"
+      - "--warmup-secs=5"
+      - "--duration-secs=30"
+    depends_on:
+      kv-1:
+        condition: service_healthy
+      kv-2:
+        condition: service_healthy
+      kv-3:
+        condition: service_healthy
+
+networks:
+  rrlab:
+    driver: bridge
+
+volumes:
+  redpanda-data:

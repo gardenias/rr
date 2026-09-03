@@ -1,0 +1,86 @@
+# Chaos-mode override: interpose toxiproxy between the kv nodes' inter-node
+# traffic (raft + redirect-followed client traffic). Load generators talk to
+# the nodes DIRECTLY (kv-N:51001), so toxics isolate the raft-link variable.
+#
+# Usage (repo root):
+#   docker compose -f deploy/lab/docker-compose.yml -f deploy/lab/docker-compose.chaos.yml up -d --build
+#
+# The override swaps each node's command to use the toxiproxy endpoints as the
+# peer roster; toxiproxy.json provisions the per-destination proxies.
+
+services:
+  toxiproxy:
+    image: shopify/toxiproxy:latest # pin a release tag for reproducibility
+    container_name: toxiproxy
+    networks: [rrlab]
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "18474:8474" # management API (lab only)
+    restart: unless-stopped
+
+  kv-1:
+    command:
+      - "--node-id"
+      - "1"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@toxiproxy:15101,2@toxiproxy:15102,3@toxiproxy:15103"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+      - "--bootstrap"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+
+  kv-2:
+    command:
+      - "--node-id"
+      - "2"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@toxiproxy:15101,2@toxiproxy:15102,3@toxiproxy:15103"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+    depends_on:
+      kv-1:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+
+  kv-3:
+    command:
+      - "--node-id"
+      - "3"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@toxiproxy:15101,2@toxiproxy:15102,3@toxiproxy:15103"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+    depends_on:
+      kv-2:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
