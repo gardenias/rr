@@ -272,6 +272,27 @@ A-0005 / A-0006 / A-0007 / A-0008 / A-0009 landed. No release tag yet.
 
 - Error sanitization (F2.5) plus full audit trail (F2.4): the network layer no longer surfaces internal state to attackers, and unauthorized rejects are now investigatable from the audit sink.
 
+### 实验环境批次（2026-09-03/04 — 容器实验室 + 压测驱动修复）
+
+> Built `deploy/lab/` — a reproducible OrbStack/Docker lab (3-node kv-store +
+> Redpanda + Prometheus/Grafana + Toxiproxy) — and fixed the defects it
+> exposed. Chaos suite: 7 scenarios under `deploy/lab/chaos/`.
+
+#### Added (lab batch)
+
+- **`deploy/lab/` local lab**: 3-node containerized `kv-store` (real KV semantics) with Redpanda as a real Kafka input source, Prometheus scraping + provisioned Grafana dashboard, Toxiproxy override for fine-grained network faults, a 7-scenario chaos suite with scripted pass/fail assertions, and `soak.sh` for hours-long stability runs with sampled reports (`deploy/lab/reports/`).
+- **`tools/rr-lab-producer`**: rate-limited Kafka command producer emitting bincode `KvRequest`s — `Increment lab:counter` (exactly-once assertion: final counter must equal the sent count) + sequenced `Put lab:seq:<i>` keys for spot verification. `acks=all` + producer idempotence; `PRODUCER-DONE` summary line for scripting.
+- **`kv-store` example**: new flags `--listen-addr`, `--metrics-port`, `--kafka-brokers`/`--kafka-topic-prefix` (real `KafkaIngestor` wiring behind `--features rdkafka`); advertise address now comes from the roster entry so container hostnames work. New `KvRequest::Increment { key, delta }` (appended last — wire ordinals unchanged; counters stored as decimal UTF-8).
+- **`rr-perf-bench`**: external-cluster mode (`--cluster-addrs`, skips spawn/bootstrap; spawn-only flags conflict-checked), `--progress-secs` heartbeat for long runs, sampled WARN logging of the first op failures.
+
+#### Fixed (found by the lab/benchmarks)
+
+- **`rr-client` dialed a fresh TCP/H2 connection per RPC** (`connect_to_addr` bypassed the pool): under concurrency ≥10 loopback ephemeral-port/backlog exhaustion failed ~98% of reads and destabilized leader heartbeats. Channels are now cached per address and evicted on `Code::Unavailable`; integration suite 49/49 green, 500-concurrency sweeps error-free.
+- **Kafka ingestor poll starvation**: the poll `select!` raced `metrics_rx.changed()` — which fires on every replication-progress update — canceling in-flight polls forever once heartbeats began (deterministic stall, only visible with a real broker). The in-flight poll is no longer cancellable by metrics; leadership is re-checked between batch return and propose. Plus `BATCH_WRITE_TIMEOUT` (10s) around `client_write_many`, whose response stream can stall indefinitely across a leadership transition; a timeout now drops the batch step-down-style and re-seeds from the raft-log-authoritative offset.
+- **Wedged H2 channels after black-holed links**: all three dial sites (rr-raft raft pool, rr-network pool, rr-client) now set HTTP/2 keepalive (10s/5s/idle) + TCP keepalive so dead connections are torn down and redialed instead of producing permanent heartbeat timeouts and post-partition split-brain liveness loss. (Raft safety held throughout — divergent entries were never committed.)
+- **`EchoStateMachine` serves reads** via a new echoing `read_handle`, so the stock binary's `ReadLocal`/`ReadLinearizable` work; `submit_read` failures now log (sanitized) like the write path.
+- **`v0.2.0-rc` doc/sample corrections**: quickstart rewritten around verified end-to-end paths; architecture/C4 docs corrected against the code (ShardRouter cache fabrication, ConfigProvider write methods, RPC inventories, snapshot persistence claims, deployment flags/metrics); new pages — positioning, openraft relationship, read consistency, FAQ, security, durability & recovery, ADR index.
+
 ## [0.2.0] — _TBD on tag cut_
 
 First production-ready release. Rolls up everything from `v0.2.0-rc1` and

@@ -103,6 +103,24 @@ This benchmark round exposed — and fixed — three real defects (all numbers a
 
 ## 复现 / Reproduce
 
+### 容器网络环境（lab 基线）/ Container-network baseline (lab)
+
+同一套场景在 OrbStack 容器网络中跑 3 节点 kv-store（真实 KV 状态机；负载经 `rr-lab:dev` 容器在网内发起，见 [本地实验环境](../operations/local-lab.md)）：
+
+| 场景 / Scenario | 并发 / Conc. | TPS | p50 | p99 | 错误 / Errors |
+|---|---|---|---|---|---|
+| S1 串行写 / serial write | 1 | 3.8k | 253µs | 468µs | 0 |
+| S2 并发写 / write sweep | 100 | 38.8k | 2.0ms | 3.6ms | 0 |
+| S2 并发写 / write sweep | 500 | 40.7k | 8.9ms | 20.7ms | 0 |
+| S3 ReadLocal | 500 | 52.8k | 5.8ms | 24.1ms | 0 |
+| S3 Linearizable | 500 | 17.8k | 21.3ms | 48.8ms | 0 |
+
+与本机 loopback 数字的差异来自环境（容器网桥 + kv-store 真实状态机 vs stock echo）而非单一变量；两组都如实呈现，不要跨环境直接比绝对值。
+
+Numbers differ from the loopback tables due to environment (container bridge + kv-store's real state machine vs stock echo) rather than a single variable — both are presented as-is; do not compare absolute values across environments.
+
+## 复现 / Reproduce
+
 ```bash
 # 构建（一次）/ Build once
 cargo build --release -p rr-server -p rr-admin -p rr-perf-bench
