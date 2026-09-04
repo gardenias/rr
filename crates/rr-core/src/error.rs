@@ -1,100 +1,169 @@
 //! Error types for the rr distributed framework.
 
+/// Top-level error type of the rr framework, wrapping the domain-specific errors.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RrError {
+    /// Raft consensus error.
     #[error("raft error: {0}")]
     Raft(#[from] RaftError),
+    /// Storage engine error.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
+    /// Configuration provider error.
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
+    /// Routing error.
     #[error("router error: {0}")]
     Router(#[from] RouterError),
+    /// Network transport error.
     #[error("network error: {0}")]
     Network(#[from] NetworkError),
+    /// Serialization or deserialization error.
     #[error("codec error: {0}")]
     Codec(#[from] CodecError),
+    /// Error raised by application code (Service / StateMachine logic).
     #[error("application error: {0}")]
     Application(String),
+    /// The request's idempotency record has expired and been evicted; retry
+    /// with a fresh `request_id` greater than the returned watermark.
     #[error("idempotency expired: request_type={request_type}, request_id={request_id}, watermark={watermark}")]
     IdempotencyExpired {
+        /// Request type of the rejected request.
         request_type: String,
+        /// Request ID that fell below the dedup watermark.
         request_id: u64,
+        /// Current dedup watermark; IDs at or below it are no longer tracked.
         watermark: u64,
     },
 }
 
+/// Errors raised by the Raft consensus layer.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RaftError {
+    /// The node that received the request is not the group's leader.
     #[error("not leader, current leader: id={leader:?}, addr={leader_addr:?}")]
     NotLeader {
+        /// Node ID of the current leader, if known.
         leader: Option<u64>,
+        /// Address of the current leader, if known.
         leader_addr: Option<String>,
     },
+    /// The requested Raft group does not exist.
     #[error("group not found: {group_id}")]
-    GroupNotFound { group_id: u64 },
+    GroupNotFound {
+        /// ID of the missing group.
+        group_id: u64,
+    },
+    /// A Raft proposal failed to commit.
     #[error("proposal failed: {reason}")]
-    ProposalFailed { reason: String },
+    ProposalFailed {
+        /// Why the proposal failed.
+        reason: String,
+    },
+    /// A Raft operation timed out.
     #[error("raft timeout")]
     Timeout,
+    /// Raft group initialization failed.
     #[error("raft initialization failed: {reason}")]
-    InitializationFailed { reason: String },
+    InitializationFailed {
+        /// Why initialization failed.
+        reason: String,
+    },
+    /// Membership change rejected because the remaining voter set would drop
+    /// below the required minimum; re-run with force to override.
     #[error(
         "membership change rejected: target voter set has {target_voters} voter(s), \
              below minimum {min}; re-run with force to override"
     )]
-    UnsafeMembershipChange { target_voters: usize, min: usize },
+    UnsafeMembershipChange {
+        /// Number of voters that would remain after the change.
+        target_voters: usize,
+        /// Minimum required voter count (see `MIN_VOTERS_AFTER_REMOVAL`).
+        min: usize,
+    },
 }
 
+/// Errors raised by a storage engine backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StorageError {
+    /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Persisted data failed integrity or decode checks.
     #[error("data corruption: {0}")]
     Corruption(String),
+    /// The requested key was not found.
     #[error("not found: {key}")]
-    NotFound { key: String },
+    NotFound {
+        /// The missing key.
+        key: String,
+    },
 }
 
+/// Errors raised by a configuration provider.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    /// The configuration backend could not be reached.
     #[error("provider unavailable: {0}")]
     ProviderUnavailable(String),
+    /// The provider returned malformed configuration data.
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+    /// The change-watch stream disconnected; re-fetch and re-subscribe.
     #[error("watch disconnected")]
     WatchDisconnected,
 }
 
+/// Errors raised while routing a request to a Raft group.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RouterError {
+    /// No routing table entry exists for the partition.
     #[error("partition not found: {partition_id}")]
-    PartitionNotFound { partition_id: u64 },
+    PartitionNotFound {
+        /// ID of the missing partition.
+        partition_id: u64,
+    },
+    /// No routing table entry exists for the group.
     #[error("group not found: {group_id}")]
-    GroupNotFound { group_id: u64 },
+    GroupNotFound {
+        /// ID of the missing group.
+        group_id: u64,
+    },
 }
 
+/// Errors raised by the network transport layer.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum NetworkError {
+    /// Failed to establish a connection.
     #[error("connection failed to {addr}: {reason}")]
-    ConnectionFailed { addr: String, reason: String },
+    ConnectionFailed {
+        /// Address that could not be reached.
+        addr: String,
+        /// Why the connection failed.
+        reason: String,
+    },
+    /// An established RPC call failed.
     #[error("rpc failed: {0}")]
     RpcFailed(String),
+    /// A network operation timed out.
     #[error("network timeout")]
     Timeout,
 }
 
+/// Errors raised while encoding or decoding payloads.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CodecError {
+    /// A value could not be serialized.
     #[error("serialize failed: {0}")]
     SerializeFailed(String),
+    /// Bytes could not be deserialized into the target type.
     #[error("deserialize failed: {0}")]
     DeserializeFailed(String),
 }

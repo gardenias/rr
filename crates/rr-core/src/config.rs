@@ -13,26 +13,45 @@ use crate::types::{GroupId, NodeAddr, NodeId, PartitionConfig, PartitionId, Rout
 pub enum RoutingTableChange {
     /// A new partition was added to the routing table.
     PartitionAdded {
+        /// ID of the added partition.
         partition_id: PartitionId,
+        /// How the partition maps to its Raft group.
         config: PartitionConfig,
+        /// Raft group that owns the partition.
         group_id: GroupId,
     },
     /// A partition was removed from the routing table.
-    PartitionRemoved { partition_id: PartitionId },
+    PartitionRemoved {
+        /// ID of the removed partition.
+        partition_id: PartitionId,
+    },
 
     /// An existing partition's configuration was updated.
     PartitionUpdated {
+        /// ID of the updated partition.
         partition_id: PartitionId,
+        /// New partition-to-group mapping.
         config: PartitionConfig,
+        /// Raft group that now owns the partition.
         group_id: GroupId,
     },
     /// A new node was added.
-    NodeAdded { node_id: NodeId, addr: NodeAddr },
+    NodeAdded {
+        /// ID of the added node.
+        node_id: NodeId,
+        /// Network address of the added node.
+        addr: NodeAddr,
+    },
     /// A node was removed.
-    NodeRemoved { node_id: NodeId },
+    NodeRemoved {
+        /// ID of the removed node.
+        node_id: NodeId,
+    },
     /// Group membership was changed.
     GroupMembershipChanged {
+        /// Raft group whose membership changed.
         group_id: GroupId,
+        /// New full replica set of the group.
         replicas: Vec<NodeId>,
     },
 }
@@ -45,6 +64,26 @@ pub trait ConfigProvider: Send + Sync {
     /// Get the current full routing table.
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
     /// Subscribe to routing table change events as a stream.
+    ///
+    /// # Stream semantics (current behavior, contractual as of v0.2.0)
+    ///
+    /// - **No initial snapshot.** The stream only yields changes that
+    ///   happen *after* subscription. Bootstrap by calling
+    ///   [`get_routing_table`](Self::get_routing_table) yourself, then
+    ///   apply the stream on top.
+    /// - **Ordering.** Events are best-effort ordered per key. The etcd
+    ///   backend fans three independent watchers (nodes / partitions /
+    ///   groups) into one channel, so there is NO global ordering
+    ///   guarantee across those domains.
+    /// - **Lag behavior differs per backend.** The in-memory backend
+    ///   (broadcast channel) silently DROPS events when a consumer lags —
+    ///   no error is signalled. The etcd backend (bounded mpsc, 256)
+    ///   applies backpressure instead: the watch loop stalls until the
+    ///   consumer catches up. A consumer that must never miss a change
+    ///   should periodically re-fetch the routing table to reconcile.
+    /// - **Disconnect.** If the backend connection drops, the stream may
+    ///   end or stall; consumers should treat stream termination as
+    ///   "re-fetch and re-subscribe".
     async fn watch_changes(
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError>;

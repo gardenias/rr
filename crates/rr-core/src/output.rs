@@ -1,3 +1,10 @@
+//! Side-effect outputs produced by committed Raft entries.
+//!
+//! A [`Service`](crate::Service) may return [`Output`]s alongside its
+//! response via [`HandleResult`]; the framework's output runner delivers
+//! each output to its [`OutputTarget`] at-least-once after the originating
+//! Raft entry is committed and applied.
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +23,9 @@ pub enum OutputTarget {
     },
     /// Publish to a Kafka topic (requires rdkafka feature in the application).
     KafkaPublish {
+        /// Kafka topic to publish to.
         topic: String,
+        /// Kafka partition to publish to.
         partition: i32,
         /// Optional Kafka message key for partition routing.
         key: Vec<u8>,
@@ -33,11 +42,15 @@ pub struct Output {
     /// Idempotency key. Receivers must deduplicate on this key.
     /// Typically: "{input_idempotency_key}:{output_index}".
     pub idempotency_key: String,
+    /// Where the output should be delivered.
     pub target: OutputTarget,
+    /// Opaque payload delivered to the target.
     pub payload: Vec<u8>,
 }
 
 impl Output {
+    /// Create an output with `seq` set to 0; the framework assigns the
+    /// actual sequence number when the output is recorded.
     pub fn new(idempotency_key: impl Into<String>, target: OutputTarget, payload: Vec<u8>) -> Self {
         Self {
             seq: 0,
@@ -57,6 +70,7 @@ pub struct HandleResult {
 }
 
 impl HandleResult {
+    /// Build a result with a response and no side-effect outputs.
     pub fn from_response(response: Vec<u8>) -> Self {
         Self {
             response,
@@ -64,6 +78,8 @@ impl HandleResult {
         }
     }
 
+    /// Build a result with a response and side-effect outputs to deliver
+    /// after the apply commits.
     pub fn with_outputs(response: Vec<u8>, outputs: Vec<Output>) -> Self {
         Self { response, outputs }
     }

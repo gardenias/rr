@@ -1,8 +1,8 @@
 ---
 title: "CommandIngestor trait + rr-ingestor-kafka reference impl"
-status: proposed
+status: implemented
 created: 2026-04-24
-updated: 2026-04-24
+updated: 2026-09-04
 tags: [adr, architecture, input, kafka, mq]
 ---
 

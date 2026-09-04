@@ -20,7 +20,7 @@ use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
 use rr_core::config::ConfigProvider;
-use rr_core::state_machine::StateMachine;
+use rr_core::state_machine::{StateMachine, StateMachineReader};
 use rr_core::storage::StorageEngine;
 use rr_core::types::{GroupId, LogIndex, NodeId, PartitionConfig};
 use rr_raft::group_manager::RaftGroupManager;
@@ -51,6 +51,21 @@ impl StateMachine for EchoSM {
     }
     async fn last_applied(&self) -> Option<LogIndex> {
         None
+    }
+
+    fn read_handle(&self) -> Option<Arc<dyn StateMachineReader>> {
+        Some(Arc::new(EchoReader))
+    }
+}
+
+/// Echo reader for the stale/linearizable read paths — mirrors the
+/// production `EchoStateMachine` reader in `rr-server::builtin_service`.
+struct EchoReader;
+
+#[async_trait::async_trait]
+impl StateMachineReader for EchoReader {
+    async fn read(&self, payload: Vec<u8>) -> Result<Vec<u8>, rr_core::error::RrError> {
+        Ok(payload)
     }
 }
 
@@ -1190,10 +1205,49 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
-    /// T23c — Client leader failover: kill leader, cluster elects new one.
+    /// T23c — Linearizable read redirect: point the SDK at a known follower;
+    /// the follower must answer with a leader redirect and the SDK must
+    /// converge on the leader and serve the read (ADR A-0009 follow-up).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_client_leader_failover() {
-        use std::time::Duration;
+    async fn test_read_linearizable_redirect_from_follower() {
+        let (nodes, provider) = ClusterBuilder::new(3, 1)
+            .with_real_network()
+            .build_with_provider()
+            .await
+            .unwrap();
+
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Point the SDK at a node that is NOT the leader.
+        let follower_id = (1..=3u64).find(|id| *id != leader_id).unwrap();
+        let table = provider.get_routing_table().await.unwrap();
+        let follower_addr = table.nodes[&follower_id].addr.clone();
+
+        let client = RrClient::connect_with_config(
+            vec![follower_addr],
+            RetryConfig {
+                max_retries: 5,
+                retry_delay_ms: 100,
+            },
+        )
+        .await
+        .unwrap();
+
+        // The follower cannot serve a linearizable read locally — openraft
+        // answers ForwardToLeader, the server flattens it into a
+        // `leader_info` redirect, and the SDK retries against the leader.
+        let resp = client
+            .read_linearizable(1, b"lin-read".to_vec())
+            .await
+            .expect("linearizable read via follower must redirect and succeed");
+        assert_eq!(resp, b"lin-read", "EchoReader must echo the read payload");
+
+        shutdown_all(&nodes).await;
+    }
+
+    /// T23d — Client leader failover: kill leader, cluster elects new one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_client_leader_failover() {        use std::time::Duration;
 
         let (nodes, provider) = ClusterBuilder::new(3, 1)
             .with_real_network()

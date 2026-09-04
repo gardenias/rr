@@ -34,7 +34,7 @@ invariants** in `RrNode::new()` by default:
 
 ---
 
-## 从 plaintext v0.2.x 升级到 strict v0.3.x
+## 从 plaintext v0.1.x 升级到 strict v0.2.x
 
 ### 风险分析 / Risk Profile
 
@@ -156,7 +156,7 @@ let node = Arc::new(RrNode::new(config)?);
 3. 重启该节点。
 4. 等 `/ready` 200。
 
-因为 v0.2 → v0.3 的 wire / disk 兼容（见 F4 review），rollback 不丢数据。
+因为 v0.1 → v0.2 的 wire / disk 兼容（见 F4 review），rollback 不丢数据。
 
 ---
 

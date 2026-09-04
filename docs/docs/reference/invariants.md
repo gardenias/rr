@@ -140,6 +140,19 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   `cargo test --workspace --features rr-storage/rocks,integration/rocks`
   (`.github/workflows/ci.yml:93-95`,行内注释说明 `integration` crate 必须开启自身 `rocks`
   feature),llvm-cov 同步(`:176-177`)——3 个 rocks 持久化集成测试与 T4 在 CI 实际运行。
+- **【2026-08-29 WS-7 实施期发现 → RC 批次】SDK 在"follower 未知 leader"窗口对写请求静默假 ACK。**
+  `rr-client` 的 `send_request_inner` 在 server 回 `success=false` 且无 `leader_info`
+  (新当选 leader 尚未被 follower 感知的窗口)时直接 `return Ok(空 payload)`——
+  客户端认为写已成功,实际从未 propose,INV-1 的 ACK 边界在 SDK 侧被架空。
+  同类第二条路径:redirect 链末次 attempt 拿到 `success=false` + `leader_info` 时同样落到 `Ok(空)`。
+
+  **✅ 已闭环(2026-09-04,RC 批次)**:`send_request_inner` 重构——`success=false` 一律按可重试处理
+  (有 `leader_info` 更新 redirect 缓存;无则清缓存回退 bootstrap 轮询),重试耗尽返回
+  `RaftError::NotLeader`,`Ok` 仅在 `success=true` 时返回(`crates/rr-client/src/lib.rs`
+  `send_request_inner`)。回归测试:`test_send_request_no_fake_success_when_leader_unknown`、
+  `test_send_request_converges_once_leader_is_known`(mock gRPC server 模拟未知/已知窗口);
+  既有 redirect/failover 集成测试(`test_client_redirect`、`test_client_leader_failover`、
+  `leader_redirect_failover`)实测全绿。
 
 ## INV-2 Linearizable Read — 线性一致读
 
@@ -180,12 +193,19 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
 - `crates/rr-network/src/client_service.rs:486` `test_read_linearizable_routes_to_submit_linearizable_read`
 - `crates/rr-network/src/client_service.rs:539` `test_read_linearizable_surfaces_leader_redirect_to_proto`
   (follower → `leader_info` 重定向直通 proto 层)
+- `tests/integration/src/lib.rs` `test_read_linearizable_redirect_from_follower`
+  (3 节点真集群:SDK 仅指向已知 follower,经 `leader_info` 重定向在 leader 收敛读成功)
 
 ### 已知缺口
 
 - **【A-0009 遗留 follow-up → 路线图 RC 并行项】无 3 节点集成测试。** 线性一致读目前只有
   mock dispatch 级的单元测试;"对已知 follower 调 `read_linearizable`、断言经重定向在 leader
   上读到最新写"的端到端路径无覆盖。无对应 review P 条目(该 RPC 为 0.2.0 新增,review 未单列)。
+
+  **✅ 已闭环(2026-09-04,RC 批次)**:`test_read_linearizable_redirect_from_follower`
+  (`tests/integration/src/lib.rs`,3 节点 real-network 集群,SDK 只配 follower 地址,
+  断言经 redirect 收敛);集成测试 EchoSM 补 `read_handle`(镜像生产
+  `EchoStateMachine` 的 read 路径)。
 
 ## INV-3 Exactly-Once Ingest — 摄入恰好一次
 

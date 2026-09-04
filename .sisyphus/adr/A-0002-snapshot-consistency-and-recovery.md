@@ -1,8 +1,8 @@
 ---
 title: "Snapshot consistency contract + disaster recovery path"
-status: proposed
+status: implemented
 created: 2026-04-24
-updated: 2026-04-24
+updated: 2026-09-04
 tags: [adr, architecture, snapshot, recovery, openraft]
 ---
 

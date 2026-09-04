@@ -29,17 +29,17 @@
 //! ## Arguments:
 //! - `--node-id <N>`            — Node ID (u64). Defaults to 1 for single-node demo.
 //! - `--port <PORT>`            — gRPC listen port. Defaults to 51001.
-//!                                The admin API is served on PORT + 1000 (51001 → 52001).
+//!   The admin API is served on PORT + 1000 (51001 → 52001).
 //! - `--listen-addr <HOST>`     — gRPC bind host. Defaults to 127.0.0.1. Affects binding
-//!                                only; the advertised address always comes from `--peers`
-//!                                (single-node runs stay on 127.0.0.1).
+//!   only; the advertised address always comes from `--peers`
+//!   (single-node runs stay on 127.0.0.1).
 //! - `--peers <ID@ADDR,...>`    — Full cluster roster, comma-separated `id@addr` pairs
-//!                                (must include this node). Empty means single-node roster.
+//!   (must include this node). Empty means single-node roster.
 //! - `--metrics-port <PORT>`    — Also serve /health, /ready and Prometheus /metrics
-//!                                over HTTP on this port. Off by default.
+//!   over HTTP on this port. Off by default.
 //! - `--kafka-brokers <A,...>`  — Comma-separated bootstrap brokers; consumes group 1's
-//!                                command topic with framework-managed exactly-once apply.
-//!                                Requires a binary built with `--features rdkafka`.
+//!   command topic with framework-managed exactly-once apply.
+//!   Requires a binary built with `--features rdkafka`.
 //! - `--kafka-topic-prefix <P>` — Topic prefix; group 1 consumes `{P}1`. Default `input_`.
 //! - `--bootstrap`              — Initialize Raft membership (run on exactly one node).
 //! - `--demo`                   — Run KV demo writes and exit (default when no args given).

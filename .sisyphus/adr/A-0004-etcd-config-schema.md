@@ -1,8 +1,8 @@
 ---
 title: "etcd key schema for ConfigProvider routing state"
-status: proposed
+status: implemented
 created: 2026-04-27
-updated: 2026-04-27
+updated: 2026-09-04
 tags: [adr, config, etcd, routing, schema]
 ---
 

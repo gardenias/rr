@@ -26,8 +26,8 @@ message Empty {}
 /// framework-level deduplication. The pair (request_type, request_id) is
 /// the dedup identity; client_id is diagnostic-only.
 ///
-/// proto3 `optional` keeps this backward-compatible: a v0.2.x client
-/// (which never sets `idem_key`) and a v0.3.x server (which checks for
+/// proto3 `optional` keeps this backward-compatible: a v0.1.x client
+/// (which never sets `idem_key`) and a v0.2.x server (which checks for
 /// presence) interoperate without renegotiation.
 message IdempotencyKey {
     string request_type = 1;

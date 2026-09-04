@@ -37,6 +37,7 @@ pub const AUDIT_TARGET: &str = "rr::audit";
 /// can filter by surface (e.g. `service="admin"` to scope alerting to
 /// management traffic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServiceLabel {
     /// `AdminService` (management RPCs — TransferLeader, TriggerSnapshot, …).
     Admin,

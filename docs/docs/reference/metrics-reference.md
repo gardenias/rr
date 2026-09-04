@@ -155,7 +155,7 @@ absence as "lag is 0". Always predicate alerts on
 | 类型 / Type | Gauge |
 | 标签 / Labels | `group_id`, `follower_node_id` |
 | 记录位置 / Recorded in | `rr-raft/src/metrics_ticker.rs` — 5s 周期性发射 / 5s periodic ticker |
-| 可用版本 / Available since | v0.3.0 |
+| 可用版本 / Available since | v0.2.0 |
 
 ---
 
@@ -173,9 +173,8 @@ a node catches up via snapshot after falling behind.
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Counter |
-| 标签 / Labels | `group_id` (目前硬编码为 `"unknown"` / currently hard-coded to `"unknown"`) |
+| 标签 / Labels | `group_id` |
 | 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `restore()` |
-| 已知问题 / Known Issue | `group_id` 标签目前因为 `service_adapter` 无法访问所在 group 的 ID 而硬编码。Phase 3 将通过把 group_id 注入 adapter 修复此问题 / The `group_id` label is hard-coded because `service_adapter` lacks access to its owning group's ID. Phase 3 will fix this by threading `group_id` into the adapter. |
 
 ---
 
@@ -343,10 +342,10 @@ Hit / miss counts for the client's leader cache. A miss means fallback to round-
 
 ## 规划中的指标 / Planned Metrics
 
-剩余 Phase 3 观测性计划：
+原 Phase 3 观测性计划已全部落地：/ The original Phase 3 observability plan has fully landed:
 
-- `rr_raft_replication_lag` — 每个 follower 相对 leader 的 `commit_index` 差距 / Per-follower commit_index lag behind leader
-- OpenTelemetry trace propagation via tonic interceptor (`traceparent` + W3C trace context)
+- `rr_raft_replication_lag` — 已实现，见上文 Gauge 表 / Implemented, see the gauge table above (since v0.2.0)
+- W3C trace context 传播 — 已实现（`rr-network::tracing` 的 `extract_/attach_traceparent` 助手 + `examples/otel-client` 集成示例）/ Shipped in v0.2.0 via `rr-network::tracing` helpers and the `examples/otel-client` integration example。OpenTelemetry SDK (OTLP exporter) 按设计不内置，由用户自带 / The OTel SDK itself is deliberately not bundled — bring your own OTLP stack.
 
 ---
 

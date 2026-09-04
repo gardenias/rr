@@ -1,6 +1,6 @@
 # rr v0.2.0 发布路线图与可靠性专项 — 主计划
 
-> **状态**:Phase 0 已实施(2026-08-29:WS-1~WS-7 全部落地、全仓 clippy/测试全绿;ADR A-0011~A-0014 → implemented;见 CONTEXT.md 2026-08-29 session);RC 并行项与 Phase 1 待启动
+> **状态**:Phase 0 已实施(2026-08-29:WS-1~WS-7 全部落地、全仓 clippy/测试全绿;ADR A-0011~A-0014 → implemented;见 CONTEXT.md 2026-08-29 session);RC 并行项已全部关闭(2026-09-04,见下文各勾选 + freeze checklist B/D/E 裁决记录);Phase 1 部分启动(R-7 基线/R-8 soak lab 已落地)
 > **依据**:`.sisyphus/evidence/rr-full-review-2026-08-16.md`(11 个 P0、P1/P2 清单、Oracle 5 问)+ `.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`(全景归档)
 > **基线**:HEAD=`ba69cc8`;8-16 review 的行号引用与当前代码一致。
 > **原则**:正确性 > 性能 > 功能;设计与方案先行(本文件 + 各 ADR/plan 落地后才动工);每个工作项带验收标准。
@@ -112,13 +112,15 @@ v0.2.0 的阻塞不在功能完整性,而在**横切不变量没有执法者**(O
 
 ### RC 其余并行项(任务级,1~2 人日合计)
 
-- [ ] **audit 配对补齐**:`TriggerSnapshot` 无 started、`DrainNode` 无 finished、`reset_ingestor_offset` 无 started;**ClientService mutation 完全无 audit**(`admin.rs:228/364-478/602-647`)——补 dispatch/result 配对事件。
-- [ ] **docs 漂移清单**(逐条修复):`README.md:173` 旧 4 参数 `RrNode::new` 签名;`components-server.md:80`、`storage-engines.md:61` 同样残留;`getting-started.md:19` MSRV 1.75→1.88;`compatibility.md:119` MSRV 1.82→1.88;`idempotency.md:68` `RrClient::connect` 类型错误;`metrics-reference.md:211/:176-178/:366` 三处;文档以 0.3.0 为当前版本叙述与 crates 实为 0.1.0 的矛盾(WS-3 后统一为 0.2.0 叙述)。
-- [ ] **linearizable read 3 节点集成测试**(A-0009 遗留 follow-up):对已知 follower 调 `read_linearizable`,断言 redirect 成功。
-- [ ] **ADR frontmatter 与索引漂移**(P3/cosmetic):A-0001/2/3/4 frontmatter `proposed` → `implemented`,与索引对齐。
-- [ ] **`constant_time_eq` 换 `subtle`**(`auth.rs:202-211`,手写+长度早返回);`token_fingerprint` 32-bit 评估加强(`auth.rs:173-181`)。
-- [ ] **rr-client 静默假成功修复**(2026-08-29 WS-7 实施中发现的 pre-existing 正确性 bug):`rr-client/src/lib.rs` `send_request_inner` 在 server 回 `success=false` 且无 `leader_info` 时(follower 暂不知新 leader 的窗口)直接返回 `Ok(空 payload)` 而非重试——写请求静默"假成功"。修法:该分支按可重试错误处理,走 bootstrap 轮询直至 redirect 收敛或重试耗尽;补回归测试(follower 未知 leader 窗口场景)。优先级:P1,建议 RC 期内修。
-- [ ] **docs 漂移增补**(同上来源):`dynamic-config-update.md:109`、`dynamic-leader-election.md:43/84/85`、`dynamic-put-request.md:39/71/80`、`leader-flapping.md:95` 仍描述虚构的 `update_leader`/`LeaderChanged`/router-returns-leader 模型,并入上方 docs 漂移清单一并修。
+> 全部关闭(2026-09-04)。验证:rr-client 27 测试、rr-server 110 测试、rr-network 71 测试、integration(含新 linearizable read 测试)全绿;workspace clippy `-D warnings` 零告警。
+
+- [x] **audit 配对补齐**(2026-09-04):核实现状——`TriggerSnapshot` 已有 dispatch+result 配对;补 `DrainNode` 主路径 finished 事件(原仅 no-op 分支有 result)与 `reset_ingestor_offset` dispatch 事件。**ClientService 热路径 audit 经评审不做**:audit-log.md 文档面明确 audit 覆盖范围为 AdminService,逐写请求 audit 会冲垮热路径与日志链;该清单项引用的 `admin.rs:228/364-478/602-647` 实为 AdminService 的三个 mutation RPC,已全部配对。
+- [x] **docs 漂移清单**(逐条修复):`README.md` 旧签名/`getting-started.md` MSRV/`compatibility.md` MSRV/`idempotency.md` connect 类型——核实均已在先前提交修复;`metrics-reference.md` 三处本次修(`rr_snapshot_installs_total` group_id 已知问题过时、Planned Metrics 列已实现项;`:211` `node.started`→`start()` 早已正确);**0.3.0→0.2.0 版本叙述统一**(idempotency/kafka-input/metrics-reference/audit-log/durability/upgrading + `client.proto` 注释 + `config_file.rs` 注释);`v0.2-to-v0.3-migration.md` 改名重写为 `v0.1-to-v0.2-migration.md`(sidebar/交叉链接同步,docusaurus build 通过)。
+- [x] **linearizable read 3 节点集成测试**(A-0009 遗留 follow-up):`test_read_linearizable_redirect_from_follower`(2026-09-04)——SDK 仅指向已知 follower,断言经 leader_info redirect 收敛成功;集成测试 EchoSM 补 `read_handle`(镜像生产 EchoStateMachine)。
+- [x] **ADR frontmatter 与索引漂移**(P3/cosmetic):A-0001/2/3/4 frontmatter `proposed` → `implemented`(2026-09-04),与索引对齐。
+- [x] **`constant_time_eq` 换 `subtle`**(2026-09-04):手写实现替换为 vetted `subtle::ConstantTimeEq`(workspace 依赖,无新增供应链);`token_fingerprint` 32-bit → 64-bit(16-hex,birthday 碰撞域 ~2^32),audit-log.md 同步。
+- [x] **rr-client 静默假成功修复**(2026-09-04,P1):`send_request_inner` 重构——`success=false` 一律按可重试处理:有 `leader_info` 更新缓存,无则清缓存走 bootstrap 轮询,重试耗尽返回 `RaftError::NotLeader`(修掉原两条静默 `Ok(空 payload)` 路径:无 leader_info 分支 + 末次 attempt 的 leader_info 分支)。回归测试 2 个(mock gRPC server:leader 未知窗口不再假成功、leader 出现后收敛)。同批顺带:blocking 接口 current_thread/无 runtime 由 panic 改为前置检查返回错误(freeze checklist E 节 P2)+ 2 测试。影响面(gitnexus impact,CRITICAL 级但行为不变式收敛):redirect/failover 相关 5 个集成测试实测全绿。
+- [x] **docs 漂移增补**(同上来源):核实 `dynamic-config-update.md`/`dynamic-leader-election.md`/`dynamic-put-request.md`/`leader-flapping.md` 已无 `update_leader`/`LeaderChanged` 残留(grep 零命中,先前提交已修)。
 
 **RC exit criteria**:Phase 0 全部 WS 验收通过 + 上述并行项关闭 → 才允许 cut `v0.2.0` tag。
 

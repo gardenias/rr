@@ -133,6 +133,12 @@ downstream users time to catch up.
 2. **Grace period** — 至少一整个 MINOR 周期保留已弃用 API；期间继续工作（可能发出警告）。
 3. **Remove** — 在下一个 MAJOR 删除；CHANGELOG 的 `Removed` 小节记录。
 
+> pre-1.0 语义下，"下一个 MAJOR" 指**下一个 breaking（MINOR）版本**——例如
+> v0.2.0 弃用的 API 在 v0.3.0 删除（`DurabilityPolicy::Balanced`/`Fast` 即此例）。
+> Under pre-1.0, "next MAJOR" means the **next breaking (MINOR) release** —
+> an API deprecated in v0.2.0 is removed in v0.3.0 (e.g.
+> `DurabilityPolicy::Balanced`/`Fast`).
+
 1. **Announce** — add `#[deprecated(since="x.y.z", note="use Foo instead")]`;
    log under CHANGELOG `Deprecated`.
 2. **Grace period** — keep the deprecated API for at least one full MINOR

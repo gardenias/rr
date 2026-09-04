@@ -2,20 +2,34 @@
 
 use std::collections::HashMap;
 
+/// Unique identifier of a node in the cluster.
 pub type NodeId = u64;
+/// Unique identifier of a Raft group.
 pub type GroupId = u64;
+/// Unique identifier of a data partition.
 pub type PartitionId = u64;
+/// Index of an entry in a Raft log.
 pub type LogIndex = u64;
 
+/// Network address of a cluster node.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NodeAddr {
+    /// gRPC address of the node (e.g. `"127.0.0.1:9001"`).
     pub addr: String,
 }
 
+/// How a partition is identified when mapping it to a Raft group.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PartitionConfig {
+    /// The partition is a single fixed ID.
     SingleId(u64),
-    Range { start: u64, end: u64 },
+    /// The partition covers a contiguous range of IDs.
+    Range {
+        /// First ID in the range.
+        start: u64,
+        /// Last ID in the range.
+        end: u64,
+    },
 }
 
 /// Configuration-plane metadata for a Raft group.
@@ -27,7 +41,9 @@ pub enum PartitionConfig {
 /// table (see ADR A-0013).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroupMeta {
+    /// ID of the Raft group.
     pub group_id: GroupId,
+    /// Nodes that replicate this group.
     pub replicas: Vec<NodeId>,
 }
 

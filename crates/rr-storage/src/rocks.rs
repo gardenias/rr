@@ -40,8 +40,8 @@ pub struct CfOptions {
 ///   production)
 ///
 /// The old names remain as `#[deprecated]` aliases for one minor version;
-/// they map to the new variants with the same on-disk behavior. Update
-/// your code to the new names before upgrading past v0.4.0.
+/// they map to the new variants with the same on-disk behavior. They are
+/// removed in v0.3.0 — update your code to the new names before then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityPolicy {
     /// **Production default.** Every committed write issues an `fsync` on
@@ -77,11 +77,11 @@ pub enum DurabilityPolicy {
     TestOnly,
     /// Deprecated alias for [`ReplicatedOnly`](Self::ReplicatedOnly). Same
     /// on-disk behavior; kept for one minor version to ease migration.
-    #[deprecated(since = "0.3.0", note = "renamed to `ReplicatedOnly`")]
+    #[deprecated(since = "0.2.0", note = "renamed to `ReplicatedOnly`; will be removed in v0.3.0")]
     Balanced,
     /// Deprecated alias for [`TestOnly`](Self::TestOnly). Same on-disk
     /// behavior; kept for one minor version to ease migration.
-    #[deprecated(since = "0.3.0", note = "renamed to `TestOnly`")]
+    #[deprecated(since = "0.2.0", note = "renamed to `TestOnly`; will be removed in v0.3.0")]
     Fast,
 }
 

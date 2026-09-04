@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rr_core::error::{NetworkError, RrError};
+use rr_core::error::{NetworkError, RaftError, RrError};
 use rr_core::idempotency::IdempotencyKey;
 use rr_core::types::{GroupId, NodeId};
 use rr_network::auth::attach_bearer_token;
@@ -615,33 +615,61 @@ impl RrClient {
                         });
                     }
 
-                    if let Some(leader_info) = resp.leader_info {
-                        tracing::info!(
-                            group_id,
-                            leader_node_id = leader_info.node_id,
-                            leader_addr = %leader_info.addr,
-                            "leader redirect received, updating cache"
-                        );
-                        self.update_leader_cache(group_id, leader_info.node_id, leader_info.addr)
-                            .await;
-
-                        if !resp.success && attempt + 1 < max_attempts {
-                            let delay_ms = self
-                                .retry_config
-                                .retry_delay_ms
-                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
-                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                            continue;
-                        }
+                    if resp.success {
+                        metrics::histogram!(
+                            "rr_client_request_duration_seconds",
+                            "group_id" => gid_label.clone(),
+                            "outcome" => "success",
+                        )
+                        .record(request_start.elapsed().as_secs_f64());
+                        return Ok(resp.payload);
                     }
 
-                    metrics::histogram!(
-                        "rr_client_request_duration_seconds",
-                        "group_id" => gid_label.clone(),
-                        "outcome" => "success",
-                    )
-                    .record(request_start.elapsed().as_secs_f64());
-                    return Ok(resp.payload);
+                    // `success == false` means the contacted node is not (or
+                    // not yet) the leader — the write was NOT applied. Never
+                    // surface this as `Ok`: that would acknowledge a write
+                    // that never happened (silent fake success). Treat it as
+                    // retryable until the redirect converges or attempts run
+                    // out.
+                    if let Some(leader_info) = resp.leader_info {
+                        let leader_node_id = leader_info.node_id;
+                        let leader_addr = leader_info.addr;
+                        tracing::info!(
+                            group_id,
+                            leader_node_id,
+                            leader_addr = %leader_addr,
+                            "leader redirect received, updating cache"
+                        );
+                        self.update_leader_cache(group_id, leader_node_id, leader_addr.clone())
+                            .await;
+                        last_error = Some(RrError::Raft(RaftError::NotLeader {
+                            leader: Some(leader_node_id),
+                            leader_addr: Some(leader_addr),
+                        }));
+                    } else {
+                        // Follower does not know the current leader (election
+                        // window). Drop any stale cache entry so the next
+                        // attempt falls back to bootstrap polling.
+                        tracing::debug!(
+                            attempt,
+                            group_id,
+                            addr = %addr,
+                            "node has no known leader yet, retrying via bootstrap"
+                        );
+                        self.remove_cached_leader(group_id).await;
+                        last_error = Some(RrError::Raft(RaftError::NotLeader {
+                            leader: None,
+                            leader_addr: None,
+                        }));
+                    }
+
+                    if attempt + 1 < max_attempts {
+                        let delay_ms = self
+                            .retry_config
+                            .retry_delay_ms
+                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
                 }
                 Err(status) => {
                     tracing::warn!(
@@ -752,18 +780,41 @@ impl RrClient {
 
     // ── Blocking interface ────────────────────────────────────────────────────
 
+    /// Validate the runtime requirements of the blocking interface and
+    /// return the current handle.
+    ///
+    /// `block_in_place` only works on a multi-thread runtime; historically
+    /// calling the blocking API on a `current_thread` runtime (or outside
+    /// any runtime) panicked deep inside tokio. Fail fast with a typed
+    /// error instead.
+    fn blocking_runtime_handle() -> Result<tokio::runtime::Handle, RrError> {
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            RrError::Network(NetworkError::RpcFailed(
+                "blocking interface requires an active tokio multi-thread runtime".into(),
+            ))
+        })?;
+        if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+            return Err(RrError::Network(NetworkError::RpcFailed(
+                "blocking interface is unsupported on a current_thread runtime; \
+                 use the async or reactive API instead"
+                    .into(),
+            )));
+        }
+        Ok(handle)
+    }
+
     /// Blocking write — blocks the calling OS thread until the response
     /// arrives.  Wraps [`send_request`] via `block_in_place` so it is safe
     /// to call from within a tokio **multi-thread** runtime without starving
-    /// the scheduler.  Panics if called from a `current_thread` runtime.
+    /// the scheduler.  Returns an error (not a panic) when called from a
+    /// `current_thread` runtime or outside any runtime.
     pub fn send_request_blocking(
         &self,
         group_id: GroupId,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, RrError> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.send_request(group_id, payload))
-        })
+        let handle = Self::blocking_runtime_handle()?;
+        tokio::task::block_in_place(|| handle.block_on(self.send_request(group_id, payload)))
     }
 
     /// Idempotent blocking write.  See [`send_request_idempotent`] and
@@ -774,17 +825,16 @@ impl RrClient {
         payload: Vec<u8>,
         key: IdempotencyKey,
     ) -> Result<Vec<u8>, RrError> {
+        let handle = Self::blocking_runtime_handle()?;
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(self.send_request_idempotent(group_id, payload, key))
+            handle.block_on(self.send_request_idempotent(group_id, payload, key))
         })
     }
 
     /// Blocking stale read.  See [`read`] and [`send_request_blocking`].
     pub fn read_blocking(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.read(group_id, payload))
-        })
+        let handle = Self::blocking_runtime_handle()?;
+        tokio::task::block_in_place(|| handle.block_on(self.read(group_id, payload)))
     }
 
     /// Blocking linearizable read.  See [`read_linearizable`] and
@@ -794,9 +844,8 @@ impl RrClient {
         group_id: GroupId,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, RrError> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.read_linearizable(group_id, payload))
-        })
+        let handle = Self::blocking_runtime_handle()?;
+        tokio::task::block_in_place(|| handle.block_on(self.read_linearizable(group_id, payload)))
     }
 
     // ── Reactive interface (callback-driven) ──────────────────────────────────
@@ -1190,6 +1239,46 @@ mod tests {
         );
     }
 
+    /// The blocking API must fail fast with a typed error — not panic deep
+    /// inside tokio — when invoked on a current_thread runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_send_on_current_thread_runtime_returns_error_not_panic() {
+        let client = RrClient::connect(vec!["localhost:1".to_string()])
+            .await
+            .expect("connect");
+
+        let err = client
+            .send_request_blocking(1, vec![])
+            .expect_err("current_thread runtime must reject blocking calls");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("current_thread"),
+            "error must name the current_thread limitation, got: {msg}"
+        );
+    }
+
+    /// Outside any tokio runtime the blocking API must also return an error
+    /// rather than panic.
+    #[test]
+    fn blocking_send_outside_runtime_returns_error_not_panic() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = rt
+            .block_on(RrClient::connect(vec!["localhost:1".to_string()]))
+            .expect("connect");
+        drop(rt);
+
+        let err = client
+            .send_request_blocking(1, vec![])
+            .expect_err("no-runtime context must reject blocking calls");
+        assert!(
+            err.to_string().contains("multi-thread runtime"),
+            "error must state the runtime requirement, got: {err}"
+        );
+    }
+
     // ── Reactive interface tests ───────────────────────────────────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1283,5 +1372,201 @@ mod tests {
             .expect("oneshot not dropped");
 
         assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), N);
+    }
+
+    // ── Fake-success regression tests (leader-unknown window) ────────────
+    //
+    // A follower that is asked for a write but does not know the current
+    // leader (election window) answers `success = false` with NO
+    // `leader_info`. The client must treat that as retryable — returning
+    // `Ok` here would acknowledge a write that was never applied.
+
+    use rr_network::proto::client::client_service_server::{
+        ClientService as ClientServiceTrait, ClientServiceServer,
+    };
+    use rr_network::proto::client::{ClientResponse, ReadLocalResponse};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Fake node that always answers "not leader, and I don't know who is".
+    #[derive(Default)]
+    struct LeaderUnknownService {
+        hits: Arc<AtomicUsize>,
+    }
+
+    /// Fake node that plays "leader unknown" for the first `unknown_for`
+    /// requests, then answers as a healthy leader.
+    struct LeaderAppearsService {
+        hits: Arc<AtomicUsize>,
+        unknown_for: usize,
+        payload: Vec<u8>,
+    }
+
+    #[tonic::async_trait]
+    impl ClientServiceTrait for LeaderUnknownService {
+        async fn request(
+            &self,
+            _request: tonic::Request<ClientRequest>,
+        ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(tonic::Response::new(ClientResponse {
+                success: false,
+                payload: vec![],
+                leader_info: None,
+                idem_error: None,
+            }))
+        }
+
+        async fn read_local(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_linearizable(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn get_cluster_info(
+            &self,
+            _request: tonic::Request<Empty>,
+        ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
+            Ok(tonic::Response::new(ClusterInfo { groups: vec![] }))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl ClientServiceTrait for LeaderAppearsService {
+        async fn request(
+            &self,
+            _request: tonic::Request<ClientRequest>,
+        ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
+            let hit = self.hits.fetch_add(1, Ordering::SeqCst);
+            if hit < self.unknown_for {
+                Ok(tonic::Response::new(ClientResponse {
+                    success: false,
+                    payload: vec![],
+                    leader_info: None,
+                    idem_error: None,
+                }))
+            } else {
+                Ok(tonic::Response::new(ClientResponse {
+                    success: true,
+                    payload: self.payload.clone(),
+                    leader_info: None,
+                    idem_error: None,
+                }))
+            }
+        }
+
+        async fn read_local(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_linearizable(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn get_cluster_info(
+            &self,
+            _request: tonic::Request<Empty>,
+        ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
+            Ok(tonic::Response::new(ClusterInfo { groups: vec![] }))
+        }
+    }
+
+    /// Spawn the given service on an ephemeral localhost port; returns the
+    /// dial address and the server task handle (aborted on test end).
+    async fn spawn_fake_client_service<S>(svc: S) -> (String, tokio::task::JoinHandle<()>)
+    where
+        S: ClientServiceTrait + Send + Sync + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ClientServiceServer::new(svc))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .expect("fake client service");
+        });
+        (format!("127.0.0.1:{port}"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_send_request_no_fake_success_when_leader_unknown() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let svc = LeaderUnknownService {
+            hits: Arc::clone(&hits),
+        };
+        let (addr, server) = spawn_fake_client_service(svc).await;
+
+        let client = RrClient::connect_with_config(
+            vec![addr],
+            RetryConfig {
+                max_retries: 2,
+                retry_delay_ms: 5,
+            },
+        )
+        .await
+        .expect("connect");
+
+        let result = client.send_request(1, b"write".to_vec()).await;
+        server.abort();
+
+        let Err(err) = result else {
+            panic!("success=false without leader_info must NOT silently succeed");
+        };
+        assert!(
+            matches!(err, RrError::Raft(RaftError::NotLeader { .. })),
+            "expected NotLeader after retries exhausted, got: {err}"
+        );
+        // max_attempts = max_retries + 1 = 3: the client must keep polling
+        // the bootstrap list instead of giving up (or fake-succeeding) on
+        // the first "leader unknown" reply.
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "client must retry via bootstrap polling until attempts run out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_send_request_converges_once_leader_is_known() {
+        let svc = LeaderAppearsService {
+            hits: Arc::new(AtomicUsize::new(0)),
+            unknown_for: 2,
+            payload: b"applied".to_vec(),
+        };
+        let (addr, server) = spawn_fake_client_service(svc).await;
+
+        let client = RrClient::connect_with_config(
+            vec![addr],
+            RetryConfig {
+                max_retries: 4,
+                retry_delay_ms: 5,
+            },
+        )
+        .await
+        .expect("connect");
+
+        let result = client
+            .send_request(1, b"write".to_vec())
+            .await
+            .expect("must succeed once the node knows a leader");
+        server.abort();
+
+        assert_eq!(result, b"applied".to_vec());
     }
 }

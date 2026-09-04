@@ -65,6 +65,7 @@ pub use mock::{MockKafkaHandle, MockKafkaIngestor};
 /// supervisor exits with an error rather than proposing a command whose
 /// request id regressed or collided with another message.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum KafkaOffsetError {
     /// The bytes are not a bincode-encoded `i64`.
     #[error("offset bytes are not a bincode-encoded i64: {0}")]

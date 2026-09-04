@@ -1,8 +1,8 @@
 ---
 title: "Framework-level idempotency via (request_type, request_id)"
-status: proposed
+status: implemented
 created: 2026-04-24
-updated: 2026-04-24
+updated: 2026-09-04
 tags: [adr, architecture, idempotency, correctness]
 ---
 

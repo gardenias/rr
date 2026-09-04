@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Post-`v0.2.0` security hardening + Phase 4 Tier 0 docs patches + ADRs
-A-0005 / A-0006 / A-0007 / A-0008 / A-0009 landed. No release tag yet.
+Changes landed after `v0.2.0-rc2`, queued for the `v0.2.0` final tag:
+security hardening + Phase 4 features (ADRs A-0005 / A-0006 / A-0007 /
+A-0008 / A-0009) + the release-hardening batch below. No release tag yet —
+merge these entries into the `[0.2.0]` categories when the tag is cut.
 
 ### 发布加固批次(2026-08-29 — 路线图 WS-1~WS-7,ADR A-0011~A-0014)
 
@@ -90,6 +92,89 @@ A-0005 / A-0006 / A-0007 / A-0008 / A-0009 landed. No release tag yet.
 - Grafana dashboard: removed the panel referencing the nonexistent
   `rr_auth_rejects_total` metric (implementing that metric is scheduled in the
   RC audit-pairing batch).
+
+### RC 批次(2026-09-04 — 路线图 Phase RC 并行项)
+
+> Executed per `.sisyphus/plans/rr-v0.2.0-release-roadmap.md` Phase RC
+> (see "RC 其余并行项" there and
+> `.sisyphus/checklists/v0.2.0-api-freeze.md` sections B/D/E for the review
+> record). Merge these entries into the `[0.2.0]` categories when the tag is
+> cut.
+
+#### Added
+
+- **Linearizable-read redirect integration test** (ADR A-0009 follow-up):
+  `test_read_linearizable_redirect_from_follower` points the SDK at a known
+  follower and asserts the read converges via the `leader_info` redirect.
+  The integration-harness `EchoSM` gained a `read_handle` (mirrors the
+  production `EchoStateMachine` reader).
+- **Audit event pairing completed** (AdminService): `DrainNode` now emits a
+  finished result event on the main path (previously only the no-op branch
+  had one), and `reset_ingestor_offset` emits a dispatch event. Auditing
+  per-request on the `ClientService` hot path was reviewed and deliberately
+  rejected — the documented audit scope is AdminService.
+- Five more public enums are `#[non_exhaustive]`: `ServiceLabel`
+  (rr-network), `RaftTransport` (rr-server), and `SecurityProtocol` /
+  `KafkaIngestorError` / `KafkaOffsetError` (rr-ingestor-kafka). Matches all
+  live in the defining crates, so no downstream breakage; the
+  framework-dispatched enums (`BatchOp`, `OutputTarget`,
+  `IdempotencyDecision`, `RoutingTableChange`, `PartitionConfig`) were
+  reviewed and deliberately left exhaustive — the compiler forcing match
+  updates there is a correctness feature.
+- Two regression tests for the client fake-success fix (mock gRPC server:
+  leader-unknown window no longer returns `Ok`, client converges once a
+  leader is known) and two for the blocking-API preflight (current_thread /
+  no runtime now error instead of panic).
+
+#### Changed (breaking — landed before the v0.2.0 API freeze)
+
+- **rr-client never fake-succeeds in the leader-unknown window**
+  (correctness, P1): `send_request_inner` treats every `success=false`
+  response as retryable — a write is acknowledged only after it was actually
+  applied. A follower that knows the leader updates the redirect cache; one
+  that doesn't clears the cache and the client falls back to bootstrap
+  polling; when attempts run out the call returns
+  `RaftError::NotLeader { leader: None, leader_addr: None }`. Previously the
+  SDK returned `Ok` with an empty payload in this window (and on the final
+  attempt of a redirect chain), silently acknowledging unapplied writes.
+- **Blocking client API preflights its runtime**: the four `*_blocking`
+  methods now return a typed error ("requires a multi-thread runtime" /
+  "unsupported on current_thread") instead of panicking inside tokio when
+  called on a `current_thread` runtime or outside any runtime.
+- **`ResolvedConfig::resolve` returns typed `ConfigError`** (was
+  `anyhow::Result`): `anyhow` no longer appears in any library crate's
+  public signature. It remains in the `rr-server` / `rr-admin` binaries.
+- **`token_fingerprint` widened to 64-bit (16-hex)**: the `caller_token_fp`
+  field in auth-reject audit events changes format (was 8-hex). Constant-time
+  token comparison is now backed by the vetted `subtle` crate.
+- Wire-level `MAGIC` / `VERSION` constants (`APPLY_OUTCOME_*`,
+  `FRAMED_ENTRY_*`, `FRAMED_SNAPSHOT_*`) are `#[doc(hidden)]` — the on-the-wire
+  format commitment lives in `docs/reference/compatibility.md`, not in
+  docs.rs constant entries.
+- `ConfigProvider::watch_changes` stream semantics are now contractual in
+  rustdoc: no initial snapshot (call `get_routing_table` first), no global
+  ordering across domains, the in-memory backend **silently drops** events
+  on lag while the etcd backend applies backpressure.
+
+#### Fixed
+
+- **Docs version narrative unified to 0.2.0**: idempotency / kafka-input /
+  metrics-reference / audit-log / durability / upgrading pages, the
+  `client.proto` comments, and the `config_file.rs` rustdoc no longer
+  describe shipped features as "v0.3.0 (in development)". The migration
+  guide was renamed and rewritten as `v0.1 → v0.2` (sidebar + cross-links
+  updated; docusaurus build verified).
+- **`metrics-reference.md`**: dropped the stale "group_id hard-coded /
+  Phase 3 will fix" known issue for `rr_snapshot_installs_total` (fixed by
+  the adapter `group_id` parameter); removed implemented items from the
+  Planned Metrics section.
+- **`DurabilityPolicy` deprecation metadata aligned** with the compatibility
+  policy: aliases are `#[deprecated(since = "0.2.0")]` and removed in
+  v0.3.0 (was: `since = "0.3.0"` + "migrate before v0.4.0"). Code, CHANGELOG,
+  compatibility.md (pre-1.0 semantics clarified), and docs all agree now.
+- CI hygiene: fixed the pre-existing clippy failures in `examples/kv-store`,
+  `examples/counter` (doc-overindented list items) and `tools/rr-lab-producer`
+  (`manual_is_multiple_of`) so the workspace lint gate is green again.
 
 ### Added
 
@@ -261,7 +346,7 @@ A-0005 / A-0006 / A-0007 / A-0008 / A-0009 landed. No release tag yet.
 - **`DurabilityPolicy` rename** (T0.2 of Phase 4 Tier 0):
   - `Balanced` → `ReplicatedOnly` (clearer intent — only safe with multi-node replication).
   - `Fast` → `TestOnly` (clearer intent — never use in production).
-  - Old names remain as `#[deprecated(since = "0.3.0")]` aliases for one minor version. TOML / CLI also accept old strings (`"balanced"` / `"fast"`) but emit a deprecation warning at startup. Migrate before v0.4.0.
+  - Old names remain as `#[deprecated(since = "0.2.0")]` aliases for one minor version. TOML / CLI also accept old strings (`"balanced"` / `"fast"`) but emit a deprecation warning at startup. Aliases are removed in v0.3.0 — migrate before then.
 - `RocksStorage::open` now emits a `tracing::warn!` at startup when the policy is not `Strict` (violates OpenRaft's durability contract per ADR A-0002).
 
 #### Dependencies / Toolchain

@@ -110,6 +110,7 @@ pub struct KafkaSecurityConfig {
 /// Top-level Kafka security protocol, mapped 1:1 onto rdkafka.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[non_exhaustive]
 pub enum SecurityProtocol {
     Plaintext,
     Ssl,

@@ -91,7 +91,7 @@ const sidebars: SidebarsConfig = {
         'deployment/audit-log',
         'deployment/kubernetes',
         'deployment/upgrading',
-        'deployment/v0.2-to-v0.3-migration',
+        'deployment/v0.1-to-v0.2-migration',
         'deployment/security',
       ],
     },

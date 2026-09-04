@@ -9,12 +9,20 @@ use crate::error::StorageError;
 pub enum BatchOp {
     /// Insert or update a key-value pair in a column family.
     Put {
+        /// Column family to write into.
         cf: String,
+        /// Key to insert or update.
         key: Vec<u8>,
+        /// Value to store.
         value: Vec<u8>,
     },
     /// Delete a key from a column family.
-    Delete { cf: String, key: Vec<u8> },
+    Delete {
+        /// Column family to delete from.
+        cf: String,
+        /// Key to delete.
+        key: Vec<u8>,
+    },
 }
 
 /// Trait for a pluggable storage engine with column family support.

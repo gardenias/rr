@@ -34,10 +34,17 @@ use crate::error::{CodecError, RrError};
 /// Magic byte prefix identifying a framed snapshot. Chosen so it is highly
 /// unlikely to collide with a user's raw `Service::snapshot()` bytes (no
 /// printable header, embedded NULs, version digit).
+///
+/// Wire implementation detail — the on-the-wire format commitment is
+/// documented in `docs/reference/compatibility.md`, not here.
+#[doc(hidden)]
 pub const FRAMED_SNAPSHOT_MAGIC: [u8; 8] = *b"\0rrSNAP1";
 
 /// Current envelope schema version. Bumped when [`FrameworkState`] adds a
 /// non-optional field or changes the meaning of an existing one.
+///
+/// Wire implementation detail — see [`FRAMED_SNAPSHOT_MAGIC`].
+#[doc(hidden)]
 pub const FRAMED_SNAPSHOT_VERSION: u8 = 1;
 
 /// Wraps a user's raw `Service::snapshot()` bytes plus framework-owned

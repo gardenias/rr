@@ -262,7 +262,7 @@ fn spawn_sends(
         stats.sent_increments += 1;
     }
 
-    if index % 10 == 0 {
+    if index.is_multiple_of(10) {
         let put = KvRequest::Put {
             key: format!("lab:seq:{index}"),
             value: format!("v{index}").into_bytes(),

@@ -163,11 +163,14 @@ impl Interceptor for BearerInterceptor {
 /// bearer token, suitable for audit-log correlation across reject
 /// events from the same caller.
 ///
-/// The output is the lower 8 hex characters of a `DefaultHasher`
+/// The output is the lower 16 hex characters of a `DefaultHasher`
 /// (siphash-1-3) over the token bytes — collision-resistant enough
 /// to discriminate attackers within a session without leaking the
 /// token itself. NOT a security primitive: do NOT use this for
-/// authentication, only for grouping log lines.
+/// authentication, only for grouping log lines. Note that
+/// `DefaultHasher`'s algorithm is not specified, so fingerprints may
+/// change across Rust toolchain upgrades — correlate only within a
+/// single deployment generation.
 ///
 /// Empty input returns `"empty"` so log lines stay greppable.
 pub fn token_fingerprint(token: &str) -> String {
@@ -177,7 +180,7 @@ pub fn token_fingerprint(token: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     token.as_bytes().hash(&mut hasher);
-    format!("{:08x}", (hasher.finish() & 0xFFFF_FFFF))
+    format!("{:016x}", hasher.finish())
 }
 
 /// Attach a bearer token to an outbound gRPC request's metadata.
@@ -192,22 +195,16 @@ pub fn attach_bearer_token<T>(request: &mut Request<T>, token: &str) -> Result<(
     Ok(())
 }
 
-/// Constant-time byte-slice equality.
+/// Constant-time byte-slice equality, backed by the vetted [`subtle`]
+/// crate.
 ///
 /// Prevents token *content* leaks through timing side channels. Note that
-/// this implementation returns early on length mismatch (a length oracle is
-/// considered acceptable: tokens are fixed-length in practice and length
-/// is not the secret). For full length-blinding, switch to the `subtle`
-/// crate.
+/// (like every slice comparison) this returns early on length mismatch —
+/// a length oracle is considered acceptable: tokens are fixed-length in
+/// practice and length is not the secret.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 #[cfg(test)]
@@ -307,7 +304,7 @@ mod tests {
         let a = token_fingerprint("alice-secret");
         let b = token_fingerprint("alice-secret");
         assert_eq!(a, b);
-        assert_eq!(a.len(), 8);
+        assert_eq!(a.len(), 16);
     }
 
     #[test]

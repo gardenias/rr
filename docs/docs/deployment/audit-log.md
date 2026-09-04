@@ -96,14 +96,14 @@ Layered defenses:
 4. **审计日志** — 检测 + 事后取证（本文档）
 5. **immutable log sink** — 防止攻击者抹掉痕迹
 
-## 调用者身份 / Caller identity (since v0.3.0)
+## 调用者身份 / Caller identity (since v0.2.0)
 
-Auth reject 事件携带 `caller_token_fp` 字段——一个**非密码学**的 8-hex
+Auth reject 事件携带 `caller_token_fp` 字段——一个**非密码学**的 16-hex
 fingerprint（基于 siphash），用于在多个 reject 之间关联同一调用者，
 不暴露 token 本身。`peer` 字段继续提供网络层身份。
 
 ```json
-{"op":"auth","service":"client","peer":"10.0.1.23:51234","caller_token_fp":"7f3e9a02","result":"rejected","reason":"invalid_credential"}
+{"op":"auth","service":"client","peer":"10.0.1.23:51234","caller_token_fp":"7f3e9a02b1c4d5e6","result":"rejected","reason":"invalid_credential"}
 ```
 
 调查 spray 攻击或撞库尝试时，按 `caller_token_fp` group-by 即可看到
@@ -115,7 +115,7 @@ fingerprint（基于 siphash），用于在多个 reject 之间关联同一调�
 ---
 
 Auth reject events carry a `caller_token_fp` field — a
-**non-cryptographic** 8-hex fingerprint (siphash) that lets operators
+**non-cryptographic** 16-hex fingerprint (siphash) that lets operators
 correlate multiple reject events from the same caller without
 exposing the token itself. `peer` still provides network-layer
 identity.

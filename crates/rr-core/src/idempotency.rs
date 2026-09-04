@@ -101,7 +101,7 @@ pub enum IdempotencyDecision {
     Replay(Vec<u8>),
     /// Request ID is below the watermark AND has been evicted from the
     /// LRU response cache. Cannot be safely replayed (the client must
-    /// pick a fresh ID). Surfaces as [`IdempotencyError::Expired`] on
+    /// pick a fresh ID). Surfaces as [`IdempotencyError`] on
     /// the wire.
     Expired {
         /// Request type whose watermark was tripped.
@@ -182,10 +182,17 @@ pub enum ApplyOutcome {
 /// because the response wire path is single-source — the dispatch
 /// layer is the only encoder/decoder, so a short tag is enough to
 /// catch type errors without the cost of a full magic header.
+///
+/// Wire implementation detail — the on-the-wire format commitment is
+/// documented in `docs/reference/compatibility.md`, not here.
+#[doc(hidden)]
 pub const APPLY_OUTCOME_TAG: u8 = 0xAA;
 
 /// Schema version for the `ApplyOutcome` envelope. Bumped if a new
 /// variant is added with non-backward-compatible semantics.
+///
+/// Wire implementation detail — see [`APPLY_OUTCOME_TAG`].
+#[doc(hidden)]
 pub const APPLY_OUTCOME_VERSION: u8 = 1;
 
 impl ApplyOutcome {

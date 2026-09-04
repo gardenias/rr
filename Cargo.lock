@@ -3238,6 +3238,7 @@ dependencies = [
  "rr-core",
  "rr-network",
  "tokio",
+ "tokio-stream",
  "tonic 0.14.5",
  "tracing",
 ]
@@ -3327,6 +3328,7 @@ dependencies = [
  "prost 0.14.3",
  "rr-core",
  "rustls-pemfile",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-stream",

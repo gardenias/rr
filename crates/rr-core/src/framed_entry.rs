@@ -27,6 +27,10 @@ use crate::idempotency::IdempotencyKey;
 /// Magic byte prefix identifying a framed entry. Distinct from
 /// [`crate::framed_snapshot::FRAMED_SNAPSHOT_MAGIC`] so the two
 /// envelopes can never be mistaken for each other.
+///
+/// Wire implementation detail — the on-the-wire format commitment is
+/// documented in `docs/reference/compatibility.md`, not here.
+#[doc(hidden)]
 pub const FRAMED_ENTRY_MAGIC: [u8; 8] = *b"\0rrENT01";
 
 /// Current envelope schema version. Bumped when [`FramedEntry`] adds a
@@ -37,6 +41,9 @@ pub const FRAMED_ENTRY_MAGIC: [u8; 8] = *b"\0rrENT01";
 /// preserves field-order positional encoding for additive `Option<…>`
 /// trailers (followers tolerate trailing bytes from future minor
 /// changes; non-optional adds force a version bump).
+///
+/// Wire implementation detail — see [`FRAMED_ENTRY_MAGIC`].
+#[doc(hidden)]
 pub const FRAMED_ENTRY_VERSION: u8 = 1;
 
 /// Per-entry envelope wrapping user payload + framework metadata.

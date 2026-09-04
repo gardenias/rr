@@ -481,6 +481,19 @@ impl AdminService for AdminServiceImpl {
             }
         }
 
+        let transferred = groups.iter().filter(|g| g.leadership_transferred).count();
+        info!(
+            target: AUDIT_TARGET,
+            op = "DrainNode",
+            peer = %peer,
+            node_id = self.node_id,
+            requested_node_id = req.node_id,
+            success = true,
+            groups_total = groups.len(),
+            groups_transferred = transferred,
+            message = "drain finished",
+            "admin rpc result"
+        );
         Ok(Response::new(DrainResult { groups }))
     }
 
@@ -688,6 +701,16 @@ impl AdminService for AdminServiceImpl {
         let group_id = req.group_id;
         let offset = req.offset;
         let new_offset = (offset != -1).then_some(offset);
+
+        info!(
+            target: AUDIT_TARGET,
+            op = "reset_ingestor_offset",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id,
+            offset,
+            "admin rpc — mutation"
+        );
 
         match self
             .group_manager

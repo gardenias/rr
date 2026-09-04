@@ -22,9 +22,9 @@
 //! ## Arguments:
 //! - `--node-id <N>`         — Node ID (u64). Defaults to 1 for single-node demo.
 //! - `--port <PORT>`         — gRPC listen port. Defaults to 52001.
-//!                             The admin API is served on PORT + 1000 (52001 → 53001).
+//!   The admin API is served on PORT + 1000 (52001 → 53001).
 //! - `--peers <ID@ADDR,...>` — Full cluster roster, comma-separated `id@addr` pairs
-//!                             (must include this node). Empty means single-node roster.
+//!   (must include this node). Empty means single-node roster.
 //! - `--bootstrap`           — Initialize Raft membership (run on exactly one node).
 //! - `--demo`                — Run counter demo and exit (default when no args given).
 //!

@@ -75,7 +75,7 @@ Key facts:
 
 ### DurabilityPolicy
 
-`crates/rr-storage/src/rocks.rs:46-86` 定义三档策略（v0.3.0 起改名，旧名保留为 deprecated 别名一个次版本）：
+`crates/rr-storage/src/rocks.rs:46-86` 定义三档策略（v0.2.0 起改名，旧名保留为 deprecated 别名一个次版本）：
 
 | 策略 / Policy | 行为 / Behavior | 适用 / Use |
 | :--- | :--- | :--- |
@@ -87,7 +87,7 @@ CLI 选择：`--durability strict|replicated_only|test_only`（env `RR_DURABILIT
 
 ---
 
-`crates/rr-storage/src/rocks.rs:46-86` defines three policies (renamed in v0.3.0; old names remain as deprecated aliases for one minor version):
+`crates/rr-storage/src/rocks.rs:46-86` defines three policies (renamed in v0.2.0; old names remain as deprecated aliases for one minor version):
 
 | Policy | Behavior | Use |
 | :--- | :--- | :--- |

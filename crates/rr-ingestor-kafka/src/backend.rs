@@ -28,6 +28,7 @@ use crate::config::{KafkaIngestorConfig, KafkaSecurityConfig, SecurityProtocol};
 /// at the trait boundary so it composes with the framework's
 /// existing error chain.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum KafkaIngestorError {
     /// rdkafka returned an error from `subscribe` / `assign` /
     /// `seek_partitions` / `recv` etc.

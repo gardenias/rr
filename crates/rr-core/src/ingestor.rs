@@ -29,7 +29,7 @@
 //! # Lifecycle
 //!
 //! - **On leader promotion**, the framework calls
-//!   [`DynCommandIngestor::seek`] with the bytes recorded in the most
+//!   [`DynCommandIngestor::seek_bytes`] with the bytes recorded in the most
 //!   recent snapshot's `IngestorState.last_applied_offset` (or `None`
 //!   for a fresh group). The ingestor resumes from that point.
 //! - **On step-down**, the framework drops the ingestor instance —

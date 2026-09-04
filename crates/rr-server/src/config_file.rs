@@ -6,12 +6,22 @@
 //! 3. TOML config file values
 //! 4. Built-in defaults (applied inside [`ResolvedConfig::resolve`])
 
-use anyhow::{anyhow, Context, Result};
+use rr_core::error::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::ServeArgs;
+
+/// Module-local result type: config resolution fails with typed
+/// [`ConfigError`]s, keeping `anyhow` out of the library's public surface
+/// (the `rr-server` binary may still use `anyhow` internally).
+type Result<T> = std::result::Result<T, ConfigError>;
+
+/// Build an `InvalidConfig` error with a caller-context message.
+fn invalid(msg: impl Into<String>) -> ConfigError {
+    ConfigError::InvalidConfig(msg.into())
+}
 
 /// Schema for the TOML config file.
 ///
@@ -190,7 +200,7 @@ pub enum StorageBackend {
 /// Selected durability policy string; converted to the actual enum at storage
 /// construction time (keeps this module free of the `rocks` feature gate).
 ///
-/// Names changed in v0.3.0:
+/// Names changed in v0.2.0:
 /// - `"balanced"` → `"replicated_only"` (canonical) — old name still parses
 ///   with a deprecation warning.
 /// - `"fast"` → `"test_only"` (canonical) — old name still parses with a
@@ -220,7 +230,7 @@ impl ResolvedConfig {
         let file = file.unwrap_or_default();
 
         let node_id = args.node_id.or(file.node.id).ok_or_else(|| {
-            anyhow!("missing node id: set via --node-id, RR_NODE_ID, or [node].id in config")
+            invalid("missing node id: set via --node-id, RR_NODE_ID, or [node].id in config")
         })?;
 
         let listen_addr = args
@@ -228,7 +238,9 @@ impl ResolvedConfig {
             .clone()
             .or(file.node.listen_addr.clone())
             .ok_or_else(|| {
-                anyhow!("missing listen_addr: set via --listen-addr, RR_LISTEN_ADDR, or [node].listen_addr")
+                invalid(
+                    "missing listen_addr: set via --listen-addr, RR_LISTEN_ADDR, or [node].listen_addr",
+                )
             })?;
 
         let storage_backend = match args
@@ -240,9 +252,9 @@ impl ResolvedConfig {
             "mem" => StorageBackend::Mem,
             "rocks" => StorageBackend::Rocks,
             other => {
-                return Err(anyhow!(
+                return Err(invalid(format!(
                     "invalid storage backend '{other}': expected 'mem' or 'rocks'"
-                ))
+                )))
             }
         };
 
@@ -258,31 +270,31 @@ impl ResolvedConfig {
             "balanced" => {
                 tracing::warn!(
                     "durability='balanced' is deprecated; rename to 'replicated_only' \
-                     (same on-disk behavior). The old name will be removed in v0.4.0."
+                     (same on-disk behavior). The old name will be removed in v0.3.0."
                 );
                 DurabilityChoice::ReplicatedOnly
             }
             "fast" => {
                 tracing::warn!(
                     "durability='fast' is deprecated; rename to 'test_only' (same \
-                     on-disk behavior). The old name will be removed in v0.4.0."
+                     on-disk behavior). The old name will be removed in v0.3.0."
                 );
                 DurabilityChoice::TestOnly
             }
             other => {
-                return Err(anyhow!(
+                return Err(invalid(format!(
                     "invalid durability '{other}': expected 'strict', \
                      'replicated_only', or 'test_only' (deprecated aliases: \
                      'balanced' → 'replicated_only', 'fast' → 'test_only')"
-                ))
+                )))
             }
         };
 
         let data_dir = args.data_dir.clone().or(file.node.data_dir.clone());
 
         if matches!(storage_backend, StorageBackend::Rocks) && data_dir.is_none() {
-            return Err(anyhow!(
-                "storage = rocks requires data_dir: set via --data-dir, RR_DATA_DIR, or [node].data_dir"
+            return Err(invalid(
+                "storage = rocks requires data_dir: set via --data-dir, RR_DATA_DIR, or [node].data_dir",
             ));
         }
 
@@ -299,9 +311,9 @@ impl ResolvedConfig {
             "grpc" => RaftTransportKind::Grpc,
             "tcp" => RaftTransportKind::Tcp,
             other => {
-                return Err(anyhow!(
+                return Err(invalid(format!(
                     "invalid raft transport '{other}': expected 'grpc' or 'tcp'"
-                ))
+                )))
             }
         };
 
@@ -310,9 +322,9 @@ impl ResolvedConfig {
         {
             let grpc_port = parse_port_from_addr(&listen_addr)?;
             Some(grpc_port.checked_add(10_000).ok_or_else(|| {
-                anyhow!(
+                invalid(format!(
                     "failed to derive raft_tcp_port from listen_addr '{listen_addr}' with default +10000 offset"
-                )
+                ))
             })?)
         } else {
             raft_tcp_port
@@ -326,8 +338,8 @@ impl ResolvedConfig {
         };
 
         if bootstrap && !peers.is_empty() {
-            return Err(anyhow!(
-                "--bootstrap and --peers are mutually exclusive: a bootstrapping node must not list peers"
+            return Err(invalid(
+                "--bootstrap and --peers are mutually exclusive: a bootstrapping node must not list peers",
             ));
         }
 
@@ -352,8 +364,8 @@ impl ResolvedConfig {
             .or(file.node.snapshot_logs_since_last)
             .unwrap_or(rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST);
         if snapshot_logs_since_last == 0 {
-            return Err(anyhow!(
-                "snapshot_logs_since_last must be > 0; got 0 (would disable snapshots)"
+            return Err(invalid(
+                "snapshot_logs_since_last must be > 0; got 0 (would disable snapshots)",
             ));
         }
 
@@ -380,9 +392,9 @@ impl ResolvedConfig {
 
     fn load_file(path: &Path) -> Result<ConfigFile> {
         let raw = fs::read_to_string(path)
-            .with_context(|| format!("failed to read config file {}", path.display()))?;
+            .map_err(|e| invalid(format!("failed to read config file {}: {e}", path.display())))?;
         let parsed: ConfigFile = toml::from_str(&raw)
-            .with_context(|| format!("failed to parse TOML config {}", path.display()))?;
+            .map_err(|e| invalid(format!("failed to parse TOML config {}: {e}", path.display())))?;
         Ok(parsed)
     }
 }
@@ -405,19 +417,19 @@ fn resolve_auth(file: &AuthSection) -> Result<ResolvedAuth> {
 fn read_token_env(var_name: &str, role: &str) -> Result<String> {
     match std::env::var(var_name) {
         Ok(v) if !v.is_empty() => Ok(v),
-        Ok(_) => Err(anyhow!(
+        Ok(_) => Err(invalid(format!(
             "auth.{role}_token_env points to environment variable '{var_name}' \
              which is set but EMPTY. Refusing to start with an empty token: this would \
              silently disable {role} auth (fail-open is a security anti-pattern). \
              Set {var_name}=<non-empty-secret>, or remove auth.{role}_token_env from \
              the config to explicitly disable {role} auth."
-        )),
-        Err(_) => Err(anyhow!(
+        ))),
+        Err(_) => Err(invalid(format!(
             "auth.{role}_token_env references environment variable '{var_name}' \
              which is NOT SET. Refusing to start: this would silently disable {role} \
              auth (fail-open). Either set {var_name}=<secret>, or remove \
              auth.{role}_token_env from the config to explicitly disable {role} auth."
-        )),
+        ))),
     }
 }
 
@@ -431,19 +443,19 @@ fn resolve_tls(args: &ServeArgs, file: &TlsSection) -> Result<Option<ResolvedTls
     match (cert_path, key_path) {
         (None, None) => {
             if ca_path.is_some() || require_client_cert {
-                return Err(anyhow!(
-                    "TLS options specified but tls_cert / tls_key are missing; TLS cannot be enabled"
+                return Err(invalid(
+                    "TLS options specified but tls_cert / tls_key are missing; TLS cannot be enabled",
                 ));
             }
             Ok(None)
         }
-        (Some(_), None) | (None, Some(_)) => Err(anyhow!(
-            "tls_cert and tls_key must both be set to enable TLS"
+        (Some(_), None) | (None, Some(_)) => Err(invalid(
+            "tls_cert and tls_key must both be set to enable TLS",
         )),
         (Some(cert), Some(key)) => {
             if require_client_cert && ca_path.is_none() {
-                return Err(anyhow!(
-                    "tls_require_client_cert = true requires tls_ca to verify client certs"
+                return Err(invalid(
+                    "tls_require_client_cert = true requires tls_ca to verify client certs",
                 ));
             }
             Ok(Some(ResolvedTls {
@@ -460,9 +472,9 @@ fn resolve_tls(args: &ServeArgs, file: &TlsSection) -> Result<Option<ResolvedTls
 fn parse_port_from_addr(addr: &str) -> Result<u16> {
     let (_, port) = addr
         .rsplit_once(':')
-        .ok_or_else(|| anyhow!("listen_addr '{addr}' must include a port"))?;
+        .ok_or_else(|| invalid(format!("listen_addr '{addr}' must include a port")))?;
     port.parse::<u16>()
-        .with_context(|| format!("listen_addr '{addr}' has invalid port"))
+        .map_err(|_| invalid(format!("listen_addr '{addr}' has invalid port")))
 }
 
 #[cfg(test)]

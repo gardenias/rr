@@ -26,6 +26,7 @@ use rr_raft::group_manager::StateMachineFactory;
 /// `RaftService` — and its existing TLS/mTLS gates — stay in force under
 /// both variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RaftTransport {
     /// gRPC transport (default). TLS/mTLS available via `tls_config`.
     Grpc,
