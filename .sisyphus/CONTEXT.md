@@ -5,11 +5,11 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-08-29 (Phase 0 全部落地:WS-1~WS-7 实施完成,测试全绿;ADR A-0011~A-0014 → implemented)
-**Current phase**: v0.2.0 RC 准备(剩余:RC 并行项——audit 配对、docs 漂移、linearizable read 集成测试、subtle/指纹加强;随后可靠性专项 R-1~R-8)
+**Last updated**: 2026-09-05 (服务端延迟预算可观测性批次落地:6 个新指标 + 原生 histogram buckets 修复,测试全绿)
+**Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;随后可靠性专项 R-1~R-8;`v0.2.0` final 待打 tag)
 **Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(主路线图;子计划:rr-durability-hardening.md、rr-reliability-program.md;rr-wal-impl.md 仍 deferred)
 **Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut — 11 个 P0 阻塞项见路线图 Phase 0
-**Main branch HEAD**: `ba69cc8` (linearizable reads + per-caller rate limiting + WAL ADR)
+**Main branch HEAD**: `a71f90c` (observability 批次:延迟预算指标 + 原生 histogram buckets)
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`);Oracle 判断已并入 8-16 review
 **Latest Momus review**: 2026-05-13 (`bg_a0e5a6d2`) on rr-wal-impl.md — pending
@@ -22,6 +22,14 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.1
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-09-05 — 服务端延迟预算可观测性批次落地
+
+- **新指标(代码)**:`rr_server_requests_total{group_id,op,outcome}` + `rr_server_request_duration_seconds{group_id,op}`(dispatch 客户端协议边界;op=write|read|lin_read,outcome=success|redirect|error|idempotency_expired;leader redirect 不计入 raft 段);`rr_raft_apply_duration_seconds` + `rr_raft_applied_entries_total`(SM adapter,精确 applied TPS 源,无 snapshot 阶跃/leader 切换空洞);`rr_raft_append_entries_rtt_seconds{kind=heartbeat|append}`(leader→follower RTT,replication lag 的时间维度伴生指标);`rr_ingestor_commands_committed_total`(Kafka 路径 raft 已提交命令数,与生产端速率/soak 计数交叉核对);`rr_proposal_duration_seconds` 加 `source=client|batch` 标签(两者形状不同,勿混算均值)。闭环:server ≈ routing + replication + apply。
+- **关键修复**:`rr-server/src/node.rs` recorder 安装处配显式 histogram buckets(`*_seconds` 统一延迟 bucket 组 + `rr_replication_batch_entries` 专用组)——否则 histogram 导出为 Prometheus summary,所有 `histogram_quantile(..._bucket)` recording rule/panel 全部无数据。
+- **配套**:recording rules 按延迟预算分层重写;Grafana cluster-overview dashboard 扩充对应 panel;metrics-reference.md 全量同步(含使用注记)。
+- **验证**:新增 `apply_emits_prometheus_metrics`(进程级全局 recorder 一次性安装,rr-raft 内无冲突);rr-raft 105 + rr-server 110 全绿;workspace check/clippy `-D warnings` 零告警;docusaurus build 通过;recording rules 引用指标与代码逐一对账无缺。
+- **遗留**:仓库存在 6 个先前遗留的 rustfmt 漂移点(非本批次引入:`ingestor_runner.rs:501`、builtin_service/config_file/rocks/examples×2/tests/rr-lab-producer),本次仅修本批次引入的 `service_adapter.rs` 一处;`.idea/`、`.playwright-mcp/` 为本地未跟踪目录,未入库。
 
 ### Session 2026-08-29 — Phase 0 发布阻塞项全部落地(WS-1~WS-7 实施)
 
