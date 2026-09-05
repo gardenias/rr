@@ -5,7 +5,7 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-06 (可靠性专项批次二:R-4 crash harness + 故障注入 + R-5 线性一致检查器;**A-0015 append 可见性契约关键修复**;批次一 R-1/R-6/R-7 同树;**工作树未提交**)
+**Last updated**: 2026-09-06 (可靠性专项批次二:R-4 crash harness + 故障注入 + R-5 线性一致检查器;**A-0015 append 可见性契约关键修复**;批次一 R-1/R-6/R-7 同批合入,commit `ddd908b`)
 **Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;随后可靠性专项 R-1~R-8;`v0.2.0` final 待打 tag)
 **Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(主路线图;子计划:rr-durability-hardening.md、rr-reliability-program.md;rr-wal-impl.md 仍 deferred)
 **Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut — 11 个 P0 阻塞项见路线图 Phase 0
@@ -1022,42 +1022,12 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 
 ## Git 状态
 
-- `main` 当前 HEAD 比 `origin/main` 超前 **25 个 commit**（**全部未 push**）。
-  按时间顺序：
-
-  **Phase 4 v0.3 核心（前一段 session）**:
-  - `c760efe` docs(evidence) — F1-F4 review report
-  - `7db26ec` feat(security) — Wave 1 F1/F2 hardening
-  - `02bfbe2` feat(core,storage) — Wave 2 Tier 0 docs
-  - `c341bd5` feat(core,raft) — Wave 3 FramedSnapshot
-  - `7ff6526` feat(core,network) — Wave 4a Tier 2/3 shared types
-  - `4852448` feat(raft,server,client) — Wave 4b IdempotencyLayer
-  - `8938114` feat(raft) — Wave 4c.1+4c.2 ingestor lifecycle
-  - `bfa0d37` feat(ingestor) — Wave 4c.3 rr-ingestor-kafka crate
-  - `6949356` test(integration) — Wave 4 verify cross-tier
-  - `e0a8d1e` feat(raft,core,ingestor) — Wave 4d Oracle P0 fixes
-  - `e0a0337` docs(guide,deployment) — Wave 5 Tier 4 docs + example
-  - `e5fdb48` feat(raft,network) — Wave 6.1 Theme A.1+A.2
-  - `b9776cc` feat(observability,examples) — Wave 6.2 Theme A.3+A.4
-  - `582cc6d` feat(server) — Wave 7 Theme B.4 /ready JSON
-  - `c6ec8cd` docs(context) — handoff CONTEXT update
-
-  **Phase 3.1 Theme B + Oracle 跟进 + Theme C（本 session）**:
-  - `89abdf3` feat(admin) — Wave 8 add_learner/change_membership
-  - `0ab0918` feat(admin) — Wave 9 T0.3 rr-admin node-reset
-  - `917c113` feat(raft) — Wave 10 B.2 auto-promote learner
-  - `2f03e4a` feat(admin,server) — Wave 11 B.1 online backup streaming
-  - `7d42363` feat(admin) — Wave 12 B.3 DecommissionNode
-  - `d97f2b3` feat(core,raft,ingestor) — Wave 13 Oracle P1/P2 follow-ups
-  - `c1d0d41` test(integration) — Wave 14 C.1 TLS+mTLS+auth e2e
-  - `a4c8fe6` test(fuzz) — Wave 15 C.2 cargo-fuzz proto fuzzer
-  - `b9f53ef` test(integration) — Wave 16 C.3 partition pathology
-  - `eea3988` test(integration) — Wave 17 C.4 crash-during-write durability
-  - `e27a8f8` test(integration) — Wave 18 C.5 linearizability stress
-
-  （加本次 CONTEXT 更新 = 26 个）
-
-- 工作树干净（CONTEXT.md 当前 session 的更新待 commit）。
+- `main` 当前 HEAD = `ddd908b`,比 `origin/main` 超前 **1 个 commit**(未 push):
+  - `ddd908b` feat(reliability) — 可靠性专项批次一+二合入:R-1 执法 / R-6 proptest+fuzz /
+    R-7 性能基线 / R-4 crash harness + 故障注入 / R-5 线性一致检查器 / **A-0015 日志可见性
+    契约关键修复**(123 files, +9375/-130;2026-09-06)
+- 更早的 Phase 3.1 / Phase 4 / v0.2.0 加固批次已全部在 `origin/main`(此前已 push)。
+- 工作树干净(本次 CONTEXT 更新除外,随下个 handoff commit 入库)。
 
 ---
 
