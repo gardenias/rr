@@ -18,6 +18,14 @@
 //! 3. Writing **all** accumulated entries in one `write_batch()` → one fsync.
 //! 4. Notifying every caller's callback when the batch is durable.
 //!
+//! # Read-your-submit barrier
+//!
+//! The channel is strictly ordered, so a [`IoBatcher::flush_barrier`] call is
+//! answered only after every item accepted **before** it has been flushed.
+//! `RocksLogStorage` uses this to order rare direct writes (`truncate_after`
+//! / `purge`) after queued appends — without it, a later batch flush would
+//! resurrect entries the direct write had just deleted.
+//!
 //! # Accumulation strategy
 //!
 //! - After receiving the first item, the worker does a **non-blocking drain**
@@ -51,9 +59,9 @@
 //! was flushed, answered exactly once, and the worker exited cleanly".
 //!
 //! If `close()` returns `Err`, pending completions stay with the wedged
-//! worker and its `Arc<RocksStorage>` (and the RocksDB LOCK) stays alive
-//! until process exit — a group whose batcher failed to close must not be
-//! restarted without bouncing the process.
+//! worker and its storage `Arc` (and, for a RocksDB-backed engine, the
+//! RocksDB LOCK) stays alive until process exit — a group whose batcher
+//! failed to close must not be restarted without bouncing the process.
 //!
 //! Dropping all clones of an `IoBatcher` still closes the channel and lets
 //! the worker drain pending items before exiting, but that drop-drain is a
@@ -74,7 +82,6 @@ use openraft::storage::IOFlushed;
 
 use rr_core::storage::BatchOp;
 use rr_core::storage::StorageEngine;
-use rr_storage::rocks::RocksStorage;
 
 use crate::type_config::RrTypeConfig;
 
@@ -153,6 +160,11 @@ enum BatchCompletion {
     /// openraft pipeline callback from `RaftLogStorage::append` — fired
     /// directly by the worker, so no per-append relay task is needed.
     Flushed(IOFlushed<RrTypeConfig>),
+    /// Post-flush action attached to a submission (see
+    /// [`IoBatcher::submit_with_hook`]). Runs after the batch's
+    /// `write_batch` completes, with the same result the caller's callback
+    /// receives — on both the success and the error path.
+    Hook(Box<dyn FnOnce(Result<(), String>) + Send + 'static>),
 }
 
 impl BatchCompletion {
@@ -164,6 +176,9 @@ impl BatchCompletion {
             Self::Flushed(callback) => {
                 callback.io_completed(result.map_err(io::Error::other));
             }
+            Self::Hook(f) => {
+                f(result);
+            }
         }
     }
 }
@@ -173,6 +188,9 @@ enum BatchItem {
         ops: Vec<BatchOp>,
         completions: Vec<BatchCompletion>,
     },
+    /// Control message: the worker answers it after the flush carrying every
+    /// item accepted before it ("read-your-submit" barrier).
+    Barrier(oneshot::Sender<()>),
     /// Control message asking the worker to drain, run the final
     /// `write_batch`, answer everything pending, ack the closer, and exit.
     Close(oneshot::Sender<()>),
@@ -209,7 +227,12 @@ pub struct IoBatcher {
 
 impl IoBatcher {
     /// Spawn a new batcher worker task backed by `storage`.
-    pub fn new(storage: Arc<RocksStorage>, config: IoBatcherConfig) -> Self {
+    ///
+    /// The storage is type-erased (`Arc<dyn StorageEngine>`): the worker only
+    /// ever calls [`StorageEngine::write_batch`], so any engine — RocksDB in
+    /// production, a fault-injecting wrapper in tests (reliability program
+    /// R-4) — can back the group-commit path.
+    pub fn new(storage: Arc<dyn StorageEngine>, config: IoBatcherConfig) -> Self {
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
         let worker = tokio::spawn(batcher_worker(rx, storage, config.clone()));
         Self {
@@ -274,6 +297,62 @@ impl IoBatcher {
             .map_err(|_| "io batcher worker has exited".to_string())
     }
 
+    /// [`submit_with_callback`](Self::submit_with_callback) plus a post-flush
+    /// `hook` fired with the same result, after the callback. Used by
+    /// `RocksLogStorage` to prune its submitted-but-unflushed overlay exactly
+    /// when the entries become readable from the storage engine — including
+    /// on the error path, where the entries will never land and must not
+    /// linger in the overlay.
+    pub async fn submit_with_hook<F>(
+        &self,
+        ops: Vec<BatchOp>,
+        callback: IOFlushed<RrTypeConfig>,
+        hook: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(Result<(), String>) + Send + 'static,
+    {
+        if self.state.closing.load(Ordering::SeqCst) {
+            return Err("io batcher is closing".to_string());
+        }
+        let item = BatchItem::Ops {
+            ops,
+            completions: vec![
+                BatchCompletion::Flushed(callback),
+                BatchCompletion::Hook(Box::new(hook)),
+            ],
+        };
+        self.tx
+            .send(item)
+            .await
+            .map_err(|_| "io batcher worker has exited".to_string())
+    }
+
+    /// Await a flush barrier: resolves once every item the worker accepted
+    /// **before** this call has been flushed (fsync under Strict).
+    ///
+    /// The internal channel is strictly ordered, so the barrier message can
+    /// only be answered after a `write_batch` covering all prior items has
+    /// completed. Items submitted *concurrently with or after* this call are
+    /// NOT covered.
+    ///
+    /// `Err` means the worker has exited (closed channel): nothing queued can
+    /// overtake the caller afterwards, so a caller that only needs ordering
+    /// (e.g. `RocksLogStorage::truncate_after`) may proceed — the batcher's
+    /// durability contract is unaffected either way. Unlike [`submit`], a
+    /// barrier is NOT rejected while [`IoBatcher::close`] is draining: the
+    /// closing sequence answers it along with everything else still queued.
+    pub async fn flush_barrier(&self) -> Result<(), String> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.tx
+            .send(BatchItem::Barrier(ack_tx))
+            .await
+            .map_err(|_| "io batcher worker has exited".to_string())?;
+        ack_rx
+            .await
+            .map_err(|_| "io batcher worker exited without answering barrier".to_string())
+    }
+
     /// Gracefully shut the batcher down (ADR A-0011 §Decision-2).
     ///
     /// Idempotent and concurrency-safe: every concurrent or repeated call
@@ -291,9 +370,10 @@ impl IoBatcher {
     ///
     /// If `close()` returns `Err`, any completions still pending stay with
     /// the wedged worker (they are NOT answered with an error), and the
-    /// worker keeps its `Arc<RocksStorage>` — and therefore the RocksDB
-    /// LOCK — alive until process exit: a group whose batcher failed to
-    /// close must not be restarted without bouncing the process.
+    /// worker keeps its storage `Arc` — and therefore, for a RocksDB-backed
+    /// engine, the RocksDB LOCK — alive until process exit: a group whose
+    /// batcher failed to close must not be restarted without bouncing the
+    /// process.
     pub async fn close(&self) -> Result<(), String> {
         self.state.closing.store(true, Ordering::SeqCst);
 
@@ -370,6 +450,8 @@ fn accumulate(
     ops: &mut Vec<BatchOp>,
     completions: &mut Vec<BatchCompletion>,
     close_acks: &mut Vec<oneshot::Sender<()>>,
+    barriers: &mut Vec<oneshot::Sender<()>>,
+    submissions: &mut usize,
     closing: &mut bool,
 ) {
     match item {
@@ -379,6 +461,13 @@ fn accumulate(
         } => {
             ops.extend(item_ops);
             completions.extend(item_completions);
+            *submissions += 1;
+        }
+        BatchItem::Barrier(ack) => {
+            // Answered after the flush of the batch it was accumulated into
+            // — which, thanks to the ordered channel, covers every item
+            // accepted before the barrier.
+            barriers.push(ack);
         }
         BatchItem::Close(ack) => {
             close_acks.push(ack);
@@ -388,7 +477,7 @@ fn accumulate(
 }
 
 /// Write the batch once and answer every completion with the same result.
-async fn flush(storage: &RocksStorage, ops: Vec<BatchOp>, completions: Vec<BatchCompletion>) {
+async fn flush(storage: &dyn StorageEngine, ops: Vec<BatchOp>, completions: Vec<BatchCompletion>) {
     let write_result = if ops.is_empty() {
         Ok(())
     } else {
@@ -401,7 +490,7 @@ async fn flush(storage: &RocksStorage, ops: Vec<BatchOp>, completions: Vec<Batch
 
 async fn batcher_worker(
     mut rx: mpsc::Receiver<BatchItem>,
-    storage: Arc<RocksStorage>,
+    storage: Arc<dyn StorageEngine>,
     config: IoBatcherConfig,
 ) {
     loop {
@@ -414,12 +503,16 @@ async fn batcher_worker(
         let mut all_ops = Vec::new();
         let mut completions: Vec<BatchCompletion> = Vec::new();
         let mut close_acks: Vec<oneshot::Sender<()>> = Vec::new();
+        let mut barriers: Vec<oneshot::Sender<()>> = Vec::new();
+        let mut submissions = 0usize;
         let mut closing = false;
         accumulate(
             first,
             &mut all_ops,
             &mut completions,
             &mut close_acks,
+            &mut barriers,
+            &mut submissions,
             &mut closing,
         );
 
@@ -431,6 +524,8 @@ async fn batcher_worker(
                     &mut all_ops,
                     &mut completions,
                     &mut close_acks,
+                    &mut barriers,
+                    &mut submissions,
                     &mut closing,
                 ),
                 Err(_) => break, // channel momentarily empty
@@ -438,8 +533,10 @@ async fn batcher_worker(
         }
 
         // ── Phase 3: timed drain (low-throughput amortisation) ───────────
-        // Only wait if we have room for more AND got nothing via try_recv.
-        if !closing && completions.len() == 1 && !config.window.is_zero() {
+        // Only wait if exactly ONE submission arrived so far (a second one
+        // already coalesced) — completion count can't gate this because one
+        // submission may carry several completions (callback + hook).
+        if !closing && submissions == 1 && !config.window.is_zero() {
             let deadline = tokio::time::Instant::now() + config.window;
             loop {
                 if closing || all_ops.len() >= config.max_entries {
@@ -455,6 +552,8 @@ async fn batcher_worker(
                         &mut all_ops,
                         &mut completions,
                         &mut close_acks,
+                        &mut barriers,
+                        &mut submissions,
                         &mut closing,
                     ),
                     Ok(None) => break, // channel closed
@@ -464,7 +563,10 @@ async fn batcher_worker(
         }
 
         // ── Phase 4+5: single write for the entire batch, then notify ─────
-        flush(&storage, all_ops, completions).await;
+        flush(&*storage, all_ops, completions).await;
+        for barrier in barriers.drain(..) {
+            let _ = barrier.send(());
+        }
 
         if closing {
             // ── Closing sequence: stop accepting new items, fold everything
@@ -480,10 +582,15 @@ async fn batcher_worker(
                     &mut rest_ops,
                     &mut rest_completions,
                     &mut close_acks,
+                    &mut barriers,
+                    &mut submissions,
                     &mut dummy,
                 );
             }
-            flush(&storage, rest_ops, rest_completions).await;
+            flush(&*storage, rest_ops, rest_completions).await;
+            for barrier in barriers.drain(..) {
+                let _ = barrier.send(());
+            }
             for ack in close_acks {
                 let _ = ack.send(());
             }
@@ -517,7 +624,7 @@ mod tests {
     #[tokio::test]
     async fn batcher_submits_single_item() {
         let (storage, _tmp) = open_storage();
-        let batcher = IoBatcher::new(Arc::clone(&storage), IoBatcherConfig::no_batching());
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::no_batching());
 
         let ops = vec![BatchOp::Put {
             cf: "state_machine".to_string(),
@@ -534,7 +641,7 @@ mod tests {
     async fn batcher_batches_concurrent_ops() {
         let (storage, _tmp) = open_storage();
         let config = IoBatcherConfig::new(Duration::from_millis(20), 256);
-        let batcher = IoBatcher::new(Arc::clone(&storage), config);
+        let batcher = IoBatcher::new(storage.clone(), config);
 
         let keys: Vec<Vec<u8>> = (0u32..50).map(|i| i.to_be_bytes().to_vec()).collect();
 
@@ -570,7 +677,7 @@ mod tests {
     async fn batcher_propagates_write_error() {
         // Use a closed/non-existent storage path to induce an error
         let (storage, _tmp) = open_storage();
-        let batcher = IoBatcher::new(Arc::clone(&storage), IoBatcherConfig::no_batching());
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::no_batching());
 
         // Submit an op to a valid CF — should succeed
         let result = batcher
@@ -583,10 +690,11 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
     #[tokio::test]
     async fn batcher_exits_cleanly_on_drop() {
         let (storage, _tmp) = open_storage();
-        let batcher = IoBatcher::new(Arc::clone(&storage), IoBatcherConfig::default());
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::default());
         drop(batcher);
         // Worker should exit; nothing to assert beyond "no hang"
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -595,7 +703,7 @@ mod tests {
     #[tokio::test]
     async fn batcher_no_batching_flushes_immediately() {
         let (storage, _tmp) = open_storage();
-        let batcher = IoBatcher::new(Arc::clone(&storage), IoBatcherConfig::no_batching());
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::no_batching());
 
         batcher
             .submit(vec![BatchOp::Put {
@@ -617,7 +725,7 @@ mod tests {
         let (storage, _tmp) = open_storage();
         // Long window so items are still accumulating when close() begins.
         let batcher = IoBatcher::new(
-            Arc::clone(&storage),
+            storage.clone(),
             IoBatcherConfig::new(Duration::from_secs(5), 256),
         );
 
@@ -662,12 +770,161 @@ mod tests {
         }
     }
 
+    // ── flush_barrier: read-your-submit ordering ─────────────────────────
+
+    #[tokio::test]
+    async fn flush_barrier_covers_prior_submissions() {
+        let (storage, _tmp) = open_storage();
+        // Long window: without a barrier the submitted ops would sit in the
+        // queue for seconds. The barrier must wait for their flush.
+        let batcher = IoBatcher::new(
+            storage.clone(),
+            IoBatcherConfig::new(Duration::from_secs(5), 256),
+        );
+
+        batcher
+            .tx
+            .send(BatchItem::Ops {
+                ops: put_op(41),
+                completions: vec![],
+            })
+            .await
+            .expect("send while open");
+
+        batcher.flush_barrier().await.expect("barrier answered");
+
+        let val = storage
+            .get("state_machine", &41u32.to_be_bytes())
+            .await
+            .unwrap();
+        assert_eq!(
+            val.as_deref(),
+            Some(41u32.to_be_bytes().as_slice()),
+            "everything accepted before the barrier must be flushed when it returns"
+        );
+        batcher.close().await.expect("close must succeed");
+    }
+
+    #[tokio::test]
+    async fn flush_barrier_on_idle_batcher_returns_fast() {
+        let (storage, _tmp) = open_storage();
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::default());
+        let start = std::time::Instant::now();
+        batcher.flush_barrier().await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "an idle barrier must not wait out the batching window"
+        );
+        batcher.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn flush_barrier_is_answered_during_close() {
+        let (storage, _tmp) = open_storage();
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::default());
+        batcher.submit(put_op(42)).await.unwrap();
+
+        // Barrier raced against close: the closing sequence must still answer it.
+        let b2 = batcher.clone();
+        let (barrier_result, close_result) = tokio::join!(b2.flush_barrier(), batcher.close());
+        barrier_result.expect("barrier during close must be answered");
+        close_result.expect("close must succeed");
+
+        // After the worker exited, the barrier errors (nothing can overtake).
+        assert!(batcher.flush_barrier().await.is_err());
+    }
+
+    // ── submit_with_hook: post-flush action, success and error path ──────
+
+    #[tokio::test]
+    async fn submit_with_hook_fires_with_result_on_success_path() {
+        let (storage, _tmp) = open_storage();
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::no_batching());
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let (callback, rx) = {
+            use openraft::type_config::async_runtime::{AsyncRuntime, Oneshot};
+            use openraft::RaftTypeConfig;
+            let (tx, rx) =
+                <<RrTypeConfig as RaftTypeConfig>::AsyncRuntime as AsyncRuntime>::Oneshot::channel(
+                );
+            (IOFlushed::signal(tx), rx)
+        };
+        batcher
+            .submit_with_hook(put_op(77), callback, move |result| {
+                seen2.lock().unwrap().push(result);
+            })
+            .await
+            .unwrap();
+
+        // Both completions fire exactly once, Ok.
+        rx.await
+            .expect("callback channel must not drop")
+            .expect("flush must succeed");
+        assert_eq!(seen.lock().unwrap().as_slice(), &[Ok(())]);
+
+        // The data the hook reported durable is in fact readable.
+        let val = storage
+            .get("state_machine", &77u32.to_be_bytes())
+            .await
+            .unwrap();
+        assert_eq!(val.as_deref(), Some(77u32.to_be_bytes().as_slice()));
+        batcher.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_with_hook_fires_with_error_on_write_failure() {
+        use rr_core::storage_fault::{FaultConfig, FaultInjectingStorage, Trigger};
+
+        let tmp = TempDir::new().unwrap();
+        let rocks =
+            rr_storage::rocks::RocksStorage::open_default(tmp.path().to_str().unwrap()).unwrap();
+        let faulted = Arc::new(FaultInjectingStorage::new(rocks, FaultConfig::seeded(1)));
+        faulted.arm_torn_write(rr_core::storage_fault::TornWrite {
+            trigger: Trigger::EveryCall,
+            prefix: rr_core::storage_fault::TornPrefix::Fixed(0),
+        });
+        let batcher = IoBatcher::new(faulted, IoBatcherConfig::no_batching());
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let (callback, rx) = {
+            use openraft::type_config::async_runtime::{AsyncRuntime, Oneshot};
+            use openraft::RaftTypeConfig;
+            let (tx, rx) =
+                <<RrTypeConfig as RaftTypeConfig>::AsyncRuntime as AsyncRuntime>::Oneshot::channel(
+                );
+            (IOFlushed::signal(tx), rx)
+        };
+        batcher
+            .submit_with_hook(put_op(78), callback, move |result| {
+                seen2.lock().unwrap().push(result);
+            })
+            .await
+            .unwrap();
+
+        // Error path: BOTH the openraft callback and the hook observe the
+        // same Err — a hook that only fired on success would leak state in
+        // its owner (RocksLogStorage's overlay).
+        rx.await
+            .expect("callback channel must not drop")
+            .expect_err("injected write failure must reach the callback");
+        let hook_results = seen.lock().unwrap().clone();
+        assert_eq!(hook_results.len(), 1, "hook must fire exactly once");
+        assert!(
+            hook_results[0].is_err(),
+            "hook must observe the write error, got {:?}",
+            hook_results[0]
+        );
+    }
+
     // ── T2: close() is idempotent, rejects new work, worker exits ─────────
 
     #[tokio::test]
     async fn batcher_close_idempotent_and_rejects_new() {
         let (storage, _tmp) = open_storage();
-        let batcher = IoBatcher::new(Arc::clone(&storage), IoBatcherConfig::default());
+        let batcher = IoBatcher::new(storage.clone(), IoBatcherConfig::default());
 
         // Submit one item so the worker has real work to drain.
         batcher.submit(put_op(7)).await.unwrap();

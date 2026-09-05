@@ -86,7 +86,7 @@ impl Metrics {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MetricsSnapshot {
     pub ok: u64,
     pub err: u64,

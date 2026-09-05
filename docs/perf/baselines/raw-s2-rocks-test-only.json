@@ -1,0 +1,94 @@
+{
+  "meta": {
+    "tool": "rr-perf-bench",
+    "version": "0.2.0",
+    "git_sha": "925a4b3711f014a592343e9ae36c43e15f32351d",
+    "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+    "os": "macos",
+    "arch": "aarch64",
+    "storage": "rocks",
+    "durability": "test_only",
+    "payload_bytes": 128,
+    "warmup_secs": 5,
+    "duration_secs": 20,
+    "concurrency_levels": [
+      1,
+      10,
+      50,
+      100,
+      200,
+      500
+    ],
+    "captured_unix_secs": 1788618698
+  },
+  "s1": null,
+  "s2": [
+    {
+      "concurrency": 1,
+      "ok": 119042,
+      "err": 0,
+      "elapsed_secs": 24.999944042,
+      "tps": 4761.690650187776,
+      "p50_us": 155,
+      "p95_us": 213,
+      "p99_us": 290,
+      "p999_us": 707
+    },
+    {
+      "concurrency": 10,
+      "ok": 510725,
+      "err": 0,
+      "elapsed_secs": 25.000135333,
+      "tps": 20428.88937756402,
+      "p50_us": 366,
+      "p95_us": 556,
+      "p99_us": 702,
+      "p999_us": 2150
+    },
+    {
+      "concurrency": 50,
+      "ok": 754092,
+      "err": 0,
+      "elapsed_secs": 25.000756125,
+      "tps": 30162.767676418178,
+      "p50_us": 1282,
+      "p95_us": 1919,
+      "p99_us": 2443,
+      "p999_us": 4714
+    },
+    {
+      "concurrency": 100,
+      "ok": 804565,
+      "err": 0,
+      "elapsed_secs": 25.002086125,
+      "tps": 32179.914747013932,
+      "p50_us": 2445,
+      "p95_us": 3571,
+      "p99_us": 4370,
+      "p999_us": 7421
+    },
+    {
+      "concurrency": 200,
+      "ok": 846664,
+      "err": 0,
+      "elapsed_secs": 25.0028475,
+      "tps": 33862.702982595445,
+      "p50_us": 4685,
+      "p95_us": 6639,
+      "p99_us": 7979,
+      "p999_us": 10280
+    },
+    {
+      "concurrency": 500,
+      "ok": 859166,
+      "err": 0,
+      "elapsed_secs": 25.008185667,
+      "tps": 34355.39107201835,
+      "p50_us": 11649,
+      "p95_us": 15564,
+      "p99_us": 18399,
+      "p999_us": 23445
+    }
+  ],
+  "s3": []
+}

@@ -225,6 +225,124 @@ merge these entries into the `[0.2.0]` categories when the tag is cut.
   label), leaving all `histogram_quantile(... _bucket ...)` recording rules
   and dashboard panels without data.
 
+### 可靠性专项批次(2026-09-05/06 — R-1 / R-6 / R-7 落地)
+
+> Executed per `.sisyphus/plans/rr-reliability-program.md`(设计已定稿,本批次落地
+> R-1 执法机制、R-6 性质测试、R-7 性能基线;R-2/R-3/R-4/R-5/R-8 见路线图后续批次)。
+> Merge these entries into the `[0.2.0]` categories when the tag is cut.
+
+#### Added
+
+- **性能基线与回归门禁(R-7)**:
+  - `rr-perf-bench` 新增 `--json-out <path>`:scenario 结束后输出机器可读 JSON
+    (meta = git SHA / rustc / OS / arch / storage / durability / payload / 并发档 + S1/S2/S3
+    快照),兼容 `--cluster-addrs` 外接集群模式(此时 storage/durability 记为 `external`)。
+  - `scripts/perf-baseline.sh`:一键采集 release 基线矩阵(S1 rocks/strict + S2 sweep ×
+    strict/replicated-only/test-only/mem,含 s2-strict 期间 CPU 采样);参数可经环境变量覆盖。
+  - 首份基线存档 `docs/perf/baselines/v0.2.0-baseline.md` + `raw-*.json` 原始数据
+    (M3 Pro / macOS 26.6.1 / rustc 1.98.0;3 节点 loopback,128B 写):**~34k TPS 饱和,
+    strict ≈ test_only ≈ mem(各档差 <2%),饱和点单进程 CPU ~3.6 核**。
+  - **ADR A-0010 前置判据已回答**:前置 1(release 基线)✅;前置 2(存储是绑定约束)❌
+    不成立 —— CPU 路径(codec/replication/apply)是约束,fsync/LSM 不热,**WAL 维持
+    deferred**,IoBatcher 调优亦无收益;下一个性能杠杆需 CPU profiling 立项。
+  - CI `bench` job 升级:main 分支 push 时 `--save-baseline main` 并缓存 `target/criterion`;
+    PR 上 restore 后 `--baseline main` 对比,`scripts/bench-compare.sh` 按 R-7 阈值裁决
+    (p<0.05 且均值回归 >15% → error,5~15% → warning 注解)。**`continue-on-error` 非阻塞
+    ≥2 周**攒噪声数据后再议转阻塞(理由写在 job 注释,防止噪声门禁自欺)。
+- **不变量登记执法机制(R-1)**:`scripts/check-invariants.sh` 五项双向检查(INV 有登记必有
+  代码引用、代码引用不得指向未登记 INV、每条 INV 至少一个关联测试、登记的测试名必须存在、
+  被登记的测试必须携带 `INV-n` 标记);新 CI job `invariants-lint`(纯文本检查,阻塞式);
+  PR 模板新增两条登记/命名检查项 + Testing Performed 的 INV 编号栏;CONTRIBUTING 新增
+  "Invariant enforcement review" 评审四问;INV-1~8 的 52 条既有测试全部补上 `/// INV-n:` 反链;
+  `invariants.md` 新增维护规则 5(登记触发元规则:能力性宣称 / guarantee 级措辞 / 带语义承诺的
+  pub API,任一命中即触发登记义务)。
+- **proptest 扩展(R-6,新增约 0.85s 测试时长)**:
+  - `rr-router` 路由表变迁(`proptest_router_transitions_route_consistency`,INV-6):随机
+    add/remove/reassign/membership 序列,每步对全 partition 宇宙断言 `route()` 与独立模型一致。
+  - `rr-raft` 幂等 LRU/watermark(`proptest_idempotency_lru_watermark_model_parity`,INV-3):
+    对照无界 HashMap oracle + 同容量 twin LRU + capture/restore 变换;watermark 单调、
+    Replay 返回原值、Expired 满足契约必要条件、四路分派与模型精确同构。
+  - `rr-raft` IoBatcher 交错(INV-1,rocks-gated):随机并发 × window × max_entries ×
+    两种 submit 路径;每个 submission 恰好应答一次、批内按 big-endian log-index 有序、
+    写错误广播给整批 caller、`close()` 幂等且事后 fail-fast、无 hang(20s 死线)。
+  - `rr-core` framed 双向兼容矩阵(7 个 proptest):version ∈ {0, 1, current, current+1,
+    u8::MAX} × 随机 payload;低版本必须可解、高版本必须明确 typed Err、任意字节不 panic;
+    配套 **golden corpus**(`crates/rr-core/tests/golden/` 6 个固定字节样本,断言解码等价 +
+    重编码字节一致——bincode 升级的静默漂移绊线)。
+- **fuzz 扩展(R-6)**:新增 `fuzz_framed_entry_roundtrip` / `fuzz_apply_outcome_roundtrip`
+  (decode→encode→decode 幂等,比纯 decode 深一层);**seed corpus 43 个样本入仓**
+  (`fuzz/corpus/<target>/`,覆盖 valid/legacy-unframed/truncated/future-version;生成器
+  `fuzz/examples/gen_corpus.rs` 可重生成);新 workflow `.github/workflows/fuzz-nightly.yml`
+  (每日 03:23 UTC + 手动触发,6 target 矩阵各 15 分钟,crash 自动 tmin 最小化并上传
+  artifact;纯信息性,不进 PR 门禁)。顺带修复 `fuzz/Cargo.toml` 的潜在损坏:
+  `prost = { workspace = true }` 在独立 crate 下无法解析,改为钉 `prost = "0.14.3"` 并注释。
+
+#### Fixed
+
+- **6 处先前遗留的 rustfmt 漂移**(ingestor_runner / builtin_service / config_file / rocks /
+  examples ×2 / rr-lab-producer / integration):`cargo fmt --all -- --check` 现全绿。
+- **`rr-perf-bench` `Cluster::drop` 现在会回收子进程**:start_kill 后 best-effort `try_wait`
+  轮询(每子进程 ~2s 预算,sync Drop 的合理近似),panic 路径不再泄漏 rr-server 进程;
+  `port_base` 文档注明并行运行需传不同 `--port-base`。
+
+#### Notes
+
+- fuzz 端到端(`cargo fuzz run`)在作者环境因网络中断未能执行(cargo-fuzz 未安装、
+  crates.io 不可达);6 个 target 经 libfuzzer-sys 同形 shim 编译并对全部 43 个种子
+  逐字节回放验证通过。**首次有网的 nightly 运行是真正的端到端验收**。
+
+### 可靠性专项批次二(2026-09-06 — R-4 / R-5 落地 + ADR A-0015 关键修复)
+
+> 承接上一批次,落地 R-4(crash harness + 存储故障注入)与 R-5(线性一致检查器);
+> harness 首跑即抓到一个真实的正确性 bug 并当批次闭环(ADR A-0015)。
+> Merge these entries into the `[0.2.0]` categories when the tag is cut.
+
+#### Added
+
+- **进程级 crash-recovery harness(R-4,新 crate `tests/crash`)**:真 SIGKILL/SIGTERM
+  3 节点 rocks/strict 集群;client 侧 ack-log(fdatasync 落盘)即 oracle  ground truth;
+  seed 化 kill 计划(`CRASH_SEED` 精确复现),事件流水 `fault-log.jsonl`;oracle 用
+  **同幂等键 + 不同探针负载**回放全部已 ACK 写——存活证明强于 log-index 对比
+  (同时验证日志存活 + 状态机不重复 apply + 幂等层跨重启有效)。
+  `scenario_a_graceful_sigterm`(优雅关闭契约:20s 内 0 码退出 + clean-shutdown 标记 +
+  已 ACK 全存活)与 `scenario_b_sigkill`(N 轮随机 kill)。新 workflow
+  `.github/workflows/crash-nightly.yml`(每日 02:41 UTC,10 轮;信息性,不阻塞 PR,
+  失败上传 run 目录 artifacts)。
+- **存储故障注入包装层(R-4)**:`rr-core` 新 feature `test-utils` 下
+  `FaultInjectingStorage`(`storage_fault.rs`)——四种可编程故障(fail_flush /
+  torn_write 前缀应用 / ENOSPC(StorageFull 类)/ latency 慢盘),SplitMix64 seed 化
+  确定性,组合顺序文档化(enospc 优先于 torn_write);8 个 wrapper 单测 +
+  `rr-raft::storage_fault_tests` 4 个组提交路径消费者测试(fail fsync 报错不 panic、
+  torn write 不留半条 entry、ENOSPC 广播整批 caller、慢盘不误判丢失)。
+  **前置改造**: `IoBatcher` 存储参数泛化为 `Arc<dyn StorageEngine>`(R-4 计划选项 a)。
+- **线性一致检查器(R-5,porcupine 风格,`tests/integration/src/linearizability.rs`)**:
+  单 partition 单 key register 模型;`History`/`OpHandle` 两阶段区间语义记录
+  (单进程 `Instant` 时钟,不跨进程比钟;失败/超时记 `?` 按部分序处理);
+  回溯搜索 + read-match 剪枝 + `(value, bitset)` 失败态记忆化;违规时贪心
+  delta-debugging 输出 1-minimal 冲突子历史 + 实时序链。`RecordingClient`
+  把写与 `read_linearizable` 记入受检历史、`read_local` 记入独立的 session 历史
+  (不送检)。`KvRegisterService` + `build_register_cluster`(FaultInjector 轮转隔离
+  follower)。既有 `test_concurrent_writes_under_chaos_linearizability` 升级为
+  计数断言(回归兜底)+ 记录历史送检双轨。
+
+#### Fixed
+
+- **ADR A-0015:异步 append 违反 openraft "submitted ⇒ visible" 契约(关键正确性)。**
+  R-4 harness 首跑即发现(seed 4242424242,两个场景四个节点实例):`RocksLogStorage::append`
+  入队即返回,而 openraft 的 apply/复制以 submit(非 flush)为门控 —— debug 构建下
+  sm worker(`sm/worker.rs:211`)与复制流(`stream_state.rs:105`)断言杀死任务,
+  节点 apply 冻结但 gRPC 假活;release 构建无断言,**静默跳过 apply**(副本状态机分叉)。
+  修复:`RocksLogStorage` pending overlay(append 先 stage 再提交;读路径**先克隆区间
+  overlay 快照、再扫 RocksDB、后合并** —— 快照序对"RocksDB 迭代器创建即钉视图 +
+  post-flush hook 摘除"竞态完备);`IoBatcher` 新增 post-flush hook(错误路径同样摘除)
+  与 `flush_barrier()`;`truncate_after`/`purge` 先过屏障再直连删除(消除被截断 entry
+  复活的同根 race);Phase 3 聚合窗口闸门按 submission 计数修正。回归测试 4+4 个;
+  终证:scenario A/B 复跑全绿(10 轮 SIGKILL,3266/3266 oracle,零 panic、零
+  head-gap 告警)。
+- **R-5 校准测试 `checker_perf_concurrent_burst` 的模型错误**:原构造让 64 个读全部
+  晚于所有写返回(real-time 后继),其中 63 个观察值注定不可满足 —— 既判不合法(语义错),
+  又触发指数穷举(性能陷阱)。修正为读/写区间交叠,恢复"广并发快检"本意。
+
 ### Added
 
 #### WAL log-storage backend design (ADR A-0010)

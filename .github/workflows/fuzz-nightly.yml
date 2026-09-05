@@ -1,0 +1,74 @@
+# Nightly fuzz campaign (work item R-6, informational — NOT a PR gate).
+#
+# Runs every fuzz target in fuzz/ for 15 minutes on the nightly toolchain
+# with libFuzzer via cargo-fuzz. On a crash, the reproducer is minimized
+# with `cargo fuzz tmin` and archived as a downloadable artifact.
+#
+# Triage contract: this workflow never blocks merges. Crash artifacts land
+# in the run's artifact list; dedup (by backtrace hash) and weekly rollup
+# issues are handled by maintainers per the risk register in
+# .sisyphus/plans/rr-reliability-program.md ("fuzz nightly 发现噪声化").
+# The PR-level smoke from the R-6 design is deliberately NOT wired into
+# ci.yml yet (noise control) — see the design doc before adding it.
+
+name: Fuzz Nightly
+
+on:
+  schedule:
+    # Daily at 03:23 UTC (deliberately off the top-of-hour herd).
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false # one crashing target must not cancel the others
+      matrix:
+        target:
+          - fuzz_framed_entry_decode
+          - fuzz_framed_snapshot_decode
+          - fuzz_apply_outcome_decode
+          - fuzz_client_request_proto
+          - fuzz_framed_entry_roundtrip
+          - fuzz_apply_outcome_roundtrip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Committed seed corpus lives in fuzz/corpus/<target>/ (cargo-fuzz
+      # default convention); cargo fuzz picks it up automatically.
+      - name: Fuzz ${{ matrix.target }} (15 min)
+        run: >
+          cargo +nightly fuzz run ${{ matrix.target }} --fuzz-dir fuzz
+          -- -max_total_time=900 -error_exitcode=42
+
+      # Minimize every crash reproducer in place so the archived artifact
+      # is the smallest input that still crashes. Bounded to 4 minutes.
+      - name: Minimize crash reproducer(s)
+        if: failure()
+        run: |
+          for artifact in fuzz/artifacts/${{ matrix.target }}/crash-*; do
+            [ -e "$artifact" ] || continue
+            echo "minimizing $artifact"
+            cargo +nightly fuzz tmin ${{ matrix.target }} "$artifact" \
+              --fuzz-dir fuzz -- -max_total_time=240 || true
+          done
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}-run${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30

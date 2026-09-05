@@ -329,12 +329,18 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
 
-    let config = NodeConfig::new(cli.node_id, bind_addr.clone(), storage, provider, dummy_factory)
-        .with_group_manager(Arc::clone(&mgr))
-        .with_raft_lookup(lookup)
-        .with_client_dispatch(dispatch)
-        .with_admin_port(cli.port + 1000)
-        .with_allow_insecure(true);
+    let config = NodeConfig::new(
+        cli.node_id,
+        bind_addr.clone(),
+        storage,
+        provider,
+        dummy_factory,
+    )
+    .with_group_manager(Arc::clone(&mgr))
+    .with_raft_lookup(lookup)
+    .with_client_dispatch(dispatch)
+    .with_admin_port(cli.port + 1000)
+    .with_allow_insecure(true);
     let config = match cli.metrics_port {
         Some(port) => config.with_metrics_port(port),
         None => config,
@@ -482,9 +488,9 @@ fn parse_roster(
 ) -> Result<BTreeMap<NodeId, String>> {
     let mut roster = BTreeMap::new();
     for entry in peers {
-        let (id, addr) = entry.split_once('@').ok_or_else(|| {
-            anyhow!("invalid --peers entry '{entry}': expected <node-id>@<addr>")
-        })?;
+        let (id, addr) = entry
+            .split_once('@')
+            .ok_or_else(|| anyhow!("invalid --peers entry '{entry}': expected <node-id>@<addr>"))?;
         let id: NodeId = id
             .trim()
             .parse()
@@ -514,7 +520,10 @@ fn parse_roster(
 /// Users start their terminals sequentially, so transient failures while the
 /// cluster comes up are retried every 500 ms for up to 30 s. A `NotAllowed`
 /// rejection means the group is already initialized — treat it as success.
-async fn initialize_with_retry(raft: &RaftInstance, members: BTreeMap<NodeId, BasicNode>) -> Result<()> {
+async fn initialize_with_retry(
+    raft: &RaftInstance,
+    members: BTreeMap<NodeId, BasicNode>,
+) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match raft.initialize(members.clone()).await {

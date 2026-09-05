@@ -391,10 +391,18 @@ impl ResolvedConfig {
     }
 
     fn load_file(path: &Path) -> Result<ConfigFile> {
-        let raw = fs::read_to_string(path)
-            .map_err(|e| invalid(format!("failed to read config file {}: {e}", path.display())))?;
-        let parsed: ConfigFile = toml::from_str(&raw)
-            .map_err(|e| invalid(format!("failed to parse TOML config {}: {e}", path.display())))?;
+        let raw = fs::read_to_string(path).map_err(|e| {
+            invalid(format!(
+                "failed to read config file {}: {e}",
+                path.display()
+            ))
+        })?;
+        let parsed: ConfigFile = toml::from_str(&raw).map_err(|e| {
+            invalid(format!(
+                "failed to parse TOML config {}: {e}",
+                path.display()
+            ))
+        })?;
         Ok(parsed)
     }
 }

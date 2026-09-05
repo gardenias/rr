@@ -14,7 +14,11 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 rr-core = { path = "../crates/rr-core" }
-prost = { workspace = true }
+# Pinned to the same version as the root workspace's [workspace.dependencies]
+# (`prost = "0.14.3"`). This crate opts out of the parent workspace via its
+# own `[workspace]` table below, so `workspace = true` inheritance is not
+# available here.
+prost = "0.14.3"
 
 # Tonic regenerates proto types in build.rs; we re-use the rr-network
 # generated code so fuzz inputs match what flows over the wire.
@@ -54,6 +58,20 @@ bench = false
 [[bin]]
 name = "fuzz_client_request_proto"
 path = "fuzz_targets/fuzz_client_request_proto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_framed_entry_roundtrip"
+path = "fuzz_targets/fuzz_framed_entry_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_apply_outcome_roundtrip"
+path = "fuzz_targets/fuzz_apply_outcome_roundtrip.rs"
 test = false
 doc = false
 bench = false

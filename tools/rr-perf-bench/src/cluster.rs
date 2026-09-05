@@ -51,6 +51,8 @@ pub struct ClusterConfig {
     /// Base port for the cluster.  Node n uses ports
     /// `base + (n-1)*10 + {1,2,3,4}` for gRPC / admin / metrics / raft_tcp.
     /// Default 47000 (avoids the 51000 range used by other tools).
+    /// Parallel bench runs on one host must pass distinct `--port-base`
+    /// values — the fixed port layout otherwise collides (R-7).
     pub port_base: u16,
     pub use_tcp_transport: bool,
     /// Optional per-node client rate limit (req/s), passed as `--client-rps`.
@@ -61,6 +63,15 @@ pub struct ClusterConfig {
 pub enum StorageKind {
     Mem,
     Rocks,
+}
+
+impl StorageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StorageKind::Mem => "mem",
+            StorageKind::Rocks => "rocks",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +103,24 @@ impl Drop for Cluster {
     fn drop(&mut self) {
         for n in &mut self.nodes {
             let _ = n.child.start_kill();
+        }
+        // Best-effort reap. Drop cannot await (and may run on a panic path
+        // with the runtime already gone), so poll try_wait() with short sync
+        // sleeps — up to ~2s per child — to actually reap exited children
+        // instead of leaking zombies. A child that still hasn't exited is
+        // given up on silently; the async shutdown() path remains the
+        // graceful option.
+        for n in &mut self.nodes {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match n.child.try_wait() {
+                    Ok(Some(_)) => break, // exited and reaped
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    _ => break, // error or still running after ~2s: give up
+                }
+            }
         }
     }
 }
@@ -333,10 +362,7 @@ async fn spawn_server(
         .arg("--metrics-port")
         .arg(ports.metrics.to_string())
         .arg("--storage")
-        .arg(match storage {
-            StorageKind::Mem => "mem",
-            StorageKind::Rocks => "rocks",
-        })
+        .arg(storage.as_str())
         .arg("--durability")
         .arg(durability.as_str())
         .arg("--allow-insecure")

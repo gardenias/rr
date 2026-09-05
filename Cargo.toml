@@ -16,6 +16,7 @@ members = [
     "examples/counter",
     "examples/otel-client",
     "tests/integration",
+    "tests/crash",
     "benches",
     "crates/rr-admin",
     "tools/rr-perf-bench",

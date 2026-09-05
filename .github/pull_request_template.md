@@ -31,6 +31,7 @@ Describe what testing you performed. For code changes, at minimum:
 For protocol/persistence changes:
   - Integration test scenarios run
   - Chaos test results if applicable
+  - Affected INV entries in docs/docs/reference/invariants.md: ____
 
 For docs changes:
   - Links checked
@@ -48,6 +49,8 @@ For docs changes:
 - [ ] No `println!`/`eprintln!` in library crates (use `tracing`)
 - [ ] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
 - [ ] PR scope is tight — no unrelated drive-by changes
+- [ ] New/changed externally advertised properties (reliability, consistency, durability, security gates, compatibility promises) are registered/updated in `docs/docs/reference/invariants.md` with enforcement point + linked test — or N/A with reason (e.g. pure internal refactor)
+- [ ] New/changed invariant-related tests carry the corresponding `INV-n` id in the test name or the first doc-comment line
 
 ## Screenshots / Logs (optional)
 

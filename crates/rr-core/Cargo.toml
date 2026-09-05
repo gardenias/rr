@@ -10,6 +10,14 @@ async-trait.workspace = true
 futures.workspace = true
 bincode.workspace = true
 metrics.workspace = true
+# Optional: only compiled with the `test-utils` feature (storage_fault's
+# latency injection sleeps on the tokio timer).
+tokio = { workspace = true, optional = true }
+
+[features]
+# Test-support utilities (fault-injecting storage wrapper, R-4). Not part of
+# production builds; consumers enable it via dev-dependency + feature.
+test-utils = ["dep:tokio"]
 
 [dev-dependencies]
 proptest = { workspace = true }

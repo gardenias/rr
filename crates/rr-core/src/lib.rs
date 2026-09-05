@@ -56,6 +56,8 @@ pub mod output;
 pub mod service;
 pub mod state_machine;
 pub mod storage;
+#[cfg(feature = "test-utils")]
+pub mod storage_fault;
 pub mod types;
 
 pub use codec::{BincodeCodec, Codec};

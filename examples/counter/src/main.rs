@@ -424,9 +424,9 @@ fn parse_roster(
 ) -> Result<BTreeMap<NodeId, String>> {
     let mut roster = BTreeMap::new();
     for entry in peers {
-        let (id, addr) = entry.split_once('@').ok_or_else(|| {
-            anyhow!("invalid --peers entry '{entry}': expected <node-id>@<addr>")
-        })?;
+        let (id, addr) = entry
+            .split_once('@')
+            .ok_or_else(|| anyhow!("invalid --peers entry '{entry}': expected <node-id>@<addr>"))?;
         let id: NodeId = id
             .trim()
             .parse()
@@ -456,7 +456,10 @@ fn parse_roster(
 /// Users start their terminals sequentially, so transient failures while the
 /// cluster comes up are retried every 500 ms for up to 30 s. A `NotAllowed`
 /// rejection means the group is already initialized — treat it as success.
-async fn initialize_with_retry(raft: &RaftInstance, members: BTreeMap<NodeId, BasicNode>) -> Result<()> {
+async fn initialize_with_retry(
+    raft: &RaftInstance,
+    members: BTreeMap<NodeId, BasicNode>,
+) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match raft.initialize(members.clone()).await {

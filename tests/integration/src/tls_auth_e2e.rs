@@ -222,6 +222,7 @@ async fn connect(
         .await
 }
 
+// INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
 #[tokio::test]
 async fn tls_mtls_bearer_auth_e2e_matrix() {
     rustls::crypto::ring::default_provider()

@@ -8,6 +8,7 @@ mod cross_tier_ingestor;
 pub mod fault_injection;
 #[cfg(test)]
 mod leader_redirect_failover;
+pub mod linearizability;
 #[cfg(test)]
 mod membership_guard;
 #[cfg(test)]
@@ -815,6 +816,7 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     /// T-002 — Two followers that have applied the same log entries independently
     /// should produce bit-for-bit identical snapshots.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1070,6 +1072,7 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
     /// T22 — RocksDB persistence: write data, restart node, verify log survives.
     #[cfg(feature = "rocks")]
     #[tokio::test]
@@ -1205,6 +1208,7 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
     /// T23c — Linearizable read redirect: point the SDK at a known follower;
     /// the follower must answer with a leader redirect and the SDK must
     /// converge on the leader and serve the read (ADR A-0009 follow-up).
@@ -1247,7 +1251,8 @@ mod tests {
 
     /// T23d — Client leader failover: kill leader, cluster elects new one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_client_leader_failover() {        use std::time::Duration;
+    async fn test_client_leader_failover() {
+        use std::time::Duration;
 
         let (nodes, provider) = ClusterBuilder::new(3, 1)
             .with_real_network()
@@ -1334,6 +1339,7 @@ mod tests {
 
     // ── T24: Partition Migration Test ────────────────────────────────────────────
 
+    /// INV-6: after a routing-table update the old shard receives no new writes; the routing table is the single source of truth.
     /// T24 — Partition migration: change membership from {1,2,3} to {1,2} and
     /// verify the cluster remains operational with writes after migration.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1399,6 +1405,7 @@ mod tests {
 
     // ── T25: Node Failure + Recovery Test ────────────────────────────────────────
 
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
     /// T25 — Node failure and recovery with RocksDB persistence.
     /// Verifies that a node can restart from persistent storage and continue operating.
     #[cfg(feature = "rocks")]
@@ -1483,6 +1490,7 @@ mod tests {
 
     // ── T26: Snapshot-Based Node Catch-Up Test ───────────────────────────────────
 
+    /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     /// T26 — Snapshot catch-up: write entries, trigger snapshot, verify cluster health.
     /// Verifies snapshot infrastructure doesn't break cluster operation.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1979,6 +1987,7 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
     /// E4 — Crash-during-write durability. Spawn a rocks-backed
     /// single-node cluster, write 20 entries sequentially (each
     /// `Ok` confirms the leader has fsynced + applied), then drop
@@ -2167,6 +2176,10 @@ mod tests {
         );
     }
 
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// INV-2: the recorded write history is fed to the porcupine-style register checker in
+    /// [`crate::linearizability`] (R-5; docs/docs/reference/invariants.md INV-2 — the checker
+    /// is the executable form of register linearizability).
     /// E5 — Linearizability stress test. Drive a 3-node cluster with
     /// 5 concurrent writer tasks (20 writes each = 100 total) while
     /// rotating a follower-isolation fault every ~250ms. After all
@@ -2179,16 +2192,18 @@ mod tests {
     ///    "skipped" entries).
     /// 3. The cluster has a stable leader after fault clearing
     ///    (system recovers, doesn't get stuck in election storm).
-    ///
-    /// This is a pragmatic Jepsen-style stress test rather than a
-    /// full linearizability checker (which would require a Knossos
-    /// / porcupine-rs history-checker). It catches the broadest class
-    /// of correctness bugs: lost acked writes, divergent state
-    /// machines, double-apply, election storms — without the runtime
-    /// + dependency cost of real Maelstrom.
+    /// 4. The recorded write history (interval semantics, `?` for
+    ///    unknown responses) passes the porcupine-style register
+    ///    checker (R-5). The counting assertions above stay as the
+    ///    regression backstop; the checker validates the recording
+    ///    pipeline against real traffic and gates the register
+    ///    model end-to-end (read-side coverage lives in
+    ///    `test_kv_register_linearizable_under_partition`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_writes_under_chaos_linearizability() {
         use std::sync::atomic::{AtomicU64, Ordering};
+
+        use crate::linearizability::{Checker, History, Verdict};
 
         let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
         let nodes = builder.build().await.expect("cluster build failed");
@@ -2205,15 +2220,25 @@ mod tests {
         let writers = 5;
         let writes_per_writer = 20;
         let ack_count = Arc::new(AtomicU64::new(0));
+        // R-5: record every write as a register op (interval semantics; a
+        // failed client_write is an unknown response — the porcupine `?`).
+        let history = History::new();
         let mut writer_handles = Vec::new();
         for w in 0..writers {
             let raft_clone = raft.clone();
             let ack_count = Arc::clone(&ack_count);
+            let history = history.clone();
             writer_handles.push(tokio::spawn(async move {
                 for i in 0..writes_per_writer {
                     let payload = vec![w as u8, i as u8];
-                    if raft_clone.client_write(payload.into()).await.is_ok() {
-                        ack_count.fetch_add(1, Ordering::SeqCst);
+                    let value = ((w as u64) << 16) | i as u64;
+                    let op = history.begin_write(value);
+                    match raft_clone.client_write(payload.into()).await {
+                        Ok(_) => {
+                            op.ack(value);
+                            ack_count.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(_) => op.unknown(),
                     }
                 }
             }));
@@ -2264,9 +2289,29 @@ mod tests {
              {writes_per_writer} ops with chaos; got {acked}"
         );
 
+        // R-5: feed the recorded register-write history (writes only on this
+        // EchoSM workload; the register model's read side is covered by
+        // test_kv_register_linearizable_under_partition) to the porcupine-style
+        // checker. Unknown responses participate as `?`.
+        let ops = history.snapshot();
+        assert_eq!(
+            ops.len(),
+            writers * writes_per_writer,
+            "every write invocation must be recorded (acked or unknown)"
+        );
+        match Checker::new().check(&ops) {
+            Verdict::Linearizable { checked, total } => {
+                eprintln!("chaos write history linearizable ({checked}/{total} ops checked)");
+            }
+            Verdict::Illegal(violation) => {
+                panic!("chaos write history is not linearizable:\n{violation}")
+            }
+        }
+
         shutdown_all(&nodes).await;
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_idempotency_dedup_survives_leader_switch() {
         let group_id = 101;
@@ -2339,6 +2384,7 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_committed_entry_applies_exactly_once_after_leader_crash() {
         let group_id = 102;
@@ -2644,6 +2690,7 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// INV-6: after a routing-table update the old shard receives no new writes; the routing table is the single source of truth.
     /// T32 — After routing table update, messages to a partition go to the new group.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_routing_table_update_routes_to_new_shard() {
@@ -2693,6 +2740,7 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// INV-6: after a routing-table update the old shard receives no new writes; the routing table is the single source of truth.
     /// T33 — After routing table update, no messages go to the old group.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_routing_no_messages_to_old_shard_after_update() {

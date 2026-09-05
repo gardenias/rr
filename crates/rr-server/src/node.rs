@@ -1037,6 +1037,7 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    // INV-6: after a routing-table update the old shard receives no new writes; the routing table is the single source of truth.
     #[tokio::test]
     async fn test_watch_loop_skips_group_not_in_replicas() {
         // Add a partition where node 1 is NOT in replicas — group must not start.
@@ -1067,6 +1068,7 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_raft_without_tls_rejects() {
         let cfg = make_config(1, "127.0.0.1:50100").with_raft_lookup(Arc::new(DummyRaftLookup));
@@ -1080,6 +1082,7 @@ mod tests {
         );
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_raft_without_mtls_rejects() {
         let cfg = make_config(1, "127.0.0.1:50101")
@@ -1095,6 +1098,7 @@ mod tests {
         );
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_auth_without_tls_rejects() {
         let cfg = make_config(1, "127.0.0.1:50102").with_auth(AuthConfig {
@@ -1111,6 +1115,7 @@ mod tests {
         );
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_admin_without_tls_rejects() {
         let cfg = make_config(1, "127.0.0.1:50103")
@@ -1129,6 +1134,7 @@ mod tests {
         );
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_admin_without_token_rejects() {
         let cfg = make_config(1, "127.0.0.1:50104")
@@ -1144,6 +1150,7 @@ mod tests {
         );
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_full_strict_path_passes() {
         let cfg = make_config(1, "127.0.0.1:50105")
@@ -1158,6 +1165,7 @@ mod tests {
         let _node = RrNode::new(cfg).expect("strict + correct config must validate");
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_allow_insecure_bypasses_all() {
         let cfg = make_config(1, "127.0.0.1:50106")
@@ -1167,12 +1175,14 @@ mod tests {
         let _node = RrNode::new(cfg).expect("allow_insecure=true must bypass validation");
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_minimal_dev_config_still_passes() {
         let _node = RrNode::new(make_config(1, "127.0.0.1:50107"))
             .expect("library users with no raft/admin should not be forced to TLS");
     }
 
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_aggregates_all_violations() {
         let cfg = make_config(1, "127.0.0.1:50108")

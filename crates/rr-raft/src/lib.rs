@@ -36,6 +36,17 @@ pub use rocks_log_storage::RocksLogStorage;
 
 pub use group_manager::RaftGroupManager;
 pub use idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
+
+// R-6 property-based test modules (unit-test only; the batcher one follows
+// the same rocks feature gate as the module under test).
+#[cfg(test)]
+mod idempotency_proptest;
+#[cfg(all(test, feature = "rocks"))]
+mod io_batcher_proptest;
+// R-4 storage fault-injection consumer tests (test-only; rocks-gated like
+// the batcher/log-storage modules they exercise).
+#[cfg(all(test, feature = "rocks"))]
+mod storage_fault_tests;
 pub use log_storage::RrLogStorage;
 pub use network_factory::GrpcNetworkFactory;
 pub use network_factory::GrpcRaftNetwork;

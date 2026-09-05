@@ -319,6 +319,7 @@ mod tests {
 
     // ── Tests ──────────────────────────────────────────────────────────────
 
+    /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     /// get_snapshot_builder + build_snapshot round-trip: snapshot data equals state.
     #[tokio::test]
     async fn test_build_snapshot_captures_state() {
@@ -344,6 +345,7 @@ mod tests {
         );
     }
 
+    /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     /// install_snapshot restores state machine from snapshot bytes.
     #[tokio::test]
     async fn test_install_snapshot_restores_state() {
@@ -367,6 +369,7 @@ mod tests {
         assert_eq!(sm.snapshot_idx, 1); // idx incremented to 1
     }
 
+    /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     /// Full round-trip: apply entries, build snapshot, create fresh SM, install snapshot.
     #[tokio::test]
     async fn test_snapshot_round_trip() {

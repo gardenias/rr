@@ -501,30 +501,28 @@ async fn run_poll_loop(
             continue;
         }
 
-        let batch_outcome = match tokio::time::timeout(
-            BATCH_WRITE_TIMEOUT,
-            mgr.write_batch(group_id, payloads),
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(_elapsed) => {
-                let dropped = commit_offsets.len() as u64;
-                metrics::counter!(
-                    "rr_ingestor_step_down_drops_total",
-                    "group_id" => group_id.to_string()
-                )
-                .increment(dropped);
-                warn!(
-                    group_id,
-                    dropped,
-                    timeout_ms = BATCH_WRITE_TIMEOUT.as_millis() as u64,
-                    "ingestor: batch write timed out; treating as step-down — offsets not \
+        let batch_outcome =
+            match tokio::time::timeout(BATCH_WRITE_TIMEOUT, mgr.write_batch(group_id, payloads))
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => {
+                    let dropped = commit_offsets.len() as u64;
+                    metrics::counter!(
+                        "rr_ingestor_step_down_drops_total",
+                        "group_id" => group_id.to_string()
+                    )
+                    .increment(dropped);
+                    warn!(
+                        group_id,
+                        dropped,
+                        timeout_ms = BATCH_WRITE_TIMEOUT.as_millis() as u64,
+                        "ingestor: batch write timed out; treating as step-down — offsets not \
                      consumed, supervisor re-seeds from the authoritative raft log offset"
-                );
-                return Ok(());
-            }
-        };
+                    );
+                    return Ok(());
+                }
+            };
 
         match batch_outcome {
             Ok(responses) => {
@@ -800,6 +798,7 @@ mod tests {
         }
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[tokio::test]
     async fn supervisor_exits_when_seed_offset_fails() {
         let mgr = make_single_node_leader().await;

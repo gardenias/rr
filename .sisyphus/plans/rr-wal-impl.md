@@ -7,7 +7,14 @@
 ## Pre-conditions (do these first, in order)
 
 1. **Release-build perf baseline**. Run `cargo build --release -p rr-perf-bench` then `rr-perf-bench --scenario s1 --storage rocks --durability strict` and `--scenario s2 --concurrency 100 --durability replicated_only`. Capture TPS / p50 / p99 / p999.
+   → **✅ DONE 2026-09-05**: full matrix archived in `docs/perf/baselines/v0.2.0-baseline.md`
+   (repro: `scripts/perf-baseline.sh`; S1 + S2 sweep × strict/replicated_only/test_only/mem).
 2. **Identify the actual bottleneck**. If CPU saturates before fsync queue depth, WAL is premature — finish IoBatcher tuning instead. Only proceed if storage shows up as the binding constraint (p99 fsync time dominates request latency, or `iostat` shows sustained high write-amp).
+   → **❌ NOT MET 2026-09-05**: strict ≈ test_only ≈ mem (<2% at every concurrency level),
+   per-process CPU peaks at ~3.6 cores at saturation. The binding constraint is the CPU path
+   (codec / replication / apply), not fsync or the RocksDB LSM. **WAL stays deferred** —
+   and IoBatcher tuning would be equally pointless (fsync is cold). Next perf lever requires
+   CPU profiling of the hot path; revisit A-0010 only if a future profile shows storage-bound.
 3. **Decide on `IoBatcher` reuse vs fork**. Read `crates/rr-raft/src/io_batcher.rs` end-to-end. Either:
    - Extract a `BatchWriter` trait so both `RocksLogStorage` and `WalLogStorage` plug in, or
    - Copy the file to `WalBatcher` and accept some duplication.

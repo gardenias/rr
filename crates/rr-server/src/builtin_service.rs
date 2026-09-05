@@ -100,6 +100,9 @@ mod tests {
     async fn echo_read_handle_echoes_payload() {
         let sm = EchoStateMachine::new();
         let reader = sm.read_handle().expect("echo SM must expose a read handle");
-        assert_eq!(reader.read(b"ping".to_vec()).await.unwrap(), b"ping".to_vec());
+        assert_eq!(
+            reader.read(b"ping".to_vec()).await.unwrap(),
+            b"ping".to_vec()
+        );
     }
 }

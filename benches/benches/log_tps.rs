@@ -143,7 +143,7 @@ fn bench_tps_concurrent_batcher(c: &mut Criterion) {
                                 RocksStorage::open_default(tmp.path().to_str().unwrap()).unwrap(),
                             );
                             let batcher = Arc::new(IoBatcher::new(
-                                Arc::clone(&rocks),
+                                rocks.clone(),
                                 IoBatcherConfig::new(Duration::from_micros(500), 1024),
                             ));
 

@@ -152,6 +152,14 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+  invariants-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check invariant registry links
+        # Pure text check (bash + grep) — zero noise, blocking by design (R-1).
+        run: bash scripts/check-invariants.sh
+
   coverage:
     runs-on: ubuntu-latest
     env:
@@ -185,6 +193,12 @@ jobs:
 
   bench:
     runs-on: ubuntu-latest
+    # Perf regression gate (R-7) is NON-BLOCKING on purpose: GitHub hosted
+    # runner timing noise is uncontrolled. Run continue-on-error for >=2 weeks,
+    # record the false-positive rate, then decide on promotion to blocking.
+    # Thresholds: scripts/bench-compare.sh (>15% significant => red, 5-15% =>
+    # warning annotation).
+    continue-on-error: true
     env:
       RUSTFLAGS: "--deny=warnings"
     strategy:
@@ -200,12 +214,34 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+      - name: Restore criterion baseline (PRs only)
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion
+          key: criterion-main-${{ github.sha }}
+          restore-keys: |
+            criterion-main-
       - name: Install RocksDB dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
       - name: Bench (compile + test mode)
         # rr-benches/rocks enables the required-features = ["rocks"] benches
         # (log_append_rocks, log_append_batched, log_tps), otherwise they are skipped.
         run: cargo bench --workspace --features rr-benches/rocks -- --test
+      - name: Bench (save baseline on main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: cargo bench --workspace --features rr-benches/rocks -- --save-baseline main
+      - name: Save criterion baseline cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: criterion-main-${{ github.run_id }}
+      - name: Bench (compare against main baseline on PRs)
+        if: github.event_name == 'pull_request'
+        run: |
+          cargo bench --workspace --features rr-benches/rocks -- --baseline main | tee bench-output.txt || true
+          scripts/bench-compare.sh bench-output.txt
 
   msrv:
     runs-on: ubuntu-latest

@@ -713,6 +713,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "crash-tests"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bincode",
+ "clap",
+ "libc",
+ "openraft",
+ "rand 0.8.5",
+ "rr-client",
+ "rr-core",
+ "rr-network",
+ "rr-raft",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tonic 0.14.5",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3346,6 +3370,7 @@ dependencies = [
  "clap",
  "hdrhistogram",
  "rr-client",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3365,6 +3390,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "openraft",
  "parking_lot",
+ "proptest",
  "prost 0.14.3",
  "rr-client",
  "rr-core",
@@ -3387,6 +3413,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "metrics",
+ "proptest",
  "rr-config",
  "rr-core",
  "tokio",

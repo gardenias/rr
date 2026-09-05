@@ -1,0 +1,400 @@
+//! The two R-4 scenarios. Both are gated on `--features rocks` (they spawn a
+//! rocks-backed node binary); a plain `cargo test -p crash-tests` runs only
+//! the skip notice below plus the pure unit tests.
+
+#[cfg(not(feature = "rocks"))]
+mod skip_notice {
+    #[test]
+    fn crash_scenarios_require_rocks_feature() {
+        eprintln!(
+            "SKIPPED: crash-recovery scenarios need the `rocks` feature and the \
+             rr-crash-node binary.\n  build: cargo build -p crash-tests --features rocks\n  \
+             run:   cargo test -p crash-tests --features rocks -- --test-threads=1 --nocapture"
+        );
+    }
+}
+
+#[cfg(feature = "rocks")]
+mod rocks_scenarios {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context, Result};
+    use rand::{Rng, SeedableRng};
+    use rr_client::RrClient;
+
+    use crate::cluster::{find_bin, log_fault, port_base, ClusterConfig, CrashCluster};
+    use crate::driver::Driver;
+    use crate::journal::Journal;
+    use crate::oracle::{replay_ack_log, OracleReport};
+
+    /// Both scenarios spawn real processes on loopback; serialize them so
+    /// port probing and failure injection never interleave across tests.
+    static SCENARIO_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Hard ceiling for one scenario. On expiry the test panics and the
+    /// cluster's Drop guard reaps all children — no stray processes.
+    const SCENARIO_TIMEOUT: Duration = Duration::from_secs(600);
+
+    /// One planned kill: which node, how far into the round (wall-clock).
+    /// Drawn from the seeded RNG before the round starts, so a `CRASH_SEED`
+    /// replay reproduces the exact same sequence.
+    #[derive(Debug, Clone, Copy)]
+    struct KillPlan {
+        node: u64,
+        offset_ms: u64,
+    }
+
+    struct Harness {
+        cluster: CrashCluster,
+        driver: Driver,
+        client: RrClient,
+        fault_log: Journal,
+        ack_path: PathBuf,
+        seed: u64,
+        rounds: u32,
+        rng: rand::rngs::StdRng,
+    }
+
+    impl Harness {
+        async fn setup(scenario: &str) -> Result<Self> {
+            let run_dir = run_dir(scenario);
+            if run_dir.exists() {
+                std::fs::remove_dir_all(&run_dir)
+                    .with_context(|| format!("wipe run dir {}", run_dir.display()))?;
+            }
+            std::fs::create_dir_all(&run_dir)
+                .with_context(|| format!("create run dir {}", run_dir.display()))?;
+
+            let seed = match std::env::var("CRASH_SEED") {
+                Ok(v) => v
+                    .parse::<u64>()
+                    .with_context(|| format!("CRASH_SEED={v} is not a valid u64"))?,
+                Err(_) => rand::random::<u64>(),
+            };
+            let rounds = env_u32("CRASH_ROUNDS", 3);
+            let write_rps = env_u32("CRASH_WRITE_RPS", 50);
+            let rng = rand::rngs::StdRng::seed_from_u64(seed);
+
+            let server_bin = find_bin("rr-crash-node", "RR_CRASH_NODE_BIN")?;
+            let cluster_cfg = ClusterConfig {
+                server_bin,
+                run_dir: run_dir.clone(),
+                port_base: port_base()?,
+                // Node-side log level; `CRASH_NODE_LOG_LEVEL` allows debug
+                // forensics, e.g. `openraft::core::sm=debug,openraft::engine=debug`.
+                log_level: std::env::var("CRASH_NODE_LOG_LEVEL")
+                    .unwrap_or_else(|_| "info".to_string()),
+            };
+
+            let mut fault_log = Journal::create(run_dir.join("fault-log.jsonl"))?;
+            log_fault(
+                &mut fault_log,
+                seed,
+                "plan",
+                None,
+                None,
+                None,
+                Some(format!(
+                    "scenario={scenario} rounds={rounds} write_rps={write_rps}"
+                )),
+            )?;
+
+            println!(
+                "[crash-harness] scenario={scenario} seed={seed} rounds={rounds} \
+                 (replay: CRASH_SEED={seed})"
+            );
+            println!("[crash-harness] run dir: {}", run_dir.display());
+
+            let cluster = CrashCluster::start(&cluster_cfg).await?;
+            let client = crate::driver::connect(&cluster.all_grpc_addrs()).await?;
+
+            let ack_path = run_dir.join("ack-log.jsonl");
+            let driver = Driver::start(client.clone(), write_rps, Journal::create(&ack_path)?);
+
+            Ok(Self {
+                cluster,
+                driver,
+                client,
+                fault_log,
+                ack_path,
+                seed,
+                rounds,
+                rng,
+            })
+        }
+
+        /// Block until the driver has at least `CRASH_WARMUP_WRITES`
+        /// (default 30) acknowledged writes — the pre-fault baseline.
+        async fn warmup_barrier(&self) -> Result<()> {
+            let target = u64::from(env_u32("CRASH_WARMUP_WRITES", 30));
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while self.driver.acked() < target {
+                if Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "warmup barrier not reached: acked={} < {target}",
+                        self.driver.acked()
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(())
+        }
+
+        /// Ack-log length on disk — the exact set of writes the oracle must
+        /// verify (the driver's in-memory counter can be one append ahead).
+        fn acked_on_disk(&self) -> Result<u64> {
+            Ok(
+                crate::journal::Journal::read_all::<crate::journal::AckRecord>(&self.ack_path)?
+                    .len() as u64,
+            )
+        }
+
+        /// Replay the whole ack log; fail loudly on any loss.
+        async fn run_oracle(&self, phase: &str) -> Result<OracleReport> {
+            let report = replay_ack_log(&self.client, &self.ack_path).await?;
+            println!(
+                "[crash-harness] oracle[{phase}]: {}/{} acked writes verified in {:?}",
+                report.verified, report.checked, report.elapsed
+            );
+            Ok(report)
+        }
+
+        async fn teardown(self, scenario: &str) {
+            let stats = Arc::clone(self.driver.stats());
+            let errors = self.driver.error_samples();
+            self.driver.stop().await;
+            println!(
+                "[crash-harness] scenario={scenario} done: sent={} acked={} failed={} corrupted={}",
+                stats.sent.load(std::sync::atomic::Ordering::Relaxed),
+                stats.acked.load(std::sync::atomic::Ordering::Relaxed),
+                stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+                stats.corrupted.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            for e in &errors {
+                println!("[crash-harness] driver error sample: {e}");
+            }
+            assert_eq!(
+                stats.corrupted.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "driver observed responses that did not echo their request: {errors:?}"
+            );
+            // CrashCluster::drop SIGKILLs and reaps any surviving children.
+            drop(self.cluster);
+        }
+    }
+
+    fn run_dir(scenario: &str) -> PathBuf {
+        if let Ok(v) = std::env::var("CRASH_RUN_DIR") {
+            return PathBuf::from(v).join(scenario);
+        }
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/crash-tests")
+            .join(scenario)
+    }
+
+    fn env_u32(name: &str, default: u32) -> u32 {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(default)
+    }
+
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// R-4 scenario A — graceful SIGTERM. Exercises the shutdown drain path
+    /// (gRPC stop → in-flight write drain → raft shutdown → batcher tail
+    /// flush): every write the client saw acknowledged must survive, and the
+    /// process must exit cleanly within the deadline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scenario_a_graceful_sigterm() {
+        let _guard = SCENARIO_LOCK.lock().await;
+        tokio::time::timeout(SCENARIO_TIMEOUT, scenario_a_body())
+            .await
+            .expect("scenario A exceeded its 10-minute ceiling")
+            .unwrap();
+    }
+
+    async fn scenario_a_body() -> Result<()> {
+        let mut h = Harness::setup("scenario-a-graceful-sigterm").await?;
+        h.warmup_barrier().await?;
+        // A few extra seconds of load so the shutdown window lands mid-stream.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let target = h.rng.gen_range(1..=3u64);
+        let frontier = h.acked_on_disk()?;
+        println!(
+            "[crash-harness] SIGTERM node {target} at frontier={frontier} (seed={})",
+            h.seed
+        );
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "sigterm",
+            Some(target),
+            Some(0),
+            None,
+            None,
+        )?;
+
+        // The graceful-shutdown contract: the process must exit, with code 0,
+        // well inside this deadline.
+        let status = h
+            .cluster
+            .term_node(target, Duration::from_secs(20))
+            .await?
+            .unwrap_or_else(|| panic!("node {target} did not exit within 20s of SIGTERM"));
+        assert!(
+            status.success(),
+            "node {target} exited with {status} after SIGTERM — graceful shutdown failed"
+        );
+        let node_log = std::fs::read_to_string(h.cluster.node_log_path(target))
+            .context("read terminated node's log")?;
+        assert!(
+            node_log.contains("rr-crash-node shut down cleanly"),
+            "node {target} log lacks the clean-shutdown marker"
+        );
+
+        h.cluster.restart_node(target).await?;
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "restart",
+            Some(target),
+            Some(0),
+            None,
+            None,
+        )?;
+        let caught_up = h
+            .cluster
+            .wait_caught_up(target, frontier, Duration::from_secs(60))
+            .await?;
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "rejoined",
+            Some(target),
+            Some(0),
+            None,
+            Some(format!("applied={caught_up} frontier={frontier}")),
+        )?;
+
+        // Oracle: every write acked at any point (including during the
+        // shutdown window) must replay from the idempotency cache.
+        let report = h.run_oracle("post-sigterm").await?;
+        assert!(report.checked > 0, "scenario A acked nothing — vacuous run");
+        assert_eq!(report.verified, report.checked);
+
+        h.teardown("scenario-a-graceful-sigterm").await;
+        Ok(())
+    }
+
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// R-4 scenario B — the main loop: N rounds of seeded-random SIGKILL at
+    /// random wall-clock points (under continuous write load), restart with
+    /// the same data dir, catch-up, then a full ack-log replay. Zero
+    /// acknowledged writes may be lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scenario_b_sigkill() {
+        let _guard = SCENARIO_LOCK.lock().await;
+        tokio::time::timeout(SCENARIO_TIMEOUT, scenario_b_body())
+            .await
+            .expect("scenario B exceeded its 10-minute ceiling")
+            .unwrap();
+    }
+
+    async fn scenario_b_body() -> Result<()> {
+        let mut h = Harness::setup("scenario-b-sigkill").await?;
+
+        // Draw the entire kill schedule up front: same seed → same schedule,
+        // independent of wall-clock jitter.
+        let schedule: Vec<KillPlan> = (1..=h.rounds)
+            .map(|_| KillPlan {
+                node: h.rng.gen_range(1..=3u64),
+                offset_ms: h.rng.gen_range(800..=2500u64),
+            })
+            .collect();
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "plan",
+            None,
+            None,
+            None,
+            Some(format!(
+                "schedule={:?}",
+                schedule
+                    .iter()
+                    .map(|k| (k.node, k.offset_ms))
+                    .collect::<Vec<_>>()
+            )),
+        )?;
+
+        h.warmup_barrier().await?;
+
+        for (round, plan) in schedule.iter().enumerate() {
+            let round = round as u32 + 1;
+            println!(
+                "[crash-harness] round {round}/{}: SIGKILL node {} in {}ms (seed={})",
+                h.rounds, plan.node, plan.offset_ms, h.seed
+            );
+
+            // Load continues into the kill window.
+            tokio::time::sleep(Duration::from_millis(plan.offset_ms)).await;
+            let frontier = h.acked_on_disk()?;
+
+            h.cluster.kill_node(plan.node).await?;
+            log_fault(
+                &mut h.fault_log,
+                h.seed,
+                "sigkill",
+                Some(plan.node),
+                Some(round),
+                Some(plan.offset_ms),
+                Some(format!("frontier={frontier}")),
+            )?;
+
+            // The surviving pair keeps quorum and keeps serving writes.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+
+            h.cluster.restart_node(plan.node).await?;
+            log_fault(
+                &mut h.fault_log,
+                h.seed,
+                "restart",
+                Some(plan.node),
+                Some(round),
+                None,
+                None,
+            )?;
+
+            let caught_up = h
+                .cluster
+                .wait_caught_up(plan.node, frontier, Duration::from_secs(60))
+                .await?;
+            log_fault(
+                &mut h.fault_log,
+                h.seed,
+                "rejoined",
+                Some(plan.node),
+                Some(round),
+                None,
+                Some(format!("applied={caught_up} frontier={frontier}")),
+            )?;
+
+            let report = h.run_oracle(&format!("round-{round}")).await?;
+            assert_eq!(
+                report.verified, report.checked,
+                "round {round}: oracle verified fewer writes than the ack log holds"
+            );
+        }
+
+        // Final full replay after the last restart settles.
+        let report = h.run_oracle("final").await?;
+        assert_eq!(report.verified, report.checked);
+        assert!(report.checked > 0, "scenario B acked nothing — vacuous run");
+
+        h.teardown("scenario-b-sigkill").await;
+        Ok(())
+    }
+}

@@ -160,9 +160,33 @@ yarn build   # static output in docs/build/
    Removed/Deprecated categories per Keep a Changelog.
 4. **Push** and open a PR against `main`. Fill out the PR template.
 5. **CI** will run build, test (default + rocks + defensive), clippy, fmt,
-   coverage, benchmarks, MSRV, doc tests, cargo-audit, and chaos tests. All
-   must pass.
+   coverage, benchmarks, MSRV, doc tests, cargo-audit, chaos tests, and the
+   invariant-registry lint (`invariants-lint`). All must pass.
 6. **Review** — at least one maintainer must approve.
+
+### Invariant enforcement review
+
+rr's advertised system-level properties are registered as decidable invariants
+in [`docs/docs/reference/invariants.md`](./docs/docs/reference/invariants.md)
+(INV-1…INV-n). `scripts/check-invariants.sh` (CI job `invariants-lint`) keeps
+the registry and the test code bidirectionally linked. When reviewing a PR,
+ask:
+
+1. **Does the change alter any externally observable guarantee?** (reliability,
+   consistency, durability, security gates, compatibility promises)
+2. **If yes, is `invariants.md` updated in the same PR?** An advertised
+   property that is not registered is treated as non-existent.
+3. **Do the claimed enforcement points (`file:line`) still exist?** Spot-check
+   a few — when code moves, the registry must move in the same PR.
+4. **Do the linked tests actually run in CI?** A test that never runs is a
+   false green. Check feature propagation end-to-end (e.g. a `rocks`-gated
+   integration test only runs because the `test-rocks` job passes
+   `integration/rocks`) instead of assuming coverage.
+
+New or changed invariant-related tests must carry the `INV-n` id in the test
+name or in the first line of their doc comment; existing tests are not renamed
+— they get a `/// INV-n: <invariant>` first doc line (or a `// INV-n: …`
+comment directly above the test fn) instead.
 
 ## 9. Reporting security issues
 

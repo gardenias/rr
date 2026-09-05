@@ -1,0 +1,41 @@
+[package]
+name = "crash-tests"
+version.workspace = true
+# Matches the repo convention (tests/integration, tools/*, crates/* are all
+# edition 2021) so workspace-wide fmt/clippy behave identically here.
+edition = "2021"
+publish = false
+description = "R-4 process-level crash-recovery harness: real SIGKILL/SIGTERM against a rocks-backed 3-node cluster, ack-log oracle, seeded kill schedule"
+
+# The `rocks` feature gates everything that needs a rocks-backed node binary
+# (the `rr-crash-node` bin target and the two scenario tests). A plain
+# `cargo test -p crash-tests` compiles and runs only the pure unit tests plus
+# an explicit skip-notice test — mirroring how `tests/integration` gates its
+# RocksDB persistence tests behind its own `rocks` feature.
+[features]
+rocks = ["rr-raft/rocks"]
+
+[[bin]]
+name = "rr-crash-node"
+path = "src/bin/rr-crash-node.rs"
+required-features = ["rocks"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bincode.workspace = true
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+openraft = { workspace = true, features = ["serde"] }
+rand = "0.8"
+rr-client = { path = "../../crates/rr-client" }
+rr-core = { path = "../../crates/rr-core" }
+rr-network = { path = "../../crates/rr-network" }
+rr-raft = { path = "../../crates/rr-raft" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

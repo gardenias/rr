@@ -690,6 +690,7 @@ mod tests {
         assert_eq!(*data, legacy);
     }
 
+    // INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     #[tokio::test]
     async fn snapshot_then_restore_roundtrip_through_adapter() {
         let svc1 = MockService::new(vec![]).with_snapshot(b"persistent-state".to_vec());
@@ -704,6 +705,7 @@ mod tests {
         assert_eq!(*svc2_data.lock().await, b"persistent-state");
     }
 
+    // INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     #[tokio::test]
     async fn restore_malformed_framed_bytes_errors() {
         let svc = MockService::new(vec![]);
@@ -763,6 +765,7 @@ mod tests {
         }
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[tokio::test]
     async fn apply_keyed_replay_returns_cached_without_calling_service() {
         let svc = MockService::new(b"first-response".to_vec());
@@ -786,6 +789,7 @@ mod tests {
         );
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[tokio::test]
     async fn apply_keyed_expired_returns_idempotency_expired_outcome() {
         let svc = MockService::new(b"resp".to_vec());
@@ -809,6 +813,7 @@ mod tests {
         }
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[tokio::test]
     async fn snapshot_restore_preserves_idempotency_replay_behaviour() {
         let svc1 = MockService::new(b"first-response".to_vec());
@@ -882,6 +887,7 @@ mod tests {
         assert_eq!(adapter.last_applied().await, None);
     }
 
+    // INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     #[tokio::test]
     async fn restore_records_snapshot_install_metric() {
         let svc = MockService::new(vec![]);
@@ -1010,6 +1016,7 @@ mod tests {
         );
     }
 
+    // INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
     #[tokio::test]
     async fn apply_collects_outputs_and_assigns_monotonic_seq() {
         let svc =
@@ -1030,6 +1037,7 @@ mod tests {
         assert_eq!(pending[0].idempotency_key, "idem:0");
     }
 
+    // INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
     #[tokio::test]
     async fn snapshot_restore_roundtrip_preserves_outbox_state() {
         let svc =

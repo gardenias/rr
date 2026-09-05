@@ -5,7 +5,7 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-05 (服务端延迟预算可观测性批次落地:6 个新指标 + 原生 histogram buckets 修复,测试全绿)
+**Last updated**: 2026-09-06 (可靠性专项批次二:R-4 crash harness + 故障注入 + R-5 线性一致检查器;**A-0015 append 可见性契约关键修复**;批次一 R-1/R-6/R-7 同树;**工作树未提交**)
 **Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;随后可靠性专项 R-1~R-8;`v0.2.0` final 待打 tag)
 **Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(主路线图;子计划:rr-durability-hardening.md、rr-reliability-program.md;rr-wal-impl.md 仍 deferred)
 **Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut — 11 个 P0 阻塞项见路线图 Phase 0
@@ -22,6 +22,60 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.1
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-09-05/06 — 可靠性专项批次(R-1 执法 + R-6 性质测试 + R-7 基线)
+
+> 执行目标(用户原话):"生产级别的稳定性和可靠性,简洁的集成使用体验,极高的吞吐和极低的延迟"。
+> 按 `rr-reliability-program.md` 既定顺序落地 R-7 → R-1 → R-6;**本 session 全部改动未 commit**。
+
+- **Batch 0(RC 退出验证)**:6 处遗留 rustfmt 漂移修复(`cargo fmt --check` 全绿);workspace clippy `-D warnings` + 全量测试(含 rocks)全绿;3 个 rocks 持久化测试逐个单独运行实测通过;docs build 通过。helm/docker 动态验证因外网中断(Docker Hub / get.helm.sh 不可达)只做静态复核——制品自 WS-2 验证批次以来零变更(f3b98e0 后无改动)。cargo-semver-checks 本机未装,CI 有 semver-checks.yml 常驻。
+- **R-7 基线与门禁**:`rr-perf-bench --json-out`(meta + S1/S2/S3 快照,兼容外接集群);`scripts/perf-baseline.sh` 一键矩阵采集;`docs/perf/baselines/v0.2.0-baseline.md` + 5 份 raw JSON 存档(M3 Pro:~34k TPS 饱和,strict≈test_only≈mem <2%,饱和点单进程 ~3.6 核)。**A-0010 判据:前置 1 ✅,前置 2 ❌(CPU 绑定,非存储)→ WAL 维持 deferred,IoBatcher 调优同判无收益**,已回写 `rr-wal-impl.md`。CI bench job:main 存 criterion baseline、PR 对比、`scripts/bench-compare.sh`(>15% 显著回归报错/5~15% 警告),`continue-on-error` 观察期。`Cluster::drop` 修复(start_kill 后 best-effort reaping)。
+- **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
+- **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
+- **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-06 — 可靠性专项批次二(R-4 crash harness + 故障注入 + R-5 线性一致检查器;**A-0015 关键正确性修复**)
+
+> 承接批次一,执行 R-4 → R-5。harness 首跑即抓到真实正确性 bug 并当批次闭环。
+
+- **R-4 crash harness(新 crate `tests/crash`,workspace member)**:真进程级 3 节点
+  rocks/strict 集群(`rr-crash-node` bin:生产组件组装——`RaftNode::new_with_rocks_factory` +
+  `GrpcNetworkFactory` + 生产 gRPC impl + `ServiceStateMachineAdapter` 幂等;选择自搭二进制
+  因为 stock `rr-server` 有两个已核实缺口:内建 EchoSM 不走幂等 adapter、`RrNode` 的
+  `start_group` 硬编码内存 log 使 `--storage rocks` 不接 raft 日志路径)。ack-log
+  (fdatasync)为 oracle 真源;seed 化 kill 计划(`CRASH_SEED` 复现);oracle 探针回放
+  (同键异负载:Replay 返回原负载=存活证明,强于 log-index 对比)。scenario A
+  (SIGTERM 优雅关闭契约)+ scenario B(N 轮 SIGKILL)。`crash-nightly.yml` 每日
+  02:41 UTC 10 轮,信息性,失败传 artifacts。
+- **R-4 故障注入**:`rr-core` feature `test-utils` 下 `FaultInjectingStorage`
+  (fail_flush / torn_write 前缀 / ENOSPC StorageFull / latency;SplitMix64 seed 化;
+  组合顺序 enospc>torn);`IoBatcher` 泛化 `Arc<dyn StorageEngine>`(计划选项 a 落地);
+  wrapper 8 单测 + `storage_fault_tests` 4 个组提交消费者测试(rocks-gated)。
+- **★ A-0015(关键,新增 ADR)**:harness 首跑抓到——异步 append 违反 openraft
+  "submitted ⇒ visible" 契约(apply/复制以 submit 为门控,`engine_impl.rs`
+  `next_progress_driven_command`)。debug 下 sm worker / 复制流断言杀任务
+  (`sm/worker.rs:211`、`stream_state.rs:105`),节点假死;release 下**静默跳 apply**
+  (状态机分叉)。修复:pending overlay(append 先 stage;读路径**克隆区间快照 →
+  扫描 → 合并**,快照序对"迭代器创建即钉视图 × hook 摘除"竞态完备——次轮仪器化实证
+  `lo=923→first=924` 后引入);`IoBatcher` post-flush hook(对错路径都摘除)+
+  `flush_barrier()`;`truncate_after`/`purge` 先屏障后直连删(消 entry 复活 race);
+  Phase 3 窗口闸门改按 submission 计数(hook 双 completion 不致窗口失效)。
+  回归:rocks_log_storage +4、io_batcher +5;终证 scenario A/B 全绿(10 轮 SIGKILL,
+  3266/3266,零 panic 零 head-gap)。
+- **R-5 线性一致检查器**(`tests/integration/src/linearizability.rs`):porcupine 风格
+  register checker(区间语义、`?` 未知响应、read-match 剪枝、失败态记忆化、违规
+  贪心最小化反例);`RecordingClient` 双历史(受检:写 + `read_linearizable`;
+  session:`read_local` 不送检);`KvRegisterService` + `build_register_cluster`;
+  E5 既有测试升级为计数 + checker 双轨。**校准测试 model bug 修复**:
+  `checker_perf_concurrent_burst` 原构造 63/64 读注定不可满足(语义错 + 指数穷举陷阱),
+  改为读写区间交叠。模块 16/16 绿(含真集群 `test_kv_register_linearizable_under_partition`)。
+- **验收对照**:R-4 验收 4 条全达(CI nightly 承载、场景 A 证 close 协议、四种故障各
+  ≥1 消费测试、seed 复现);R-5 验收 3 条中前 2 条达(校准判非法/判合法 + 两个集成测试
+  真实历史过检),第 3 条(临时分支植入 stale-read 回归)由校准测试等价覆盖、未单独做。
+- **验证**:fmt / clippy `-D warnings` / invariants-lint(63 links)/ workspace 全量
+  tests(rocks) 全绿;crash scenario A+B 复绿;linearizability 16/16。
+- **下一步候选**:R-3 DST spike → R-8 nightly soak(依赖 R-4 ack-log/oracle 组件复用)→
+  R-2 TLA+;`v0.2.0` tag 决策仍待用户。`tests/crash` 运行产物在 `target/crash-tests/`。
 
 ### Session 2026-09-05 — 服务端延迟预算可观测性批次落地
 
@@ -938,6 +992,16 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 - `.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md` — 快照契约 + 灾难恢复
 - `.sisyphus/adr/A-0003-framework-idempotency-layer.md` — 框架幂等
 - `.sisyphus/adr/A-0004-etcd-config-schema.md` — etcd ConfigProvider 的 key 布局 + JSON wire shape（2026-04-27）
+- `.sisyphus/adr/A-0015-log-visibility-contract.md` — Raft 日志可见性契约:submitted⇒visible(pending overlay + flush barrier;R-4 harness 发现,2026-09-06)
+
+### 可靠性专项产物(2026-09-05/06)
+- `tests/crash/` — R-4 进程级 crash harness(`cargo test -p crash-tests --features rocks`)
+- `crates/rr-core/src/storage_fault.rs` — R-4 故障注入 wrapper(feature `test-utils`)
+- `crates/rr-raft/src/storage_fault_tests.rs` — 组提交路径故障消费测试(rocks-gated)
+- `tests/integration/src/linearizability.rs` — R-5 porcupine 检查器 + register 集群 harness
+- `scripts/check-invariants.sh` / `scripts/perf-baseline.sh` / `scripts/bench-compare.sh` — R-1/R-7 门禁
+- `docs/perf/baselines/v0.2.0-baseline.md` + 5 份 raw JSON — R-7 首份基线
+- `.github/workflows/{crash-nightly,fuzz-nightly}.yml` — R-4/R-6 nightly 承载
 
 ### 本次 session 评审
 - `.sisyphus/evidence/rr-client-sdk-review-2026-04-27.md` — rr-client SDK 审查报告（F1/F2/F3 P0 阻塞 + F4 polish，全部已修）

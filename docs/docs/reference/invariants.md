@@ -35,6 +35,10 @@ honestly-recorded enforcement gaps.
    无归属的条目。
 4. 一条不变量被修复工作流闭环后,**缺口条目转为"已闭环"并保留**(注明闭环版本),而不是删除
    ——历史缺口是后来者的排雷图。
+5. **登记触发规则(元规则)**:凡 (a) CHANGELOG `### Added` 中出现能力性宣称、(b) README/docs
+   中出现 guarantee / must / never 级措辞、(c) 新增 pub API 带语义承诺,三者任一命中,即触发
+   本文档的登记义务——先登记 INV 条目(强制点 + 关联测试)再合入。该义务由
+   `scripts/check-invariants.sh`(CI `invariants-lint` job,阻塞式)与 PR 模板检查项共同执法。
 
 ## 与 ADR 体系的关系
 
@@ -105,6 +109,28 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
 - `crates/rr-raft/src/io_batcher.rs:292` `batcher_exits_cleanly_on_drop`(drop 后 worker 退出)
 - `tests/integration/src/lib.rs:2010` `test_concurrent_writes_under_chaos_linearizability`
   (chaos 下"已 ACK 不丢"压力验证)
+- `crates/rr-raft/src/io_batcher_proptest.rs` `proptest_io_batcher_interleavings_exactly_once_and_ordered`、
+  `crates/rr-raft/src/io_batcher_proptest.rs` `proptest_io_batcher_write_error_propagates_to_whole_batch`
+  (R-6 proptest:随机 submit 并发 × window × max_entries;每个 submission 恰好完成一次、
+  批内按 big-endian log-index 排序、写错误传播给整批 caller、无 hang;`--features rocks` 下运行)
+- `crates/rr-raft/src/rocks_log_storage.rs` `test_append_visible_before_flush_via_overlay`、
+  `test_truncate_after_does_not_resurrect_pending_appends`、
+  `test_purge_does_not_resurrect_pending_appends`、
+  `test_pipelined_appends_concurrent_reads_never_gap`(R-4,ADR A-0015 回归:
+  submitted⇒visible 契约、直连删除不复活未落盘 append、管线写 + 并发读无缺口)
+- `crates/rr-raft/src/storage_fault_tests.rs`(R-4 故障注入 × IoBatcher 组提交路径,
+  rocks-gated):`fail_flush_surfaces_err_and_batcher_worker_survives`、
+  `torn_write_batch_leaves_prefix_only_and_error_propagates`、
+  `enospc_propagates_to_all_pending_batch_callers`、
+  `slow_disk_latency_completes_correctly_just_slower`
+- `crates/rr-raft/src/io_batcher.rs` `flush_barrier_*`、`submit_with_hook_*`
+  (屏障排序与 post-flush hook 语义)
+- `tests/crash/src/scenarios.rs` `scenario_a_graceful_sigterm`(R-4 进程级 harness,
+  `--features rocks`,CI 由 `crash-nightly.yml` 承载:SIGTERM 优雅关闭 → 重启 → 全量
+  ack-log 回放,验证 WS-4 close 协议:已 ACK 全存活 + 进程 20s 内以 0 码退出 +
+  clean-shutdown 标记)、`tests/crash/src/scenarios.rs` `scenario_b_sigkill`
+  (seed 化随机 SIGKILL × N 轮 + 同 data-dir 重启 + 追平 + 每轮 oracle 回放;
+  `CRASH_SEED` 精确复现)
 
 ### 已知缺口
 
@@ -153,6 +179,24 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   `test_send_request_converges_once_leader_is_known`(mock gRPC server 模拟未知/已知窗口);
   既有 redirect/failover 集成测试(`test_client_redirect`、`test_client_leader_failover`、
   `leader_redirect_failover`)实测全绿。
+- **【2026-09-06 R-4 crash harness 首跑发现 → 当批次闭环】异步 append 违反 openraft
+  "submitted ⇒ visible" 契约。** `RocksLogStorage::append` 入队 IoBatcher 即返回,而
+  openraft 0.10.0-alpha.34 的 apply/复制管线以 log-IO **submit**(非 flush)为门控
+  (`engine_impl.rs` `next_progress_driven_command`),follower/leader 在追平或负载突发时
+  于 batcher flush 前读日志:debug 构建 sm worker 断言(`sm/worker.rs:211`)/复制流断言
+  (`replication/stream_state.rs:105`)杀死任务,节点 apply 冻结但 gRPC 假活;release 构建
+  无断言,**静默跳过 apply** —— 副本间状态机分叉。次轮仪器化又抓到 RocksDB 迭代器
+  创建即钉视图 + hook 摘除竞态("先扫后并"窗口:`lo=923 → first=924`)。
+
+  **✅ 已闭环(2026-09-06,ADR A-0015)**:`RocksLogStorage` 新增 pending overlay
+  (append 先 stage 再提交;读路径**先克隆区间 overlay 快照、再扫 RocksDB、后合并**——
+  快照序使两源互补,头部缺口不可能,尾部缺口退化为 openraft 可容忍的前缀读);
+  `IoBatcher` 新增 `BatchCompletion::Hook`(post-flush 精确摘除,错误路径同样摘除)与
+  `BatchItem::Barrier`/`flush_barrier()`(读己所提交屏障);`truncate_after`/`purge`
+  先过屏障再直连删除(消除"被截断 entry 被后续 flush 复活"的同根 race);Phase 3 聚合窗口
+  闸门由 completion 数修正为 submission 数(hook 引入后不致窗口失效)。回归测试见上方
+  "现有测试" R-4 条目组;终证:`tests/crash` scenario A(SIGTERM)+ scenario B
+  (10 轮 SIGKILL,3266/3266 oracle 全活,节点日志零 panic、零 head-gap 告警)。
 
 ## INV-2 Linearizable Read — 线性一致读
 
@@ -195,6 +239,17 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   (follower → `leader_info` 重定向直通 proto 层)
 - `tests/integration/src/lib.rs` `test_read_linearizable_redirect_from_follower`
   (3 节点真集群:SDK 仅指向已知 follower,经 `leader_info` 重定向在 leader 收敛读成功)
+- `tests/integration/src/linearizability.rs` `checker_minimizes_violation_to_conflicting_pair`
+  (R-5 porcupine 风格 register 检查器:反例最小化到冲突对;同文件 13 个校准/性能测试
+  `checker_rejects_*` ×4 / `checker_accepts_*` ×5 / `checker_perf_*` ×2 /
+  `checker_downsamples_oversized_history` / `history_records_completed_and_unknown_ops`
+  均携带 INV-2 反链,完整清单见文件)
+- `tests/integration/src/linearizability.rs` `test_kv_register_linearizable_under_partition`
+  (3 节点 kv register,2 writer + 2 linearizable reader + read_local 混负载 +
+  follower 轮转隔离;写 + `read_linearizable` 历史必须过 checker,stale-able
+  `read_local` 历史单独记录不送检)
+- `tests/integration/src/lib.rs` `test_concurrent_writes_under_chaos_linearizability`
+  (E5 计数断言保留为回归兜底,记录的写历史同时送 checker——INV-2 的写侧压力面)
 
 ### 已知缺口
 
@@ -262,6 +317,10 @@ at-least-once 重投),用户可见的 `Service::handle()` 效果**恰好发生�
 - `tests/integration/src/lib.rs:2163` `test_committed_entry_applies_exactly_once_after_leader_crash`(leader 崩溃后重试返回缓存)
 - `tests/integration/src/cross_tier_ingestor.rs:286` `test_ingestor_survives_leader_switch_no_message_loss`(重叠 offset 流去重,10 条恰好 10 次)
 - `crates/rr-raft/src/ingestor_runner.rs:681` `supervisor_exits_when_seed_offset_fails`
+- `crates/rr-raft/src/idempotency_proptest.rs` `proptest_idempotency_lru_watermark_model_parity`
+  (R-6 model-based proptest:对照无界 HashMap oracle + 同容量 twin LRU,随机 decide/record 序列 +
+  capacity 压力 + capture/restore;断言 watermark 单调、Replay 返回原值、Expired 仅在
+  `request_id <= watermark` 且 cache miss 时发生)
 
 ### 已知缺口
 
@@ -445,6 +504,10 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
 - `tests/integration/src/lib.rs:1281` `test_partition_migration`(partition 迁移)
 - `crates/rr-router/src/router.rs` 单元测试 ×8(not found / leader 查询 / 全表读取)
 - `crates/rr-server/src/node.rs:963` `test_watch_loop_skips_group_not_in_replicas` 等 watch loop 测试
+- `crates/rr-router/tests/router_proptest.rs` `proptest_router_transitions_route_consistency`
+  (R-6 proptest:随机 add_partition/remove/reassign/membership 序列(T32/T33 的 router 层对应),
+  每步后对全 partition 宇宙断言 `route()` 与独立模型一致——恰好一个 group 或明确的
+  `PartitionNotFound`,无 panic、无缓存陈旧视图)
 
 ### 已知缺口
 

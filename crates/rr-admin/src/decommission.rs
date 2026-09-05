@@ -336,6 +336,7 @@ mod tests {
         assert!(!report.made_progress());
     }
 
+    // INV-7: change-membership must not shrink a group's voters below quorum (>= 2) without explicit force + audit.
     #[test]
     fn report_quorum_loss_does_not_count_as_progress() {
         let report = DecommissionReport {
@@ -393,6 +394,7 @@ mod tests {
         assert_eq!(pick_new_leader(&voters, 4), None);
     }
 
+    // INV-7: change-membership must not shrink a group's voters below quorum (>= 2) without explicit force + audit.
     #[test]
     fn min_voters_after_removal_constant_is_two() {
         // Pins the shared policy constant (rr-core) the client-side

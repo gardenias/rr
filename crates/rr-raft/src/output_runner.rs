@@ -387,6 +387,7 @@ mod tests {
         assert!(err.to_string().contains("KafkaPublish to topic 'orders'"));
     }
 
+    // INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
     #[tokio::test]
     async fn dispatch_one_kafka_publish_success() {
         let producer = Arc::new(CapturingKafka::new()) as Arc<dyn KafkaProducer>;
@@ -404,6 +405,7 @@ mod tests {
             .unwrap();
     }
 
+    // INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
     #[tokio::test]
     async fn dispatch_one_kafka_publish_propagates_failure() {
         let producer = Arc::new(CapturingKafka::fail_first_n(1)) as Arc<dyn KafkaProducer>;
@@ -422,6 +424,7 @@ mod tests {
         assert!(err.to_string().contains("scripted failure"));
     }
 
+    // INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
     #[tokio::test]
     async fn dispatch_one_raft_write_requires_client() {
         let producer = Arc::new(CapturingKafka::new()) as Arc<dyn KafkaProducer>;
@@ -441,6 +444,7 @@ mod tests {
             .contains("OutputTarget::RaftWrite requires an RrClient"));
     }
 
+    // INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
     #[tokio::test]
     async fn output_handle_stop_completes() {
         let (stop_tx, stop_rx) = oneshot::channel();

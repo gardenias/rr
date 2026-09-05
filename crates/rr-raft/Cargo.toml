@@ -32,3 +32,8 @@ defensive = []
 [dev-dependencies]
 tempfile = "3"
 metrics-exporter-prometheus = "0.16"
+proptest = { workspace = true }
+# R-4: fault-injecting storage wrapper for the group-commit fault tests in
+# `src/storage_fault_tests.rs`. Feature-unified onto the main rr-core dep in
+# test builds only.
+rr-core = { path = "../rr-core", features = ["test-utils"] }

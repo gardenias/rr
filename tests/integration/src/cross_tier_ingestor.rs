@@ -283,6 +283,7 @@ async fn restored_adapter_seeds_new_ingestor_with_persisted_offset() {
         .expect("the persisted bytes must round-trip back through DynCommandIngestor::seek_bytes");
 }
 
+/// INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
 /// T-003 — Ingestor restart with overlapping offsets must not lose or duplicate
 /// messages. Simulates leader-switch recovery where the new ingestor re-seeks
 /// from last_applied_offset and replays a partially-overlapping stream.

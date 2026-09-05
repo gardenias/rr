@@ -77,11 +77,17 @@ pub enum DurabilityPolicy {
     TestOnly,
     /// Deprecated alias for [`ReplicatedOnly`](Self::ReplicatedOnly). Same
     /// on-disk behavior; kept for one minor version to ease migration.
-    #[deprecated(since = "0.2.0", note = "renamed to `ReplicatedOnly`; will be removed in v0.3.0")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "renamed to `ReplicatedOnly`; will be removed in v0.3.0"
+    )]
     Balanced,
     /// Deprecated alias for [`TestOnly`](Self::TestOnly). Same on-disk
     /// behavior; kept for one minor version to ease migration.
-    #[deprecated(since = "0.2.0", note = "renamed to `TestOnly`; will be removed in v0.3.0")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "renamed to `TestOnly`; will be removed in v0.3.0"
+    )]
     Fast,
 }
 

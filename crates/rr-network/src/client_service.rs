@@ -479,6 +479,7 @@ mod tests {
         assert!(resp.payload.starts_with(b"q-stale"));
     }
 
+    // INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
     #[tokio::test]
     async fn test_read_linearizable_routes_to_submit_linearizable_read() {
         let svc = ClientServiceImpl::new(Arc::new(ReadEchoDispatch));
@@ -526,6 +527,7 @@ mod tests {
         }
     }
 
+    // INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
     #[tokio::test]
     async fn test_read_linearizable_surfaces_leader_redirect_to_proto() {
         let svc = ClientServiceImpl::new(Arc::new(FollowerRedirectDispatch));

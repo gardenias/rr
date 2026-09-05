@@ -1,3 +1,5 @@
 target/
 artifacts/
-corpus/
+# corpus/ is intentionally NOT ignored: the seed corpora are committed to
+# the repo (see README.md "Corpus"). libFuzzer may add newly discovered
+# inputs here on local runs — review before committing those.

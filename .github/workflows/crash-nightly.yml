@@ -1,0 +1,73 @@
+# Nightly process-level crash-recovery campaign (work item R-4, informational
+# — NOT a PR gate).
+#
+# Runs the crash-tests harness (tests/crash) against real rocks-backed node
+# processes: a seeded kill schedule SIGKILLs/SIGTERMs nodes under write load,
+# restarts them on the same data dir, and replays the fdatasync'd ack log
+# through the idempotency layer after every round (the INV-1 oracle).
+#
+# Triage contract: this workflow never blocks merges — it only runs on a
+# schedule / manual dispatch, so it can never gate a PR. On failure, the
+# ack log, fault log (with the CRASH_SEED for exact replay), and per-node
+# logs are uploaded as artifacts; reproduce locally with
+#   CRASH_SEED=<seed from fault-log.jsonl> cargo test -p crash-tests \
+#     --features rocks -- --test-threads=1 --nocapture
+
+name: Crash Nightly
+
+on:
+  schedule:
+    # Daily at 02:41 UTC (deliberately off the top-of-hour herd).
+    - cron: '41 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crash-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUSTFLAGS: "--deny=warnings"
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # RocksDB's bundled C++ build needs these (mirrors ci.yml build-rocks).
+      - name: Install RocksDB dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-crash-${{ hashFiles('**/Cargo.lock') }}
+
+      # Builds the harness's node binary (rr-crash-node, required-features =
+      # ["rocks"]) plus the test harness itself.
+      - name: Build node binary + harness (rocks)
+        run: cargo build -p crash-tests --features rocks
+
+      # Serial: the two scenarios share the port probe space and both spawn
+      # real processes. --nocapture keeps the seed + kill-schedule lines in
+      # the CI log.
+      - name: Run crash scenarios (10 rounds)
+        env:
+          CRASH_ROUNDS: "10"
+          RR_CRASH_NODE_BIN: ${{ github.workspace }}/target/debug/rr-crash-node
+        run: >
+          cargo test -p crash-tests --features rocks
+          -- --test-threads=1 --nocapture
+
+      - name: Upload crash-harness artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-harness-run${{ github.run_id }}
+          path: target/crash-tests/
+          if-no-files-found: ignore
+          retention-days: 30

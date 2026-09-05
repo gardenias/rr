@@ -241,6 +241,7 @@ mod tests {
         ));
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[test]
     fn recorded_key_replays() {
         let mut layer = IdempotencyLayer::new(10);
@@ -272,6 +273,7 @@ mod tests {
         }
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[test]
     fn expired_when_below_watermark_and_evicted() {
         let mut layer = IdempotencyLayer::new(2);
@@ -316,6 +318,7 @@ mod tests {
         ));
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[test]
     fn capture_restore_roundtrip_preserves_replay_behaviour() {
         let mut original = IdempotencyLayer::new(10);
@@ -348,6 +351,7 @@ mod tests {
         assert_eq!(layer.watermark_for("transfer"), Some(5));
     }
 
+    // INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
     #[test]
     fn restore_replaces_existing_cache_entries_not_merge() {
         let mut original = IdempotencyLayer::new(10);
@@ -379,6 +383,7 @@ mod tests {
         }
     }
 
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[test]
     fn first_request_id_zero_is_new_not_expired() {
         let mut layer = IdempotencyLayer::new(10);
