@@ -738,7 +738,7 @@ impl RaftGroupManager {
             .map_err(|e| RrError::Application(e.to_string()))?;
 
         let gid = group_id.to_string();
-        histogram!("rr_proposal_duration_seconds", "group_id" => gid.clone())
+        histogram!("rr_proposal_duration_seconds", "group_id" => gid.clone(), "source" => "client")
             .record(start.elapsed().as_secs_f64());
 
         // Update raft gauge metrics from the current raft state.
@@ -796,7 +796,7 @@ impl RaftGroupManager {
         }
 
         let gid = group_id.to_string();
-        histogram!("rr_proposal_duration_seconds", "group_id" => gid.clone())
+        histogram!("rr_proposal_duration_seconds", "group_id" => gid.clone(), "source" => "batch")
             .record(start.elapsed().as_secs_f64());
 
         // Update raft gauge metrics from the current raft state.

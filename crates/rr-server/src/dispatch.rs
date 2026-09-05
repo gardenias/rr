@@ -51,6 +51,7 @@ impl ClientDispatch for ClientDispatchImpl {
         payload: Vec<u8>,
         idem_key: Option<IdempotencyKey>,
     ) -> Result<ClientWriteResult, tonic::Status> {
+        let start = std::time::Instant::now();
         let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
             tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
         })?;
@@ -74,7 +75,9 @@ impl ClientDispatch for ClientDispatchImpl {
             payload
         };
 
-        match raft.client_write(entry_bytes.into()).await {
+        let raft_started = std::time::Instant::now();
+        let mut proposed = true;
+        let result = match raft.client_write(entry_bytes.into()).await {
             Ok(resp) => {
                 if keyed {
                     match ApplyOutcome::decode(resp.data.as_ref()) {
@@ -113,6 +116,7 @@ impl ClientDispatch for ClientDispatchImpl {
             }
             Err(ref e) => {
                 if let Some(fwd) = e.forward_to_leader() {
+                    proposed = false;
                     Ok(ClientWriteResult {
                         success: false,
                         payload: vec![],
@@ -130,7 +134,26 @@ impl ClientDispatch for ClientDispatchImpl {
                     Err(tonic::Status::internal("client write failed"))
                 }
             }
+        };
+        // Raft propose→commit+apply round trip for the client write path —
+        // the quorum segment of the server-side latency budget. Redirects
+        // never reached raft, so they are excluded from this histogram.
+        if proposed {
+            metrics::histogram!(
+                "rr_proposal_duration_seconds",
+                "group_id" => group_id.to_string(),
+                "source" => "client"
+            )
+            .record(raft_started.elapsed().as_secs_f64());
         }
+        let outcome = match &result {
+            Ok(r) if r.idem_error.is_some() => "idempotency_expired",
+            Ok(r) if r.success => "success",
+            Ok(_) => "redirect",
+            Err(_) => "error",
+        };
+        record_request_metrics(group_id, "write", start, outcome);
+        result
     }
 
     #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
@@ -139,10 +162,12 @@ impl ClientDispatch for ClientDispatchImpl {
         partition_id: u64,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, tonic::Status> {
+        let start = std::time::Instant::now();
         let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
             tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
         })?;
-        self.group_manager
+        let result = self
+            .group_manager
             .local_read(group_id, payload)
             .await
             .map_err(|e| {
@@ -153,7 +178,10 @@ impl ClientDispatch for ClientDispatchImpl {
                     "local_read failed (detail sanitized for client)"
                 );
                 tonic::Status::internal("local read failed")
-            })
+            });
+        let outcome = if result.is_ok() { "success" } else { "error" };
+        record_request_metrics(group_id, "read", start, outcome);
+        result
     }
 
     #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
@@ -162,10 +190,11 @@ impl ClientDispatch for ClientDispatchImpl {
         partition_id: u64,
         payload: Vec<u8>,
     ) -> Result<LinearizableReadResult, tonic::Status> {
+        let start = std::time::Instant::now();
         let group_id: GroupId = self.shard_router.route(partition_id).await.map_err(|e| {
             tonic::Status::not_found(format!("partition {partition_id} not found: {e}"))
         })?;
-        match self
+        let result = match self
             .group_manager
             .linearizable_read(group_id, payload)
             .await
@@ -192,7 +221,14 @@ impl ClientDispatch for ClientDispatchImpl {
                 );
                 Err(tonic::Status::internal("linearizable read failed"))
             }
-        }
+        };
+        let outcome = match &result {
+            Ok(r) if r.leader_node_id.is_some() => "redirect",
+            Ok(_) => "success",
+            Err(_) => "error",
+        };
+        record_request_metrics(group_id, "lin_read", start, outcome);
+        result
     }
 
     #[instrument(skip(self))]
@@ -213,6 +249,33 @@ impl ClientDispatch for ClientDispatchImpl {
             .collect();
         Ok(groups)
     }
+}
+
+/// Record per-request Prometheus metrics at the client-protocol boundary:
+/// `rr_server_requests_total{group_id, op, outcome}` (counter) and
+/// `rr_server_request_duration_seconds{group_id, op}` (histogram).
+/// `op` is one of `write|read|lin_read`; `outcome` is
+/// `success|redirect|error|idempotency_expired`.
+fn record_request_metrics(
+    group_id: GroupId,
+    op: &'static str,
+    start: std::time::Instant,
+    outcome: &'static str,
+) {
+    let gid = group_id.to_string();
+    metrics::counter!(
+        "rr_server_requests_total",
+        "group_id" => gid.clone(),
+        "op" => op,
+        "outcome" => outcome
+    )
+    .increment(1);
+    metrics::histogram!(
+        "rr_server_request_duration_seconds",
+        "group_id" => gid,
+        "op" => op
+    )
+    .record(start.elapsed().as_secs_f64());
 }
 
 #[cfg(test)]

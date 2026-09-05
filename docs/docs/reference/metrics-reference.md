@@ -53,19 +53,39 @@ All metrics are collected at runtime via the `metrics` crate and scraped by the 
 
 ### Histograms (直方图)
 
-#### `rr_proposal_duration_seconds`
+所有 histogram 以原生 Prometheus histogram（`_bucket` 序列）导出，可直接用于
+`histogram_quantile()` 与跨实例聚合；bucket 边界在 `rr-server/src/node.rs` 的
+recorder 安装处配置（`*_seconds` 使用统一的延迟 bucket 组）。
 
-记录从客户端提交提案到该提案被 Raft 提交的耗时（秒）。
+All histograms are exported as native Prometheus histograms (`_bucket` series), ready for
+`histogram_quantile()` and cross-instance aggregation; bucket boundaries are configured where
+the recorder is installed in `rr-server/src/node.rs` (all `*_seconds` metrics share one
+latency bucket set).
 
 ---
 
-Records the time in seconds from client proposal submission to Raft commit.
+#### `rr_proposal_duration_seconds`
+
+记录一次 Raft `client_write` 的耗时（秒）：从提交提案到 quorum 提交并 apply
+完成。`source` 标签区分调用路径：`client` = dispatch 的客户端单条写（含
+`group_manager.write()`）；`batch` = ingestor 的 `write_batch()`（一次往返约
+100 条命令，形状不同，勿与 client 混算均值）。leader 转向（ForwardToLeader）
+不计入——请求从未到达 raft。
+
+---
+
+Records one Raft `client_write` duration in seconds: from proposal submission to
+quorum commit + apply. The `source` label distinguishes call paths: `client` =
+single client writes via dispatch (incl. `group_manager.write()`); `batch` =
+ingestor `write_batch()` (~100 commands per round trip — a different shape; do not
+mix its mean with client writes). Leader redirects (ForwardToLeader) are not
+recorded — the request never reached raft.
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Histogram |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `write()` |
+| 标签 / Labels | `group_id`, `source` (`client` \| `batch`) |
+| 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()`；`rr-raft/src/group_manager.rs` — `write()`, `write_batch()` |
 
 ---
 
@@ -82,6 +102,69 @@ Records the number of log entries per AppendEntries RPC, for observing replicati
 | 类型 / Type | Histogram |
 | 标签 / Labels | `group_id` |
 | 记录位置 / Recorded in | `rr-raft/src/network_factory.rs` — `append_entries()` |
+
+---
+
+#### `rr_raft_append_entries_rtt_seconds`
+
+leader→follower 的 AppendEntries RPC 往返耗时（秒）。`kind` 标签区分心跳
+（`heartbeat`，空 entries）与真实复制流量（`append`）——前者是空闲期的网络
+基线，后者是复制同步延迟。混沌场景（延迟/丢包注入）下最先抬升的曲线。
+
+---
+
+Leader→follower AppendEntries RPC round-trip time in seconds. The `kind` label splits
+heartbeats (`heartbeat`, empty entries) from real replication traffic (`append`) — the
+former is the idle network baseline, the latter is replication sync latency. This is the
+first curve to rise under chaos (latency/packet-loss injection).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | `group_id`, `follower_node_id`, `kind` (`heartbeat` \| `append`) |
+| 记录位置 / Recorded in | `rr-raft/src/network_factory.rs` — `append_entries()` |
+| 可用版本 / Available since | v0.2.0 (unreleased) |
+
+---
+
+#### `rr_server_request_duration_seconds`
+
+服务端客户端协议边界（dispatch）的单请求耗时（秒）。`write` = propose→quorum
+commit；`read` = 本地读；`lin_read` = 线性一致读。Kafka ingestor 路径不经过
+此边界（直接调 `write_batch`）。
+
+---
+
+Per-request latency at the server's client-protocol boundary (dispatch), in seconds.
+`write` = propose→quorum commit; `read` = local read; `lin_read` = linearizable read.
+The Kafka ingestor path does NOT cross this boundary (it calls `write_batch` directly).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`) |
+| 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()` / `submit_read()` / `submit_linearizable_read()` |
+| 可用版本 / Available since | v0.2.0 (unreleased) |
+
+---
+
+#### `rr_raft_apply_duration_seconds`
+
+状态机 apply 段耗时（秒）：幂等层 + 业务 `Service::handle`。每个节点对每条已提交
+日志记录一次。是全链路延迟的最内层段：`proposal ≈ replication + apply`。
+
+---
+
+State-machine apply segment duration in seconds: idempotency layer + business
+`Service::handle`. Recorded on every node for each committed entry. The innermost
+segment of the write latency chain: `proposal ≈ replication + apply`.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply()` |
+| 可用版本 / Available since | v0.2.0 (unreleased) |
 
 ---
 
@@ -192,6 +275,69 @@ how often the connection pool detects and recovers from stale connections.
 | 类型 / Type | Counter |
 | 标签 / Labels | `node_id` |
 | 记录位置 / Recorded in | `rr-raft/src/network_factory.rs` — `append_entries()`, `vote()`, `install_snapshot()` |
+
+---
+
+#### `rr_server_requests_total`
+
+服务端客户端协议边界的请求总数，`op` 区分操作类型，`outcome` 区分结果
+（`redirect` = 非 leader，返回 leader 地址给客户端）。`rate()` 即按操作
+类型的 TPS。
+
+---
+
+Total requests at the server's client-protocol boundary, with `op` for the operation
+kind and `outcome` for the result (`redirect` = not leader, leader address returned to
+the client). `rate()` gives TPS by operation type.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`), `outcome` (`success` \| `redirect` \| `error` \| `idempotency_expired`) |
+| 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()` / `submit_read()` / `submit_linearizable_read()` |
+| 可用版本 / Available since | v0.2.0 (unreleased) |
+
+---
+
+#### `rr_ingestor_commands_committed_total`
+
+Kafka ingestor 路径经 Raft 持久化提交的命令总数（按批内命令数递增）。
+`rate()` 即 Kafka 链路 TPS，可与 producer 发送速率、应用层计数器三方对账。
+
+---
+
+Total commands durably committed via Raft on the Kafka ingestor path (incremented by
+batch command count). `rate()` is the Kafka-path TPS, cross-checkable against the
+producer's send rate and application-level counters.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` — poll/write loop |
+| 可用版本 / Available since | v0.2.0 (unreleased) |
+
+---
+
+#### `rr_raft_applied_entries_total`
+
+状态机成功 apply 的日志条目总数，每个节点各自发射。`rate()` 即精确的集群写入
+TPS——不受 InstallSnapshot 阶跃影响，换主时无 series 断档（新 leader 继续发射）。
+集群口径用 `max by (group_id) (rate(...[1m]))`。
+
+---
+
+Total log entries successfully applied by the state machine, emitted independently on
+every node. `rate()` is the exact cluster write TPS — immune to InstallSnapshot steps
+and leader-switch series gaps (the new leader keeps emitting). For a cluster-level
+value use `max by (group_id) (rate(...[1m]))`.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply()` |
+| 可用版本 / Available since | v0.2.0 (unreleased) |
 
 ---
 
@@ -340,6 +486,51 @@ Hit / miss counts for the client's leader cache. A miss means fallback to round-
 
 ---
 
+## 全链路延迟分解 / Write-Path Latency Breakdown
+
+一个写请求从客户端发起到交付结果的完整链路，每一段都有对应指标：
+
+The full write-request chain from client send to response, with the metric covering
+each segment:
+
+```
+client t0 ──network──▶ dispatch t1 ──route/queue──▶ client_write ──quorum──▶ apply ──▶ response
+│                      │                              │                     │
+│ rr_client_request_   │ rr_server_request_            │ rr_proposal_        │ rr_raft_apply_
+│ duration_seconds     │ duration_seconds{op="write"}  │ duration_seconds    │ duration_seconds
+│ (SDK 侧 / SDK-side)   │ (dispatch 边界 / boundary)     │ (纯 client_write)    │ (状态机 / SM)
+│
+└── client_total ≈ network + server_total
+```
+
+组合关系 / Composition:
+
+- `server_total ≈ routing_encode + proposal`
+- `proposal ≈ replication_quorum + apply`
+- `client_total ≈ network + server_total`
+
+**分位数不可相减，均值可组合** / Quantiles do not subtract; means do:
+
+- 构成分析用均值规则 / Use means for composition: `rr:server_request_seconds:mean_1m`,
+  `rr:proposal_seconds:mean_1m`, `rr:apply_seconds:mean_1m`（replication/routing 段由减法得出 /
+  replication and routing segments derive by subtraction）
+- 尾部分析用各段自身分位数 / Use per-segment quantiles for tails:
+  `rr:server_request_duration_seconds:p99_1m`, `rr:proposal_duration_seconds:p99_1m`,
+  `rr:apply_duration_seconds:p99_1m`, `rr:append_entries_rtt_seconds:p99_1m`
+
+**窗口口径** / Window semantics: 延迟分位数规则一律使用 1m 窗口——分位数只有绑定当前
+工况才有意义；长拖尾窗口（如 5m）会在负载停止后重播历史最坏样本（假平台），并在负载
+爬升时混合工况。/ Latency quantile rules use 1m windows by design — a percentile is only
+meaningful bound to the current regime; long trailing windows (e.g. 5m) replay worst-case
+history after load stops (stale plateaus) and mix regimes while load ramps.
+
+**读路径** / Read path: `read`（本地读）与 `lin_read`（线性一致读）不经过 raft 复制，
+`rr_server_request_duration_seconds{op}` 的 total 即全链路。/ `read` (local) and
+`lin_read` (linearizable) skip raft replication; the `rr_server_request_duration_seconds{op}`
+total IS the full chain.
+
+---
+
 ## 规划中的指标 / Planned Metrics
 
 原 Phase 3 观测性计划已全部落地：/ The original Phase 3 observability plan has fully landed:
@@ -385,4 +576,24 @@ rate(router_route_not_found[1m])
 
 # 连接池不稳定性 / Connection-pool churn
 sum(rate(rr_channel_reconnects_total[5m])) by (node_id)
+
+# 集群写入 TPS（精确：apply 计数）/ Cluster write TPS (exact: applied entries)
+rr:applied_entries_rate_1m
+
+# 按操作类型的请求 TPS / Request TPS by op
+rr:server_request_rate_1m:by_op
+
+# Kafka 链路 TPS / Kafka-path TPS
+rr:ingestor_commands_rate_1m
+
+# p99 客户端请求延迟（按操作类型，1m 窗口）/ p99 client request latency by op (1m window)
+rr:server_request_duration_seconds:p99_1m
+
+# p99 leader→follower 同步 RTT / p99 leader→follower AppendEntries RTT
+rr:append_entries_rtt_seconds:p99_1m
+
+# 写延迟构成（均值堆叠）/ Write latency budget (stacked means)
+rr:apply_seconds:mean_1m
+rr:proposal_seconds:mean_1m - on(group_id) rr:apply_seconds:mean_1m            # replication 段
+rr:server_request_seconds:mean_1m{op="write"} - on(group_id) rr:proposal_seconds:mean_1m  # routing/encode 段
 ```

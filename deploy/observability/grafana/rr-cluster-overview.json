@@ -15,118 +15,281 @@
           "type": "dashboard"
         },
         "type": "dashboard"
+      },
+      {
+        "datasource": "${DS_PROMETHEUS}",
+        "enable": true,
+        "iconColor": "orange",
+        "name": "Leader elections",
+        "expr": "sum by (group_id) (changes(rr_raft_current_term[1m])) > 0",
+        "titleFormat": "election · group {{group_id}}",
+        "textFormat": "term change",
+        "tags": [],
+        "type": "alert"
       }
     ]
   },
-  "description": "rr cluster overview — leadership, replication lag, proposal latency, idempotency, ingestor.",
+  "description": "rr cluster overview — throughput (TPS), full-chain write latency budget, replication lag/RTT, leadership, idempotency, ingestor.",
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "iteration": 1,
   "links": [],
   "liveNow": false,
   "panels": [
     {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Throughput",
+      "type": "row",
+      "panels": []
+    },
+    {
       "datasource": "${DS_PROMETHEUS}",
-      "description": "Number of nodes reporting rr_raft_is_leader=1 per group. Healthy = 1.",
+      "description": "Entries applied by the state machine per second (rr_raft_applied_entries_total, counted on every node; max across nodes). Exact: no InstallSnapshot steps, no leader-switch gaps.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "palette-classic"
           },
           "custom": {
-            "axisLabel": "leaders",
             "drawStyle": "line",
             "fillOpacity": 10
-          }
-        }
+          },
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
-        "y": 0
-      },
-      "id": 1,
-      "title": "Leaders per group",
-      "type": "timeseries",
-      "targets": [
-        {
-          "expr": "sum by (group_id) (rr_raft_is_leader)",
-          "legendFormat": "group {{group_id}}"
-        }
-      ]
-    },
-    {
-      "datasource": "${DS_PROMETHEUS}",
-      "description": "Max replication lag (leader.last_log - follower.matched). Spikes = follower stall or partition.",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 0
+        "y": 1
       },
       "id": 2,
-      "title": "Max replication lag (entries)",
+      "title": "Applied entries/s (cluster write TPS)",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rr:replication_lag_max:by_group",
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:applied_entries_rate_1m{group_id=~\"$group_id\"}",
           "legendFormat": "group {{group_id}}"
         }
       ]
     },
     {
       "datasource": "${DS_PROMETHEUS}",
-      "description": "Server-side proposal latency p99.",
+      "description": "Request rate at the server dispatch boundary (rr_server_requests_total), split by op. Redirects/errors included; see outcome label on the raw metric.",
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
-        }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
+        "w": 8,
+        "x": 8,
+        "y": 1
       },
       "id": 3,
-      "title": "Proposal latency p99",
+      "title": "Client requests/s by op",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rr:proposal_duration_seconds:p99_5m",
-          "legendFormat": "group {{group_id}}"
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:server_request_rate_1m:by_op{group_id=~\"$group_id\"}",
+          "legendFormat": "{{op}} · group {{group_id}}"
         }
       ]
     },
     {
       "datasource": "${DS_PROMETHEUS}",
-      "description": "Idempotency Replay rate (cache hits — duplicate retries).",
+      "description": "Commands committed via the Kafka ingestor (rr_ingestor_commands_committed_total). Should track the producer rate 1:1 in steady state.",
       "fieldConfig": {
         "defaults": {
-          "unit": "ops"
-        }
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
+        "w": 8,
+        "x": 16,
+        "y": 1
       },
       "id": 4,
-      "title": "Idempotency replay rate",
+      "title": "Ingestor commands/s (Kafka path)",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "rr:idempotency_replay_rate_5m",
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:ingestor_commands_rate_1m{group_id=~\"$group_id\"}",
           "legendFormat": "group {{group_id}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 5,
+      "title": "Latency",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Server-side dispatch latency, 1m-window quantiles so the value always reflects the CURRENT regime (a 5m trailing window replays stale worst-case samples after load stops). write = propose→commit, read = local read, lin_read = linearizable read.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 10
+      },
+      "id": 6,
+      "title": "Client request latency by op",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:server_request_duration_seconds:p50_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "{{op}} p50"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:server_request_duration_seconds:p95_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "{{op}} p95"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:server_request_duration_seconds:p99_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "{{op}} p99"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Leader-side client_write duration (propose → quorum commit + apply). source=client: single writes via dispatch; source=batch: ingestor write_batch (~100 commands per round trip). 1m-window quantiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 10
+      },
+      "id": 7,
+      "title": "Proposal latency (quorum commit)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:proposal_duration_seconds:p50_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "g{{group_id}} {{source}} p50"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:proposal_duration_seconds:p95_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "g{{group_id}} {{source}} p95"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:proposal_duration_seconds:p99_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "g{{group_id}} {{source}} p99"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Leader→follower AppendEntries round-trip (rr_raft_append_entries_rtt_seconds). kind=heartbeat shows the idle network baseline; kind=append is real replication traffic. Watch this during latency/packet-loss chaos.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 10
+      },
+      "id": 8,
+      "title": "AppendEntries RTT per follower",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:append_entries_rtt_seconds:p50_1m{group_id=~\"$group_id\",follower_node_id=~\"$follower_node_id\"}",
+          "legendFormat": "→kv{{follower_node_id}} {{kind}} p50"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:append_entries_rtt_seconds:p99_1m{group_id=~\"$group_id\",follower_node_id=~\"$follower_node_id\"}",
+          "legendFormat": "→kv{{follower_node_id}} {{kind}} p99"
         }
       ]
     },
@@ -140,16 +303,155 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
+        "w": 6,
+        "x": 18,
+        "y": 10
       },
-      "id": 5,
+      "id": 9,
       "title": "Ingestor poll p99",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum by (group_id, le) (rate(rr_ingestor_poll_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (group_id, le) (rate(rr_ingestor_poll_duration_seconds_bucket{group_id=~\"$group_id\"}[1m])))",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Full server-side write chain decomposed by MEANS (means compose; quantiles do not): routing/encode = dispatch total − proposal; replication = proposal − apply; apply = state machine. Client end-to-end = this stack + network/SDK segment (rr_client_request_duration_seconds, exposed by apps embedding rr-client). Under chaos the replication segment should balloon while apply stays flat.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "id": 10,
+      "title": "Write latency segments (mean, 1m)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:server_request_seconds:mean_1m{group_id=~\"$group_id\",op=\"write\"} - on(group_id) rr:proposal_seconds:mean_1m{group_id=~\"$group_id\",source=\"client\"}",
+          "legendFormat": "routing/encode · g{{group_id}}"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:proposal_seconds:mean_1m{group_id=~\"$group_id\",source=\"client\"} - on(group_id) rr:apply_seconds:mean_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "replication (quorum wait) · g{{group_id}}"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:apply_seconds:mean_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "apply (state machine) · g{{group_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Per-segment tail latencies (not composable — each segment's own p99). AppendEntries RTT shown for kind=append only (real replication traffic).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "id": 11,
+      "title": "Segment tails (p99, 1m)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:server_request_duration_seconds:p99_1m{group_id=~\"$group_id\",op=\"write\"}",
+          "legendFormat": "server total · g{{group_id}}"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:proposal_duration_seconds:p99_1m{group_id=~\"$group_id\",source=\"client\"}",
+          "legendFormat": "proposal client · g{{group_id}}"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:proposal_duration_seconds:p99_1m{group_id=~\"$group_id\",source=\"batch\"}",
+          "legendFormat": "proposal batch (ingestor) · g{{group_id}}"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:apply_duration_seconds:p99_1m{group_id=~\"$group_id\"}",
+          "legendFormat": "apply · g{{group_id}}"
+        },
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:append_entries_rtt_seconds:p99_1m{group_id=~\"$group_id\",follower_node_id=~\"$follower_node_id\",kind=\"append\"}",
+          "legendFormat": "append RTT →kv{{follower_node_id}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "id": 12,
+      "title": "Replication",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Max replication lag (leader.last_log - follower.matched). Spikes = follower stall or partition.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 27
+      },
+      "id": 13,
+      "title": "Max replication lag (entries)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rr:replication_lag_max:by_group",
           "legendFormat": "group {{group_id}}"
         }
       ]
@@ -167,17 +469,153 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 24
+        "w": 6,
+        "x": 6,
+        "y": 27
       },
-      "id": 7,
+      "id": 14,
       "title": "Replication lag by follower (leader-only)",
       "type": "heatmap",
       "targets": [
         {
           "expr": "rr_raft_replication_lag{group_id=~\"$group_id\",follower_node_id=~\"$follower_node_id\"} and on (group_id, instance) (rr_raft_is_leader{group_id=~\"$group_id\"} == 1)",
           "legendFormat": "{{group_id}}/{{follower_node_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Entry lag ÷ commit rate (rr:replication_lag_seconds_est). An estimate of how stale a follower's data is in time. Absent while the cluster is idle (rate ≈ 0) by design.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 27
+      },
+      "id": 15,
+      "title": "Replication lag (est. seconds)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "rr:replication_lag_seconds_est{group_id=~\"$group_id\",follower_node_id=~\"$follower_node_id\"}",
+          "legendFormat": "→kv{{follower_node_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Replication batching efficiency: mean log entries per AppendEntries RPC (rr_replication_batch_entries sum/count).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 27
+      },
+      "id": 16,
+      "title": "Avg entries per AppendEntries",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": "${DS_PROMETHEUS}",
+          "expr": "sum by (group_id) (rate(rr_replication_batch_entries_sum{group_id=~\"$group_id\"}[5m]))\n  /\nsum by (group_id) (rate(rr_replication_batch_entries_count{group_id=~\"$group_id\"}[5m]))",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "id": 17,
+      "title": "Cluster health",
+      "type": "row",
+      "panels": []
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Number of nodes reporting rr_raft_is_leader=1 per group. Healthy = 1.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisLabel": "leaders",
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 36
+      },
+      "id": 18,
+      "title": "Leaders per group",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum by (group_id) (rr_raft_is_leader)",
+          "legendFormat": "group {{group_id}}"
+        }
+      ]
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "description": "Idempotency Replay rate (cache hits — duplicate retries).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 36
+      },
+      "id": 19,
+      "title": "Idempotency replay rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rr:idempotency_replay_rate_5m",
+          "legendFormat": "group {{group_id}}"
         }
       ]
     },
@@ -194,11 +632,11 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 6,
         "x": 12,
-        "y": 24
+        "y": 36
       },
-      "id": 8,
+      "id": 20,
       "title": "Idempotency rates (replay/collision/expired)",
       "type": "timeseries",
       "targets": [
@@ -244,10 +682,10 @@
       "gridPos": {
         "h": 8,
         "w": 6,
-        "x": 0,
-        "y": 32
+        "x": 18,
+        "y": 36
       },
-      "id": 9,
+      "id": 21,
       "title": "Idempotency cache usage (%)",
       "type": "stat",
       "targets": [
@@ -271,10 +709,10 @@
       "gridPos": {
         "h": 8,
         "w": 6,
-        "x": 6,
-        "y": 32
+        "x": 0,
+        "y": 44
       },
-      "id": 12,
+      "id": 22,
       "title": "Learner promotion outcomes (1h)",
       "type": "bargauge",
       "targets": [
@@ -304,11 +742,11 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 32
+        "w": 6,
+        "x": 6,
+        "y": 44
       },
-      "id": 10,
+      "id": 23,
       "title": "Ingestor health event rates",
       "type": "timeseries",
       "targets": [
@@ -346,11 +784,11 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 40
+        "w": 6,
+        "x": 12,
+        "y": 44
       },
-      "id": 11,
+      "id": 24,
       "title": "Framing decode failure rate by kind",
       "type": "timeseries",
       "targets": [

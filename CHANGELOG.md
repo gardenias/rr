@@ -176,6 +176,55 @@ merge these entries into the `[0.2.0]` categories when the tag is cut.
   `examples/counter` (doc-overindented list items) and `tools/rr-lab-producer`
   (`manual_is_multiple_of`) so the workspace lint gate is green again.
 
+### 可观测性批次(2026-09-05 — 服务端延迟预算指标)
+
+> Closes the server-side latency budget (`server ≈ routing + replication +
+> apply`) and adds the Kafka-path throughput cross-check. Merge these entries
+> into the `[0.2.0]` categories when the tag is cut.
+
+#### Added
+
+- **Request-level metrics at the client-protocol boundary** (`rr-server`
+  dispatch): `rr_server_requests_total{group_id, op, outcome}` counter and
+  `rr_server_request_duration_seconds{group_id, op}` histogram, where
+  `op = write|read|lin_read` and
+  `outcome = success|redirect|error|idempotency_expired`. The Kafka ingestor
+  path bypasses this boundary (it calls `write_batch` directly).
+- **State-machine apply observability** (`rr-raft` adapter):
+  `rr_raft_apply_duration_seconds{group_id}` histogram (idempotency layer +
+  `Service::handle`) and `rr_raft_applied_entries_total{group_id}` counter —
+  an exact applied-entries TPS source with no snapshot steps or
+  leader-switch gaps, unlike `rate(rr_raft_last_log_index)`.
+- **Replication RTT histogram**
+  `rr_raft_append_entries_rtt_seconds{group_id, follower_node_id, kind}`: the
+  time-based companion to the entry-count `rr_raft_replication_lag` gauge;
+  `kind` splits idle heartbeats from real append traffic (the first curve to
+  rise under chaos injection).
+- **Kafka-path commit counter**
+  `rr_ingestor_commands_committed_total{group_id}`: commands durably
+  committed via Raft, cross-checkable against the producer's send rate and
+  the application-level soak counter.
+- **`source` label on `rr_proposal_duration_seconds`** (`client` | `batch`):
+  single client writes and ingestor `write_batch` (~100 commands per round
+  trip) no longer share one unlabeled series. Leader redirects are excluded —
+  the request never reached raft.
+- **Recording rules + dashboard**: `rr-recording-rules.yml` rebuilt around
+  the latency budget (request → proposal → apply; replication RTT; ingestor
+  throughput); the Grafana cluster-overview dashboard gained matching panels;
+  `metrics-reference.md` documents every new series with usage notes (incl.
+  "do not mix client/batch means").
+- Test `apply_emits_prometheus_metrics` (rr-raft) asserting the adapter
+  emits its counter + histogram into a real Prometheus registry.
+
+#### Fixed
+
+- **Histograms now export as native Prometheus histograms**: the recorder in
+  `rr-server/src/node.rs` sets explicit buckets (one shared latency set for
+  all `*_seconds` metrics, one for `rr_replication_batch_entries`).
+  Previously every histogram rendered as a Prometheus *summary* (`quantile`
+  label), leaving all `histogram_quantile(... _bucket ...)` recording rules
+  and dashboard panels without data.
+
 ### Added
 
 #### WAL log-storage backend design (ADR A-0010)

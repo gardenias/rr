@@ -159,6 +159,19 @@ fn validate_security_invariants(config: &NodeConfig) -> Result<(), RrError> {
     Err(RrError::Config(ConfigError::InvalidConfig(msg)))
 }
 
+/// Default histogram buckets for `*_seconds` latency metrics (client
+/// requests, raft proposals, AppendEntries RTT, ingestor polls).
+/// Sub-millisecond to 5s so quantiles stay meaningful from in-process
+/// fast paths up to WAN-like chaos latencies.
+const LATENCY_HISTOGRAM_BUCKETS: &[f64] = &[
+    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+];
+
+/// Histogram buckets for `rr_replication_batch_entries` (log entries per
+/// AppendEntries RPC).
+const BATCH_ENTRIES_HISTOGRAM_BUCKETS: &[f64] =
+    &[1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0];
+
 /// The main node lifecycle manager.
 ///
 /// Owns the [`RaftGroupManager`], [`ShardRouter`], and an optional gRPC server.
@@ -231,7 +244,24 @@ impl RrNode {
         }
 
         let prom_handle = if config.metrics_port.is_some() {
-            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            // Without explicit buckets the exporter renders histograms as
+            // Prometheus *summaries* (quantile label), which leaves every
+            // `histogram_quantile(... _bucket ...)` recording rule and
+            // dashboard panel with no data.
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new()
+                .set_buckets_for_metric(
+                    metrics_exporter_prometheus::Matcher::Suffix("_seconds".to_string()),
+                    LATENCY_HISTOGRAM_BUCKETS,
+                )
+                .map_err(|e| ConfigError::InvalidConfig(format!("metrics bucket config: {e}")))?
+                .set_buckets_for_metric(
+                    metrics_exporter_prometheus::Matcher::Full(
+                        "rr_replication_batch_entries".to_string(),
+                    ),
+                    BATCH_ENTRIES_HISTOGRAM_BUCKETS,
+                )
+                .map_err(|e| ConfigError::InvalidConfig(format!("metrics bucket config: {e}")))?
+                .build_recorder();
             let handle = recorder.handle();
             let _ = metrics::set_global_recorder(recorder);
             info!("Prometheus recorder installed (metrics served via HTTP observability port)");

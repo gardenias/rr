@@ -358,6 +358,12 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
 #[async_trait]
 impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+        // Full-chain latency observability: this is the business-apply
+        // segment (idempotency layer + Service::handle). Combined with
+        // rr_proposal_duration_seconds (client_write total) and
+        // rr_server_request_duration_seconds (dispatch total) it closes the
+        // server-side latency budget: server ≈ routing + replication + apply.
+        let apply_started = std::time::Instant::now();
         let (offset, idem_key, payload) = match FramedEntry::decode(entry)? {
             Some(framed) => (framed.offset, framed.idem_key, framed.payload),
             None => (None, None, entry.to_vec()),
@@ -370,10 +376,23 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
 
         if result.is_ok() {
             self.applied_count += 1;
+            // Exact applied-entries TPS source: emitted on every node per
+            // committed entry — no snapshot steps, no leader-switch gaps,
+            // unlike rate(rr_raft_last_log_index).
+            metrics::counter!(
+                "rr_raft_applied_entries_total",
+                "group_id" => self.group_id.to_string()
+            )
+            .increment(1);
             if let Some(off) = offset {
                 self.set_latest_ingestor_offset(Some(off));
             }
         }
+        metrics::histogram!(
+            "rr_raft_apply_duration_seconds",
+            "group_id" => self.group_id.to_string()
+        )
+        .record(apply_started.elapsed().as_secs_f64());
         result
     }
 
@@ -583,6 +602,29 @@ mod tests {
             *self.snapshot_data.lock().await = data.to_vec();
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn apply_emits_prometheus_metrics() {
+        // Global recorder can be installed only once per process; rr-raft has
+        // no other test installing one, so this is safe here.
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _ = metrics::set_global_recorder(recorder);
+
+        let svc = MockService::new(b"ok".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+        adapter.apply(b"req").await.unwrap();
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("rr_raft_applied_entries_total"),
+            "applied-entries counter missing from registry: {rendered}"
+        );
+        assert!(
+            rendered.contains("rr_raft_apply_duration_seconds"),
+            "apply-duration histogram missing from registry: {rendered}"
+        );
     }
 
     #[tokio::test]

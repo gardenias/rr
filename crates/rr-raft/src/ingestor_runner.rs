@@ -545,6 +545,15 @@ async fn run_poll_loop(
                     return Ok(());
                 }
 
+                // Kafka-path throughput: commands durably committed via Raft.
+                // Cross-checkable against the producer's send rate and the
+                // application-level soak counter.
+                metrics::counter!(
+                    "rr_ingestor_commands_committed_total",
+                    "group_id" => group_id.to_string()
+                )
+                .increment(commit_offsets.len() as u64);
+
                 for offset in commit_offsets {
                     if let Err(e) = ingestor.commit_applied_bytes(&offset).await {
                         debug!(

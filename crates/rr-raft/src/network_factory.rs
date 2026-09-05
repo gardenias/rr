@@ -435,6 +435,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             .map_err(to_unreachable)?;
 
         let mut client = RaftGrpcClient::new(channel);
+        let rpc_started = std::time::Instant::now();
         let response = client
             .append_entries(ProtoAppendReq {
                 group_id: self.group_id,
@@ -449,6 +450,17 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
                 to_unreachable(status)
             })?
             .into_inner();
+
+        // Leader→follower replication round-trip (includes heartbeats,
+        // split out via the `kind` label) — the time-based companion to
+        // the entry-count `rr_raft_replication_lag` gauge.
+        metrics::histogram!(
+            "rr_raft_append_entries_rtt_seconds",
+            "group_id" => self.group_id.to_string(),
+            "follower_node_id" => self.target.to_string(),
+            "kind" => if batch_size == 0.0 { "heartbeat" } else { "append" }
+        )
+        .record(rpc_started.elapsed().as_secs_f64());
 
         let (resp, _): (AppendEntriesResponse<RrTypeConfig>, _) =
             bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())

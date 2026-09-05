@@ -23,15 +23,6 @@ groups:
       - record: rr:leader_churn_5m:rate
         expr: sum by (group_id) (rate(rr_raft_current_term[5m]))
 
-      # P99 client request latency by group (server-side, not the
-      # client SDK's outbound histogram).
-      - record: rr:proposal_duration_seconds:p99_5m
-        expr: |
-          histogram_quantile(
-            0.99,
-            sum by (group_id, le) (rate(rr_proposal_duration_seconds_bucket[5m]))
-          )
-
       # P50 / P95 / P99 idempotency replay rate per group.
       - record: rr:idempotency_replay_rate_5m
         expr: sum by (group_id) (rate(rr_idempotency_replays_total[5m]))
@@ -69,3 +60,123 @@ groups:
       # Decode failure rate split by failure kind.
       - record: rr:framing_decode_failure_rate_5m
         expr: sum by (kind) (rate(rr_framing_decode_failures_total[5m]))
+
+      # --- Throughput -----------------------------------------------------
+
+      # Cluster write TPS: entries applied per second, counted on every
+      # node in the state-machine apply path (rr_raft_applied_entries_total).
+      # Exact — unlike rate(last_log_index) it has no InstallSnapshot steps
+      # and no series gaps on leader switch; max() is robust during elections.
+      - record: rr:applied_entries_rate_1m
+        expr: max by (group_id) (rate(rr_raft_applied_entries_total[1m]))
+
+      # Client request TPS at the server dispatch boundary, by op
+      # (write/read/lin_read), all outcomes combined.
+      - record: rr:server_request_rate_1m:by_op
+        expr: sum by (group_id, op) (rate(rr_server_requests_total[1m]))
+
+      # Kafka-path TPS: commands durably committed via the ingestor.
+      # Cross-check against producer send rate and app-level counters.
+      - record: rr:ingestor_commands_rate_1m
+        expr: sum by (group_id) (rate(rr_ingestor_commands_committed_total[1m]))
+
+      # --- Latency quantiles (1m windows) ----------------------------------
+      #
+      # Quantile rules deliberately use 1m windows: a percentile is only
+      # meaningful when bound to a *current regime*. A trailing 5m window
+      # replays the worst historical samples for minutes after load stops
+      # (stale plateaus) and mixes regimes while load ramps. At the lab's
+      # 5s scrape interval 1m still holds ~12 samples per series.
+
+      # Client request latency quantiles by op (server dispatch boundary).
+      - record: rr:server_request_duration_seconds:p50_1m
+        expr: |
+          histogram_quantile(0.50,
+            sum by (group_id, op, le) (rate(rr_server_request_duration_seconds_bucket[1m])))
+      - record: rr:server_request_duration_seconds:p95_1m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (group_id, op, le) (rate(rr_server_request_duration_seconds_bucket[1m])))
+      - record: rr:server_request_duration_seconds:p99_1m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (group_id, op, le) (rate(rr_server_request_duration_seconds_bucket[1m])))
+
+      # Proposal (client_write: quorum replication + apply) latency, split
+      # by source: "client" = single writes via dispatch; "batch" =
+      # write_batch via the ingestor (~100 commands per round trip).
+      - record: rr:proposal_duration_seconds:p50_1m
+        expr: |
+          histogram_quantile(0.50,
+            sum by (group_id, source, le) (rate(rr_proposal_duration_seconds_bucket[1m])))
+      - record: rr:proposal_duration_seconds:p95_1m
+        expr: |
+          histogram_quantile(0.95,
+            sum by (group_id, source, le) (rate(rr_proposal_duration_seconds_bucket[1m])))
+      - record: rr:proposal_duration_seconds:p99_1m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (group_id, source, le) (rate(rr_proposal_duration_seconds_bucket[1m])))
+
+      # AppendEntries RTT per follower (leader→follower sync latency),
+      # split by kind (heartbeat/append).
+      - record: rr:append_entries_rtt_seconds:p50_1m
+        expr: |
+          histogram_quantile(0.50,
+            sum by (group_id, follower_node_id, kind, le)
+              (rate(rr_raft_append_entries_rtt_seconds_bucket[1m])))
+      - record: rr:append_entries_rtt_seconds:p99_1m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (group_id, follower_node_id, kind, le)
+              (rate(rr_raft_append_entries_rtt_seconds_bucket[1m])))
+
+      # Business-apply segment quantiles (state machine apply incl.
+      # idempotency layer) — the innermost segment of the write chain.
+      - record: rr:apply_duration_seconds:p50_1m
+        expr: |
+          histogram_quantile(0.50,
+            sum by (group_id, le) (rate(rr_raft_apply_duration_seconds_bucket[1m])))
+      - record: rr:apply_duration_seconds:p99_1m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (group_id, le) (rate(rr_raft_apply_duration_seconds_bucket[1m])))
+
+      # --- Latency budget means (composable) -------------------------------
+      #
+      # Quantiles do not subtract, means do. The full write chain composes
+      # from means: server ≈ routing + proposal, proposal ≈ replication +
+      # apply. Segment means below; dashboards derive replication and
+      # routing by subtraction.
+
+      - record: rr:server_request_seconds:mean_1m
+        expr: |
+          sum by (group_id, op) (rate(rr_server_request_duration_seconds_sum[1m]))
+            /
+          sum by (group_id, op) (rate(rr_server_request_duration_seconds_count[1m]))
+
+      - record: rr:proposal_seconds:mean_1m
+        expr: |
+          sum by (group_id, source) (rate(rr_proposal_duration_seconds_sum[1m]))
+            /
+          sum by (group_id, source) (rate(rr_proposal_duration_seconds_count[1m]))
+
+      - record: rr:apply_seconds:mean_1m
+        expr: |
+          sum by (group_id) (rate(rr_raft_apply_duration_seconds_sum[1m]))
+            /
+          sum by (group_id) (rate(rr_raft_apply_duration_seconds_count[1m]))
+
+      # --- Replication ----------------------------------------------------
+
+      # Entry lag converted to an estimated time lag (lag ÷ applied rate).
+      # Absent when the apply rate is ~0 (idle cluster) by design — the
+      # estimate is meaningless without flow.
+      - record: rr:replication_lag_seconds_est
+        expr: |
+          (
+            rr_raft_replication_lag
+            and on (group_id, instance) (rr_raft_is_leader == 1)
+          )
+          / on (group_id) group_left()
+          (rr:applied_entries_rate_1m > 1)
