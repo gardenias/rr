@@ -1051,12 +1051,11 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 
 ## Git 状态
 
-- `main` 当前 HEAD = `ddd908b`,比 `origin/main` 超前 **1 个 commit**(未 push):
-  - `ddd908b` feat(reliability) — 可靠性专项批次一+二合入:R-1 执法 / R-6 proptest+fuzz /
-    R-7 性能基线 / R-4 crash harness + 故障注入 / R-5 线性一致检查器 / **A-0015 日志可见性
-    契约关键修复**(123 files, +9375/-130;2026-09-06)
-- 更早的 Phase 3.1 / Phase 4 / v0.2.0 加固批次已全部在 `origin/main`(此前已 push)。
-- 工作树干净(本次 CONTEXT 更新除外,随下个 handoff commit 入库)。
+- `main` 当前 HEAD = `193fa94`,比 `origin/main` 超前 **3 个 commit**(未 push):
+  - `ddd908b` feat(reliability) — 批次一+二:R-1/R-6/R-7 + R-4/R-5 + A-0015(2026-09-06)
+  - `6eb03b7` docs(context) — 批次二 handoff(2026-09-06)
+  - `193fa94` test(reliability) — 批次三:R-3 spike + 替代方案 + R-8 soak harness(2026-09-10)
+- 工作树干净(本次 CONTEXT 更新随下个 handoff commit 入库)。
 
 ---
 
