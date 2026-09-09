@@ -5,8 +5,8 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-10 (可靠性专项批次三:R-3 turmoil spike(前提全绿,转替代方案)+ fault schedule 记录/回放 + R-8 soak 自动化;**本 session 改动待提交**)
-**Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;可靠性专项 R-1~R-8 中 R-1/R-4/R-5/R-6/R-7 已落地,R-3 spike 完成(转替代),R-8 落地;剩 R-2 TLA+)
+**Last updated**: 2026-09-10 (R-2 TLA+ 形式化落地,专项 R-1~R-8 全部关闭;批次三 R-3/R-8 同日;**本 session 改动待提交**)
+**Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;可靠性专项 R-1~R-8 全落地;`v0.2.0` final 待打 tag)
 **Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(主路线图;子计划:rr-durability-hardening.md、rr-reliability-program.md;rr-wal-impl.md 仍 deferred)
 **Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut — 11 个 P0 阻塞项见路线图 Phase 0
 **Main branch HEAD**: `a71f90c` (observability 批次:延迟预算指标 + 原生 histogram buckets)
@@ -33,6 +33,29 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.1
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-10 — R-2 TLA+ 形式化落地(专项收官)
+
+> 用户指示:"从理论上正确才有可能正确"。4 份 spec 全部实测 TLC 零反例;专项 R-1~R-8 全部关闭。
+
+- **`formal/tla/` 新目录**(与 fuzz/ 平级,不进 workspace 编译):4 份 spec + 5 个 cfg +
+  README(运行手册 + 性质↔实现映射 + 实证记录)+ `bugs/` 两个植入反例。
+- **MembershipGuard.tla**(INV-7/A-0012):并发变更任意交错下 n→0 无条件拒绝、低于下限必经
+  force+先审计、审计完备;11,545 态零反例。**实证 1**:`bugs/MembershipGuardBuggy.tla`
+  (移除拒绝路径=P0#7 修复前形态)被 TLC 3 步抓到 `QuorumLossOnlyWithAudit` 违反。
+- **OffsetExactlyOnce.tla**(INV-3/A-0003+A-0011):exactly-once apply、缓存响应归属、
+  watermark=最大已 apply、无虚假 Expired、fail-closed 终止;558 态零反例。**实证 2**:
+  `bugs/OffsetClampBug.tla`(哨兵 clamp-to-0=P0#6 原始缺陷)被抓 `ResponseBelongsToGenuine`。
+- **OutputWatermark.tla**(INV-4/A-0007):无幻影推进、保序游标、Failover 落在 SendOk↔Advance
+  窗口 ⇒ 重复投递显式合法(承诺语义);280,478 态零反例。
+- **RoutingTableSwitch.tla**(INV-6):单归属、收敛后无旧路由、watch 最终收敛;
+  Mem 整表快照 / etcd 按 key 增量双 cfg 分别 1,411 / 4,731 态零反例。
+- **CI**:`.github/workflows/formal.yml`(每周日 05:29 UTC + dispatch,非阻塞,TLC 输出
+  失败时上传 artifact;tla2tools v1.7.4 钉版)。
+- **双链**:invariants.md 的 INV-3/4/6/7 各增"形式化(R-2)"条目(lint 63 links 仍绿);
+  spec 头部注释含 spec↔实现 file↔INV 三向链接。
+- 本机工具:tla2tools.jar v1.7.4 装于 `~/.kimi-code/tools/tla2tools/`(已按环境约定登记
+  INSTALLED-SOFTWARE.md)。
 
 ### Session 2026-09-09/10 — 可靠性专项批次三(R-3 DST spike + 替代方案;R-8 soak 自动化)
 

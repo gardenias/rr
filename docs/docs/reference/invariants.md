@@ -326,6 +326,9 @@ at-least-once 重投),用户可见的 `Service::handle()` 效果**恰好发生�
   (R-6 model-based proptest:对照无界 HashMap oracle + 同容量 twin LRU,随机 decide/record 序列 +
   capacity 压力 + capture/restore;断言 watermark 单调、Replay 返回原值、Expired 仅在
   `request_id <= watermark` 且 cache miss 时发生)
+- 形式化(R-2):`formal/tla/OffsetExactlyOnce.tla`(TLC 小模型 558 态零反例,2026-09-10;
+  exactly-once apply / 响应归属 / watermark 语义 / 无虚假 Expired;植入的 clamp-to-0
+  反例被 TLC 抓到——`formal/tla/bugs/OffsetClampBug.tla`)
 
 ### 已知缺口
 
@@ -394,6 +397,8 @@ apply,就**最终会被投递**到目标(Raft 写/Kafka 发布):投递失败按�
   `output_handle_stop_completes`(:443)
 - `crates/rr-raft/src/service_adapter.rs:966` `apply_collects_outputs_and_assigns_monotonic_seq`、
   `:985` `snapshot_restore_roundtrip_preserves_outbox_state`
+- 形式化(R-2):`formal/tla/OutputWatermark.tla`(TLC 小模型 280k 态零反例,2026-09-10;
+  无幻影推进 / 保序游标 / 切换重复窗口显式允许;性质↔实现映射见 formal/tla/README.md)
 
 ### 已知缺口
 
@@ -513,6 +518,9 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
   (R-6 proptest:随机 add_partition/remove/reassign/membership 序列(T32/T33 的 router 层对应),
   每步后对全 partition 宇宙断言 `route()` 与独立模型一致——恰好一个 group 或明确的
   `PartitionNotFound`,无 panic、无缓存陈旧视图)
+- 形式化(R-2):`formal/tla/RoutingTableSwitch.tla`(TLC 零反例,2026-09-10;Mem 整表快照与
+  etcd 按 key 增量两种 watch 语义各一份 cfg;路由由视图唯一决定 / 收敛后无旧路由 /
+  watch 传播最终收敛)
 
 ### 已知缺口
 
@@ -574,6 +582,9 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
 
 - `crates/rr-admin/src/decommission.rs:339` `report_quorum_loss_does_not_count_as_progress`、
   `:396` `min_voters_after_removal_constant_is_two`(client-side 守卫的间接覆盖)
+- 形式化(R-2):`formal/tla/MembershipGuard.tla`(TLC 小模型 11,545 态零反例,2026-09-10;
+  n→0 无条件拒绝 / 低于下限必经 force+审计 / 审计完备 / 并发提交任意交错安全;
+  植入的去 guard 反例被 TLC 抓到——`formal/tla/bugs/MembershipGuardBuggy.tla`)
 
 ### 已知缺口
 

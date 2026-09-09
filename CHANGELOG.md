@@ -374,6 +374,30 @@ merge these entries into the `[0.2.0]` categories when the tag is cut.
   - `.github/workflows/soak-nightly.yml`:每日 04:17 UTC 2h smoke,信息性;
     24h release 级经 `workflow_dispatch`,0.3.0 起进入 release checklist。
 
+### 可靠性专项批次四(2026-09-10 — R-2 TLA+ 形式化;专项收官)
+
+> 用户指示:"从理论上正确才有可能正确"。专项 R-1~R-8 至此全部关闭。
+> Merge these entries into the `[0.2.0]` categories when the tag is cut.
+
+#### Added
+
+- **`formal/tla/` TLA+ 形式化(R-2)**:rr 自有扩展协议的 4 份 spec + TLC 小模型实测:
+  - `MembershipGuard.tla`(INV-7/A-0012,11,545 态零反例):并发 change-membership
+    任意交错下 n→0 无条件拒绝、低于 MinVoters 必经 force+先审计、审计完备。
+  - `OffsetExactlyOnce.tla`(INV-3,558 态零反例):exactly-once apply、缓存响应归属
+    真实消息、watermark=最大已 apply、无虚假 Expired、哨兵 fail-closed。
+  - `OutputWatermark.tla`(INV-4/A-0007,280k 态零反例):无幻影推进、保序游标;
+    leader 切换落在发送成功↔watermark 推进窗口 ⇒ 重复投递**显式合法**(承诺语义)。
+  - `RoutingTableSwitch.tla`(INV-6,双 cfg):Mem 整表快照 / etcd 按 key 增量两种
+    watch 语义下,路由由视图唯一决定、收敛后无旧路由、watch 最终收敛。
+- **植入反例实证**(`formal/tla/bugs/`,不进 CI 绿集):`MembershipGuardBuggy`(去 guard
+  = P0#7 修复前形态)被 TLC 3 步抓到 `QuorumLossOnlyWithAudit` 违反;`OffsetClampBug`
+  (哨兵 clamp-to-0 = P0#6 原始缺陷)被抓 `ResponseBelongsToGenuine` 违反。
+- **CI**:`.github/workflows/formal.yml`(每周日 05:29 UTC + dispatch,非阻塞,
+  tla2tools v1.7.4 钉版,失败传 artifact)。
+- **双向链接**:invariants.md 的 INV-3/4/6/7 各增"形式化(R-2)"条目;spec 头部注释
+  含 spec↔实现 file↔INV 三向链接;运行手册与性质映射在 `formal/tla/README.md`。
+
 ### Added
 
 #### WAL log-storage backend design (ADR A-0010)
