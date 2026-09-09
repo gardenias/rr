@@ -343,6 +343,37 @@ merge these entries into the `[0.2.0]` categories when the tag is cut.
   晚于所有写返回(real-time 后继),其中 63 个观察值注定不可满足 —— 既判不合法(语义错),
   又触发指数穷举(性能陷阱)。修正为读/写区间交叠,恢复"广并发快检"本意。
 
+### 可靠性专项批次三(2026-09-09/10 — R-3 spike + 替代方案 / R-8 soak 自动化)
+
+> 按 `rr-reliability-program.md` 既定顺序执行 R-3 → R-8;R-2 TLA+ 为专项余项。
+> Merge these entries into the `[0.2.0]` categories when the tag is cut.
+
+#### Added
+
+- **R-3 确定性仿真 spike(turmoil)——前提验证通过,按计划转替代方案**:
+  - 证据测试 `tests/integration/src/turmoil_spike.rs`:tonic 0.14 server
+    (`serve_with_incoming` + `SimIo` newtype 解决 `Connected` 无 blanket impl)×
+    turmoil listener,client(`connect_with_connector` + `TokioIo` 包 turmoil stream)×
+    sim 网络,echo 往返全绿、模拟时钟墙钟 ~0s。该测试随默认 test job 常驻——
+    tonic/turmoil 升级若破坏此路径,CI 自动浮现重评信号。
+  - spike 报告:`.sisyphus/evidence/rr-r3-turmoil-spike-2026-09-09.md`(完整试点的
+    剩余工作量实测:per-host ClusterBuilder + RrNode serving seam ≈ 3~4 人日,超
+    2 人日时间盒;重评触发条件在报告末节)。
+- **R-3 替代方案:fault schedule 记录/回放**(`tests/integration/src/fault_schedule.rs`):
+  seed 化生成(StdRng + pool 轮转)+ JSONL fault log(fdatasync/条,与 R-4/R-8 同族
+  schema)+ `RR_FAULT_SEED` 重生成 / `RR_FAULT_REPLAY` 逐条回放;E3b/E5 两个 chaos
+  测试接入(生成/回放双模式实测);6 个单测。
+- **R-8 soak 自动化**:
+  - `rr-perf-bench --scenario soak`:定率 keyed 幂等写 + 周期性 `read_linearizable`
+    探针 + fdatasync ack log(JSONL)+ metrics.jsonl 计数快照;`--oracle-only`
+    独立回放;oracle = 探针 Put(幂等缓存)+ linearizable Get 读回原始值,大日志
+    均匀步长采样(首尾 100 条必含)。5 个单测。
+  - `scripts/soak.sh` 一键 harness:lab 3 节点 + seed 化故障循环(SIGKILL / pause /
+    网络分区,指数间隔;ENOSPC 有意不进 smoke 集,理由见脚本头注释)+ 三件套
+    oracle(无丢失 / 无 panic / lag 60s 收敛)+ 报告入 `docs/perf/soak/`。
+  - `.github/workflows/soak-nightly.yml`:每日 04:17 UTC 2h smoke,信息性;
+    24h release 级经 `workflow_dispatch`,0.3.0 起进入 release checklist。
+
 ### Added
 
 #### WAL log-storage backend design (ADR A-0010)

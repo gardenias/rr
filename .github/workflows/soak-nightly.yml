@@ -1,0 +1,70 @@
+# Nightly smoke soak (work item R-8, informational — NOT a PR gate).
+#
+# Runs scripts/soak.sh against the lab stack (deploy/lab): 2h of fixed-rate
+# keyed idempotent writes with a seeded fault loop (SIGKILL / pause /
+# partition), then the three-part oracle: ack-log replay (no lost writes),
+# panic scan, lag convergence. The report lands in docs/perf/soak/ and all
+# raw artifacts are uploaded on failure (and on demand).
+#
+# Triage contract: this workflow never blocks merges (schedule/dispatch only).
+# Reproduce a fault schedule locally with:
+#   SOAK_SEED=<seed from the report/fault-log> scripts/soak.sh
+#
+# Release gating: per the R-8 plan, a green 24h report (SOAK_DURATION=86400,
+# self-hosted/maintainer machine via workflow_dispatch) becomes a release
+# gate from 0.3.0 — until then this nightly smoke accumulates signal.
+
+name: Soak Nightly
+
+on:
+  schedule:
+    # Daily at 04:17 UTC (deliberately off the top-of-hour herd, and off the
+    # crash (02:41) / fuzz (03:23) nightlies).
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_secs:
+        description: Soak duration in seconds (default 7200 = 2h smoke)
+        required: false
+        default: "7200"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    # 2h load + build + oracle must fit the 6h hosted-runner job limit.
+    timeout-minutes: 240
+    env:
+      SOAK_DURATION: ${{ inputs.duration_secs || '7200' }}
+      SOAK_RATE: "200"
+      SOAK_FAULT_MEAN_SECS: "600"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-soak-${{ hashFiles('**/Cargo.lock') }}
+
+      # ubuntu-latest ships Docker + the compose plugin; base images pull
+      # from Docker Hub (the local-only mirror convention is a maintainer
+      # machine concern, not CI).
+      - name: Run 2h smoke soak
+        run: scripts/soak.sh
+
+      - name: Upload soak artifacts
+        if: failure() || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-run${{ github.run_id }}
+          path: |
+            target/soak/
+            docs/perf/soak/
+          if-no-files-found: ignore
+          retention-days: 30

@@ -131,6 +131,11 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   clean-shutdown 标记)、`tests/crash/src/scenarios.rs` `scenario_b_sigkill`
   (seed 化随机 SIGKILL × N 轮 + 同 data-dir 重启 + 追平 + 每轮 oracle 回放;
   `CRASH_SEED` 精确复现)
+- R-8 soak harness(脚本入口 scripts/soak.sh,nightly 由 soak-nightly.yml 承载):
+  三件套 oracle —— ack-log 探针回放(同幂等键异值 Put + linearizable Get 读回原始值)、
+  节点日志零 panic、lag 收敛;`SOAK_SEED` 复现故障序列。2026-09-10 本地 60s/90s smoke
+  全绿,且两个负面对照实测命中(伪造未写记录 → INV-1 VIOLATION;篡改 hash →
+  hash-mismatch 报错);2h+ 绿由 nightly 累积。
 
 ### 已知缺口
 

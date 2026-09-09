@@ -7,12 +7,16 @@
 mod cross_tier_ingestor;
 pub mod fault_injection;
 #[cfg(test)]
+pub mod fault_schedule;
+#[cfg(test)]
 mod leader_redirect_failover;
 pub mod linearizability;
 #[cfg(test)]
 mod membership_guard;
 #[cfg(test)]
 mod tls_auth_e2e;
+#[cfg(test)]
+mod turmoil_spike;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -1880,6 +1884,10 @@ mod tests {
     /// isolate the leader's side (2 nodes including the leader). The
     /// resulting 2-node minority must NOT accept writes (no quorum), while
     /// the 3-node majority elects a new leader and DOES accept writes.
+    ///
+    /// R-3: the minority composition (which follower joins the leader) is
+    /// drawn from a seeded, recorded schedule — `RR_FAULT_SEED` /
+    /// `RR_FAULT_REPLAY` reproduce the exact partition shape.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_minority_partition_blocks_writes() {
         let (builder, injector) = ClusterBuilder::new(5, 1).with_fault_injector();
@@ -1888,15 +1896,39 @@ mod tests {
             .await
             .expect("initial leader");
 
-        let mut other_minority_id = 0;
-        for n in &nodes {
-            if n.node_id() != original_leader {
-                other_minority_id = n.node_id();
-                break;
-            }
-        }
-        injector.isolate(original_leader);
-        injector.isolate(other_minority_id);
+        let follower_ids: Vec<u64> = nodes
+            .iter()
+            .map(|n| n.node_id())
+            .filter(|id| *id != original_leader)
+            .collect();
+        let (schedule, log_path) =
+            crate::fault_schedule::resolve_schedule("e3b-minority-partition", |seed| {
+                use rand::seq::SliceRandom;
+                use rand::SeedableRng;
+                let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+                let other = follower_ids.choose(&mut rng).copied().unwrap();
+                crate::fault_schedule::FaultSchedule {
+                    seed,
+                    events: vec![
+                        crate::fault_schedule::FaultEvent {
+                            ts_ms: 0,
+                            offset_ms: 0,
+                            node: Some(original_leader),
+                            kind: crate::fault_schedule::FaultKind::Isolate,
+                            seed,
+                        },
+                        crate::fault_schedule::FaultEvent {
+                            ts_ms: 0,
+                            offset_ms: 0,
+                            node: Some(other),
+                            kind: crate::fault_schedule::FaultKind::Isolate,
+                            seed,
+                        },
+                    ],
+                }
+            });
+        crate::fault_schedule::apply_schedule(&schedule, &injector, &log_path).await;
+        let other_minority_id = schedule.events[1].node.unwrap();
 
         let new_leader = wait_for_new_leader(&nodes, 1, original_leader, 15_000)
             .await
@@ -2251,14 +2283,22 @@ mod tests {
                 .map(|n| n.node_id())
                 .filter(|id| *id != initial_leader)
                 .collect();
+            // R-3: seeded, recorded, replayable fault schedule (was: fixed
+            // target/timing). RR_FAULT_SEED / RR_FAULT_REPLAY reproduce a run.
+            let (schedule, log_path) =
+                crate::fault_schedule::resolve_schedule("e5-chaos-linearizability", |seed| {
+                    crate::fault_schedule::FaultSchedule::generate(
+                        seed,
+                        &crate::fault_schedule::ScheduleConfig {
+                            rounds: 6,
+                            isolate_ms: (150, 250),
+                            gap_ms: (100, 200),
+                            pool: follower_ids,
+                        },
+                    )
+                });
             tokio::spawn(async move {
-                for _ in 0..6 {
-                    let target = follower_ids[0];
-                    injector.isolate(target);
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                    injector.restore(target);
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
+                crate::fault_schedule::apply_schedule(&schedule, &injector, &log_path).await;
             })
         };
 

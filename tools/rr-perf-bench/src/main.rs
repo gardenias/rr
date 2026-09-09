@@ -10,6 +10,7 @@ use serde::Serialize;
 mod cluster;
 mod metrics;
 mod report;
+mod soak;
 mod workload;
 
 use cluster::{find_bin, Cluster, ClusterConfig, DurabilityKind, StorageKind};
@@ -117,13 +118,53 @@ struct Args {
     /// Works with --cluster-addrs (storage/durability are then "external").
     #[arg(long, value_name = "PATH")]
     json_out: Option<PathBuf>,
+
+    // ── Soak scenario (R-8) knobs ─────────────────────────────────────────
+    /// [soak] Fixed write rate (keyed idempotent writes/second).
+    #[arg(long, default_value = "200")]
+    rate: u32,
+
+    /// [soak] Ack-log path (JSONL, fdatasync per record) — the oracle's
+    /// ground truth. Required by `--scenario soak`.
+    #[arg(long, value_name = "PATH")]
+    ack_log: Option<PathBuf>,
+
+    /// [soak] Optional metrics journal path (counters snapshot appended
+    /// every --metrics-snapshot-secs).
+    #[arg(long, value_name = "PATH")]
+    metrics_log: Option<PathBuf>,
+
+    /// [soak] Seconds between linearizable-read probes of the probe key.
+    #[arg(long, default_value = "10")]
+    read_probe_secs: u64,
+
+    /// [soak] Seconds between metrics-journal records.
+    #[arg(long, default_value = "300")]
+    metrics_snapshot_secs: u64,
+
+    /// [soak] Max ack-log records the oracle replays (uniform-stride sample
+    /// that always includes the first/last 100).
+    #[arg(long, default_value = "5000")]
+    oracle_sample: usize,
+
+    /// [soak] Skip the load phase and run ONLY the oracle against an
+    /// existing ack log (used by the soak harness after cluster convergence).
+    #[arg(long)]
+    oracle_only: bool,
+
+    /// [soak] Skip the post-load oracle replay.
+    #[arg(long)]
+    no_oracle: bool,
 }
 
-#[derive(Clone, ValueEnum, Debug)]
+#[derive(Clone, Copy, ValueEnum, Debug, PartialEq)]
 enum Scenario {
     S1,
     S2,
     S3,
+    /// R-8 soak: fixed-rate keyed idempotent writes + read probes + ack log
+    /// + loss oracle. See soak.rs.
+    Soak,
     All,
 }
 
@@ -316,6 +357,70 @@ async fn main() -> Result<()> {
         _ => {}
     }
 
+    let mut soak_summary: Option<soak::SoakSummary> = None;
+    if args.scenario == Scenario::Soak {
+        let ack_log = args
+            .ack_log
+            .clone()
+            .context("--scenario soak requires --ack-log <path>")?;
+        let cfg = soak::SoakConfig {
+            rate_per_sec: args.rate,
+            duration,
+            payload_size: args.payload,
+            ack_log,
+            metrics_log: args.metrics_log.clone(),
+            read_probe_interval: Duration::from_secs(args.read_probe_secs),
+            metrics_interval: Duration::from_secs(args.metrics_snapshot_secs),
+            oracle_sample: args.oracle_sample,
+            skip_oracle: args.no_oracle || args.oracle_only,
+        };
+
+        if args.oracle_only {
+            println!(
+                "soak oracle replay: {} (sample ≤ {})",
+                cfg.ack_log.display(),
+                cfg.oracle_sample
+            );
+            let oracle = soak::run_oracle(Arc::clone(&client), &cfg).await?;
+            println!(
+                "soak oracle: {}/{} verified in {:.1}s",
+                oracle.verified, oracle.checked, oracle.elapsed_secs
+            );
+            soak_summary = Some(soak::SoakSummary {
+                duration_secs: 0,
+                rate_per_sec: args.rate,
+                sent: 0,
+                acked: 0,
+                failed: 0,
+                reads_ok: 0,
+                reads_failed: 0,
+                ack_log_records: oracle.sampled_from,
+                oracle: Some(oracle),
+            });
+        } else {
+            println!(
+                "soak: {} writes/s for {}s, ack log {}",
+                cfg.rate_per_sec,
+                cfg.duration.as_secs(),
+                cfg.ack_log.display()
+            );
+            let mut summary = soak::run_soak_load(Arc::clone(&client), &cfg).await?;
+            println!(
+                "soak load done: sent={} acked={} failed={} reads_ok={} reads_failed={}",
+                summary.sent, summary.acked, summary.failed, summary.reads_ok, summary.reads_failed
+            );
+            if !cfg.skip_oracle {
+                let oracle = soak::run_oracle(Arc::clone(&client), &cfg).await?;
+                println!(
+                    "soak oracle: {}/{} verified in {:.1}s",
+                    oracle.verified, oracle.checked, oracle.elapsed_secs
+                );
+                summary.oracle = Some(oracle);
+            }
+            soak_summary = Some(summary);
+        }
+    }
+
     // Machine-readable report — written before cluster shutdown so a write
     // failure surfaces while the cluster is still up for inspection.
     if let Some(path) = &args.json_out {
@@ -351,6 +456,7 @@ async fn main() -> Result<()> {
                     snap,
                 })
                 .collect(),
+            soak: soak_summary,
         };
         let json = serde_json::to_string_pretty(&report).context("serialize JSON report")?;
         std::fs::write(path, json)
@@ -376,6 +482,8 @@ struct JsonReport {
     s1: Option<MetricsSnapshot>,
     s2: Vec<S2Entry>,
     s3: Vec<S3Entry>,
+    /// Soak summary; `null` unless `--scenario soak` ran.
+    soak: Option<soak::SoakSummary>,
 }
 
 #[derive(Serialize)]

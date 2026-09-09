@@ -5,8 +5,8 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-06 (可靠性专项批次二:R-4 crash harness + 故障注入 + R-5 线性一致检查器;**A-0015 append 可见性契约关键修复**;批次一 R-1/R-6/R-7 同批合入,commit `ddd908b`)
-**Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;随后可靠性专项 R-1~R-8;`v0.2.0` final 待打 tag)
+**Last updated**: 2026-09-10 (可靠性专项批次三:R-3 turmoil spike(前提全绿,转替代方案)+ fault schedule 记录/回放 + R-8 soak 自动化;**本 session 改动待提交**)
+**Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;可靠性专项 R-1~R-8 中 R-1/R-4/R-5/R-6/R-7 已落地,R-3 spike 完成(转替代),R-8 落地;剩 R-2 TLA+)
 **Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(主路线图;子计划:rr-durability-hardening.md、rr-reliability-program.md;rr-wal-impl.md 仍 deferred)
 **Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut — 11 个 P0 阻塞项见路线图 Phase 0
 **Main branch HEAD**: `a71f90c` (observability 批次:延迟预算指标 + 原生 histogram buckets)
@@ -33,6 +33,35 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.1
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-09/10 — 可靠性专项批次三(R-3 DST spike + 替代方案;R-8 soak 自动化)
+
+> 按专项顺序执行 R-3 → R-8。
+
+- **R-3 spike(turmoil)**:承重前提全绿——tonic 0.14.5 `connect_with_connector` 存在且
+  实证可用;`serve_with_incoming` 经 ~45 行 `SimIo` newtype(tonic `Connected` 无 blanket
+  impl;`TokioIo` 方向相反)承载 turmoil listener;turmoil 0.7.2 与本仓 tokio/hyper 栈兼容。
+  证据测试 `tests/integration/src/turmoil_spike.rs`(3 次 echo 往返,模拟时钟墙钟 0.00s),
+  报告 `.sisyphus/evidence/rr-r3-turmoil-spike-2026-09-09.md`。**按计划决策规则转替代方案**:
+  完整试点需 per-host ClusterBuilder + RrNode serving seam,3~4 人日超时间盒。
+- **R-3 替代方案落地**:`tests/integration/src/fault_schedule.rs`——seed 化 schedule 生成
+  (StdRng,轮转覆盖 pool)+ JSONL 故障日志(fdatasync/条,schema 与 crash harness/R-8 同族)
+  + `RR_FAULT_SEED` 重生成 / `RR_FAULT_REPLAY` 逐条回放。E5(`test_concurrent_writes_under_
+  chaos_linearizability`)与 E3b(`test_minority_partition_blocks_writes`)接入并双模式实测
+  通过;6 个 schedule 单测。CI 20× 零 flaky 判据待 nightly 累积。
+- **R-8 soak 自动化**:`rr-perf-bench --scenario soak`(定率 keyed 幂等写 + 周期性
+  `read_linearizable` 探针 + fdatasync ack log + metrics.jsonl 计数快照;`--oracle-only`
+  独立回放模式);oracle = 探针 Put(幂等缓存路径)+ linearizable Get 读回原始值,
+  大日志按均匀步长采样(首尾各 100 条必含,采样有醒目告警)。`scripts/soak.sh` 一键
+  harness:lab 3 节点 + **网内**负载(redirect 广告 kv-N:51001,宿主直连必挂——
+  smoke 实测踩出)+ python3 seed 化故障循环(SIGKILL/pause/分区,指数
+  间隔;ENOSPC 有意不进 smoke 集——docker volume 无容量上限,填宿主盘不可接受,L1 已由
+  FaultInjectingStorage 覆盖)+ 三件套 oracle(无丢失/无 panic/lag 60s 收敛)+ 报告入
+  `docs/perf/soak/`。`soak-nightly.yml` 每日 04:17 UTC 2h smoke,信息性。
+  **实测**:60s/90s smoke 全绿(oracle 587/587、582/582);负面对照 ×2 实测命中
+  (伪造未写记录 → INV-1 VIOLATION 并定位 request_id;篡改 value_hash → hash-mismatch)。
+  lab 栈 kv-store 为 MemStorage——kill 覆盖的是 snapshot 恢复路径;rocks/strict 日志级
+  崩溃恢复仍归 `tests/crash`。2h+ 绿由 nightly 累积(R-8 验收第 2/3 条待时间)。
 
 ### Session 2026-09-06 — 可靠性专项批次二(R-4 crash harness + 故障注入 + R-5 线性一致检查器;**A-0015 关键正确性修复**)
 

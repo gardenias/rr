@@ -17,6 +17,8 @@ clap       = { version = "4", features = ["derive", "env"] }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile   = { workspace = true }
+bincode    = { workspace = true }
+rr-core    = { path = "../../crates/rr-core" }
 hdrhistogram = "7"
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

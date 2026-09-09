@@ -178,17 +178,17 @@ impl FaultInjector {
     }
 
     #[cfg(test)]
-    fn is_isolated(&self, node_id: NodeId) -> bool {
+    pub(crate) fn is_isolated(&self, node_id: NodeId) -> bool {
         self.state.isolated.contains(&node_id)
     }
 
     #[cfg(test)]
-    fn loss_for(&self, node_id: NodeId) -> Option<f64> {
+    pub(crate) fn loss_for(&self, node_id: NodeId) -> Option<f64> {
         self.state.loss.get(&node_id).map(|v| *v)
     }
 
     #[cfg(test)]
-    fn latency_for(&self, node_id: NodeId) -> Option<u64> {
+    pub(crate) fn latency_for(&self, node_id: NodeId) -> Option<u64> {
         self.state.latency_ms.get(&node_id).map(|v| *v)
     }
 }

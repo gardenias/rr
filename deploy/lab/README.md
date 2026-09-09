@@ -52,6 +52,12 @@ docker compose -f deploy/lab/docker-compose.yml down -v
 - `chaos/` — 混沌脚本套件（kill/pause/分区/延迟/丢包/删卷/滚动重启）
 - `soak.sh` — 小时级稳定性长跑 + 报告生成（输出到 `reports/`）
 
+## 相关 harness
+
+- **`scripts/soak.sh`(仓库根,R-8)**:故障注入 + 数据丢失 oracle 的严格版 soak
+  (seed 化故障循环 / ack-log 回放 / 三件套 oracle;报告入 `docs/perf/soak/`)。
+  负载与 oracle 均经 `--profile bench` 在 lab 网内运行(见下"已知语义"的重定向条)。
+
 ## 已知语义 / Known semantics
 
 - kv-store 容器使用 **MemStorage**：容器重启 = 全量状态丢失，靠 leader 的
