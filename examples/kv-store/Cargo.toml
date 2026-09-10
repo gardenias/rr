@@ -21,6 +21,9 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 openraft = { workspace = true, features = ["serde"] }
+# rustls is only used to install the process-global ring crypto provider
+# before tonic TLS (server + ChannelPool) is configured (`--tls-*` flags).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [features]
 # Default builds without librdkafka / cmake; `--kafka-brokers` then fails

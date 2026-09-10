@@ -26,6 +26,22 @@
 //!     --kafka-brokers redpanda:9092 --kafka-topic-prefix input_
 //! ```
 //!
+//! ## Secure production shape (TLS + mTLS + bearer tokens — perf-lab):
+//! ```text
+//! RR_ADMIN_TOKEN=<secret> RR_CLIENT_TOKEN=<secret> \
+//! kv-store --node-id 1 --listen-addr 0.0.0.0 --port 51001 --metrics-port 9100 \
+//!     --bootstrap --peers 1@kv-1:51001,2@kv-2:51001,3@kv-3:51001 \
+//!     --data-dir /var/lib/rr/data \
+//!     --tls-cert /etc/rr/certs/node1.pem --tls-key /etc/rr/certs/node1.key \
+//!     --tls-ca /etc/rr/certs/ca.pem
+//! ```
+//! Secure mode is all-or-nothing: all three `--tls-cert/--tls-key/--tls-ca`
+//! flags plus both token env vars are required together, and the node then
+//! runs the full `RrNode` G1–G7 security gates (NO `allow_insecure` opt-out):
+//! TLS on every gRPC endpoint, mandatory client certificates (mTLS is the
+//! only RaftService peer-identity check), and enforced admin/client bearer
+//! tokens. With no `--tls-*` flags the historical plaintext dev mode stays.
+//!
 //! ## Arguments:
 //! - `--node-id <N>`            — Node ID (u64). Defaults to 1 for single-node demo.
 //! - `--port <PORT>`            — gRPC listen port. Defaults to 51001.
@@ -44,6 +60,18 @@
 //! - `--data-dir <PATH>`        — Durable mode (ADR A-0016): the Raft log is persisted
 //!   to `{PATH}/raft-log/{group_id}`. Requires a binary built with `--features rocks`.
 //!   Unset = in-memory log (historical behavior).
+//! - `--tls-cert <PATH>`        — Server identity PEM; also presented as the client
+//!   identity when dialing peers. Requires `--tls-key` and `--tls-ca` (all-or-nothing).
+//! - `--tls-key <PATH>`         — Private key matching `--tls-cert`.
+//! - `--tls-ca <PATH>`          — CA bundle verifying peers (outbound) and client
+//!   certificates (inbound mTLS — always required in TLS mode; RaftService has no
+//!   bearer-token path, so mTLS is the only peer-identity check).
+//! - `--tls-domain <NAME>`      — Optional TLS server-name (SNI) override used when
+//!   dialing peers; defaults to the host part of each peer's roster address.
+//! - `RR_ADMIN_TOKEN` / `RR_CLIENT_TOKEN` (env) — Bearer tokens enforced on the
+//!   Admin/Client services. REQUIRED in TLS mode (secrets come from the
+//!   environment, never argv — same convention as rr-server's
+//!   `auth.*_token_env`); ignored in plaintext dev mode.
 //! - `--bootstrap`              — Initialize Raft membership (run on exactly one node).
 //! - `--demo`                   — Run KV demo writes and exit (default when no args given).
 //!
@@ -59,6 +87,7 @@
 //! - `ShardRouter` for partition-to-group mapping
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -68,8 +97,10 @@ use rr_core::config::ConfigProvider;
 use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{NodeId, PartitionConfig};
+use rr_network::auth::AuthConfig;
+use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
-use rr_raft::network_factory::{ChannelPool, ChannelPoolLike};
+use rr_raft::network_factory::{ChannelPool, ChannelPoolLike, TlsPaths};
 use rr_raft::service_adapter::ServiceStateMachineAdapter;
 use rr_router::router::ShardRouter;
 use rr_server::config::NodeConfig;
@@ -77,7 +108,7 @@ use rr_server::dispatch::ClientDispatchImpl;
 use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::node::RrNode;
 use rr_storage::mem::MemStorage;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use kv_store::service::KvService;
@@ -95,6 +126,10 @@ struct CliConfig {
     kafka_brokers: Option<Vec<String>>,
     kafka_topic_prefix: String,
     data_dir: Option<String>,
+    tls_cert: Option<String>,
+    tls_key: Option<String>,
+    tls_ca: Option<String>,
+    tls_domain: Option<String>,
     bootstrap: bool,
     demo: bool,
 }
@@ -114,6 +149,10 @@ impl CliConfig {
                 kafka_brokers: None,
                 kafka_topic_prefix: "input_".to_string(),
                 data_dir: None,
+                tls_cert: None,
+                tls_key: None,
+                tls_ca: None,
+                tls_domain: None,
                 bootstrap: false,
                 demo: true,
             };
@@ -127,6 +166,10 @@ impl CliConfig {
         let mut kafka_brokers: Option<Vec<String>> = None;
         let mut kafka_topic_prefix = "input_".to_string();
         let mut data_dir: Option<String> = None;
+        let mut tls_cert: Option<String> = None;
+        let mut tls_key: Option<String> = None;
+        let mut tls_ca: Option<String> = None;
+        let mut tls_domain: Option<String> = None;
         let mut bootstrap = false;
         let mut demo = false;
         let mut i = 0;
@@ -166,6 +209,22 @@ impl CliConfig {
                     i += 1;
                     data_dir = Some(args[i].clone());
                 }
+                "--tls-cert" => {
+                    i += 1;
+                    tls_cert = Some(args[i].clone());
+                }
+                "--tls-key" => {
+                    i += 1;
+                    tls_key = Some(args[i].clone());
+                }
+                "--tls-ca" => {
+                    i += 1;
+                    tls_ca = Some(args[i].clone());
+                }
+                "--tls-domain" => {
+                    i += 1;
+                    tls_domain = Some(args[i].clone());
+                }
                 "--bootstrap" => bootstrap = true,
                 "--demo" => demo = true,
                 other => {
@@ -184,6 +243,10 @@ impl CliConfig {
             kafka_brokers,
             kafka_topic_prefix,
             data_dir,
+            tls_cert,
+            tls_key,
+            tls_ca,
+            tls_domain,
             bootstrap,
             demo,
         }
@@ -194,6 +257,11 @@ impl CliConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls (tonic TLS on the server side and in the inter-node ChannelPool)
+    // needs a process-global crypto provider; install ring's. Idempotent —
+    // the error only fires when a provider is already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // ── 1. Initialise tracing ─────────────────────────────────────────────────
     let _subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
@@ -280,6 +348,9 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     check_kafka_support(&cli)?;
     // Fail fast when --data-dir was passed to a binary without RocksDB.
     check_raft_log_support(&cli)?;
+    // Resolve the TLS/mTLS/token surface (all-or-nothing; see doc header).
+    // `None` keeps the historical plaintext dev mode with allow_insecure.
+    let secure = resolve_secure_config(&cli)?;
 
     // The bind address comes from --listen-addr; the address advertised to
     // peers comes exclusively from the roster (--peers), so containers can
@@ -300,6 +371,7 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         advertise_addr = %roster[&cli.node_id],
         peers = ?cli.peers,
         bootstrap = cli.bootstrap,
+        tls = secure.is_some(),
         "=== rr KV-Store multi-node starting ==="
     );
 
@@ -322,7 +394,12 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
 
     // ── Build RaftGroupManager with real gRPC network ─────────────────────────
-    let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
+    // Secure mode: every inter-node channel (AppendEntries/Vote/snapshot) runs
+    // over mTLS — this node presents its own cert as the client identity.
+    let pool: Arc<dyn ChannelPoolLike> = match &secure {
+        Some(s) => Arc::new(ChannelPool::with_tls(s.pool_tls.clone())),
+        None => Arc::new(ChannelPool::new()),
+    };
     let sm_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
         Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
@@ -359,8 +436,16 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     .with_group_manager(Arc::clone(&mgr))
     .with_raft_lookup(lookup)
     .with_client_dispatch(dispatch)
-    .with_admin_port(cli.port + 1000)
-    .with_allow_insecure(true);
+    .with_admin_port(cli.port + 1000);
+    // Secure mode runs the full G1–G7 gate set (no opt-out); plaintext mode
+    // keeps the historical dev-only `allow_insecure` bypass.
+    let config = match &secure {
+        Some(s) => config.with_tls(s.tls.clone()).with_auth(s.auth.clone()),
+        None => {
+            warn!("plaintext dev mode: no TLS/auth — running with allow_insecure (never use outside local dev)");
+            config.with_allow_insecure(true)
+        }
+    };
     let config = match cli.metrics_port {
         Some(port) => config.with_metrics_port(port),
         None => config,
@@ -466,6 +551,91 @@ fn check_raft_log_support(cli: &CliConfig) -> Result<()> {
 #[cfg(feature = "rocks")]
 fn check_raft_log_support(_cli: &CliConfig) -> Result<()> {
     Ok(())
+}
+
+// ── Secure mode (TLS + mTLS + bearer tokens) ─────────────────────────────────
+
+/// Fully-resolved secure-mode configuration: server-side TLS for every gRPC
+/// endpoint, client-side TLS for the inter-node channel pool, and the
+/// admin/client bearer-token policy.
+struct SecureConfig {
+    tls: TlsConfig,
+    pool_tls: TlsPaths,
+    auth: AuthConfig,
+}
+
+/// Resolve the `--tls-*` flags and token env vars into a [`SecureConfig`].
+///
+/// Secure mode is all-or-nothing: passing any of `--tls-cert/--tls-key/
+/// --tls-ca` requires all three, plus non-empty `RR_ADMIN_TOKEN` and
+/// `RR_CLIENT_TOKEN` env vars (secrets never travel on argv — same convention
+/// as rr-server's `auth.*_token_env`). With no TLS flags at all, returns
+/// `None` and the node keeps its historical plaintext dev mode
+/// (`allow_insecure = true`).
+///
+/// mTLS is not optional in secure mode: RaftService has no bearer-token path,
+/// so the client certificate is the ONLY peer-identity check (gate G2) —
+/// there is deliberately no `--tls-require-client-cert` opt-out flag.
+fn resolve_secure_config(cli: &CliConfig) -> Result<Option<SecureConfig>> {
+    let tls_flags = [&cli.tls_cert, &cli.tls_key, &cli.tls_ca];
+    let given = tls_flags.iter().filter(|f| f.is_some()).count();
+    if given == 0 {
+        if cli.tls_domain.is_some() {
+            return Err(anyhow!(
+                "--tls-domain only makes sense with --tls-cert/--tls-key/--tls-ca"
+            ));
+        }
+        return Ok(None);
+    }
+
+    let (Some(cert), Some(key), Some(ca)) = (&cli.tls_cert, &cli.tls_key, &cli.tls_ca) else {
+        return Err(anyhow!(
+            "TLS mode is all-or-nothing: --tls-cert, --tls-key and --tls-ca must be \
+             given together (plus RR_ADMIN_TOKEN / RR_CLIENT_TOKEN in the environment)"
+        ));
+    };
+
+    let admin_token = read_token_env("RR_ADMIN_TOKEN", "admin")?;
+    let client_token = read_token_env("RR_CLIENT_TOKEN", "client")?;
+
+    Ok(Some(SecureConfig {
+        tls: TlsConfig {
+            cert_path: PathBuf::from(cert),
+            key_path: PathBuf::from(key),
+            ca_path: Some(PathBuf::from(ca)),
+            require_client_cert: true,
+            // Server-side configs ignore domain_name; peer dialing uses the
+            // roster host unless --tls-domain overrides it (pool_tls below).
+            domain_name: None,
+        },
+        pool_tls: TlsPaths {
+            cert_path: PathBuf::from(cert),
+            key_path: PathBuf::from(key),
+            ca_path: Some(PathBuf::from(ca)),
+            domain_name: cli.tls_domain.clone(),
+        },
+        auth: AuthConfig {
+            admin_token: Some(admin_token),
+            client_token: Some(client_token),
+        },
+    }))
+}
+
+/// Read a non-empty bearer token from `var_name`; secure mode fails fast
+/// otherwise (mirrors `rr-server` config-file semantics).
+fn read_token_env(var_name: &str, role: &str) -> Result<String> {
+    match std::env::var(var_name) {
+        Ok(v) if !v.is_empty() => Ok(v),
+        Ok(_) => Err(anyhow!(
+            "{role} token env var '{var_name}' is set but empty — \
+             set {var_name}=<non-empty-secret>, or drop the --tls-* flags for dev mode"
+        )),
+        Err(_) => Err(anyhow!(
+            "TLS mode requires the {role} bearer token in environment variable \
+             '{var_name}' (e.g. `{var_name}=<secret> kv-store --tls-cert … --tls-key … \
+             --tls-ca …`), or drop the --tls-* flags for plaintext dev mode"
+        )),
+    }
 }
 
 /// Wire the configured Kafka topic into Raft group 1 with framework-managed

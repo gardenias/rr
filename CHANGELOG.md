@@ -32,6 +32,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replicated + RocksDB-log cluster, 50 acked writes, rolling restart of
   every node with quorum preserved, recovered nodes serve linearizable
   reads, byte-level log-DB verification). INV-1 registry updated.
+- **`kv-store` example: new TLS/mTLS/token surface** (perf-lab M1-a):
+  `--tls-cert/--tls-key/--tls-ca` (all-or-nothing) plus optional
+  `--tls-domain` switch the node into secure mode — TLS on every gRPC
+  endpoint, mandatory client certificates (no opt-out flag: mTLS is the only
+  RaftService peer-identity check, gate G2), and enforced bearer tokens read
+  from the `RR_ADMIN_TOKEN` / `RR_CLIENT_TOKEN` environment variables (same
+  secrets-via-env convention as rr-server's `auth.*_token_env`). In secure
+  mode the full `RrNode` G1–G7 gate set applies with no `allow_insecure`
+  bypass; with no `--tls-*` flags the historical plaintext dev mode is
+  unchanged.
+- **perf-lab stack (`deploy/perf/`)** (rr-prod-perf plan, milestone M1): a
+  production-shape docker-compose benchmark cluster — three `kv-store` nodes
+  (rocks durable Raft log via `--data-dir`, TLS/mTLS/token secure mode,
+  per-node `cpuset` + 2Gi memory limits, named data volumes), Prometheus +
+  Grafana wired to `deploy/observability` recording rules/alerts/dashboard,
+  plus profile-gated `bench`/`probe` containers running inside the cluster
+  network. Ships with `gen-certs.sh` (CA + node certs with `kv-N` SANs +
+  client cert; `certs/` gitignored), `.env.example` token/cpuset knobs,
+  `selfcheck.sh` (executable G1–G7 controls: `RR_ALLOW_INSECURE` absence,
+  token injection, all-ready, exactly-one-leader over mTLS, plaintext and
+  certificate-less clients rejected, valid mTLS client accepted), and a
+  README. `deploy/lab/`, `scripts/`, and the existing bench tooling are
+  untouched.
 
 ### Changed
 

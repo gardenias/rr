@@ -5,9 +5,9 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官)
+**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官;同日 M0 durable raft log + M1 perf-lab 落地)
 **Current phase**: **v0.2.0 已发布**(Phase 0 WS-1~WS-7、RC 并行项、可靠性专项 R-1~R-8 全部关闭;freeze checklist 已签字);下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`,WAL(A-0010)维持 deferred
-**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log 已落地,M1 待动工);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
+**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log、M1 perf-lab stack 已落地,**M2 待动工**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
 **Main branch HEAD**: 见下文 Git 状态段
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
@@ -33,6 +33,44 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-10(午后)— M1 落地:perf-lab 生产形态基准栈(deploy/perf/)+ kv-store TLS 参数面(M1-a)
+
+> 生产性能方案 M1 收官;全栈 selfcheck 实测 8/8 绿;改动未 commit(等用户决策)。
+
+- **M1-a(kv-store TLS/mTLS/token 参数面)**:`--tls-cert/--tls-key/--tls-ca`
+  全有或全无 + `--tls-domain`(拨 peer 的 SNI 覆盖);token 固定走
+  `RR_ADMIN_TOKEN`/`RR_CLIENT_TOKEN` env(secure 模式必需,fail-fast;与
+  rr-server `auth.*_token_env` 同约定,密钥不上 argv)。secure 模式 = 全
+  G1–G7(不再 `allow_insecure`):mTLS 强制(无 opt-out knob——G2 下
+  RaftService 唯一身份面),`ChannelPool::with_tls` 承载
+  AppendEntries/Vote/snapshot;无 TLS flag = 历史明文 dev 模式
+  (allow_insecure + warn)。main 顶端装 rustls ring provider(kv-store 新增
+  rustls 依赖)。impact:run_node 上游仅 main(LOW,exact)。
+- **deploy/perf/**:`Dockerfile`(kv-store `--features rdkafka,rocks`;runtime
+  补 libstdc++6——rocksdb C++ 链接;镜像 rr-perf:dev);compose 栈 `rrperf`
+  (kv-1/2/3:durable log `--data-dir /var/lib/rr/data` + named volumes +
+  cpuset(默认 0-1/2-3/4-5,env 可覆盖)+ mem_limit 2g + 证书 ro 挂载 +
+  token `:?` 注入;bench/probe 两个 profile 容器网内运行;Prom/Grafana 复用
+  deploy/observability,宿主端口 9190/3100;**节点端口一律不发布宿主**——
+  网内负载原则);`gen-certs.sh`(kv-N SAN + client.pem;certs/ gitignored;
+  key 0644 因容器 uid 10001 需读——本地专用,头部警告;**scripts/
+  gen-dev-certs.sh 冻结不动**,SAN 不匹配故 perf 自带生成器);`.env.example`;
+  `selfcheck.sh`(8 项:S1×2 ALLOW_INSECURE 零赋值(源码 `[=:]` 锚定防注释
+  误伤)+ 渲染配置零出现;S2 token 注入;C1 三节点 /ready;C2 单 leader
+  (mTLS 复制实证);N1 明文拒;N2 无证书拒;P1 mTLS 正对照;默认 down -v,
+  `--keep` 保留);README(拓扑/安全模型/配额矩阵/macOS 失真警告)。
+- **验证**:kv-store fmt/clippy `-D warnings`/12 测试(rocks)绿;本地单节点
+  secure 冒烟六项全过(全有或全无 fail-fast、token env fail-fast、mTLS
+  bootstrap + is_leader=1、明文拒、无证书拒、client cert 收);**全栈实测
+  selfcheck 8/8 绿**(首构建 ~7.5min;三节点 mTLS 选举成功;
+  `raft-log/1` SST/CURRENT 落卷实证);invariants-lint 65 links 绿;
+  detect_changes 11 符号全在 kv-store main.rs,无跨模块爆炸半径。
+  **踩坑:不要编辑正在运行的 bash 脚本**(bash 按偏移续读,编辑 → 假语法
+  错误;selfcheck 首跑因此中断,重跑即绿)。
+- **下一步**:M2(rr-perf-bench 加法扩展 §5.2 之 1–5:open-loop 调度、
+  `--mix`、zipfian、`--client-id`、`--timeseries-out`、TLS client)+
+  S1/S2/S3 同 flag 回归。
 
 ### Session 2026-09-10(深夜)— M0 落地:durable raft log 生产接线(ADR A-0016 → implemented)
 

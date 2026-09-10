@@ -1845,6 +1845,7 @@ dependencies = [
  "rr-router",
  "rr-server",
  "rr-storage",
+ "rustls",
  "serde",
  "tokio",
  "tracing",
