@@ -5,9 +5,9 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官;同日 M0 durable raft log + M1 perf-lab + M2 open-loop 引擎落地)
+**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官;同日 M0 durable raft log + M1 perf-lab + M2 open-loop 引擎 + M3 一键矩阵落地)
 **Current phase**: **v0.2.0 已发布**(Phase 0 WS-1~WS-7、RC 并行项、可靠性专项 R-1~R-8 全部关闭;freeze checklist 已签字);下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`,WAL(A-0010)维持 deferred
-**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log、M1 perf-lab stack、M2 open-loop 引擎 + TLS client 已落地,**M3 待动工**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
+**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log、M1 perf-lab stack、M2 open-loop 引擎 + TLS client、M3 一键矩阵 + Prom 采集已落地,**M4(首轮实测 + 基线归档 + A-0010 重判)待动工**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
 **Main branch HEAD**: 见下文 Git 状态段
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
@@ -33,6 +33,64 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-10(深夜三)— M3 落地:一键矩阵 + Prom 窗口采集 + 三个修复的引擎缺陷
+
+> 生产性能方案 M3 收官;全量 smoke 全档绿(sec + W1–W9 + W11)。三轮 smoke 各暴露一个
+> 真问题并当场修复——perf-lab 的验收价值在工具自身落地前就已兑现。
+
+- **M3-6(Prom 对齐采集)**:rr-perf-bench 新 `prom.rs`——`--prom-url` 在 mix/wladder/
+  soak 的 JSON 报告嵌入**同墙钟窗口**的服务端汇总(server/proposal/apply/append-RTT
+  p50/p99 + 复制 lag max + `rr_ingestor_commands_committed_total` 提交速率;原始直方图/
+  计数器族 instant 查询,observability recording rules 零触碰);`started_unix_secs`
+  入 ScenarioReport/SoakSummary;curl 子进程零新依赖(仓内 cmd_stdout 同模式);
+  采集失败降级 null + note,**永不拖垮 run**。5 个解析单测。
+- **M3-7(一键矩阵)**:`scripts/prod-perf.sh`(新;sec 负面对照硬门禁 + W1–W9/W11
+  全档,档位全 env 可覆盖,--smoke 缩时,单层失败不中断、ledger 记账、退出码聚合)+
+  `scripts/prod-perf-report.py`(新;从 raw JSON 渲染 report.md,knee/安全税/raft-log
+  成本 A/B 表自动算,禁止手抄数字)。归档 `docs/perf/prod/<date>-<sha>/`(raw-*.
+  json + ts-*.jsonl + ledger + docker-stats + meta;**本轮 smoke 目录不入 git**,
+  首份基线归 M4)。
+- **overlays**:`docker-compose.kafka.yml`(W6:redpanda + kv `--kafka-brokers perf_` +
+  profile 化 producer;topic-init 重试环 + awk 精确匹配幂等)、`docker-compose.insecure.
+  yml`(W8 对照:明文无 token,kv-store dev 模式;token 插值用空字面量中和)、
+  `docker-compose.memlog.yml`(W11 对照:去 `--data-dir` 回退 M0 前形态;报告注明
+  mem-SM 混杂因子,R-7 实测 <2%)。基座 compose 增 `SNAPSHOT_LOGS_SINCE_LAST` env
+  旋钮(默认 50000 行为不变,W7 用)。W10(Toxiproxy WAN)按计划"可选"标记 deferred。
+- **rr-admin TLS/token**(W9 TransferLeader 前置,也补齐"perf-lab 安全集群此前无法
+  运维"的口子):`--tls-ca/--tls-cert/--tls-key` 全有或全无 + `--tls-domain` +
+  `--token-env`/`--client-token-env`(REPL kv 命令用);单 Interceptor 类型统一所有
+  调用点(InterceptedService<Channel, TokenInterceptor>,token 缺省即透传),
+  decommission.rs 三签名改别名;70 单测绿。
+- **kv-store**:`--snapshot-logs-since-last` 透传(W7;NodeConfig.with_* 既有旋钮)。
+- **引擎缺陷修复(全部冒烟实测发现)**:
+  ① open-loop 调度器爬速缺陷:驱动循环单轮 >50µs 时计划时刻按"上次计划+间隔"爬行,
+  永不追赶,实测 20k/s×16KiB 只发出 8%(且 lag 不可见——正是本引擎要消灭的偏差);
+  重构为**落后即不 yield 的追发**(ahead 才 sleep_until;acquire 与窗口结束 select),
+  payload 编码移入 op 任务并行化。同缺陷②:`max_in_flight` 满时 firing loop 停在
+  acquire 上 → join! 永不返回(W5-16KiB hang 15min 实证);③ 新增 `--op-timeout-secs`
+  (默认 30s,HDR 上限;tonic 无默认 RPC deadline,**挂死 RPC 会无限悬挂**——soak 在
+  TransferLeader 瞬间实证;soak 场景同旋钮接入,失败计数不中断);④ soak oracle 对
+  **超 LRU 窗(10k)记录**原样判死刑 → 2h 级 soak 必败(R-8 验收第 2/3 条"待时间"
+  的潜在雷);现 Expired 记录跳过 replay 探针(会 re-apply 污染 key)、仅线性一致 Get
+  证存活,单列 `survival_only` 计数并醒目 eprintln;空 ack 日志从"0/0 假绿"改为
+  fail。⑤ W9 的 TransferLeader 必须打**目标节点** admin API(服务端前提错误实证);
+  ⑥ prod-perf.sh 函数在 `||` 语境下 `set -e` 失效导致 rc 丢失 → 显式 rc 检查 + 失败
+  自动抓节点日志取证。⑦ compose 每阶段 `--build` 重解析 base 镜像清单撞外网 →
+  preflight 单次构建。
+- **验证**:全量 `--smoke` 末轮全档绿(sec 明文全拒;W1×3 payload、W2×2、W3×3、W4×2、
+  W5×4 含 16384 档有界收尾;W9 60s soak 16,765 acked 0 失败 + TransferLeader 成功 +
+  oracle 5000/5000 其中 survival 2322;W7 快照压力;W6 producer 20k 消息 0 误 +
+  Prom 提交速率实测;W11/W8 对照档;selfcheck 8/8 复测绿;workspace clippy
+  `-D warnings`/fmt/22+70 单测/docs build/invariants-lint 65 links 全绿;
+  detect_changes 53 符号 CRITICAL 但全在 rr-admin/kv-store/rr-perf-bench 三个工具
+  二进制内,库 crate 零触碰——已复核)。
+- **遗留发现(供后续专项)**:rr-client 单次 RPC 尝试无 deadline,leader 切换瞬间在途
+  写可无限悬挂(客户端侧 op_timeout 已止血;服务端在 step-down 时是否主动结束在途
+  client_write 待查);macOS Docker Desktop 下 bench 驱动 lag-p99 ~25ms 为环境烙印
+  (lag 指标的意义就是把它暴露出来)。
+- **下一步**:M4——首轮完整矩阵实测(非 smoke 时长)+ 首份生产基线归档 +
+  判据表回填 + **A-0010 前置判据 2 以 W11 数据重判并回写 `rr-wal-impl.md`**。
 
 ### Session 2026-09-10(深夜二)— M2 落地:rr-perf-bench open-loop 引擎 + TLS client(§5.2 之 1–5)
 

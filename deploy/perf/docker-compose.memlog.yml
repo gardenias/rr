@@ -1,0 +1,81 @@
+# W11 control leg (raft-log persistence A/B, G8/ADR A-0010 re-judgement):
+# SAME secure stack (TLS/mTLS/token on) but WITHOUT `--data-dir` — the Raft
+# log and the KV state machine go back to the pre-M0 in-memory shape. The
+# diff against the base stack isolates the durable-log path (IoBatcher +
+# fsync). Note the SM-storage confound (mem vs rocks SM is in the mix too);
+# R-7 measured that delta at <2%, while the raft-log fsync path is the
+# suspected dominant term — the report must state this reading.
+#
+# Usage (repo root):
+#   docker compose -f deploy/perf/docker-compose.yml -f deploy/perf/docker-compose.memlog.yml up -d
+
+services:
+  kv-1:
+    command:
+      - "--node-id"
+      - "1"
+      - "--bootstrap"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--tls-cert"
+      - "/etc/rr/certs/node1.pem"
+      - "--tls-key"
+      - "/etc/rr/certs/node1.key"
+      - "--tls-ca"
+      - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+
+  kv-2:
+    command:
+      - "--node-id"
+      - "2"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--tls-cert"
+      - "/etc/rr/certs/node2.pem"
+      - "--tls-key"
+      - "/etc/rr/certs/node2.key"
+      - "--tls-ca"
+      - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+    depends_on:
+      kv-1:
+        condition: service_healthy
+
+  kv-3:
+    command:
+      - "--node-id"
+      - "3"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--tls-cert"
+      - "/etc/rr/certs/node3.pem"
+      - "--tls-key"
+      - "/etc/rr/certs/node3.key"
+      - "--tls-ca"
+      - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+    depends_on:
+      kv-2:
+        condition: service_healthy

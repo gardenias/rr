@@ -32,15 +32,14 @@
 //! `--dry-run` skips steps 3-5 and prints what would happen. Useful
 //! for checking quorum impact before committing.
 
+use crate::AdminClient;
 use anyhow::{anyhow, Result};
 use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
-use rr_network::proto::admin::admin_service_client::AdminServiceClient;
 use rr_network::proto::admin::{
     ChangeMembershipRequest, Empty, GroupId, NodeMember, TransferLeaderRequest,
 };
 use serde::Serialize;
 use std::time::{Duration, Instant};
-use tonic::transport::Channel;
 
 /// Maximum time we wait for a transferred leadership to land on the
 /// new leader before giving up on the drain step. ~10s covers a
@@ -113,7 +112,7 @@ impl DecommissionReport {
 /// member (preferably a leader, but the orchestrator follows
 /// `TransferLeader` errors gracefully).
 pub async fn decommission_node(
-    client: &mut AdminServiceClient<Channel>,
+    client: &mut AdminClient,
     target_node_id: u64,
     dry_run: bool,
 ) -> Result<DecommissionReport> {
@@ -142,7 +141,7 @@ pub async fn decommission_node(
 }
 
 async fn decommission_one_group(
-    client: &mut AdminServiceClient<Channel>,
+    client: &mut AdminClient,
     group_id: u64,
     target_node_id: u64,
     dry_run: bool,
@@ -255,7 +254,7 @@ fn pick_new_leader(voters: &[NodeMember], target_node_id: u64) -> Option<u64> {
 }
 
 async fn wait_for_drain(
-    client: &mut AdminServiceClient<Channel>,
+    client: &mut AdminClient,
     group_id: u64,
     target_node_id: u64,
 ) -> Result<()> {

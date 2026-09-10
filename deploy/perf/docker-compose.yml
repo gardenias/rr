@@ -16,8 +16,11 @@
 # NOTE: kv-store's hand-rolled CLI parser only accepts `--flag value` (two
 # argv items), NOT `--flag=value` — keep the command lists in split form.
 #
-# W6 (Kafka ingest) and W10 (Toxiproxy WAN) profiles arrive with M3; the M1
-# stack is deliberately just the secure cluster + observability.
+# W6 (Kafka ingest) overlay ships as docker-compose.kafka.yml (M3); the W10
+# (Toxiproxy WAN) profile is deferred — the plan marks W10 optional, and its
+# roster-via-proxy topology lands when the first baseline (M4) exists.
+# W8/W11 control legs are overlays too (docker-compose.insecure.yml /
+# docker-compose.memlog.yml) — see scripts/prod-perf.sh.
 
 name: rrperf
 
@@ -76,6 +79,8 @@ services:
       - "/etc/rr/certs/node1.key"
       - "--tls-ca"
       - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
     volumes:
       - ./certs:/etc/rr/certs:ro
       - rrperf-data-1:/var/lib/rr/data
@@ -104,6 +109,8 @@ services:
       - "/etc/rr/certs/node2.key"
       - "--tls-ca"
       - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
     volumes:
       - ./certs:/etc/rr/certs:ro
       - rrperf-data-2:/var/lib/rr/data
@@ -135,6 +142,8 @@ services:
       - "/etc/rr/certs/node3.key"
       - "--tls-ca"
       - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
     volumes:
       - ./certs:/etc/rr/certs:ro
       - rrperf-data-3:/var/lib/rr/data

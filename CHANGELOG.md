@@ -90,6 +90,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `mix`/`wladder`/`client_id` keys appear only when the new scenarios
     ran); `scripts/perf-baseline.sh`, `scripts/soak.sh`, `deploy/lab/`
     remain untouched.
+- **Benchmark matrix runner + server-side capture** (rr-prod-perf plan,
+  milestone M3, §5.2 items 6–7 + §5.3):
+  - `rr-perf-bench --prom-url <url>` embeds a server-side Prometheus
+    summary of the exact measurement window into the JSON report
+    (server/proposal/apply/append-RTT p50/p99, replication-lag max,
+    ingestor committed rate — queried from the raw histogram/counter
+    families; the `deploy/observability` recording rules are untouched).
+    Scenario reports carry `started_unix_secs` for window alignment.
+    Capture failures degrade fields to null, never fail a run. The soak
+    scenario summary gains the same window fields.
+  - `scripts/prod-perf.sh` (new): one-shot W1–W9 + W11 matrix over
+    `deploy/perf/` — build, secure stack up, plaintext negative control
+    (hard gate), per-tier raw JSON + 1s time series, per-tier ok/fail
+    ledger, overlay restarts for W6 (Kafka ingest), W7 (snapshot
+    pressure), W8 (insecure control), W11 (mem-log control), and a
+    rendered `report.md` from `scripts/prod-perf-report.py` (embedded
+    template, no new deps). `--smoke` shrinks every tier for
+    self-validation; artifacts archive to `docs/perf/prod/<date>-<sha>/`.
+  - `deploy/perf/` overlays: `docker-compose.kafka.yml` (redpanda + kv
+    `--kafka-brokers` + profile-gated fixed-rate producer),
+    `docker-compose.insecure.yml` (W8 control), `docker-compose.memlog.yml`
+    (W11 control). Base stack gains `SNAPSHOT_LOGS_SINCE_LAST` env knob
+    (default 50000, unchanged behavior) for W7. The W10 (Toxiproxy WAN)
+    profile is deferred — the plan marks it optional.
+  - `kv-store` example: `--snapshot-logs-since-last` passthrough (W7).
+  - `rr-admin`: `--tls-ca/--tls-cert/--tls-key` (all-or-nothing),
+    `--tls-domain`, `--token-env`/`--client-token-env` — the perf-lab's
+    secure cluster is now operable (W9 issues a mid-soak
+    `TransferLeader` over mTLS + admin token).
+  - Soak oracle: ack-log records past the idempotency cache's LRU window
+    (10k entries) are now **survival-verified** by the linearizable Get
+    alone (the replay probe is skipped — it would re-apply as `New` and
+    pollute the key) and counted separately as `survival_only`; the
+    `verified` headline total is unchanged in meaning. Previously any
+    soak longer than the cache window (e.g. 2h runs) failed the oracle
+    on the oldest sampled records — a latent limit first exposed by the
+    perf-lab's W9 smoke (16.7k acks). The crash-harness oracle
+    (tests/crash) is unchanged.
 
 ### Changed
 

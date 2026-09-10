@@ -4,7 +4,9 @@
 > 批准;动工前查实 G8(raft log 持久化未接线)并增补 M0 前置里程碑;**M0 已落地
 > (2026-09-10,ADR A-0016 → implemented);M1 已落地(2026-09-10,deploy/perf/ +
 > kv-store TLS 参数面,selfcheck 8/8 实测绿);M2 已落地(2026-09-10,openloop 引擎 +
-> TLS client,本地 + perf-lab mTLS 冒烟绿,S1/S2/S3 schema 回归干净),M3 待动工**
+> TLS client,本地 + perf-lab mTLS 冒烟绿,S1/S2/S3 schema 回归干净);M3 已落地
+> (2026-09-10,--prom-url 窗口采集 + prod-perf.sh 一键矩阵 + 三 overlay + rr-admin
+> TLS,全量 smoke 全档绿),M4(首轮完整矩阵实测 + 基线归档 + A-0010 重判)待动工**
 > **依据**:用户指示——"按真实生产环境要求设计集群;先设计性能测试方案;已有集成性能测试
 > base 结合起来看,在此基础上调整;**局部性能测试脚本暂时都不动**,要搭建的是一个生产性能
 > 测试工具"。

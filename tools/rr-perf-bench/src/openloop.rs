@@ -418,6 +418,14 @@ pub struct ScenarioReport {
     pub client_id: u32,
     pub seed: u64,
     pub max_in_flight: usize,
+    pub op_timeout_ms: u64,
+    /// Wall-clock start of the measurement window (post-warmup) — aligns the
+    /// client HDRs with the Prometheus window (plan §5.2 item 6).
+    pub started_unix_secs: u64,
+    /// Server-side rollup over the same window; present iff --prom-url was
+    /// given (set by main after the run, post-drain).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_side: Option<crate::prom::ServerSideWindow>,
     pub runs: Vec<RunReport>,
 }
 
@@ -436,6 +444,11 @@ pub struct OpenLoopConfig {
     pub client_id: u32,
     pub seed: u64,
     pub max_in_flight: usize,
+    /// Per-op deadline: a slow op past this is counted as an error and its
+    /// permit freed — bounds the drain (a wedged cluster can stall the
+    /// firing loop's semaphore wait forever otherwise; W5-16KiB smoke found
+    /// this). Default matches the HDR ceiling (30s).
+    pub op_timeout: Duration,
     /// 1s-bucket time series recorded alongside the aggregate histograms.
     pub timeseries: bool,
 }
@@ -556,8 +569,12 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
     if cfg.max_in_flight == 0 {
         bail!("--max-in-flight must be >= 1");
     }
+    if cfg.op_timeout.is_zero() {
+        bail!("--op-timeout-secs must be >= 1");
+    }
 
     let rungs = cfg.rates.len();
+    let wall0 = crate::prom::now_unix_secs();
     let t0 = Instant::now();
     let measure_start = t0 + cfg.warmup;
     let end = measure_start + cfg.rung_duration * rungs as u32;
@@ -585,6 +602,8 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
             let mut mix_rng = SplitMix64::new(cfg.seed ^ 0x9E37_79B9_7F4A_7C15);
             let mut key_rng = SplitMix64::new(cfg.seed ^ 0x3C79_AC49_2BA7_B653);
             let mut keygen = KeyGen::new(cfg.key_space, cfg.key_dist)?;
+            let op_timeout = cfg.op_timeout;
+            let payload_size = cfg.payload_size;
             let mut seq = 0u64;
             let mut next = t0;
 
@@ -597,25 +616,27 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
                 if next >= end {
                     break;
                 }
-                tokio::time::sleep_until(next.into()).await;
+                // Sleep only when AHEAD of the plan; when behind, iterate
+                // immediately so one poll fires the whole catch-up burst —
+                // per-op awaits would let executor pressure starve the driver
+                // and silently turn the run closed-loop (the exact bias this
+                // engine exists to expose; lag records the real debt).
+                if next > Instant::now() {
+                    tokio::time::sleep_until(next.into()).await;
+                }
 
-                let permit = Arc::clone(&sem)
-                    .acquire_owned()
-                    .await
-                    .expect("semaphore closed");
+                // A saturated server fills the in-flight cap and parks this
+                // acquire; if the schedule window ends while parked, stop
+                // instead of hanging (W5-16KiB smoke).
+                let permit = tokio::select! {
+                    p = Arc::clone(&sem).acquire_owned() => p.expect("semaphore closed"),
+                    _ = tokio::time::sleep_until(end.into()) => break,
+                };
                 let actual = Instant::now();
                 seq += 1;
 
                 let op = cfg.mix.pick(&mut mix_rng);
                 let key_id = keygen.next(&mut key_rng);
-                let key = kv_key(key_id);
-                let payload = match op {
-                    BenchOp::Write => encode_req(&KvRequest::Put {
-                        value: put_value(&key, seq, cfg.payload_size),
-                        key,
-                    }),
-                    BenchOp::ReadLocal | BenchOp::ReadLin => encode_req(&KvRequest::Get { key }),
-                };
 
                 if let Some(r) = rung_of(next, measure_start, cfg.rung_duration, rungs) {
                     offered[r][op.idx()].fetch_add(1, Ordering::Relaxed);
@@ -625,8 +646,31 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
                 let client = Arc::clone(&client);
                 let tx_cb = tx.clone();
                 let in_flight_cb = Arc::clone(&in_flight);
+                // The payload is built ON THE OP TASK (not the firing loop):
+                // per-op encode work parallelizes across worker threads and
+                // cannot tax the driver's iteration rate.
                 tokio::spawn(async move {
-                    let ok = exec_op(&client, op, payload).await;
+                    let key = kv_key(key_id);
+                    let payload = match op {
+                        BenchOp::Write => encode_req(&KvRequest::Put {
+                            value: put_value(&key, seq, payload_size),
+                            key,
+                        }),
+                        BenchOp::ReadLocal | BenchOp::ReadLin => {
+                            encode_req(&KvRequest::Get { key })
+                        }
+                    };
+                    // Per-op deadline bounds every op's lifetime — and hence
+                    // the drain — even when the cluster is wedged.
+                    let ok = match tokio::time::timeout(op_timeout, exec_op(&client, op, payload))
+                        .await
+                    {
+                        Ok(ok) => ok,
+                        Err(_) => {
+                            log_failure(op, &"op deadline exceeded (--op-timeout-secs)");
+                            false
+                        }
+                    };
                     let done = Instant::now();
                     drop(permit);
                     in_flight_cb.fetch_sub(1, Ordering::Relaxed);
@@ -763,6 +807,12 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
             client_id: cfg.client_id,
             seed: cfg.seed,
             max_in_flight: cfg.max_in_flight,
+            op_timeout_ms: cfg.op_timeout.as_millis() as u64,
+            // Wall-clock window start = process wall time + warmup (Instant
+            // and SystemTime aren't linked; the two are captured together at
+            // entry and the offset is exact).
+            started_unix_secs: wall0 + cfg.warmup.as_secs(),
+            server_side: None,
             runs,
         },
         timeseries_jsonl,

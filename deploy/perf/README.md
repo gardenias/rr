@@ -53,8 +53,31 @@ docker compose -f deploy/perf/docker-compose.yml --profile bench run --rm bench 
 ```
 
 `--client-id N` tags the JSON report meta when several bench containers fan
-out (aggregation key). The W1–W9 one-shot matrix arrives with M3
-(`scripts/prod-perf.sh`).
+out (aggregation key).
+
+## One-shot matrix (M3)
+
+```bash
+scripts/prod-perf.sh            # full matrix (~40 min + 2h soak)
+scripts/prod-perf.sh --smoke    # every tier shrunk (~6 min, self-validation)
+```
+
+Archives land in `docs/perf/prod/<date>-<sha>/`: `raw-*.json` (per tier, with
+client HDRs + embedded server-side Prometheus window), `ts-*.jsonl` (1s time
+series), `ledger.txt` (per-tier ok/fail), `docker-stats.json`, and a rendered
+`report.md`. Tier parameters are env-overridable (see the script header).
+
+Overlay files (compose `-f` merges, only used by the matrix):
+
+| overlay | purpose |
+|---|---|
+| `docker-compose.kafka.yml` | W6: redpanda + kv `--kafka-brokers` + profile-gated `producer` |
+| `docker-compose.insecure.yml` | W8 control: security OFF (plaintext, no tokens) — never a production shape |
+| `docker-compose.memlog.yml` | W11 control: no `--data-dir` (pre-M0 in-memory raft log) |
+
+The base stack takes one env knob for W7: `SNAPSHOT_LOGS_SINCE_LAST`
+(default 50000, ADR A-0008). rr-admin gained `--tls-*`/`--token-env` so the
+secure cluster stays operable (W9 issues a mid-soak `TransferLeader`).
 
 ## Security model
 

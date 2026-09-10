@@ -1,0 +1,85 @@
+# W8 control leg (security-cost A/B): the SAME topology with the security
+# layer off — plaintext gRPC, no mTLS, no bearer tokens (kv-store dev mode:
+# built-in allow_insecure + warn). The base stack's token interpolation is
+# neutralized with empty literals so compose renders without .env tokens.
+#
+# THIS STACK EXISTS ONLY AS THE W8 NEGATIVE-SECURITY BASELINE. It must never
+# be used as a production shape; the main stack (docker-compose.yml) is the
+# secure one. Run it only via scripts/prod-perf.sh (W8), never `up` it alone
+# for measurements that matter.
+#
+# Usage (repo root):
+#   docker compose -f deploy/perf/docker-compose.yml -f deploy/perf/docker-compose.insecure.yml up -d
+
+services:
+  kv-1:
+    command:
+      - "--node-id"
+      - "1"
+      - "--bootstrap"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--data-dir"
+      - "/var/lib/rr/data"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+    environment:
+      RUST_LOG: "info"
+      # Empty literals override the base's `${...:?}` interpolation: dev mode
+      # never reads them (secure mode would fail fast on empty — by design).
+      RR_ADMIN_TOKEN: ""
+      RR_CLIENT_TOKEN: ""
+
+  kv-2:
+    command:
+      - "--node-id"
+      - "2"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--data-dir"
+      - "/var/lib/rr/data"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+    environment:
+      RUST_LOG: "info"
+      RR_ADMIN_TOKEN: ""
+      RR_CLIENT_TOKEN: ""
+    depends_on:
+      kv-1:
+        condition: service_healthy
+
+  kv-3:
+    command:
+      - "--node-id"
+      - "3"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--data-dir"
+      - "/var/lib/rr/data"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+    environment:
+      RUST_LOG: "info"
+      RR_ADMIN_TOKEN: ""
+      RR_CLIENT_TOKEN: ""
+    depends_on:
+      kv-2:
+        condition: service_healthy

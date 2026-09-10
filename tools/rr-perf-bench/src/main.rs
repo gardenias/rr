@@ -11,6 +11,7 @@ use serde::Serialize;
 mod cluster;
 mod metrics;
 mod openloop;
+mod prom;
 mod report;
 mod soak;
 mod workload;
@@ -208,6 +209,14 @@ struct Args {
     #[arg(long, default_value = "32768")]
     max_in_flight: usize,
 
+    /// [open-loop|soak] Per-op deadline (seconds). A slow op past this
+    /// deadline is counted as an error and its in-flight slot freed, bounding
+    /// the drain on a saturated cluster (open-loop) and preventing a wedged
+    /// RPC from hanging the soak (tonic has no default RPC deadline).
+    /// Default 30s = the HDR histogram ceiling.
+    #[arg(long, default_value = "30")]
+    op_timeout_secs: u64,
+
     /// [wladder] Step-up rate rungs (ops/s), comma-separated; each rung runs
     /// for --duration-secs. Warmup runs once at the first rung's rate.
     #[arg(long, default_value = "100,500,1000,2000,4000,8000,16000,32000")]
@@ -217,6 +226,14 @@ struct Args {
     /// p50_us, p99_us, plus rung for wladder) to the given path.
     #[arg(long, value_name = "PATH")]
     timeseries_out: Option<PathBuf>,
+
+    /// Embed a server-side Prometheus summary of the measurement window into
+    /// the JSON report (mix/wladder/soak only). Queries run at window end
+    /// against the raw histogram/counter families; failures degrade fields
+    /// to null with a note, never fail the run. Example:
+    /// --prom-url http://prometheus:9090
+    #[arg(long, value_name = "URL")]
+    prom_url: Option<String>,
 
     // ── TLS / auth client (rr-prod-perf M2, item 5) ─────────────────────────
     /// CA bundle for verifying the server certificate. The
@@ -529,6 +546,7 @@ async fn main() -> Result<()> {
             client_id: args.client_id,
             seed: args.seed,
             max_in_flight: args.max_in_flight,
+            op_timeout: Duration::from_secs(args.op_timeout_secs),
             timeseries: args.timeseries_out.is_some(),
         };
 
@@ -540,16 +558,22 @@ async fn main() -> Result<()> {
             cfg.warmup.as_secs(),
         );
         let outcome = openloop::run(Arc::clone(&client), &cfg).await?;
-        report::print_openloop(label, &outcome.report);
+        let mut report = outcome.report;
+        if let Some(prom_url) = &args.prom_url {
+            let start = report.started_unix_secs;
+            let end = start + report.rung_secs * report.rates.len() as u64;
+            report.server_side = Some(prom::capture(prom_url, start, end));
+        }
+        report::print_openloop(label, &report);
         if let Some(path) = &args.timeseries_out {
             std::fs::write(path, &outcome.timeseries_jsonl)
                 .with_context(|| format!("write time series to {}", path.display()))?;
             println!("time series written to {}", path.display());
         }
         if is_ladder {
-            wladder_report = Some(outcome.report);
+            wladder_report = Some(report);
         } else {
-            mix_report = Some(outcome.report);
+            mix_report = Some(report);
         }
     }
 
@@ -569,6 +593,7 @@ async fn main() -> Result<()> {
             metrics_interval: Duration::from_secs(args.metrics_snapshot_secs),
             oracle_sample: args.oracle_sample,
             skip_oracle: args.no_oracle || args.oracle_only,
+            op_timeout: Duration::from_secs(args.op_timeout_secs),
         };
 
         if args.oracle_only {
@@ -579,8 +604,12 @@ async fn main() -> Result<()> {
             );
             let oracle = soak::run_oracle(Arc::clone(&client), &cfg).await?;
             println!(
-                "soak oracle: {}/{} verified in {:.1}s",
-                oracle.verified, oracle.checked, oracle.elapsed_secs
+                "soak oracle: {}/{} verified in {:.1}s (replay {} + survival-only {})",
+                oracle.verified,
+                oracle.checked,
+                oracle.elapsed_secs,
+                oracle.replay_verified,
+                oracle.survival_only
             );
             soak_summary = Some(soak::SoakSummary {
                 duration_secs: 0,
@@ -591,6 +620,8 @@ async fn main() -> Result<()> {
                 reads_ok: 0,
                 reads_failed: 0,
                 ack_log_records: oracle.sampled_from,
+                started_unix_secs: None,
+                server_side: None,
                 oracle: Some(oracle),
             });
         } else {
@@ -608,13 +639,36 @@ async fn main() -> Result<()> {
             if !cfg.skip_oracle {
                 let oracle = soak::run_oracle(Arc::clone(&client), &cfg).await?;
                 println!(
-                    "soak oracle: {}/{} verified in {:.1}s",
-                    oracle.verified, oracle.checked, oracle.elapsed_secs
+                    "soak oracle: {}/{} verified in {:.1}s (replay {} + survival-only {})",
+                    oracle.verified,
+                    oracle.checked,
+                    oracle.elapsed_secs,
+                    oracle.replay_verified,
+                    oracle.survival_only
                 );
                 summary.oracle = Some(oracle);
             }
+            // Server-side window covers the LOAD phase (oracle replay is
+            // post-window; its traffic is deliberately excluded).
+            if let (Some(prom_url), Some(start)) = (&args.prom_url, summary.started_unix_secs) {
+                summary.server_side = Some(prom::capture(
+                    prom_url,
+                    start,
+                    start + summary.duration_secs,
+                ));
+            }
             soak_summary = Some(summary);
         }
+    }
+
+    // --prom-url only has a window to query for mix/wladder/soak.
+    if args.prom_url.is_some()
+        && !matches!(
+            args.scenario,
+            Scenario::Mix | Scenario::Wladder | Scenario::Soak
+        )
+    {
+        eprintln!("[rr-perf-bench] note: --prom-url applies to mix/wladder/soak only; ignoring");
     }
 
     // Machine-readable report — written before cluster shutdown so a write

@@ -68,6 +68,9 @@
 //!   bearer-token path, so mTLS is the only peer-identity check).
 //! - `--tls-domain <NAME>`      — Optional TLS server-name (SNI) override used when
 //!   dialing peers; defaults to the host part of each peer's roster address.
+//! - `--snapshot-logs-since-last <N>` — Snapshot trigger threshold override
+//!   (default 50_000, ADR A-0008). W7 snapshot-pressure runs lower it (e.g.
+//!   5_000) so snapshot cost shows up in latency time series.
 //! - `RR_ADMIN_TOKEN` / `RR_CLIENT_TOKEN` (env) — Bearer tokens enforced on the
 //!   Admin/Client services. REQUIRED in TLS mode (secrets come from the
 //!   environment, never argv — same convention as rr-server's
@@ -130,6 +133,7 @@ struct CliConfig {
     tls_key: Option<String>,
     tls_ca: Option<String>,
     tls_domain: Option<String>,
+    snapshot_logs_since_last: Option<u64>,
     bootstrap: bool,
     demo: bool,
 }
@@ -153,6 +157,7 @@ impl CliConfig {
                 tls_key: None,
                 tls_ca: None,
                 tls_domain: None,
+                snapshot_logs_since_last: None,
                 bootstrap: false,
                 demo: true,
             };
@@ -170,6 +175,7 @@ impl CliConfig {
         let mut tls_key: Option<String> = None;
         let mut tls_ca: Option<String> = None;
         let mut tls_domain: Option<String> = None;
+        let mut snapshot_logs_since_last: Option<u64> = None;
         let mut bootstrap = false;
         let mut demo = false;
         let mut i = 0;
@@ -225,6 +231,14 @@ impl CliConfig {
                     i += 1;
                     tls_domain = Some(args[i].clone());
                 }
+                "--snapshot-logs-since-last" => {
+                    i += 1;
+                    snapshot_logs_since_last = Some(
+                        args[i]
+                            .parse()
+                            .expect("--snapshot-logs-since-last must be a u64"),
+                    );
+                }
                 "--bootstrap" => bootstrap = true,
                 "--demo" => demo = true,
                 other => {
@@ -247,6 +261,7 @@ impl CliConfig {
             tls_key,
             tls_ca,
             tls_domain,
+            snapshot_logs_since_last,
             bootstrap,
             demo,
         }
@@ -448,6 +463,12 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     };
     let config = match cli.metrics_port {
         Some(port) => config.with_metrics_port(port),
+        None => config,
+    };
+    // W7 snapshot-pressure runs lower the trigger (e.g. 5k) to make snapshot
+    // cost visible in the time series; default keeps 50k (ADR A-0008).
+    let config = match cli.snapshot_logs_since_last {
+        Some(n) => config.with_snapshot_logs_since_last(n),
         None => config,
     };
 

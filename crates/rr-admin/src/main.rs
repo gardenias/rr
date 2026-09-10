@@ -21,12 +21,114 @@ use rr_network::proto::admin::{
 };
 use rr_network::proto::client::client_service_client::ClientServiceClient;
 use rr_network::proto::client::ClientRequest;
+use rr_network::tls::TlsConfig;
 use std::path::PathBuf;
-use tonic::{transport::Channel, Code, Response, Status};
+use std::sync::Arc;
+use tonic::service::Interceptor;
+use tonic::transport::Channel;
+use tonic::{Code, Response, Status};
 
 mod backup;
 mod decommission;
 mod node_reset;
+
+// ── TLS / bearer-token client plumbing ──────────────────────────────────────
+
+/// Request interceptor attaching the bearer token when one is configured
+/// (no-op otherwise, so every call site shares one client type).
+#[derive(Clone)]
+pub(crate) struct TokenInterceptor {
+    token: Option<Arc<str>>,
+}
+
+impl Interceptor for TokenInterceptor {
+    fn call(
+        &mut self,
+        mut req: tonic::Request<()>,
+    ) -> std::result::Result<tonic::Request<()>, Status> {
+        if let Some(token) = &self.token {
+            rr_network::auth::attach_bearer_token(&mut req, token)?;
+        }
+        Ok(req)
+    }
+}
+
+/// Client channel type shared by all admin/kv call sites (intercepted,
+/// token optional).
+pub(crate) type GrpcChannel =
+    tonic::service::interceptor::InterceptedService<Channel, TokenInterceptor>;
+pub(crate) type AdminClient = AdminServiceClient<GrpcChannel>;
+pub(crate) type KvClient = ClientServiceClient<GrpcChannel>;
+
+/// Establish a gRPC channel to the given host:port address — plaintext by
+/// default, HTTPS + mTLS when `tls` is set.
+async fn connect(addr: &str, tls: Option<&TlsConfig>) -> Result<Channel> {
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    let endpoint = format!("{scheme}://{addr}");
+    let endpoint = tonic::transport::Channel::from_shared(endpoint)?;
+    let endpoint = match tls {
+        Some(t) => endpoint.tls_config(
+            t.build_client_tls()
+                .map_err(|e| anyhow::anyhow!("TLS client config: {e}"))?,
+        )?,
+        None => endpoint,
+    };
+    let channel = endpoint.connect().await?;
+    Ok(channel)
+}
+
+fn make_admin_client(channel: Channel, token: &Option<Arc<str>>) -> AdminClient {
+    AdminServiceClient::with_interceptor(
+        channel,
+        TokenInterceptor {
+            token: token.clone(),
+        },
+    )
+}
+
+fn make_kv_client(channel: Channel, token: &Option<Arc<str>>) -> KvClient {
+    ClientServiceClient::with_interceptor(
+        channel,
+        TokenInterceptor {
+            token: token.clone(),
+        },
+    )
+}
+
+/// Validate the --tls-* trio (all-or-nothing, kv-store convention) and build
+/// the client-side TLS config.
+fn tls_config_from_args(cli: &Cli) -> Result<Option<TlsConfig>> {
+    let any = cli.tls_ca.is_some() || cli.tls_cert.is_some() || cli.tls_key.is_some();
+    if !any {
+        anyhow::ensure!(
+            cli.tls_domain.is_none(),
+            "--tls-domain requires the --tls-ca/--tls-cert/--tls-key trio"
+        );
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        cli.tls_ca.is_some() && cli.tls_cert.is_some() && cli.tls_key.is_some(),
+        "--tls-ca/--tls-cert/--tls-key are all-or-nothing"
+    );
+    Ok(Some(TlsConfig {
+        cert_path: cli.tls_cert.clone().expect("ensured above"),
+        key_path: cli.tls_key.clone().expect("ensured above"),
+        ca_path: Some(cli.tls_ca.clone().expect("ensured above")),
+        require_client_cert: false, // server-side knob, ignored on clients
+        domain_name: cli.tls_domain.clone(),
+    }))
+}
+
+/// Read a bearer token from the env var named by the flag; missing/empty is
+/// a hard error (explicit flag ⇒ operator intent).
+fn token_from_env(env_var: &Option<String>, flag: &str) -> Result<Option<Arc<str>>> {
+    let Some(var) = env_var else { return Ok(None) };
+    let token = std::env::var(var)
+        .ok()
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{flag} {var}: variable not set or empty"))?;
+    Ok(Some(Arc::from(token)))
+}
 
 // ── KV wire types (mirrors kv-store's KvRequest/KvResponse) ────────────────
 
@@ -67,6 +169,36 @@ struct Cli {
     /// Output format.
     #[arg(long, value_enum, default_value = "human")]
     output: OutputFormat,
+
+    /// CA bundle for verifying the server certificate. The
+    /// --tls-ca/--tls-cert/--tls-key trio is all-or-nothing (kv-store
+    /// convention); without them the client speaks plaintext (dev default).
+    #[arg(long, value_name = "PATH")]
+    tls_ca: Option<PathBuf>,
+
+    /// Client certificate presented for mTLS.
+    #[arg(long, value_name = "PATH")]
+    tls_cert: Option<PathBuf>,
+
+    /// Client private key for --tls-cert.
+    #[arg(long, value_name = "PATH")]
+    tls_key: Option<PathBuf>,
+
+    /// SNI / expected server name override when dialing by an address that
+    /// does not match the certificate SAN.
+    #[arg(long, value_name = "NAME")]
+    tls_domain: Option<String>,
+
+    /// Name of the environment variable holding the ADMIN bearer token (e.g.
+    /// RR_ADMIN_TOKEN). Secrets stay off argv — same convention as
+    /// rr-server's `auth.admin_token_env`. Fails fast if unset or empty.
+    #[arg(long, value_name = "ENV_VAR")]
+    token_env: Option<String>,
+
+    /// Name of the environment variable holding the CLIENT bearer token
+    /// (e.g. RR_CLIENT_TOKEN) — used only by `repl` kv commands.
+    #[arg(long, value_name = "ENV_VAR")]
+    client_token_env: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -297,10 +429,15 @@ enum ConfigCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // TLS/token are resolved once, up front: a bad flag fails fast before any
+    // subcommand runs (file-only subcommands like backup ignore them).
+    let tls = tls_config_from_args(&cli)?;
+    let admin_token = token_from_env(&cli.token_env, "--token-env")?;
+    let client_token = token_from_env(&cli.client_token_env, "--client-token-env")?;
 
     match &cli.command {
         Commands::Repl { addr, group } => {
-            run_repl(addr, *group).await?;
+            run_repl(addr, *group, tls.as_ref(), &admin_token, &client_token).await?;
         }
         Commands::Backup {
             data_dir,
@@ -387,8 +524,8 @@ async fn main() -> Result<()> {
             }
         }
         _ => {
-            let channel = connect(&cli.addr).await?;
-            let mut client = AdminServiceClient::new(channel);
+            let channel = connect(&cli.addr, tls.as_ref()).await?;
+            let mut client = make_admin_client(channel, &admin_token);
 
             match &cli.command {
                 Commands::Node {
@@ -928,15 +1065,6 @@ async fn main() -> Result<()> {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/// Establish a gRPC channel to the given host:port address.
-async fn connect(addr: &str) -> Result<Channel> {
-    let endpoint = format!("http://{addr}");
-    let channel = tonic::transport::Channel::from_shared(endpoint)?
-        .connect()
-        .await?;
-    Ok(channel)
-}
-
 fn admin_action_outcome<T>(
     result: Result<Response<T>, Status>,
     ok_message: &str,
@@ -1078,10 +1206,16 @@ fn decode_kv_response(bytes: &[u8]) -> anyhow::Result<Option<String>> {
 ///
 /// Supports 7 commands: get, put, delete, status, members, help, reconnect.
 /// get/put/delete use the kv-store bincode wire format.
-async fn run_repl(addr: &str, group: u64) -> Result<()> {
-    let channel = connect(addr).await?;
-    let mut admin_client = AdminServiceClient::new(channel.clone());
-    let mut kv_client = ClientServiceClient::new(channel);
+async fn run_repl(
+    addr: &str,
+    group: u64,
+    tls: Option<&TlsConfig>,
+    admin_token: &Option<Arc<str>>,
+    client_token: &Option<Arc<str>>,
+) -> Result<()> {
+    let channel = connect(addr, tls).await?;
+    let mut admin_client = make_admin_client(channel.clone(), admin_token);
+    let mut kv_client = make_kv_client(channel, client_token);
     let mut needs_reconnect = false;
 
     let mut rl = rustyline::DefaultEditor::new()?;
@@ -1100,10 +1234,10 @@ async fn run_repl(addr: &str, group: u64) -> Result<()> {
         let _ = rl.add_history_entry(&line);
 
         if needs_reconnect || line.trim() == "reconnect" {
-            match connect(addr).await {
+            match connect(addr, tls).await {
                 Ok(ch) => {
-                    admin_client = AdminServiceClient::new(ch.clone());
-                    kv_client = ClientServiceClient::new(ch);
+                    admin_client = make_admin_client(ch.clone(), admin_token);
+                    kv_client = make_kv_client(ch, client_token);
                     needs_reconnect = false;
                     if line.trim() == "reconnect" {
                         println!("reconnected to {addr}");

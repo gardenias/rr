@@ -17,6 +17,19 @@
 //! double-applied — the exactly-once durability face, same strength as the
 //! R-4 crash harness oracle (tests/crash/src/oracle.rs).
 //!
+//! ## Records past the LRU window (long runs)
+//!
+//! The idempotency response cache is a bounded LRU (10 000 entries). A soak
+//! whose ack count exceeds the window evicts the oldest entries; replaying
+//! those would decide `Expired` (watermark advanced, cache entry gone) and a
+//! probe `Put` would re-apply as `New` — polluting the key. For such records
+//! the oracle therefore SKIPS the probe and proves survival directly: the
+//! linearizable `Get` must still return the original value (any loss or any
+//! leaked probe write breaks equality). Their exactly-once protection came
+//! from the cache while they were resident during the load phase; the
+//! summary counts them separately (`survival_only`) so the weakening is
+//! visible, never silent.
+//!
 //! # Schema lineage
 //!
 //! The ack log / metrics log formats mirror tests/crash's journal (JSONL,
@@ -230,6 +243,12 @@ pub struct SoakConfig {
     /// Skip the post-load oracle (e.g. when a harness runs it separately
     /// after cluster convergence).
     pub skip_oracle: bool,
+    /// Per-op deadline for writes and read probes. tonic has no default RPC
+    /// deadline, so a request in flight exactly when a leadership transfer
+    /// lands can pend forever server-side — without this cap a single wedged
+    /// RPC hangs the whole soak (W9 smoke, 2026-09-10). A timed-out op counts
+    /// as failed; the load loop continues.
+    pub op_timeout: Duration,
 }
 
 /// Counters shared with the final report.
@@ -253,20 +272,35 @@ pub struct SoakSummary {
     pub reads_ok: u64,
     pub reads_failed: u64,
     pub ack_log_records: usize,
+    /// Wall-clock start of the load window (post-warmup); `None` in
+    /// oracle-only mode (no load ran). Aligns with the Prom window (§5.2.6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_unix_secs: Option<u64>,
+    /// Server-side rollup over the load window; present iff --prom-url was
+    /// given (set by main after the run).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_side: Option<crate::prom::ServerSideWindow>,
     pub oracle: Option<OracleSummary>,
 }
 
 #[derive(Serialize)]
 pub struct OracleSummary {
     pub checked: usize,
+    /// All records that passed verification (replay-verified + survival-only).
     pub verified: usize,
+    /// Subset verified by the full two-step replay probe (cache-resident).
+    pub replay_verified: usize,
+    /// Subset past the LRU cache window: probe skipped (it would re-apply),
+    /// survival proven by linearizable Get of the original value.
+    pub survival_only: usize,
     pub sampled_from: usize,
     pub elapsed_secs: f64,
 }
 
 /// Wait until the cluster accepts a keyed write (leader elected, dispatch
-/// live), then write the probe key used by the read probes.
-async fn warmup(client: &RrClient, timeout: Duration) -> Result<()> {
+/// live), then write the probe key used by the read probes. Each attempt is
+/// bounded by `op_timeout` so a wedged RPC cannot defeat the outer deadline.
+async fn warmup(client: &RrClient, timeout: Duration, op_timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut probe_id = 0u64;
     loop {
@@ -276,11 +310,22 @@ async fn warmup(client: &RrClient, timeout: Duration) -> Result<()> {
             key: PROBE_KEY.to_string(),
             value: b"soak-probe-value".to_vec(),
         });
-        match client.send_request_idempotent(PARTITION_ID, put, key).await {
-            Ok(_) => return Ok(()),
-            Err(e) => {
+        let attempt = tokio::time::timeout(
+            op_timeout,
+            client.send_request_idempotent(PARTITION_ID, put, key),
+        )
+        .await;
+        match attempt {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(e)) => {
                 if Instant::now() >= deadline {
                     anyhow::bail!("cluster not writable within {timeout:?}: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(_) => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!("cluster not writable within {timeout:?}: op timeout");
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
@@ -291,7 +336,8 @@ async fn warmup(client: &RrClient, timeout: Duration) -> Result<()> {
 /// The soak load loop: fixed-rate serial keyed writes, ack log on every Ok,
 /// periodic read probes and metrics records.
 pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<SoakSummary> {
-    warmup(&client, Duration::from_secs(60)).await?;
+    warmup(&client, Duration::from_secs(60), cfg.op_timeout).await?;
+    let started_wall_unix = crate::prom::now_unix_secs();
 
     let stats = Arc::new(SoakStats::default());
     let mut ack_log = Journal::create(&cfg.ack_log)?;
@@ -321,8 +367,13 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
             value: value.clone(),
         });
         let key = IdempotencyKey::with_client_id(REQUEST_TYPE, request_id, CLIENT_ID);
-        match client.send_request_idempotent(PARTITION_ID, put, key).await {
-            Ok(resp) => {
+        let write = tokio::time::timeout(
+            cfg.op_timeout,
+            client.send_request_idempotent(PARTITION_ID, put, key),
+        )
+        .await;
+        match write {
+            Ok(Ok(resp)) => {
                 // The Put response shape is fixed (value: None); a decodable
                 // response proves the apply path ran.
                 match decode_resp(&resp) {
@@ -345,13 +396,23 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
                     }
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 // Expected during fault windows: not acked, nothing owed.
                 stats.failed.fetch_add(1, Ordering::Relaxed);
                 latencies.record(tick.elapsed(), false);
                 static LOGGED: AtomicU64 = AtomicU64::new(0);
                 if LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
                     tracing::warn!(request_id, error = %e, "soak write failed (sampled)");
+                }
+            }
+            Err(_) => {
+                // Op deadline exceeded (a wedged RPC mid-transfer): counts as
+                // failed — never acked — and the loop continues.
+                stats.failed.fetch_add(1, Ordering::Relaxed);
+                latencies.record(tick.elapsed(), false);
+                static LOGGED_TO: AtomicU64 = AtomicU64::new(0);
+                if LOGGED_TO.fetch_add(1, Ordering::Relaxed) < 5 {
+                    tracing::warn!(request_id, "soak write op deadline exceeded (sampled)");
                 }
             }
         }
@@ -362,8 +423,10 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
             let get = encode_req(&KvRequest::Get {
                 key: PROBE_KEY.to_string(),
             });
-            match client.read_linearizable(PARTITION_ID, get).await {
-                Ok(resp) => match decode_resp(&resp) {
+            match tokio::time::timeout(cfg.op_timeout, client.read_linearizable(PARTITION_ID, get))
+                .await
+            {
+                Ok(Ok(resp)) => match decode_resp(&resp) {
                     Ok(r) if r.value.as_deref() == Some(b"soak-probe-value") => {
                         stats.reads_ok.fetch_add(1, Ordering::Relaxed);
                     }
@@ -379,9 +442,13 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
                         tracing::warn!(error = %e, "soak probe read undecodable");
                     }
                 },
-                Err(e) => {
+                Ok(Err(e)) => {
                     stats.reads_failed.fetch_add(1, Ordering::Relaxed);
                     tracing::debug!(error = %e, "soak probe read failed (fault window?)");
+                }
+                Err(_) => {
+                    stats.reads_failed.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!("soak probe read op deadline exceeded");
                 }
             }
         }
@@ -421,6 +488,8 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
         reads_ok: stats.reads_ok.load(Ordering::Relaxed),
         reads_failed: stats.reads_failed.load(Ordering::Relaxed),
         ack_log_records: records,
+        started_unix_secs: Some(started_wall_unix),
+        server_side: None,
         oracle: None,
     })
 }
@@ -456,15 +525,24 @@ fn sample_records(records: &[AckRecord], max: usize) -> Vec<AckRecord> {
 }
 
 /// Replay the ack log: every record must survive (probe Put deduped via the
-/// idempotency layer, `Get` returns the ORIGINAL value).
+/// idempotency layer when cache-resident; `Get` returns the ORIGINAL value
+/// always). Records past the LRU window are survival-verified (module docs).
 pub async fn run_oracle(client: SharedClient, cfg: &SoakConfig) -> Result<OracleSummary> {
     let records = read_ack_log(&cfg.ack_log)?;
+    // An oracle over zero records proves nothing — and silently passing one
+    // hides a load phase that never acked (W9 smoke, 2026-09-10). Fail loud.
+    anyhow::ensure!(
+        !records.is_empty(),
+        "ack log {} is empty or missing — nothing to verify (did the load phase run?)",
+        cfg.ack_log.display()
+    );
     let sample = sample_records(&records, cfg.oracle_sample);
     let started = Instant::now();
-    let mut verified = 0usize;
+    let mut replay_verified = 0usize;
+    let mut survival_only = 0usize;
 
     for (i, record) in sample.iter().enumerate() {
-        verify_one(&client, record, cfg.payload_size)
+        match verify_one(&client, record, cfg.payload_size)
             .await
             .with_context(|| {
                 format!(
@@ -472,8 +550,11 @@ pub async fn run_oracle(client: SharedClient, cfg: &SoakConfig) -> Result<Oracle
                     record.request_id,
                     sample.len()
                 )
-            })?;
-        verified += 1;
+            })? {
+            VerifyOutcome::ReplayVerified => replay_verified += 1,
+            VerifyOutcome::SurvivalOnly => survival_only += 1,
+        }
+        let verified = replay_verified + survival_only;
         if verified.is_multiple_of(500) {
             eprintln!(
                 "[soak-oracle] {}/{} verified ({:?})",
@@ -483,16 +564,38 @@ pub async fn run_oracle(client: SharedClient, cfg: &SoakConfig) -> Result<Oracle
             );
         }
     }
+    if survival_only > 0 {
+        eprintln!(
+            "[soak-oracle] NOTE: {survival_only} sampled records were past the idempotency \
+             cache's LRU window; survival verified by linearizable Get only (replay probe \
+             skipped — a probe would re-apply as New). See soak.rs module docs."
+        );
+    }
 
     Ok(OracleSummary {
         checked: sample.len(),
-        verified,
+        verified: replay_verified + survival_only,
+        replay_verified,
+        survival_only,
         sampled_from: records.len(),
         elapsed_secs: started.elapsed().as_secs_f64(),
     })
 }
 
-async fn verify_one(client: &RrClient, record: &AckRecord, payload_size: usize) -> Result<()> {
+/// Which verification path a record took.
+#[derive(Debug, PartialEq, Eq)]
+enum VerifyOutcome {
+    /// Cache-resident: replay probe deduped + Get returned the original.
+    ReplayVerified,
+    /// Past the LRU window: probe skipped, Get returned the original.
+    SurvivalOnly,
+}
+
+async fn verify_one(
+    client: &RrClient,
+    record: &AckRecord,
+    payload_size: usize,
+) -> Result<VerifyOutcome> {
     let original = value_for(record.request_id, payload_size);
     let expected_hash = value_hash(&original);
     anyhow::ensure!(
@@ -502,17 +605,25 @@ async fn verify_one(client: &RrClient, record: &AckRecord, payload_size: usize) 
         record.value_hash
     );
 
-    // 1. Probe Put under the same idempotency key: the idempotency layer must
-    //    answer from its cache (the state machine never sees the probe).
+    // 1. Probe Put under the same idempotency key: while cache-resident the
+    //    layer must answer from its cache (the state machine never sees the
+    //    probe). Past the LRU window it answers Expired instead — the
+    //    watermark advanced and the cached response is gone; the probe is
+    //    then SKIPPED (sending it would re-apply as New and destroy the very
+    //    evidence step 2 checks).
     let probe = encode_req(&KvRequest::Put {
         key: record.key.clone(),
         value: probe_value_for(record.request_id, payload_size),
     });
     let key = IdempotencyKey::with_client_id(REQUEST_TYPE, record.request_id, CLIENT_ID);
-    client
+    let evicted = match client
         .send_request_idempotent(PARTITION_ID, probe, key)
         .await
-        .context("probe Put failed after client retries")?;
+    {
+        Ok(_) => false,
+        Err(rr_core::error::RrError::IdempotencyExpired { .. }) => true,
+        Err(e) => return Err(e).context("probe Put failed after client retries"),
+    };
 
     // 2. Linearizable read: the value must be the ORIGINAL — any other value
     //    means the original acked write was lost (or the probe leaked through).
@@ -532,7 +643,11 @@ async fn verify_one(client: &RrClient, record: &AckRecord, payload_size: usize) 
         got.as_ref().map(|v| v.len()).unwrap_or(0),
         got.as_ref().map(|v| &v[..v.len().min(16)])
     );
-    Ok(())
+    Ok(if evicted {
+        VerifyOutcome::SurvivalOnly
+    } else {
+        VerifyOutcome::ReplayVerified
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

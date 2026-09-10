@@ -1,0 +1,193 @@
+# W6 (Kafka ingest path) overlay for the rr perf-lab — redpanda + kv nodes
+# wired to consume topic `perf_1` (group 1), plus a profile-gated fixed-rate
+# producer. Base stack security (TLS/mTLS/token, durable raft log) unchanged.
+#
+# Usage (repo root), combined with the base file:
+#   docker compose -f deploy/perf/docker-compose.yml -f deploy/perf/docker-compose.kafka.yml up -d
+#   docker compose -f deploy/perf/docker-compose.yml -f deploy/perf/docker-compose.kafka.yml \
+#     --profile kafka run --rm producer --rate 2000 --total 120000
+#
+# Merge semantics (compose v2): `command` is REPLACED per service (the full
+# list is restated here), `depends_on`/`environment` merge per key.
+# rr-lab-producer speaks plaintext to redpanda (Kafka broker traffic is
+# in-network; the rr client/raft endpoints keep mTLS).
+
+services:
+  kv-1:
+    command:
+      - "--node-id"
+      - "1"
+      - "--bootstrap"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--data-dir"
+      - "/var/lib/rr/data"
+      - "--tls-cert"
+      - "/etc/rr/certs/node1.pem"
+      - "--tls-key"
+      - "/etc/rr/certs/node1.key"
+      - "--tls-ca"
+      - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+      - "--kafka-topic-prefix"
+      - "perf_"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  kv-2:
+    command:
+      - "--node-id"
+      - "2"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--data-dir"
+      - "/var/lib/rr/data"
+      - "--tls-cert"
+      - "/etc/rr/certs/node2.pem"
+      - "--tls-key"
+      - "/etc/rr/certs/node2.key"
+      - "--tls-ca"
+      - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+      - "--kafka-topic-prefix"
+      - "perf_"
+    depends_on:
+      kv-1:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  kv-3:
+    command:
+      - "--node-id"
+      - "3"
+      - "--port"
+      - "51001"
+      - "--listen-addr"
+      - "0.0.0.0"
+      - "--metrics-port"
+      - "9100"
+      - "--peers"
+      - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
+      - "--data-dir"
+      - "/var/lib/rr/data"
+      - "--tls-cert"
+      - "/etc/rr/certs/node3.pem"
+      - "--tls-key"
+      - "/etc/rr/certs/node3.key"
+      - "--tls-ca"
+      - "/etc/rr/certs/ca.pem"
+      - "--snapshot-logs-since-last"
+      - "${SNAPSHOT_LOGS_SINCE_LAST:-50000}"
+      - "--kafka-brokers"
+      - "redpanda:9092"
+      - "--kafka-topic-prefix"
+      - "perf_"
+    depends_on:
+      kv-2:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: rr-perf-redpanda
+    hostname: redpanda
+    networks: [rrperf]
+    # No host port published: broker traffic stays inside rrperf.
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=0.0.0.0:9092
+      - --advertise-kafka-addr=redpanda:9092
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      # Healthchecks bypass the image entrypoint — call rpk by full path.
+      test: ["CMD", "/usr/bin/rpk", "cluster", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  # One-shot helper: create the ingestor topic perf_1 (single partition, per
+  # the rr-ingestor-kafka design). Retries tolerate a broker whose health
+  # check passes before its Kafka API is fully serving; an already-existing
+  # topic is accepted (idempotent under matrix re-runs).
+  topic-init:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: rr-perf-topic-init
+    networks: [rrperf]
+    entrypoint: ["/bin/bash"]
+    command:
+      - "-c"
+      - |
+        for i in $$(seq 1 15); do
+          if /usr/bin/rpk topic list --brokers redpanda:9092 | awk '{print $$1}' | grep -qx 'perf_1'; then
+            echo "topic perf_1 already exists — ok"; exit 0
+          fi
+          /usr/bin/rpk topic create perf_1 --brokers redpanda:9092 --partitions 1 && exit 0
+          echo "topic create attempt $$i failed; retrying in 2s"
+          sleep 2
+        done
+        echo "topic perf_1 could not be created" >&2; exit 1
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  # Fixed-rate command producer (rr-lab-producer): Increment/Put stream into
+  # perf_1. Started by prod-perf.sh for the W6 window with a bounded --total;
+  # never auto-starts with the stack.
+  producer:
+    image: rr-perf:dev
+    container_name: rr-perf-producer
+    networks: [rrperf]
+    profiles: ["kafka"]
+    entrypoint: ["/usr/local/bin/rr-lab-producer"]
+    command:
+      - "--brokers"
+      - "redpanda:9092"
+      - "--topic"
+      - "perf_1"
+      - "--rate"
+      - "${W6_PRODUCER_RATE:-2000}"
+      - "--total"
+      - "0"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+
+volumes:
+  redpanda-data:

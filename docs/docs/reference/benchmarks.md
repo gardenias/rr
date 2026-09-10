@@ -166,6 +166,10 @@ rr-perf-bench --cluster-addrs ... --scenario mix \
 
 全部随机源(到达过程、op 选择、key 选择)来自 `--seed` 化的 SplitMix64:同 seed 同 flag 复现同一负载轨迹。`--client-id` 供多负载容器扇出时在 JSON meta 聚合。
 
+`--prom-url <url>` 会把**服务端窗口汇总**嵌入 JSON 报告(与客户端窗口同墙钟对齐:server/proposal/apply/append-RTT p50/p99、复制 lag、ingestor 提交速率),用于把客户端毛刺归因到服务端环节;Prometheus 不可达时字段降级为 null,不会拖垮 run。`--op-timeout-secs`(默认 30)给每个 op 上期限,饱和集群上 run 必然有界收尾。
+
+生产形态全矩阵(W1–W9 + W11 对照档)由 `scripts/prod-perf.sh` 一键执行(见 `deploy/perf/README.md`),产出归档 `docs/perf/prod/<date>-<sha>/`(raw JSON + 时间序列 + report.md)。
+
 ## 当前限制 / Current Limitations
 
 - **单机 loopback**：跨机器网络 RTT 会主导真实部署的写延迟（Raft 写通常 2-3 个 RTT）。
