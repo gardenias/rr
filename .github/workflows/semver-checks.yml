@@ -4,16 +4,15 @@
 # 当前代码 checkout 在 workspace 根目录,baseline tag(v0.2.0-rc2)checkout
 # 到 `baseline/` 子目录,以 `--baseline-root` 做 git 基线对比。
 #
-# 已知限制 / 后续动作:
-# - v0.2.0 相对 0.1.0-rc 基线包含已记录的 breaking changes(见 CHANGELOG.md),
-#   因此现阶段 `continue-on-error: true`,只做报告不阻塞。
-#   **v0.2.0 正式发布后**:去掉 `continue-on-error`,把 baseline 滚动到最新
-#   release tag,转为阻塞门禁。
+# 基线策略:
+# - baseline 为最新 release tag(当前 v0.2.0),阻塞式门禁。
+# - v0.2.0 相对 0.1.0/rc 基线的 breaking changes 已记录在 CHANGELOG.md;
+#   自 v0.2.0 起所有 breaking 变更必须在 PR 中经评审放行(门禁红灯即信号)。
 # - `--workspace` 会检查 workspace 内所有可发布成员;`publish = false` 的
 #   内部成员(benches、rr-perf-bench)会被自动跳过。fuzz 不是 workspace
 #   成员,不参与检查。
 # - 未配置依赖/目标缓存,rustdoc JSON 每次全量生成,job 耗时以分钟计;
-#   转为阻塞门禁前可再评估缓存。
+#   如成为瓶颈可再评估缓存。
 name: Semver Checks
 
 on:
@@ -23,10 +22,8 @@ on:
 
 jobs:
   semver-checks:
-    name: "cargo-semver-checks (baseline: v0.2.0-rc2)"
+    name: "cargo-semver-checks (baseline: v0.2.0)"
     runs-on: ubuntu-latest
-    # v0.2.0 发布后转为阻塞门禁(见文件头注释)。
-    continue-on-error: true
     steps:
       - name: Checkout current code
         uses: actions/checkout@v4
@@ -34,7 +31,7 @@ jobs:
       - name: Checkout baseline tag into ./baseline
         uses: actions/checkout@v4
         with:
-          ref: v0.2.0-rc2
+          ref: v0.2.0
           path: baseline
 
       - uses: dtolnay/rust-toolchain@stable
@@ -42,5 +39,5 @@ jobs:
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@cargo-semver-checks
 
-      - name: Run cargo-semver-checks (non-blocking until v0.2.0 ships)
+      - name: Run cargo-semver-checks (blocking gate)
         run: cargo semver-checks check-release --workspace --baseline-root baseline
