@@ -41,13 +41,18 @@
 //!   command topic with framework-managed exactly-once apply.
 //!   Requires a binary built with `--features rdkafka`.
 //! - `--kafka-topic-prefix <P>` — Topic prefix; group 1 consumes `{P}1`. Default `input_`.
+//! - `--data-dir <PATH>`        — Durable mode (ADR A-0016): the Raft log is persisted
+//!   to `{PATH}/raft-log/{group_id}`. Requires a binary built with `--features rocks`.
+//!   Unset = in-memory log (historical behavior).
 //! - `--bootstrap`              — Initialize Raft membership (run on exactly one node).
 //! - `--demo`                   — Run KV demo writes and exit (default when no args given).
 //!
 //! # Architecture
 //!
 //! Each node is an `RrNode` with:
-//! - `MemStorage` for key/value data (no RocksDB in this example)
+//! - `MemStorage` for key/value data (the business KV stays in memory; with
+//!   `--data-dir` the *Raft log* is persisted to RocksDB — snapshots plus the
+//!   durable log give full restart recovery)
 //! - `KvService` wrapped in `ServiceStateMachineAdapter` as the state machine
 //! - `RaftGroupLookupImpl` for intra-cluster Raft RPCs
 //! - `ClientDispatchImpl` for client write routing
@@ -89,6 +94,7 @@ struct CliConfig {
     metrics_port: Option<u16>,
     kafka_brokers: Option<Vec<String>>,
     kafka_topic_prefix: String,
+    data_dir: Option<String>,
     bootstrap: bool,
     demo: bool,
 }
@@ -107,6 +113,7 @@ impl CliConfig {
                 metrics_port: None,
                 kafka_brokers: None,
                 kafka_topic_prefix: "input_".to_string(),
+                data_dir: None,
                 bootstrap: false,
                 demo: true,
             };
@@ -119,6 +126,7 @@ impl CliConfig {
         let mut metrics_port: Option<u16> = None;
         let mut kafka_brokers: Option<Vec<String>> = None;
         let mut kafka_topic_prefix = "input_".to_string();
+        let mut data_dir: Option<String> = None;
         let mut bootstrap = false;
         let mut demo = false;
         let mut i = 0;
@@ -154,6 +162,10 @@ impl CliConfig {
                     i += 1;
                     kafka_topic_prefix = args[i].clone();
                 }
+                "--data-dir" => {
+                    i += 1;
+                    data_dir = Some(args[i].clone());
+                }
                 "--bootstrap" => bootstrap = true,
                 "--demo" => demo = true,
                 other => {
@@ -171,6 +183,7 @@ impl CliConfig {
             metrics_port,
             kafka_brokers,
             kafka_topic_prefix,
+            data_dir,
             bootstrap,
             demo,
         }
@@ -265,6 +278,8 @@ async fn run_demo() -> Result<()> {
 async fn run_node(cli: CliConfig) -> Result<()> {
     // Fail fast when --kafka-brokers was passed to a binary without rdkafka.
     check_kafka_support(&cli)?;
+    // Fail fast when --data-dir was passed to a binary without RocksDB.
+    check_raft_log_support(&cli)?;
 
     // The bind address comes from --listen-addr; the address advertised to
     // peers comes exclusively from the roster (--peers), so containers can
@@ -312,11 +327,16 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
 
-    let mgr = Arc::new(RaftGroupManager::new_with_network(
-        cli.node_id,
-        sm_factory,
-        pool.clone(),
-    ));
+    let mgr = RaftGroupManager::new_with_network(cli.node_id, sm_factory, pool.clone());
+    // ADR A-0016: `--data-dir` turns on the durable Raft log at
+    // `{data-dir}/raft-log/{group_id}` (rocks builds only). Unset = in-memory
+    // log, the historical behavior of this example.
+    #[cfg(feature = "rocks")]
+    let mgr = match &cli.data_dir {
+        Some(dir) => mgr.with_rocks_base_path(format!("{dir}/raft-log")),
+        None => mgr,
+    };
+    let mgr = Arc::new(mgr);
 
     // ── Wire lookup and dispatch ──────────────────────────────────────────────
     let router = Arc::new(ShardRouter::new(Arc::clone(&provider)));
@@ -425,6 +445,26 @@ fn check_kafka_support(cli: &CliConfig) -> Result<()> {
 /// in [`KafkaIngestor::new`](rr_ingestor_kafka::KafkaIngestor).
 #[cfg(feature = "rdkafka")]
 fn check_kafka_support(_cli: &CliConfig) -> Result<()> {
+    Ok(())
+}
+
+/// Fail fast when `--data-dir` was passed to a binary built without the
+/// `rocks` feature — there is no RocksDB raft-log backend (ADR A-0016).
+#[cfg(not(feature = "rocks"))]
+fn check_raft_log_support(cli: &CliConfig) -> Result<()> {
+    if cli.data_dir.is_some() {
+        return Err(anyhow!(
+            "--data-dir requires RocksDB support, but this binary was built \
+             without it — rebuild with `cargo build -p kv-store --features rocks`"
+        ));
+    }
+    Ok(())
+}
+
+/// rocks builds accept `--data-dir` unconditionally; the directory is created
+/// on demand when the first group starts.
+#[cfg(feature = "rocks")]
+fn check_raft_log_support(_cli: &CliConfig) -> Result<()> {
     Ok(())
 }
 

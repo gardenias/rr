@@ -7,7 +7,7 @@
 
 **Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官)
 **Current phase**: **v0.2.0 已发布**(Phase 0 WS-1~WS-7、RC 并行项、可靠性专项 R-1~R-8 全部关闭;freeze checklist 已签字);下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`,WAL(A-0010)维持 deferred
-**Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(**已闭环**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred)
+**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log 已落地,M1 待动工);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
 **Main branch HEAD**: 见下文 Git 状态段
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
@@ -33,6 +33,62 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-10(深夜)— M0 落地:durable raft log 生产接线(ADR A-0016 → implemented)
+
+> G8 修复,生产性能方案前置阻塞解除;全部改动本 session 完成。
+
+- **rr-raft**:`RaftGroupManager::with_rocks_base_path`(cfg `rocks`);`start_group`
+  统一 log 选择(base path 已设 = `RocksLogStorage` at `{base}/{group_id}`,否则内存),
+  两个维度正交收敛至 `build_node<NF>`;`start_group_rocks` 退化为兼容 shim(断言 +
+  委托统一入口,`new_with_rocks` 调用方无可观察变化);`build_node` 内
+  `create_dir_all(base)` 防御两级新目录。
+- **rr-server**:`--storage rocks` 时新 helper `with_raft_log_dir` 接线
+  `{data_dir}/raft-log/{group_id}`(gRPC/TCP 两分支,match 重构为先生成 manager 再
+  Arc);mem 后端行为不变。
+- **kv-store**:新增 `rocks` cargo feature(`rr-raft/rocks`)+ `--data-dir` flag
+  (非 rocks 构建 fail fast 并提示重编译,与 `--kafka-brokers` 同模式);doc header 同步。
+  **计划修正**:不设 `--storage`/`--durability`(`NodeConfig.storage_engine` 无生产
+  消费者,假 knob 不加;log 存储固定 Strict)。
+- **测试**:rr-raft 单测 ×2(`test_start_group_persists_log_with_rocks_base_path`、
+  `test_start_group_rocks_shim_still_persists`;直开存储字节级 + `Raft::new` 恢复双验证。
+  踩坑:metrics `last_log_index` 启动恢复竞态 → 轮询;`RocksLogStorage` 必须显式
+  close+drop 才释放 DB LOCK);integration e2e
+  `test_rocks_raft_log_rolling_restart_preserves_acked_writes`(3 节点双开,50 条已
+  ACK,逐节点滚动重启 quorum 保持、复制收敛、恢复节点 lin-read、直开 log DB 字节级)。
+- **文档**:ADR A-0016(implemented)+ 索引;CHANGELOG `[Unreleased]`(Added + Changed);
+  storage-engines.md 增"Raft 日志持久化"双语段;invariants.md INV-1 强制点 #6 +
+  3 条新测试登记(lint 65 links)。
+- **验证**:rr-raft rocks 146 全绿(含 2 新)、e2e 一次过、invariants-lint 65 links、
+  fmt/clippy `-D warnings`/workspace 全量测试(rocks)全绿。
+- **下一步**:M1(perf-lab stack:deploy/perf/ + 证书/token + kv-store TLS 参数面)。
+
+### Session 2026-09-10(晚)— 生产性能测试方案定稿 + G8 关键发现(raft log 未接线)
+
+> 用户批准方案 A(rr-perf-bench 纯加法扩展)与 kv-store 改动;动工前用户要求核实
+> "raft 集群间协调同步是否开启",查实一个生产正确性缺口。
+
+- **方案**:`.sisyphus/plans/rr-prod-perf.md`——perf-lab(`deploy/perf/`,kv-store ×3
+  rocks/strict + TLS/mTLS/token + cpuset 隔离 + 网内负载)、W1–W11 负载矩阵、
+  open-loop 无协调遗漏度量、M0–M5 里程碑(~8.5 人日核心)。局部脚本
+  (`scripts/perf-baseline.sh`/`soak.sh`/`deploy/lab/`)零改动为硬性验收。
+- **G8 发现(三层证据)**:
+  ① 复制(AppendEntries)**已开启**:stock rr-server(`main.rs:127`)与 kv-store
+  (`main.rs:315`)均 `RaftGroupManager::new_with_network` → `GrpcNetworkFactory`;
+  ② **raft log 持久化未开启**:`start_group` → `RaftNode::new_with_factory` →
+  `RrLogStorage` 内存 log(`raft_node.rs:85`);`start_group_rocks`/`RocksLogStorage`
+  生产路径零调用,且硬编码 `NoopNetworkFactory`(`group_manager.rs:1081`)——
+  "rocks log + 复制"组合在生产代码中不存在,唯一双开组装在 `tests/crash`;
+  ③ 影响:R-7 基线写路径最热的一段(raft log append + IoBatcher + fsync)不在测量
+  回路内,A-0010 前置判据 2("存储非约束")证据不充分,**须在生产基线后重判**;
+  且 Helm/K8s 默认部署形态全集群断电即丢未快照日志——strict 耐久契约在默认形态
+  不成立(正确性缺口,crash harness 当时已以 rr-crash-node 绕过)。
+- **M0(前置阻塞,已入计划)**:group_manager log storage × network factory 正交化 +
+  RrNode 3 处调用点统一入口 + rr-server/kv-store 接线 + 双开 e2e(重启已 ACK 不丢)。
+  impact 分析:`start_group` 图分析 9 个直接调用全为 rr-raft 单测;RrNode 3 处
+  (node.rs:334/363/459)经文本核实(field-receiver 调用图未收录)。落地前补 ADR。
+- **A-0010 重判据**:W11(mem-log vs rocks-log A/B)为直接证据档;若 rocks-log 显著
+  劣化且 fsync 转热 → WAL 重判为具备开工条件,结论回写 `rr-wal-impl.md`。
 
 ### Session 2026-09-10(傍晚)— v0.2.0 final 发布(用户决策 cut tag)
 

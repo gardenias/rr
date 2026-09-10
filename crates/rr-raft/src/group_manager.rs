@@ -1,6 +1,7 @@
 //! Manages the lifecycle of multiple Raft groups on a single node.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -8,6 +9,7 @@ use std::time::Instant;
 use bincode::config::standard;
 use dashmap::DashMap;
 use metrics::{counter, gauge, histogram};
+use openraft::network::{NetSnapshot, RaftNetworkFactory};
 use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
 use openraft::ReadPolicy;
@@ -85,7 +87,8 @@ pub struct RaftGroupManager {
     /// When `Some`, new groups are created with `TcpRaftNetworkFactory`
     /// (AppendEntries/Vote over binary TCP, snapshot over gRPC fallback).
     tcp_network: Option<TcpNetworkConfig>,
-    /// When `Some`, `start_group_rocks` will use `RocksLogStorage` at `{base_path}/{group_id}`.
+    /// When `Some`, `start_group` (and the `start_group_rocks` compat shim)
+    /// use `RocksLogStorage` at `{base_path}/{group_id}` (ADR A-0016).
     #[cfg(feature = "rocks")]
     rocks_base_path: Option<String>,
     snapshot_logs_since_last: u64,
@@ -168,11 +171,26 @@ impl RaftGroupManager {
         self
     }
 
+    /// Use RocksDB-backed Raft log storage for every group started from this
+    /// manager (ADR A-0016): `start_group` opens a `RocksLogStorage` at
+    /// `{base_path}/{group_id}` instead of the in-memory `RrLogStorage`.
+    /// Orthogonal to the configured network factory — replication is
+    /// unaffected. Production deployments that set `--storage rocks` are
+    /// expected to set this (rr-server does so automatically).
+    #[cfg(feature = "rocks")]
+    pub fn with_rocks_base_path(mut self, base_path: String) -> Self {
+        self.rocks_base_path = Some(base_path);
+        self
+    }
+
     /// Start a new Raft group on this node.
     ///
     /// Creates a `RaftNode` and stores it. Returns error if group already exists.
     /// When a `ChannelPool` was supplied at construction time, the group will use
     /// `GrpcNetworkFactory`; otherwise `NoopNetworkFactory` is used.
+    ///
+    /// Log storage is selected by [`Self::with_rocks_base_path`] (ADR A-0016):
+    /// RocksDB at `{base_path}/{group_id}` when set, in-memory otherwise.
     #[instrument(skip(self))]
     pub async fn start_group(&self, group_id: GroupId) -> Result<(), RrError> {
         let sm = (self.sm_factory)(group_id);
@@ -188,39 +206,62 @@ impl RaftGroupManager {
                 tcp_cfg.port_offset,
                 tcp_cfg.tls.clone(),
             );
-            RaftNode::new_with_factory(
-                group_id,
-                self.node_id,
-                sm,
-                factory,
-                self.snapshot_logs_since_last,
-            )
-            .await
-            .map_err(|e| RrError::Application(e.to_string()))?
+            self.build_node(group_id, sm, factory).await?
         } else if let Some(pool) = &self.channel_pool {
             let factory = GrpcNetworkFactory::new(pool.clone(), group_id);
-            RaftNode::new_with_factory(
-                group_id,
-                self.node_id,
-                sm,
-                factory,
-                self.snapshot_logs_since_last,
-            )
-            .await
-            .map_err(|e| RrError::Application(e.to_string()))?
+            self.build_node(group_id, sm, factory).await?
         } else {
-            RaftNode::new_with_factory(
-                group_id,
-                self.node_id,
-                sm,
-                NoopNetworkFactory,
-                self.snapshot_logs_since_last,
-            )
-            .await
-            .map_err(|e| RrError::Application(e.to_string()))?
+            self.build_node(group_id, sm, NoopNetworkFactory).await?
         };
         self.register_node(group_id, node, ctrl, read, outbox, hook)
             .await
+    }
+
+    /// Construct a `RaftNode`, choosing the log storage backend (ADR A-0016):
+    /// `RocksLogStorage` at `{rocks_base_path}/{group_id}` when a base path is
+    /// configured, in-memory `RrLogStorage` otherwise. The network factory is
+    /// orthogonal — always the one supplied by the caller.
+    async fn build_node<NF>(
+        &self,
+        group_id: GroupId,
+        sm: Box<dyn StateMachine>,
+        factory: NF,
+    ) -> Result<RaftNode, RrError>
+    where
+        NF: RaftNetworkFactory<RrTypeConfig> + 'static,
+        NF::Network: NetSnapshot<RrTypeConfig, SnapshotData = Cursor<Vec<u8>>>,
+    {
+        #[cfg(feature = "rocks")]
+        if let Some(base) = &self.rocks_base_path {
+            let path = format!("{base}/{group_id}");
+            // RocksDB creates the final DB directory but not necessarily the
+            // intermediate `raft-log/` level — make the base path explicit so
+            // nested layouts like `{data_dir}/raft-log/{group_id}` always work.
+            std::fs::create_dir_all(base).map_err(|e| {
+                RrError::Application(format!(
+                    "failed to create raft log base directory {base}: {e}"
+                ))
+            })?;
+            return RaftNode::new_with_rocks_factory(
+                group_id,
+                self.node_id,
+                sm,
+                factory,
+                &path,
+                self.snapshot_logs_since_last,
+            )
+            .await
+            .map_err(|e| RrError::Application(e.to_string()));
+        }
+        RaftNode::new_with_factory(
+            group_id,
+            self.node_id,
+            sm,
+            factory,
+            self.snapshot_logs_since_last,
+        )
+        .await
+        .map_err(|e| RrError::Application(e.to_string()))
     }
 
     async fn register_node(
@@ -1038,8 +1079,11 @@ impl RaftGroupManager {
     }
     /// Create a `RaftGroupManager` that uses RocksDB-backed log storage.
     ///
-    /// Groups started via `start_group_rocks` will persist their Raft log to
-    /// `{base_path}/{group_id}/` on disk.
+    /// Groups started via `start_group` (or the `start_group_rocks` compat
+    /// shim) will persist their Raft log to `{base_path}/{group_id}/` on disk.
+    /// This constructor uses `NoopNetworkFactory` (single-node / test mode);
+    /// for replicated durable groups use `new_with_network` (or
+    /// `new_with_tcp_network`) + [`Self::with_rocks_base_path`] (ADR A-0016).
     #[cfg(feature = "rocks")]
     pub fn new_with_rocks(
         node_id: NodeId,
@@ -1061,31 +1105,19 @@ impl RaftGroupManager {
     /// Start a Raft group backed by RocksDB log storage.
     ///
     /// The database is opened at `{rocks_base_path}/{group_id}`.
+    ///
+    /// Since ADR A-0016 this is a compatibility shim: `start_group` already
+    /// selects RocksDB log storage whenever `rocks_base_path` is set, and the
+    /// network factory is the one configured at construction time (this method
+    /// previously hard-coded `NoopNetworkFactory`; `new_with_rocks` configures
+    /// NoopNetwork, so existing callers observe no change).
     #[cfg(feature = "rocks")]
     #[instrument(skip(self))]
     pub async fn start_group_rocks(&self, group_id: GroupId) -> Result<(), RrError> {
-        let base = self
-            .rocks_base_path
-            .as_ref()
-            .ok_or_else(|| RrError::Application("rocks_base_path not set".to_string()))?;
-        let path = format!("{base}/{group_id}");
-        let sm = (self.sm_factory)(group_id);
-        let ctrl = sm.ingestor_offset_control();
-        let read = sm.read_handle();
-        let outbox = sm.outbox_control();
-        let hook = sm.lifecycle_hook();
-        let node = RaftNode::new_with_rocks_factory(
-            group_id,
-            self.node_id,
-            sm,
-            NoopNetworkFactory,
-            &path,
-            self.snapshot_logs_since_last,
-        )
-        .await
-        .map_err(|e| RrError::Application(e.to_string()))?;
-        self.register_node(group_id, node, ctrl, read, outbox, hook)
-            .await
+        if self.rocks_base_path.is_none() {
+            return Err(RrError::Application("rocks_base_path not set".to_string()));
+        }
+        self.start_group(group_id).await
     }
 
     /// Notify per-group lifecycle hook that leadership was acquired.
@@ -1528,5 +1560,129 @@ mod tests {
             1,
             "shutdown callback should fire exactly once"
         );
+    }
+
+    /// ADR A-0016 helper: poll the group's metrics until the log frontier is
+    /// at least `min` (raft-core startup recovery is async — a single read
+    /// right after `start_group` races with it and sees `None`).
+    #[cfg(feature = "rocks")]
+    async fn wait_last_log_index(mgr: &RaftGroupManager, group: u64, min: u64) -> u64 {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(raft) = mgr.get_raft(group).await {
+                if let Some(idx) = raft.metrics().borrow_watched().last_log_index {
+                    if idx >= min {
+                        return idx;
+                    }
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for last_log_index >= {min}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// INV-1 (ADR A-0016): `start_group` must select RocksDB log storage when
+    /// the manager was built with `with_rocks_base_path` — entries survive a
+    /// full manager restart on the same base path.
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_start_group_persists_log_with_rocks_base_path() {
+        use crate::rocks_log_storage::RocksLogStorage;
+        use openraft::storage::RaftLogStorage;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("raft-log").to_string_lossy().into_owned();
+
+        // Phase 1: bootstrap a single-voter group and write two entries.
+        let mgr = RaftGroupManager::new(1, noop_factory()).with_rocks_base_path(base.clone());
+        mgr.start_group(1).await.unwrap();
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        mgr.init_cluster(1, members).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        mgr.write(1, vec![1, 2, 3]).await.unwrap();
+        mgr.write(1, vec![4, 5, 6]).await.unwrap();
+        // init membership + two writes ⇒ frontier at 3
+        let committed = wait_last_log_index(&mgr, 1, 3).await;
+        mgr.stop_group(1).await.unwrap();
+
+        // Direct storage check: the entries are on disk at {base}/1.
+        let mut log = RocksLogStorage::open(&format!("{base}/1")).unwrap();
+        let state = log.get_log_state().await.unwrap();
+        assert!(
+            state.last_log_id.map(|id| id.index) >= Some(committed),
+            "entries must be persisted at {base}/1: {state:?}"
+        );
+        // Explicit close + drop: the struct holds `Arc<RocksStorage>` (the DB
+        // LOCK) until it is dropped; the batcher worker releases its own Arc
+        // only via close() (ADR A-0011).
+        log.close().await.unwrap();
+        drop(log);
+
+        // Phase 2: a fresh manager on the same base path recovers the log
+        // through `Raft::new` (not just via direct storage reads).
+        let mgr2 = RaftGroupManager::new(1, noop_factory()).with_rocks_base_path(base);
+        mgr2.start_group(1).await.unwrap();
+        let recovered = wait_last_log_index(&mgr2, 1, committed).await;
+        assert!(
+            recovered >= committed,
+            "raft log must survive a manager restart on the same base path"
+        );
+        mgr2.stop_group(1).await.unwrap();
+    }
+
+    /// INV-1 (ADR A-0016 compat): the `start_group_rocks` shim keeps working
+    /// on a `new_with_rocks` manager (NoopNetwork, single-node) and now shares
+    /// the unified log-selection path.
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_start_group_rocks_shim_still_persists() {
+        use crate::rocks_log_storage::RocksLogStorage;
+        use openraft::storage::RaftLogStorage;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_string_lossy().into_owned();
+
+        let mgr = RaftGroupManager::new_with_rocks(1, noop_factory(), base.clone());
+        mgr.start_group_rocks(1).await.unwrap();
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        mgr.init_cluster(1, members).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        mgr.write(1, vec![7, 8, 9]).await.unwrap();
+        // init membership + one write ⇒ frontier at 2
+        let committed = wait_last_log_index(&mgr, 1, 2).await;
+        mgr.stop_group(1).await.unwrap();
+
+        let mut log = RocksLogStorage::open(&format!("{base}/1")).unwrap();
+        let state = log.get_log_state().await.unwrap();
+        assert!(
+            state.last_log_id.map(|id| id.index) >= Some(committed),
+            "entries must be persisted at {base}/1: {state:?}"
+        );
+        // Explicit close + drop: the struct holds `Arc<RocksStorage>` (the DB
+        // LOCK) until it is dropped; the batcher worker releases its own Arc
+        // only via close() (ADR A-0011).
+        log.close().await.unwrap();
+        drop(log);
+
+        let mgr2 = RaftGroupManager::new_with_rocks(1, noop_factory(), base);
+        mgr2.start_group_rocks(1).await.unwrap();
+        let recovered = wait_last_log_index(&mgr2, 1, committed).await;
+        assert!(recovered >= committed, "log must survive restart via shim");
+        mgr2.stop_group(1).await.unwrap();
     }
 }

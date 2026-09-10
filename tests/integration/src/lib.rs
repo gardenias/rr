@@ -13,6 +13,8 @@ mod leader_redirect_failover;
 pub mod linearizability;
 #[cfg(test)]
 mod membership_guard;
+
+mod raft_log_durability;
 #[cfg(test)]
 mod tls_auth_e2e;
 #[cfg(test)]

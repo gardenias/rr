@@ -27,6 +27,8 @@ openraft = { workspace = true, features = ["serde"] }
 # fast with a rebuild hint. Add the `rdkafka` feature for real Kafka ingest.
 default = []
 rdkafka = ["dep:rr-ingestor-kafka", "rr-ingestor-kafka/rdkafka"]
+# Durable Raft log (`--data-dir`): RocksDB-backed log storage (ADR A-0016).
+rocks = ["rr-raft/rocks"]
 
 [[bin]]
 name = "kv-store"

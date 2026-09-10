@@ -33,6 +33,7 @@
 | [A-0013](./A-0013-remove-groupmeta-leader.md) | 删除静态路由表中的 `GroupMeta.leader` 字段 | implemented | 2026-08-28 |
 | [A-0014](./A-0014-tcp-transport-security-gate.md) | TCP raft transport 的 transport-aware 安全 gate | implemented | 2026-08-28 |
 | [A-0015](./A-0015-log-visibility-contract.md) | Raft 日志可见性契约:append 提交即可见(pending overlay + flush barrier) | implemented | 2026-09-06 |
+| [A-0016](./A-0016-durable-raft-log-wiring.md) | 生产二进制接线 durable raft log(log storage × network factory 正交化) | implemented | 2026-09-10 |
 
 ## Relationship
 

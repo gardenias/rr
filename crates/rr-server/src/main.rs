@@ -123,10 +123,10 @@ async fn start_node(
     };
 
     let mgr = match cfg.raft_transport {
-        RaftTransportKind::Grpc => Arc::new(
+        RaftTransportKind::Grpc => {
             RaftGroupManager::new_with_network(cfg.node_id, echo_factory(), Arc::clone(&pool))
-                .with_snapshot_logs_since_last(cfg.snapshot_logs_since_last),
-        ),
+                .with_snapshot_logs_since_last(cfg.snapshot_logs_since_last)
+        }
         RaftTransportKind::Tcp => {
             let tcp_pool = Arc::new(TcpConnectionPool::new(8));
             let grpc_port = parse_port_from_addr(&cfg.listen_addr)
@@ -149,24 +149,29 @@ async fn start_node(
                     "raft_tcp_port ({tcp_port}) must be >= listen_addr port ({grpc_port}) for offset-based derivation"
                 )
             })?;
-            Arc::new(
-                RaftGroupManager::new_with_tcp_network(
-                    cfg.node_id,
-                    echo_factory(),
-                    tcp_pool,
-                    Arc::clone(&pool),
-                    port_offset,
-                    cfg.tls.as_ref().map(|tls| TlsPaths {
-                        cert_path: tls.cert_path.clone(),
-                        key_path: tls.key_path.clone(),
-                        ca_path: tls.ca_path.clone(),
-                        domain_name: tls.domain_name.clone(),
-                    }),
-                )
-                .with_snapshot_logs_since_last(cfg.snapshot_logs_since_last),
+            RaftGroupManager::new_with_tcp_network(
+                cfg.node_id,
+                echo_factory(),
+                tcp_pool,
+                Arc::clone(&pool),
+                port_offset,
+                cfg.tls.as_ref().map(|tls| TlsPaths {
+                    cert_path: tls.cert_path.clone(),
+                    key_path: tls.key_path.clone(),
+                    ca_path: tls.ca_path.clone(),
+                    domain_name: tls.domain_name.clone(),
+                }),
             )
+            .with_snapshot_logs_since_last(cfg.snapshot_logs_since_last)
         }
     };
+    // ADR A-0016: with the rocks storage backend, persist the Raft log too
+    // (`{data_dir}/raft-log/{group_id}`). Previously `--storage rocks` covered
+    // only the SM-side storage — the default deployment's strict durability
+    // contract did not hold across a full-cluster power loss.
+    #[cfg(feature = "rocks")]
+    let mgr = with_raft_log_dir(mgr, cfg);
+    let mgr = Arc::new(mgr);
 
     // Derive the TCP raft bind address ONCE — single source of truth shared
     // by the `NodeConfig::raft_transport` descriptor (security gates G6/G7
@@ -310,6 +315,21 @@ async fn build_config_provider(cfg: &ResolvedConfig) -> Result<Arc<MemConfigProv
         .await;
 
     Ok(provider)
+}
+
+/// ADR A-0016: with the rocks storage backend, also persist the Raft log at
+/// `{data_dir}/raft-log/{group_id}` (previously only the SM-side storage was
+/// durable). Mem backend keeps the in-memory log, unchanged.
+#[cfg(feature = "rocks")]
+fn with_raft_log_dir(mgr: RaftGroupManager, cfg: &ResolvedConfig) -> RaftGroupManager {
+    if !matches!(cfg.storage_backend, StorageBackend::Rocks) {
+        return mgr;
+    }
+    // `build_storage` runs first and already requires data_dir for rocks.
+    match cfg.data_dir.as_ref() {
+        Some(dir) => mgr.with_rocks_base_path(format!("{}/raft-log", dir.display())),
+        None => mgr,
+    }
 }
 
 fn build_storage(cfg: &ResolvedConfig) -> Result<Arc<dyn StorageEngine>> {

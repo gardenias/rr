@@ -97,6 +97,7 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
 | 3 | `crates/rr-storage/src/rocks.rs:333-339` | 非 Strict 策略启动时 `warn!`:"violates OpenRaft's durability contract"(软门控) |
 | 4 | `crates/rr-raft/src/rocks_log_storage.rs:234-249` | 空批次立即 `io_completed(Ok)`;非空批次经 batcher,无"先 ACK 后落盘"路径 |
 | 5 | `crates/rr-raft/src/group_manager.rs:405-417` | `stop_group` 等待 `in_flight_writes` 归零后才 shutdown raft |
+| 6 | `crates/rr-server/src/main.rs` `with_raft_log_dir` | 生产接线(ADR A-0016):`--storage rocks` 时 raft log 落盘 `{data_dir}/raft-log/{group_id}`——默认部署形态的 durable log 自此成立 |
 
 ### 现有测试
 
@@ -125,6 +126,13 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   `slow_disk_latency_completes_correctly_just_slower`
 - `crates/rr-raft/src/io_batcher.rs` `flush_barrier_*`、`submit_with_hook_*`
   (屏障排序与 post-flush hook 语义)
+- `crates/rr-raft/src/group_manager.rs` `test_start_group_persists_log_with_rocks_base_path`、
+  `test_start_group_rocks_shim_still_persists`(ADR A-0016,rocks-gated:统一 log 选择 +
+  shim 兼容,直开存储字节级验证 + `Raft::new` 恢复路径验证)
+- `tests/integration/src/raft_log_durability.rs`
+  `test_rocks_raft_log_rolling_restart_preserves_acked_writes`(ADR A-0016,rocks-gated:
+  3 节点复制 + rocks log 双开,50 条已 ACK 写,逐节点滚动重启,quorum 保持、复制收敛、
+  恢复节点服务 linearizable read、直开 log DB 字节级验证)
 - `tests/crash/src/scenarios.rs` `scenario_a_graceful_sigterm`(R-4 进程级 harness,
   `--features rocks`,CI 由 `crash-nightly.yml` 承载:SIGTERM 优雅关闭 → 重启 → 全量
   ack-log 回放,验证 WS-4 close 协议:已 ACK 全存活 + 进程 20s 内以 0 码退出 +

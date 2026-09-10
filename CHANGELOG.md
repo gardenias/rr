@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Durable Raft log in production binaries (ADR A-0016)**: the Raft log is
+  no longer memory-only outside tests. `RaftGroupManager` gained
+  `with_rocks_base_path(path)` (feature `rocks`): `start_group` now selects
+  `RocksLogStorage` at `{base_path}/{group_id}` when a base path is set and
+  the in-memory `RrLogStorage` otherwise — log storage is fully orthogonal
+  to the configured network factory (gRPC / TCP / Noop).
+  - `rr-server --storage rocks` now also persists the Raft log at
+    `{data_dir}/raft-log/{group_id}` (both gRPC and TCP raft transports).
+    Previously only the state-machine-side storage was durable — a
+    full-cluster power loss could lose un-snapshotted committed entries.
+    The mem backend keeps the in-memory log, unchanged; existing data
+    directories need no migration (`raft-log/` is created on first start
+    and is included in `rr-admin backup` archives of `data_dir`).
+  - `kv-store` example: new `--data-dir <PATH>` flag (requires the new
+    `rocks` cargo feature of the example) enabling the same durable Raft
+    log; non-rocks builds fail fast with a rebuild hint.
+- Tests (ADR A-0016): two `rr-raft` unit tests (unified log selection
+  persists across manager restart; `start_group_rocks` compat shim), one
+  rocks-gated integration e2e
+  (`test_rocks_raft_log_rolling_restart_preserves_acked_writes` — 3-node
+  replicated + RocksDB-log cluster, 50 acked writes, rolling restart of
+  every node with quorum preserved, recovered nodes serve linearizable
+  reads, byte-level log-DB verification). INV-1 registry updated.
+
+### Changed
+
+- **`RaftGroupManager::start_group_rocks` is now a compatibility shim**
+  (ADR A-0016): it asserts `rocks_base_path` is set (same error as before)
+  and delegates to the unified `start_group`. Its network factory is no
+  longer hard-coded to `NoopNetworkFactory` but taken from the manager's
+  construction — no observable change for existing callers, since the only
+  rocks-configured constructor (`new_with_rocks`) uses NoopNetwork. This
+  unlocks replicated + durable groups via
+  `new_with_network(...).with_rocks_base_path(...)`.
+
 ## [0.2.0] — 2026-09-10
 
 First production-ready release. Rolls up everything from `v0.2.0-rc1` and

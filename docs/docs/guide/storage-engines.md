@@ -168,6 +168,35 @@ startup. Migrate to the new names before v0.3.0.
 when the policy is not `Strict`, reminding operators that the node
 violates Raft's durability contract.
 
+### Raft 日志持久化 / Raft Log Persistence(ADR A-0016)
+
+自 v0.2.0 之后(`[Unreleased]`):`rr-server --storage rocks` 现在**同时**把
+Raft log 持久化到 `{data_dir}/raft-log/{group_id}/`——在此之前只有状态机侧
+存储是持久的,Raft log 一直是内存存储,全集群断电会丢失未快照的已提交日志。
+mem 后端行为不变(内存 log);数据目录升级零迁移(首启自动创建 `raft-log/`
+子目录,`rr-admin backup` 打包 `data_dir` 自动包含)。
+
+框架层面,`RaftGroupManager::with_rocks_base_path()` 为任何组装方式
+(单机组装、example、下游应用)提供同样的 durable log;log 存储选择与
+network factory(gRPC / TCP / Noop)完全正交。`kv-store` example 新增
+`--data-dir` flag(需 `--features rocks` 构建)开启同一能力。
+
+---
+
+Since after v0.2.0 (`[Unreleased]`): `rr-server --storage rocks` now **also**
+persists the Raft log to `{data_dir}/raft-log/{group_id}/` — previously only
+the state-machine-side storage was durable while the Raft log stayed in
+memory, so a full-cluster power loss could lose un-snapshotted committed
+entries. The mem backend is unchanged (in-memory log); existing data
+directories need no migration (`raft-log/` is created on first start, and
+`rr-admin backup` archives `data_dir` wholesale).
+
+At the framework level, `RaftGroupManager::with_rocks_base_path()` offers the
+same durable log to any assembly (single-node, examples, downstream apps);
+the log-storage choice is fully orthogonal to the network factory
+(gRPC / TCP / Noop). The `kv-store` example gained a `--data-dir` flag
+(requires a `--features rocks` build) switching on the same capability.
+
 ## 选择存储引擎 / Choosing a Storage Engine
 
 根据你的应用阶段和需求选择合适的引擎：
