@@ -145,9 +145,10 @@ services:
   # On-demand load generator, runs INSIDE the perf network so in-cluster
   # hostnames (and leader-redirect addresses) resolve. Not started by default:
   #   docker compose -f deploy/perf/docker-compose.yml --profile bench run --rm bench [args]
-  # M1 ships it PLAINTEXT: against this stack it is the negative control
-  # (connection must fail). TLS/token client flags land with M2 (rr-perf-bench
-  # §5.2 extension), then this default command gains --tls-*/--token flags.
+  # M2 landed the TLS/token client flags + open-loop scenarios: the default
+  # command is a modest working smoke (wladder over mTLS). The W1–W9 matrix
+  # arrives with M3 (scripts/prod-perf.sh). Plaintext probes stay available
+  # via the selfcheck profile as the negative control.
   bench:
     image: rr-perf:dev
     container_name: rr-perf-bench
@@ -155,12 +156,21 @@ services:
     profiles: ["bench"]
     cpuset: ${BENCH_CPUSET:-6-7}
     mem_limit: 2g
+    environment:
+      RR_CLIENT_TOKEN: ${RR_CLIENT_TOKEN:?set RR_CLIENT_TOKEN in deploy/perf/.env — see .env.example}
+    volumes:
+      - ./certs:/etc/rr/certs:ro
     entrypoint: ["/usr/local/bin/rr-perf-bench"]
     command:
       - "--cluster-addrs=kv-1:51001,kv-2:51001,kv-3:51001"
-      - "--scenario=all"
+      - "--scenario=wladder"
+      - "--ladder-rates=100,500,1000,2000"
       - "--warmup-secs=5"
-      - "--duration-secs=30"
+      - "--duration-secs=10"
+      - "--tls-ca=/etc/rr/certs/ca.pem"
+      - "--tls-cert=/etc/rr/certs/client.pem"
+      - "--tls-key=/etc/rr/certs/client.key"
+      - "--token-env=RR_CLIENT_TOKEN"
     depends_on:
       kv-1:
         condition: service_healthy

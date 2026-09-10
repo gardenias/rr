@@ -5,9 +5,9 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官;同日 M0 durable raft log + M1 perf-lab 落地)
+**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官;同日 M0 durable raft log + M1 perf-lab + M2 open-loop 引擎落地)
 **Current phase**: **v0.2.0 已发布**(Phase 0 WS-1~WS-7、RC 并行项、可靠性专项 R-1~R-8 全部关闭;freeze checklist 已签字);下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`,WAL(A-0010)维持 deferred
-**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log、M1 perf-lab stack 已落地,**M2 待动工**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
+**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log、M1 perf-lab stack、M2 open-loop 引擎 + TLS client 已落地,**M3 待动工**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
 **Main branch HEAD**: 见下文 Git 状态段
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
@@ -33,6 +33,45 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-10(深夜二)— M2 落地:rr-perf-bench open-loop 引擎 + TLS client(§5.2 之 1–5)
+
+> 生产性能方案 M2 收官;本地 kv-store 与 perf-lab mTLS 双路冒烟绿;S1/S2/S3 schema 回归干净。
+
+- **openloop.rs(新引擎,~700 行含 12 单测)**:计划时刻调度(恒定网格 /
+  `--poisson` 指数到达)+ 协调遗漏修正三计量(`lat`=计划→完成、`svc`=实际→完成、
+  `lag`=计划→实际,驱动跟不上计划时 lag 如实暴露);`--mix write:90,local:5,lin:5`
+  加权 op 混合;`--key-space`/`--key-dist uniform|zipfian`(`--zipf-theta` 0.99,CDF
+  二分采样,>16M keyspace 拒绝防 OOM);`--client-id`(JSON meta 聚合标签);
+  `--timeseries-out` 1s 桶 JSONL(t/op/count/err/p50/p99,wladder 带 rung);
+  `--max-in-flight` 信号量背压(滑落计入 lag,不静默丢载);wladder = 单连续
+  分段定速调度(rung 间队列溢出按 scheduled 时刻正确归属,不 drain 不中断)。
+  全随机源 = seed 化 SplitMix64 三流(到达/op/key;`0x5EED5EED5EED5EED` 默认),
+  与 rr-core storage_fault 同族(私有故按仓内不提取惯例复制 + 参考向量钉死)。
+- **场景**:`mix`(定速)/`wladder`(`--ladder-rates`,默认 100→32000 八档);
+  不进 `All`(all 行为不变);KV 线协议 bincode(KvRequest 与 soak.rs 单源,
+  pub(crate) 可见性共享,序位测试双向防漂移)。
+- **关键设计决策——写走 plain `send_request`**:冒烟实测发现 keyed 写在 open-loop
+  并发下必然触发幂等层 watermark 过期(并发在途 ID 乱序 apply:26 先于 25 落盘 →
+  25 判 Expired;框架契约本就要求"namespace 内单调",串行生产者为假设)。首跑
+  8.4% 写错误全为此类。幂等 keyed 路径由 soak(W9)与 Kafka ingestor(W6)持续覆盖,
+  open-loop 引擎测其下的写包线。已写入模块文档与 CHANGELOG。
+- **TLS client(M2-5)**:`--tls-ca/--tls-cert/--tls-key` 全有或全无(kv-store 同约定)+
+  `--tls-domain`(SNI 覆盖)+ `--token-env VAR`(env 读 token,fail-fast,密钥不上
+  argv);`connect_client` 统一两个连接点,全场景(含 soak)生效;明文默认不变。
+  rr-perf-bench 新增 rr-network path 依赖(TlsConfig;rr-client 无 re-export)。
+- **perf-lab 接线**:bench 容器默认命令换 wladder 小阶梯 + 挂 certs + 注
+  RR_CLIENT_TOKEN(M1 注释承诺的 M2 flags 落地);README 增 "Running load (M2)" 段。
+- **回归证据**:workload/metrics/cluster 三文件 vs HEAD 零 diff;report.rs 纯加法;
+  soak.rs 仅可见性;JSON schema 与 v0.2.0 逐键一致(mix/wladder/client_id 未跑即缺省);
+  S1 同 flag 冒烟正常;`git diff HEAD -- scripts/ deploy/lab/ .github/` 为空;
+  invariants-lint 65 links 绿;`--open-loop` 等 flag 误用于 S 场景有 eprintln 提示。
+- **验证**:fmt/clippy `-D warnings`/17 单测绿;本地单节点 kv-store:mix(500/s
+  5s zipfian 混合)0 err、wladder(100/500/2000 × 3s poisson)offered 精确跟随速率;
+  **perf-lab 实测:三节点 mTLS + token 下 wladder 100→2000 四档 36,000 写 0 err**,
+  明文负面对照 100/100 全拒;栈 `down -v` 收净。
+- **下一步**:M3(§5.2 之 6–7:Prom 对齐采集 + 报告渲染 + `scripts/prod-perf.sh`
+  一键矩阵 + W6/W10 profile)。
 
 ### Session 2026-09-10(午后)— M1 落地:perf-lab 生产形态基准栈(deploy/perf/)+ kv-store TLS 参数面(M1-a)
 

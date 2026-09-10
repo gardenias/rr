@@ -88,25 +88,42 @@ fn value_hash(bytes: &[u8]) -> String {
 //
 // bincode variant ordinals are positional; keep the order EXACTLY as in
 // kv-store (Put=0, Get=1, Delete=2, Increment=3).
+//
+// pub(crate): shared with the open-loop engine (openloop.rs, M2) so both
+// scenarios single-source the wire format; the ordinal test below trips on
+// drift for either consumer.
 
 #[derive(Serialize, Deserialize)]
-enum KvRequest {
-    Put { key: String, value: Vec<u8> },
-    Get { key: String },
-    Delete { key: String },
-    Increment { key: String, delta: i64 },
+pub(crate) enum KvRequest {
+    Put {
+        key: String,
+        value: Vec<u8>,
+    },
+    Get {
+        key: String,
+    },
+    #[allow(dead_code)]
+    Delete {
+        key: String,
+    },
+    #[allow(dead_code)]
+    Increment {
+        key: String,
+        delta: i64,
+    },
 }
 
 #[derive(Deserialize)]
-struct KvResponse {
-    value: Option<Vec<u8>>,
+pub(crate) struct KvResponse {
+    #[allow(dead_code)]
+    pub(crate) value: Option<Vec<u8>>,
 }
 
-fn encode_req(req: &KvRequest) -> Vec<u8> {
+pub(crate) fn encode_req(req: &KvRequest) -> Vec<u8> {
     bincode::serde::encode_to_vec(req, bincode::config::standard()).expect("KvRequest encodes")
 }
 
-fn decode_resp(bytes: &[u8]) -> Result<KvResponse> {
+pub(crate) fn decode_resp(bytes: &[u8]) -> Result<KvResponse> {
     let (resp, _): (KvResponse, _) =
         bincode::serde::decode_from_slice(bytes, bincode::config::standard())
             .context("KvResponse decode failed")?;

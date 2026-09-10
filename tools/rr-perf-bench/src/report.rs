@@ -1,4 +1,5 @@
 use crate::metrics::MetricsSnapshot;
+use crate::openloop::ScenarioReport;
 use crate::workload::ReadKind;
 
 fn fmt_us(us: u64) -> String {
@@ -92,4 +93,66 @@ pub fn print_s3_row(kind: ReadKind, concurrency: usize, snap: &MetricsSnapshot) 
         p999 = fmt_us(snap.p999_us),
         err = snap.err,
     );
+}
+
+/// Open-loop report (mix = one rung, wladder = N rungs). Latency columns are
+/// the coordinated-omission-corrected ones (scheduled → completion);
+/// `svc-p99`/`lag-p99` split service time from scheduler debt so a driver
+/// that cannot keep up with its own plan is visible in the output.
+pub fn print_openloop(title: &str, report: &ScenarioReport) {
+    println!();
+    println!("── {title} ────────────────────────────────────────────────────");
+    println!(
+        "  mix={}  key-dist={} space={}  poisson={}  payload={}B  client-id={}  seed={:#x}",
+        report.mix,
+        report.key_dist,
+        report.key_space,
+        report.poisson,
+        report.payload_bytes,
+        report.client_id,
+        report.seed,
+    );
+    for run in &report.runs {
+        if report.runs.len() > 1 {
+            println!(
+                "  rung {}: {} ops/s  window={}s",
+                run.rung, run.rate, run.window_secs
+            );
+        } else {
+            println!("  rate={} ops/s  window={}s", run.rate, run.window_secs);
+        }
+        println!(
+            "  {op:<8} {off:<10} {ok:<10} {err:<8} {inc:<8} {tps:<9} {p50:<10} {p99:<10} {p999:<10} {max:<10} {svc:<10} {lag:<10}",
+            op = "op",
+            off = "offered",
+            ok = "ok",
+            err = "err",
+            inc = "incompl",
+            tps = "TPS",
+            p50 = "p50",
+            p99 = "p99",
+            p999 = "p999",
+            max = "max",
+            svc = "svc-p99",
+            lag = "lag-p99",
+        );
+        println!("  {}", "─".repeat(116));
+        for op in &run.ops {
+            println!(
+                "  {op:<8} {off:<10} {ok:<10} {err:<8} {inc:<8} {tps:<9} {p50:<10} {p99:<10} {p999:<10} {max:<10} {svc:<10} {lag:<10}",
+                op = op.op,
+                off = op.offered,
+                ok = op.ok,
+                err = op.err,
+                inc = op.incomplete,
+                tps = fmt_tps(op.tps),
+                p50 = fmt_us(op.p50_us),
+                p99 = fmt_us(op.p99_us),
+                p999 = fmt_us(op.p999_us),
+                max = fmt_us(op.max_us),
+                svc = fmt_us(op.svc_p99_us),
+                lag = fmt_us(op.lag_p99_us),
+            );
+        }
+    }
 }

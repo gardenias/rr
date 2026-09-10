@@ -3399,6 +3399,7 @@ dependencies = [
  "hdrhistogram",
  "rr-client",
  "rr-core",
+ "rr-network",
  "serde",
  "serde_json",
  "tempfile",

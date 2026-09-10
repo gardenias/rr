@@ -143,18 +143,41 @@ cargo bench -p rr-benches --features rocks                 # 含 RocksDB 存储�
 
 更多参数见 `./target/release/rr-perf-bench --help`。压测期间的客户端重试/重定向诊断可用 `RUST_LOG=rr_client=debug` 打开。
 
+## Open-loop 场景（mix / wladder）
+
+S1/S2/S3 是 closed-loop(响应驱动下一请求),会系统性低估尾延迟(协调遗漏 / coordinated omission)。`--scenario mix|wladder` 是 open-loop 驱动:请求按**计划时刻**发起(恒定网格或 `--poisson` 指数到达),延迟按 计划→完成 计量,并同时输出 实际发起→完成(服务时间)与 计划→实际发起(调度滞后,`lag`)三组分布——驱动端跟不上计划时速率时 `lag` 会如实暴露。
+
+Open-loop 场景使用 **kv-store KV 线协议**(bincode),应指向 kv-store 集群(如 `deploy/perf/` perf-lab),不要对 stock rr-server(EchoSM)使用。写操作走 plain `send_request`(无幂等键——并发在途写入天然乱序,会触发幂等层的 watermark 过期语义;keyed 路径由 soak 场景与 Kafka ingestor 覆盖)。
+
+```bash
+# 定速混合负载:5k ops/s,90/10 写/本地读,zipfian 热点 key,1s 时间序列 / fixed-rate mix
+rr-perf-bench --cluster-addrs kv-1:51001,kv-2:51001,kv-3:51001 \
+  --scenario mix --rate 5000 --mix write:90,local:10 \
+  --key-dist zipfian --key-space 100000 --duration-secs 60 \
+  --timeseries-out ts.jsonl --json-out mix.json
+
+# W1 阶梯:速率递增至饱和 / step-up ladder (rungs × --duration-secs each)
+rr-perf-bench --cluster-addrs ... --scenario wladder --ladder-rates 100,500,1000,2000,4000
+
+# TLS/mTLS + token(perf-lab 形态)/ secure client
+rr-perf-bench --cluster-addrs ... --scenario mix \
+  --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --token-env RR_CLIENT_TOKEN
+```
+
+全部随机源(到达过程、op 选择、key 选择)来自 `--seed` 化的 SplitMix64:同 seed 同 flag 复现同一负载轨迹。`--client-id` 供多负载容器扇出时在 JSON meta 聚合。
+
 ## 当前限制 / Current Limitations
 
 - **单机 loopback**：跨机器网络 RTT 会主导真实部署的写延迟（Raft 写通常 2-3 个 RTT）。
 - **空状态机**：无业务逻辑、无反序列化成本、无快照流量。
-- **内存存储**：stock 二进制尚未接线 RocksDB raft 日志存储（见 [持久化与恢复](../architecture/durability.md)）；存储层开销请用 `benches/` 的 criterion 微基准测量。
+- **上述 loopback 表格为内存 Raft 日志**：基线采集早于 ADR A-0016——此后 `--storage rocks` 会同时持久化 Raft 日志（`{data_dir}/raft-log/{group_id}`，见 [持久化与恢复](../architecture/durability.md)）；生产形态数字（durable log + TLS/mTLS + 负载机隔离）请用 `deploy/perf/` perf-lab 与上文 open-loop 场景；存储层开销请用 `benches/` 的 criterion 微基准测量。
 - **无 Jepsen 式正确性压测**：本页只覆盖性能；一致性验证见 `tests/integration/`（含 chaos 用例）。
 
 ---
 
 - **Single-machine loopback**: cross-machine network RTT dominates real deployments (a Raft write typically costs 2-3 RTTs).
 - **Empty state machine**: no business logic, no deserialization cost, no snapshot traffic.
-- **In-memory storage**: the stock binary does not yet wire RocksDB raft-log storage (see [Durability & Recovery](../architecture/durability.md)); use the criterion micro-benches in `benches/` for storage-layer numbers.
+- **In-memory Raft log in these tables**: the loopback baselines above predate ADR A-0016 — since then `--storage rocks` also persists the Raft log (`{data_dir}/raft-log/{group_id}`, see [Durability & Recovery](../architecture/durability.md)). For production-shape numbers (durable log + TLS/mTLS + isolated load generator) use the perf-lab in `deploy/perf/` with the open-loop scenarios above; use the criterion micro-benches in `benches/` for storage-layer numbers.
 - **No Jepsen-style correctness testing**: this page covers performance only; correctness under faults lives in `tests/integration/` (including chaos cases).
 
 ## 贡献基准测试 / Contributing Benchmarks

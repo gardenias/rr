@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 rr-client  = { path = "../../crates/rr-client" }
+# TlsConfig for the --tls-* client flags (rr-client does not re-export it).
+rr-network = { path = "../../crates/rr-network" }
 tokio      = { workspace = true, features = ["full"] }
 anyhow     = { workspace = true }
 clap       = { version = "4", features = ["derive", "env"] }

@@ -55,6 +55,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certificate-less clients rejected, valid mTLS client accepted), and a
   README. `deploy/lab/`, `scripts/`, and the existing bench tooling are
   untouched.
+- **`rr-perf-bench`: open-loop engine + TLS client** (rr-prod-perf plan,
+  milestone M2, §5.2 items 1–5). New scenarios `--scenario mix` (fixed-rate
+  open-loop with `--mix write:90,local:5,lin:5` operation blends) and
+  `--scenario wladder` (W1 step-up rate ladder, `--ladder-rates` rungs of
+  `--duration-secs` each on one continuous schedule), speaking the kv-store
+  KV wire protocol against external clusters:
+  - Planned-time scheduling (constant grid or `--poisson` arrivals) with
+    coordinated-omission-corrected accounting: per-op reports carry true
+    latency (scheduled → completion), service time (actual send →
+    completion) and schedule lag (scheduled → actual send) side by side, so
+    a driver that cannot keep up with its own plan is visible. All
+    randomness (arrivals, op selection, keys) comes from seeded SplitMix64
+    streams (`--seed`), same generator family as the fault-injection crate;
+    same seed + flags reproduce the same offered-load trace.
+  - `--key-space`/`--key-dist uniform|zipfian` (`--zipf-theta`, default
+    0.99) key distributions with keys carried in written values;
+    `--client-id` tags JSON meta for multi-container fan-out aggregation;
+    `--timeseries-out` emits 1s-bucket JSONL (t/op/count/err/p50/p99, plus
+    rung for wladder); `--max-in-flight` caps concurrency with honest
+    backpressure (slip recorded as lag, never silent shedding).
+  - TLS/mTLS/auth client: `--tls-ca/--tls-cert/--tls-key` (all-or-nothing
+    trio, kv-store convention), `--tls-domain` SNI override, `--token-env
+    VAR` reads the bearer token from the environment (fail-fast, secrets off
+    argv). Applies to every scenario incl. soak; plaintext remains the
+    default. The perf-lab `bench` container command now carries these flags.
+  - Writes use the plain (unkeyed) path: keyed writes under open-loop
+    concurrency would violate the idempotency layer's monotonic-per-
+    namespace watermark contract by construction (concurrent in-flight IDs
+    apply out of order → `Expired`); the keyed path stays measured by the
+    soak scenario and the Kafka ingestor path.
+  - Existing scenarios are byte-compatible: S1/S2/S3/soak code paths,
+    flags, text output and the `--json-out` schema are unchanged (new
+    `mix`/`wladder`/`client_id` keys appear only when the new scenarios
+    ran); `scripts/perf-baseline.sh`, `scripts/soak.sh`, `deploy/lab/`
+    remain untouched.
 
 ### Changed
 

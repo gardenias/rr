@@ -31,6 +31,31 @@ Grafana: <http://127.0.0.1:3100> (admin/admin by default). Prometheus:
 and probes run inside the `rrperf` network (leader redirects advertise the
 container hostnames; host-side clients cannot follow them).
 
+## Running load (M2)
+
+The `bench` profile carries mTLS + token by default; its stock command is a
+short open-loop ladder smoke. Override the args freely (`run --rm bench
+<args>` replaces the whole command):
+
+```bash
+# Stock smoke: wladder 100→2000 ops/s ×10s rungs over mTLS
+docker compose -f deploy/perf/docker-compose.yml --profile bench run --rm bench
+
+# Open-loop mix: 5k ops/s, 90/10 write/local-read, zipfian hot keys,
+# 1s time series + machine-readable report
+docker compose -f deploy/perf/docker-compose.yml --profile bench run --rm bench \
+  --cluster-addrs=kv-1:51001,kv-2:51001,kv-3:51001 \
+  --scenario=mix --rate 5000 --mix write:90,local:10 \
+  --key-dist zipfian --key-space 100000 --duration-secs 60 \
+  --timeseries-out /tmp/ts.jsonl --json-out /tmp/mix.json \
+  --tls-ca=/etc/rr/certs/ca.pem --tls-cert=/etc/rr/certs/client.pem \
+  --tls-key=/etc/rr/certs/client.key --token-env=RR_CLIENT_TOKEN
+```
+
+`--client-id N` tags the JSON report meta when several bench containers fan
+out (aggregation key). The W1–W9 one-shot matrix arrives with M3
+(`scripts/prod-perf.sh`).
+
 ## Security model
 
 - kv-store runs with `--tls-cert/--tls-key/--tls-ca` (+ `RR_ADMIN_TOKEN` /
