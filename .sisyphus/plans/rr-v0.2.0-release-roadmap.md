@@ -1,6 +1,6 @@
 # rr v0.2.0 发布路线图与可靠性专项 — 主计划
 
-> **状态**:Phase 0 已实施(2026-08-29:WS-1~WS-7 全部落地、全仓 clippy/测试全绿;ADR A-0011~A-0014 → implemented;见 CONTEXT.md 2026-08-29 session);RC 并行项已全部关闭(2026-09-04,见下文各勾选 + freeze checklist B/D/E 裁决记录);Phase 1 部分启动(R-7 基线/R-8 soak lab 已落地)
+> **状态**:**已闭环(2026-09-10 `v0.2.0` final tag 已 cut)**:Phase 0 已实施(2026-08-29:WS-1~WS-7 全部落地、全仓 clippy/测试全绿;ADR A-0011~A-0014 → implemented;见 CONTEXT.md 2026-08-29 session);RC 并行项已全部关闭(2026-09-04,见下文各勾选 + freeze checklist B/D/E 裁决记录);Phase 1 可靠性专项 R-1~R-8 全部关闭(2026-09-05~10,见 rr-reliability-program.md 与 CONTEXT.md 各批次记录)
 > **依据**:`.sisyphus/evidence/rr-full-review-2026-08-16.md`(11 个 P0、P1/P2 清单、Oracle 5 问)+ `.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`(全景归档)
 > **基线**:HEAD=`ba69cc8`;8-16 review 的行号引用与当前代码一致。
 > **原则**:正确性 > 性能 > 功能;设计与方案先行(本文件 + 各 ADR/plan 落地后才动工);每个工作项带验收标准。

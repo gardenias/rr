@@ -1,6 +1,6 @@
 # rr 可靠性强化专项计划(R-1 ~ R-8)
 
-> **状态**:active(2026-08-28 制定)
+> **状态**:**全部关闭**(2026-08-28 制定;R-1~R-8 于 2026-09-05~10 全部落地,各批次验收记录见 CONTEXT.md;时间累积型验收——R-3 CI 20× 零 flaky、R-8 2h+ soak 绿、fuzz 首次有网 nightly——由 nightly CI 承载)
 > **依据**:`.sisyphus/evidence/rr-full-review-2026-08-16.md`(11 个 P0、P1/P2 清单、Oracle 5 问)+ `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(Phase 1 索引表)
 > **格式参考**:`.sisyphus/plans/rr-wal-impl.md`(分阶段 checkbox + 验收标准 + 风险登记)
 > **基线**:HEAD=`ba69cc8`;文中所有 file:line 引用均已对照该基线核实。

@@ -5,11 +5,11 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-10 (R-2 TLA+ 形式化落地,专项 R-1~R-8 全部关闭;批次三 R-3/R-8 同日;**本 session 改动待提交**)
-**Current phase**: v0.2.0 RC(Phase 0 WS-1~WS-7 与 RC 并行项已全部关闭——09-04;可靠性专项 R-1~R-8 全落地;`v0.2.0` final 待打 tag)
-**Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(主路线图;子计划:rr-durability-hardening.md、rr-reliability-program.md;rr-wal-impl.md 仍 deferred)
-**Latest tags**: `v0.2.0-rc1` + `v0.2.0-rc2` (both pushed). `v0.2.0` final never cut — 11 个 P0 阻塞项见路线图 Phase 0
-**Main branch HEAD**: `a71f90c` (observability 批次:延迟预算指标 + 原生 histogram buckets)
+**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官)
+**Current phase**: **v0.2.0 已发布**(Phase 0 WS-1~WS-7、RC 并行项、可靠性专项 R-1~R-8 全部关闭;freeze checklist 已签字);下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`,WAL(A-0010)维持 deferred
+**Active plan**: `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(**已闭环**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred)
+**Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
+**Main branch HEAD**: 见下文 Git 状态段
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`);Oracle 判断已并入 8-16 review
 **Latest Momus review**: 2026-05-13 (`bg_a0e5a6d2`) on rr-wal-impl.md — pending
@@ -18,7 +18,7 @@
 
 ## 项目一句话 / Project One-Liner
 
-rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.19` + tonic gRPC + RocksDB，
+rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.34` + tonic gRPC + RocksDB，
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
@@ -33,6 +33,33 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.1
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-10(傍晚)— v0.2.0 final 发布(用户决策 cut tag)
+
+> RC exit criteria 已于先前 session 满足(Phase 0 全 WS + RC 并行项关闭,专项 R-1~R-8 收官);
+> 本 session 执行发布收尾并打 tag。
+
+- **CHANGELOG 定版**:`[Unreleased]` 全部内容按类别合并入 `[0.2.0] — 2026-09-10`
+  (Added/Changed/Fixed/Removed/Notes;182→182 条 bullet 零丢失,5 条为刻意合并/状态更新改写);
+  补 online backup 条目(`AdminService.OnlineBackup` 流式 RPC + `rr-admin online-backup`,
+  post-rc2 落地但此前无 changelog 记录);`semver-checks.yml` 条目更新为阻塞门禁表述。
+- **release-notes/v0.2.0.md 定版**:发布日期 2026-09-10;Summary/Highlights 补 Phase 4 特性、
+  发布加固批次(A-0011~A-0014)、R-1~R-8 与 A-0015;Breaking Changes 补 post-rc2 批次
+  (`GroupMeta.leader` 删除、`OffsetToRequestId` Result 化、错误 enum `#[non_exhaustive]`、
+  openraft alpha.19→alpha.34、`DurabilityPolicy` rename、行为收紧集);MSRV 叙述修正为
+  1.82→1.98(原文件停留在 1.88);升级路径同步加别名迁移/non_exhaustive/GroupMeta 三步。
+- **freeze checklist 签字**:F 节末项(发布后转阻塞门禁)记为既定 post-tag 动作,随 tag 后
+  首个 commit 落地;release owner 签字 2026-09-10。路线图与 rr-reliability-program.md
+  状态行同步置为已闭环/全部关闭。
+- **发布前验证**:`cargo fmt --all -- --check`、workspace clippy `-D warnings`
+  (`--all-targets --features rocks`)、workspace 全量测试(`--features
+  rr-storage/rocks,integration/rocks`)、`scripts/check-invariants.sh`(63 links)全绿。
+- **tag**:`v0.2.0`(annotated)打在 release commit 上;紧随一个 commit 把
+  `semver-checks.yml` 转为阻塞门禁(baseline 滚动 v0.2.0-rc2 → v0.2.0,去掉
+  `continue-on-error`),即 freeze checklist F 节末项。
+- **待用户动作**:`git push` main + tag(本地领先 origin/main 8 个 commit + 1 个新 tag);
+  push tag 后 `release.yml` 自动发布 Docker 镜像与 Helm chart(OCI);GitHub Release
+  描述直接粘贴 `release-notes/v0.2.0.md` 正文。
 
 ### Session 2026-09-10 — R-2 TLA+ 形式化落地(专项收官)
 
