@@ -5,9 +5,9 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-10 (`v0.2.0` final tag 已 cut;同日 R-2 TLA+ 专项收官;同日 M0 durable raft log + M1 perf-lab + M2 open-loop 引擎 + M3 一键矩阵落地)
-**Current phase**: **v0.2.0 已发布**(Phase 0 WS-1~WS-7、RC 并行项、可靠性专项 R-1~R-8 全部关闭;freeze checklist 已签字);下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`,WAL(A-0010)维持 deferred
-**Active plan**: `.sisyphus/plans/rr-prod-perf.md`(生产性能测试方案,已批准;M0 durable raft log、M1 perf-lab stack、M2 open-loop 引擎 + TLS client、M3 一键矩阵 + Prom 采集已落地,**M4(首轮实测 + 基线归档 + A-0010 重判)待动工**);v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`(deferred);`.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(已闭环)
+**Last updated**: 2026-09-12（**M4 首轮全矩阵：抓到 P0 活性 bug——openraft `raft_core.rs:2422` unwrap panic（snapshot purge/apply 竞态），根因全部钉到行；3 文件修复已落地未 commit；panic 已 vendor 补丁修复；更深 wedge 待战略决策**）
+**Current phase**: **v0.2.0 已发布**；下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`，WAL（A-0010）维持 deferred
+**Active plan**: `.sisyphus/plans/rr-prod-perf.md`（M0–M3 已落地，**M4 进行中：首轮矩阵已跑（20260912-000736-9d6c1d0），发现 P0 活性 bug，修复 + 补丁后重跑才算完成**）；v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`（deferred）
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
 **Main branch HEAD**: 见下文 Git 状态段
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
@@ -33,6 +33,52 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-12 — M4 首轮全矩阵：P0 活性 bug 全解剖 + 部分修复落地
+
+> 首轮非 smoke 全矩阵（docs/perf/prod/20260912-000736-9d6c1d0/）。矩阵的价值在首轮即兑现：
+> 抓到"流量尖峰 = 集群永久死亡"级缺陷链。根因全部钉到行；修复分"已落地"与"待拍板"两组。
+
+- **P0 主根因（openraft bug，已 vendor 补丁修复 ✅）**：`openraft-0.10.0-alpha.34/src/core/raft_core.rs:2422`，
+  `run_save_committed_and_apply` 中 `get_log_id(already_applied.next_index()).unwrap()`——
+  SaveCommittedAndApply 命令入队后、执行前，snapshot purge 恰好越过该 index → None → unwrap panic
+  → RaftCore 死亡 → 2/3 节点 panic 后 quorum 永久丢失（负载停止也不恢复）。16k/s×1KiB 下 ~2.5min
+  必现（两轮各 panic 2/3 节点，位置完全一致）。**上游 main 至今未修，alpha.34 已是最新发布版**。
+  **已走 B 路径落地**：`vendor/openraft/` + `[patch.crates-io]`；guard 语义——`already.next` 被 purge
+  时前跳到首个现存 log id（已 purge 前缀被 snapshot 覆盖，安全）；整段 purge 则 warn+跳过；
+  `next > last_log_id` 保留原 panic（真不变量破坏）。`deploy/perf/Dockerfile` 补 `COPY vendor`。
+  验证：16k/s×600s 快照全开**首次零 panic**（二进制内含 patch 字符串实证）。
+  待办：给上游提 issue；A-0015 跟踪"上游修复后摘除 vendor"。
+- **已落地修复（3 文件未 commit，均验证）**：
+  ① `network_factory.rs::full_snapshot` 三缺陷——`_cancel`/`_option` 原样丢弃（无超时无取消，
+  卡死接收方 = transmitter 无限重试且每次重读全量 SM 快照+全量 chunk 拷贝）+ 全量物化 Vec；
+  改为 select 取消 + `option.soft_ttl()` 整体 deadline（超时映射 `Unreachable` 让 transmitter
+  退避而非热重试）+ 惰性流式分块。② `raft_node.rs` 两处 Config：`enable_pre_vote: Some(true)`
+  （修复孤立节点 term 通胀 T910，实测生效）+ `install_snapshot_timeout: 60_000`（默认 200ms 对
+  百 MB 快照不可用）。③ `prod-perf.sh`：tier 后健康门禁（5s 写探针，不可写→记 fail+硬停矩阵，
+  sec/w8 豁免——首轮 W2~W7 在死集群上白跑 70min 的浪费不再发生）+ `docker logs -f` 流式落盘
+  （OrbStack 日志轮转冲掉 panic 原点的问题根治，本轮 panic 即靠流式抓到）。
+  验证：cargo test -p rr-raft 148 绿 + clippy 绿 + bash -n/shellcheck 绿。
+- **实验已回退**：选举参数 500/1500/3000 vs 50/150/300 在 16k/s（超 knee）差异 marginal
+  （804k vs 742k ok）；近 knee 影响未测，保留 50/150/300 待策略拍板。
+- **矩阵关键读数**：W1-128B 全阶梯 0 err（32k/s 档 905k ok——128B knee 未到）；W1-1024 ≤4k/s
+  干净、8k/s 起 err（**容量 knee：1024B 在 4k–8k/s 之间**，2 核容器+mTLS）；W8 insecure 32k/s
+  0 err；W11 mem-log 8k/s 0 err；W6 kafka commit 2005/s 对齐 producer 2000/s、lag max 100。
+  16k/s 超 knee 后所有修复下仍 82%+ err——超 knee 行为是 melt 而非 degrade（后续议题）。
+- **🔴 更深的第二根因（战略决策点，待 Louis 拍板）**：panic 修复后集群在 16k/s 仍 melt，
+  且**永不自愈**（负载停 5min+ 实测）。终态解剖：kv-3 稳定 leader(T62，与 kv-1 同步）但
+  **无法 commit 任何新条目**（复制静默 wedge，无 panic——client_write 永远"未确立领导权"）；
+  kv-1 租约外不知 leader → 回 None；kv-2 落后 31k 且 pre-vote 下仍 term 通胀至 T917 孤立竞选。
+  客户端四轮尝试全收 "not leader None"。**这是 alpha.34 复制核当天第三个独立活性缺陷**
+  （panic 竞态/禁 snapshot 轮的 responder wedge/本轮的复制静默）——whack-a-mole 式 vendor
+  补丁的维护成本正在失控。选项：①接受现状：matrix 限定 knee 内 + knee 边缘，M4 基线仍有意义，
+  超 knee melt 记 known-issue（A-0015 跟踪）；②继续挖 wedge（vendor patch #2，工作量未知）；
+  ③openraft 版本变更（0.9.25 stable，port 成本高，A-0015 正式立项）；④产品级入口背压/拒载
+  （独立于 raft 版本的应有防御，不替代 raft 健壮性）。**建议 ①+④ 短期、③ 中期**。
+- **开放项**：kv-2/kv-3 容器负载下重启（疑似 OOM：2GiB limit vs ~1GB 状态 snapshot 序列化翻倍，
+  kv-store example 全量 bincode 所致，实验室可提 mem_limit 绕过）。
+- **下一步**：Louis 拍板战略方向 → commit（修复 4 文件 + vendor + CONTEXT.md，等确认）→
+  按拍板结果重跑全矩阵 → 基线归档入 git → 判据表回填（plan §9）+ A-0010 用 W11 数据重判。
 
 ### Session 2026-09-10(深夜三)— M3 落地:一键矩阵 + Prom 窗口采集 + 三个修复的引擎缺陷
 
