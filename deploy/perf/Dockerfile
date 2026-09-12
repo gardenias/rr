@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY crates ./crates
 COPY tests ./tests
 COPY benches ./benches

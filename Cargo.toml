@@ -53,3 +53,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
 serde_json = "1"
 subtle = "2"
+
+# Vendored openraft with the rr patch for the RaftCore panic at
+# raft_core.rs `run_save_committed_and_apply` (unwrap on a log id purged by a
+# racing snapshot). Upstream unfixed as of alpha.34/main; drop this patch when
+# an upstream release contains the fix (track A-0015).
+[patch.crates-io]
+openraft = { path = "vendor/openraft" }
