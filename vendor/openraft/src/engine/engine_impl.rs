@@ -400,6 +400,20 @@ where
                 req.last_log_id.display(),
                 self.state.last_log_id().display(),
             );
+
+            // rr patch: even when rejecting on log recency, a strictly higher
+            // incoming vote must still be adopted locally (term convergence +
+            // step-down). Upstream returned early here without adopting, so a
+            // candidate whose term had run ahead could never propagate it and
+            // cluster terms never reconverged (permanent split observed in the
+            // perf lab). The response still says granted=false, so the lagging
+            // candidate cannot count this as a vote; and because the recency
+            // branch runs first, no equal/lower-term replay can turn the local
+            // record into an actual grant.
+            if req.vote.as_ref_vote() > self.state.vote_ref().as_ref_vote() {
+                let _ = self.vote_handler().update_vote(&req.vote);
+            }
+
             // The res is not used yet.
             // let _res = Err(RejectVoteRequest::ByLastLogId(self.state.last_log_id().copied()));
 

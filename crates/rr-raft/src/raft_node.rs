@@ -186,7 +186,14 @@ impl RaftNode {
         // Keep a cheap clone (Arc inside) as the close handle: `stop_group`
         // flushes the batcher after `raft.shutdown()` (ADR A-0011 C3).
         let log_storage_close = Some(log_storage.clone());
-        let sm = RrStateMachine::new(state_machine);
+        // A-0016 durability gap: the SM snapshot is not persisted, so after a
+        // restart only the un-purged log tail replays and the membership entry
+        // (written once at initialize) would be lost — leaving zero voters and
+        // a permanently wedged group. The sidecar preserves the committed
+        // membership across restarts (perf-lab W7 reproduced the wedge 2/2).
+        let sm = RrStateMachine::new(state_machine).with_membership_sidecar(
+            std::path::PathBuf::from(rocks_path).join("sm-membership.bin"),
+        );
         let network = network_factory;
 
         let raft = Raft::new(node_id, config, network, log_storage, sm)

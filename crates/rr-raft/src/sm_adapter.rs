@@ -31,6 +31,9 @@ pub struct RrStateMachine {
     /// Counts installed snapshots (openraft's `SnapshotMeta` no longer
     /// carries a `snapshot_id`; kept so tests can observe installs).
     snapshot_idx: u64,
+    /// Durable sidecar (bincode-encoded `StoredMembership`) preserving the
+    /// committed membership across restarts; see `with_membership_sidecar`.
+    membership_sidecar: Option<std::path::PathBuf>,
 }
 
 impl RrStateMachine {
@@ -42,6 +45,67 @@ impl RrStateMachine {
             last_membership: StoredMembership::default(),
             snapshot_bytes: Vec::new(),
             snapshot_idx: 0,
+            membership_sidecar: None,
+        }
+    }
+
+    /// Attach a durable membership sidecar, loading it if present.
+    ///
+    /// Why this exists: with a durable (purged) Raft log but non-persisted SM
+    /// snapshots — the A-0016 shape — a restart replays only the un-purged
+    /// tail, so the membership entry written once at initialize is gone. Both
+    /// this adapter and openraft's startup fallback (`sm_mem`) then rebuild an
+    /// EMPTY membership: zero voters, no elections, lease dead, and every
+    /// `client_write` is rejected with `ForwardToLeader::empty()` while
+    /// metrics still report the persisted vote's stale leadership (perf-lab
+    /// W7 reproduced this 2/2). Only committed memberships are written
+    /// (apply/install paths), never last_applied — replay positioning must
+    /// keep coming from openraft, since the inner SM's data is not durable.
+    pub fn with_membership_sidecar(mut self, path: std::path::PathBuf) -> Self {
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                match bincode::serde::decode_from_slice(&bytes, bincode::config::standard()) {
+                    Ok((membership, _)) => {
+                        self.last_membership = membership;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "membership sidecar undecodable, starting empty"
+                        );
+                    }
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "membership sidecar unreadable, starting empty"
+                );
+            }
+        }
+        self.membership_sidecar = Some(path);
+        self
+    }
+
+    /// Best-effort sidecar write; a failure must never fail the raft apply
+    /// path (membership changes are rare and the file is tiny).
+    fn persist_membership(&self) {
+        let Some(path) = &self.membership_sidecar else {
+            return;
+        };
+        let bytes = match bincode::serde::encode_to_vec(&self.last_membership, bincode::config::standard())
+        {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "membership sidecar encode failed");
+                return;
+            }
+        };
+        if let Err(e) = std::fs::write(path, bytes) {
+            tracing::warn!(error = %e, "membership sidecar write failed");
         }
     }
 
@@ -106,6 +170,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
                     .map_err(|e| io::Error::other(e.to_string()))?,
                 EntryPayload::Membership(ref mem) => {
                     self.last_membership = StoredMembership::new(Some(entry.log_id), mem.clone());
+                    self.persist_membership();
                     Vec::new()
                 }
             };
@@ -168,6 +233,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
             .map_err(|e| io::Error::other(e.to_string()))?;
         self.last_applied = meta.last_log_id;
         self.last_membership = meta.last_membership.clone();
+        self.persist_membership();
         self.snapshot_bytes = data;
         self.snapshot_idx += 1;
         Ok(())
@@ -493,5 +559,59 @@ mod tests {
             result.is_err(),
             "legacy builder must fail closed instead of emitting an empty snapshot"
         );
+    }
+
+    // ── membership sidecar (A-0016 restart wedge fix) ────────────────────
+
+    /// The committed membership must survive a simulated process restart
+    /// (fresh adapter over the same sidecar path), because with a purged
+    /// durable log it is the only place the membership survives.
+    #[tokio::test]
+    async fn test_membership_sidecar_survives_restart() {
+        use openraft::Membership;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sm-membership.bin");
+
+        let membership = Membership::new_with_defaults(
+            vec![std::collections::BTreeSet::from([1u64, 2, 3])],
+            vec![],
+        );
+        let entry = Entry {
+            log_id: LogId::new(CommittedLeaderId::new(1, 1), 0),
+            payload: EntryPayload::Membership(membership.clone()),
+        };
+
+        let mut sm = RrStateMachine::new(Box::new(VecSM { state: vec![] }))
+            .with_membership_sidecar(sidecar.clone());
+        apply_entries(&mut sm, vec![entry]).await;
+        assert!(sidecar.exists(), "membership apply must persist the sidecar");
+        drop(sm);
+
+        // Simulated restart: fresh adapter, same path.
+        let mut restarted = RrStateMachine::new(Box::new(VecSM { state: vec![] }))
+            .with_membership_sidecar(sidecar);
+        let (last_applied, restored) = restarted.applied_state().await.unwrap();
+        assert_eq!(
+            restored.membership().nodes().count(),
+            3,
+            "membership must be restored from the sidecar after restart"
+        );
+        assert!(
+            last_applied.is_none(),
+            "last_applied must NOT be restored (inner SM data is not durable)"
+        );
+    }
+
+    /// Without a sidecar file (first boot), construction starts empty.
+    #[tokio::test]
+    async fn test_membership_sidecar_first_boot_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("nonexistent.bin");
+        let mut sm = RrStateMachine::new(Box::new(VecSM { state: vec![] }))
+            .with_membership_sidecar(sidecar.clone());
+        let (_, membership) = sm.applied_state().await.unwrap();
+        assert_eq!(membership.membership().nodes().count(), 0);
+        assert!(!sidecar.exists(), "no sidecar may be created before a membership is applied");
     }
 }
