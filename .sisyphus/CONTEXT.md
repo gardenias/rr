@@ -5,9 +5,9 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-12（**M4 首轮全矩阵：抓到 P0 活性 bug——openraft `raft_core.rs:2422` unwrap panic（snapshot purge/apply 竞态），根因全部钉到行；3 文件修复已落地未 commit；panic 已 vendor 补丁修复；更深 wedge 待战略决策**）
+**Last updated**: 2026-09-13（**M4 完成：活性缺陷链全部定点修复（panic/vendor×2 + membership sidecar + pre-vote + full_snapshot），16k/s 从 melt 变为优雅降级+完全自愈；首份生产基线归档 17/18 绿（20260912-234352-9fa8347），判据表已回填，A-0010 已重判维持 deferred**）
 **Current phase**: **v0.2.0 已发布**；下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`，WAL（A-0010）维持 deferred
-**Active plan**: `.sisyphus/plans/rr-prod-perf.md`（M0–M3 已落地，**M4 进行中：首轮矩阵已跑（20260912-000736-9d6c1d0），发现 P0 活性 bug，修复 + 补丁后重跑才算完成**）；v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`（deferred）
+**Active plan**: `.sisyphus/plans/rr-prod-perf.md`（**M0–M4 全部完成**，基线 `docs/perf/prod/20260912-234352-9fa8347/`，M5=Linux 宿主正式基线）；v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`（deferred，重判结论+解锁路径已回写）
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
 **Main branch HEAD**: 见下文 Git 状态段
 **Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
@@ -33,6 +33,40 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **R-1 执法机制**:`scripts/check-invariants.sh`(5 项双向检查,故意删反链实测变红);CI `invariants-lint`(阻塞式);PR 模板 2 检查项 + INV 编号栏;CONTRIBUTING 评审四问;INV-1~8 的 52 条既有测试补 `INV-n` 反链;invariants.md 新增维护规则 5(登记触发元规则)。
 - **R-6 性质测试**:proptest ×4(router 变迁 INV-6 / 幂等 model-parity INV-3 / io_batcher 交错 INV-1(rocks-gated)/ framed 版本矩阵 ×7),新增 ~0.85s;golden corpus 6 样本(rr-core/tests/golden/,字节级重编码一致,bincode 漂移绊线)。fuzz:2 个 roundtrip target + 43 个入仓种子 + `fuzz-nightly.yml`(每日 03:23 UTC,6 target × 15min,crash→tmin→artifact);顺带修复 `fuzz/Cargo.toml` 的 `prost = { workspace = true }` 潜在损坏(独立 crate 无法解析,改钉 "0.14.3")。fuzz 端到端受网络所限未跑(shim 编译 + 全种子回放已验),**首次有网 nightly 是真验收**。
 - **下一步候选**(按专项顺序):R-4 crash harness + 存储故障注入(先决:IoBatcher 泛化 `Arc<dyn StorageEngine>` 的 impact 评估)→ R-5 线性一致检查器 → R-3 DST spike → R-8 nightly soak → R-2 TLA+。`v0.2.0` tag 是否 cut 仍待用户决策(RC exit 已满足)。
+
+### Session 2026-09-12(深夜→13 凌晨)— M4 收官:活性缺陷链全灭 + 首份生产基线 17/18 绿
+
+> 承接白天场:继续深挖"修复后仍不自愈"。一天内四个独立缺陷全部定点修复并矩阵级验证;
+> 超 knee 行为从"melt+永不自愈"翻转为"优雅降级+完全自愈"。
+
+- **缺陷 #2(openraft,vendor patch #2 ✅)**:`engine_impl.rs::handle_vote_req` 的 log recency
+  早退**不采纳更高 term**(标准 raft 必须采纳)——term 跑飞的节点永远无人跟随,集群 term
+  永不收敛(T856 vs T113 实证)。补丁:recency 拒票时仍本地采纳高 vote(响应仍 granted=false,
+  recency 分支先行故无法被重放成真授权)。实证:补丁后三节点 term 收敛到同一值。
+- **缺陷 #3(rr 框架,A-0016 缺口 ✅)**:durable log + 非持久 SM 快照下,重启只能 replay 未
+  purge 尾部 → initialize 时的 membership 条目丢失 → openraft 经 `sm_mem` 回退重建**空
+  membership** → 0 voter → 无选举/无心跳/lease 死 → client_write 一律 `ForwardToLeader::
+  empty()`(客户端"not leader None"),而 metrics 仍报 persisted vote 的假 is_leader。
+  W7 滚动重建 2/2 复现即此。修复:`sm-membership.bin` sidecar(committed membership 的
+  bincode,apply/install 时写,启动时读;刻意不存 last_applied——SM 数据非持久,replay 定位
+  必须留在 openraft)。+2 单测;W7 场景实测重建后立即可写(0% err)。
+- **矩阵级终验**:`20260912-234352-9fa8347`,**17/18 绿**:W1×3 全阶梯(4096B 上轮全灭,
+  本轮 16000/s 档 0 err)、W2–W5、**W7 修复实证**、W6/W11/W8 全绿;零 panic。
+  16k/s×600s 实测:ok 2.58M/5.9% err(原 82–100%),负载停 30s 后 0% err p99 22ms。
+  判据表(plan §9.1)回填:knee ≈4000–8000/s@1KiB;**安全税 ≈0**(TLS p50 == 明文 p50);
+  rocks-log vs mem-log 固定 +7~8ms p50 延迟底(归因 IoBatcher 窗口 vs OrbStack 磁盘未定);
+  lin-read +25% p99;无快照毛刺。**A-0010 重判:维持 deferred**,解锁路径=Linux 宿主 W11
+  A/B → IoBatcher 窗口调优 → 仍热才谈 WAL(已回写 rr-wal-impl.md)。
+- **W9 挂账(bench 工具 issue)**:soak 写 2h 零失败 + TransferLeader 成功,但读探针
+  (warmup 固定 key 的线性回读)~16min 起 ~87% 返回错误值(两轮同为 623 次,无服务端
+  事件相关)→ load 腿 rc=1、oracle 未跑。判为 probe/读路径疑点,非数据丢失(写全 ack +
+  服务端指标健康)。
+- **遗留**:① 16KiB×3000/s = 1.6GB 状态 vs 2GiB 内存的 example 快照内存悬崖(形态限制);
+  ② soak 闭环 pacer 实际只发出 ~134/s(标称 2000/s)——open-loop 化是 tool backlog;
+  ③ 上游 issue 待提(两个 vendor patch 的对应位置);④ A-0015 跟踪"上游修复后摘 vendor"。
+- **commits**:`e59eba6`(full_snapshot+pre-vote)→ `b709cc7`(tooling 门禁+日志流)→
+  `9134d87`(vendor panic 补丁)→ `ddf7790`(CONTEXT)→ `9fa8347`(vote-term 采纳 +
+  membership sidecar)→ `66d8b57`(基线归档+判据回填+A-0010 回写+门禁重试)。
 
 ### Session 2026-09-12 — M4 首轮全矩阵：P0 活性 bug 全解剖 + 部分修复落地
 
