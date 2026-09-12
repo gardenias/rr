@@ -1,0 +1,87 @@
+{
+  "meta": {
+    "tool": "rr-perf-bench",
+    "version": "0.2.0",
+    "git_sha": "unknown",
+    "rustc": "unknown",
+    "os": "linux",
+    "arch": "aarch64",
+    "storage": "external",
+    "durability": "external",
+    "payload_bytes": 128,
+    "warmup_secs": 5,
+    "duration_secs": 30,
+    "concurrency_levels": [
+      1,
+      10,
+      50,
+      100,
+      200,
+      500
+    ],
+    "client_id": 0,
+    "captured_unix_secs": 1789229016
+  },
+  "s1": null,
+  "s2": [],
+  "s3": [],
+  "soak": null,
+  "mix": {
+    "rates": [
+      3000
+    ],
+    "rung_secs": 30,
+    "warmup_secs": 5,
+    "poisson": false,
+    "mix": "write:100",
+    "key_dist": "uniform",
+    "key_space": 1000000,
+    "payload_bytes": 128,
+    "client_id": 0,
+    "seed": 6840227782638526189,
+    "max_in_flight": 32768,
+    "op_timeout_ms": 30000,
+    "started_unix_secs": 1789228986,
+    "server_side": {
+      "window_start_unix_secs": 1789228986,
+      "window_end_unix_secs": 1789229016,
+      "server_request_rate": 3447.4886773079434,
+      "server_p50_us": 9588.742596753671,
+      "server_p99_us": 908329.3226164224,
+      "proposal_p50_us": 8672.667367427974,
+      "proposal_p99_us": 159774.79511882,
+      "apply_p50_us": 250.2079428142167,
+      "apply_p99_us": 495.41172677214894,
+      "append_rtt_p50_us": 5891.833119159059,
+      "append_rtt_p99_us": 22389.424853291388,
+      "replication_lag_max_entries": 3141670.0
+    },
+    "runs": [
+      {
+        "rung": 0,
+        "rate": 3000,
+        "offered": 90000,
+        "window_secs": 30,
+        "ops": [
+          {
+            "op": "write",
+            "offered": 90000,
+            "ok": 90000,
+            "err": 0,
+            "incomplete": 0,
+            "tps": 3000.0,
+            "p50_us": 10444,
+            "p95_us": 732954,
+            "p99_us": 1228931,
+            "p999_us": 1487929,
+            "max_us": 1514143,
+            "svc_p50_us": 8839,
+            "svc_p99_us": 1227882,
+            "lag_p50_us": 1205,
+            "lag_p99_us": 4648
+          }
+        ]
+      }
+    ]
+  }
+}

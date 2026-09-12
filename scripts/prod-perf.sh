@@ -193,18 +193,25 @@ json_field() { python3 -c "import json; r=json.load(open('$1')); print($2)"; }
 # tier is ledgered as failed and the matrix aborts — later numbers on a
 # dead cluster are garbage. Skipped for `sec` (plaintext is rejected by
 # design) and `w8` (the plaintext stack would reject this TLS probe).
+# Post-liveness-fix (9fa8347) the cluster legitimately needs ~30s to
+# re-stabilize after an extreme-bandwidth tier, so probe 3× over ~40s
+# before declaring it dead.
 health_gate() {
-  "${COMPOSE[@]}" --profile bench run --rm \
-    -v "$PWD/$OUT:/out" \
-    bench \
-    "--cluster-addrs=$ADDRS" \
-    "${TLS_ARGS[@]}" \
-    "--json-out=/out/raw-health.json" \
-    --scenario=mix --rate=20 --duration-secs=5 --warmup-secs=1 --mix=write:100 \
-    >>"$OUT/bench-health.log" 2>&1 || return 1
-  local ok
-  ok=$(json_field "$OUT/raw-health.json" 'r["mix"]["runs"][0]["ops"][0]["ok"]' 2>/dev/null) || return 1
-  [[ $ok -gt 0 ]]
+  local attempt ok
+  for attempt in 1 2 3; do
+    "${COMPOSE[@]}" --profile bench run --rm \
+      -v "$PWD/$OUT:/out" \
+      bench \
+      "--cluster-addrs=$ADDRS" \
+      "${TLS_ARGS[@]}" \
+      "--json-out=/out/raw-health.json" \
+      --scenario=mix --rate=20 --duration-secs=5 --warmup-secs=1 --mix=write:100 \
+      >>"$OUT/bench-health.log" 2>&1 || true
+    ok=$(json_field "$OUT/raw-health.json" 'r["mix"]["runs"][0]["ops"][0]["ok"]' 2>/dev/null) || ok=0
+    [[ $ok -gt 0 ]] && return 0
+    [[ $attempt -lt 3 ]] && sleep 20
+  done
+  return 1
 }
 
 # tier <id> <note> <cmd…> — run one tier, ledger the outcome, never abort the

@@ -1,0 +1,73 @@
+{
+  "meta": {
+    "tool": "rr-perf-bench",
+    "version": "0.2.0",
+    "git_sha": "unknown",
+    "rustc": "unknown",
+    "os": "linux",
+    "arch": "aarch64",
+    "storage": "external",
+    "durability": "external",
+    "payload_bytes": 128,
+    "warmup_secs": 1,
+    "duration_secs": 5,
+    "concurrency_levels": [
+      1,
+      10,
+      50,
+      100,
+      200,
+      500
+    ],
+    "client_id": 0,
+    "captured_unix_secs": 1789237003
+  },
+  "s1": null,
+  "s2": [],
+  "s3": [],
+  "soak": null,
+  "mix": {
+    "rates": [
+      20
+    ],
+    "rung_secs": 5,
+    "warmup_secs": 1,
+    "poisson": false,
+    "mix": "write:100",
+    "key_dist": "uniform",
+    "key_space": 1000000,
+    "payload_bytes": 128,
+    "client_id": 0,
+    "seed": 6840227782638526189,
+    "max_in_flight": 32768,
+    "op_timeout_ms": 30000,
+    "started_unix_secs": 1789236998,
+    "runs": [
+      {
+        "rung": 0,
+        "rate": 20,
+        "offered": 100,
+        "window_secs": 5,
+        "ops": [
+          {
+            "op": "write",
+            "offered": 100,
+            "ok": 100,
+            "err": 0,
+            "incomplete": 0,
+            "tps": 20.0,
+            "p50_us": 4980,
+            "p95_us": 11632,
+            "p99_us": 13262,
+            "p999_us": 13410,
+            "max_us": 13410,
+            "svc_p50_us": 1933,
+            "svc_p99_us": 4034,
+            "lag_p50_us": 2838,
+            "lag_p99_us": 10764
+          }
+        ]
+      }
+    ]
+  }
+}

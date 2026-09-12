@@ -1,0 +1,19 @@
+sec ok plaintext negative control
+w1 ok write ladder payload=128B
+w1 ok write ladder payload=1024B
+w1 ok write ladder payload=4096B
+w2 ok mix write:90,local:10 @ 3000/s
+w2 ok mix write:50,local:50 @ 3000/s
+w3 ok read mix local:100 @ 6000/s
+w3 ok read mix local:90,lin:10 @ 6000/s
+w3 ok read mix local:50,lin:50 @ 6000/s
+w4 ok write zipfian @ 3000/s
+w4 ok write uniform @ 3000/s
+w5 ok write payload=128B @ 3000/s
+w5 ok write payload=1024B @ 3000/s
+w5 ok write payload=4096B @ 3000/s
+w9 fail soak 7200s @ 2000/s + TransferLeader
+w7 ok snapshot pressure (5000) wladder
+w6 ok kafka ingest @ 2000/s for 60s
+w11 ok mem-log control wladder
+w8 ok insecure control wladder

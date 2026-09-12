@@ -281,3 +281,23 @@ docs/perf/prod/<date>-<sha>/     ← 产出存档:raw-*.json + prom/ + report.md
 | 快照毛刺 | W7 vs W1:时间序列 p99 峰值倍数 | 首轮实测 |
 | soak 稳定性 | W9:首半小时 vs 末半小时 TPS/p99 漂移 <10% | 判据 |
 | Kafka 摄入 | W6:稳态提交速率与端到端 lag p99 | 首轮实测 |
+
+### 9.1 首轮回填(基线 `docs/perf/prod/20260912-234352-9fa8347`,git `9fa8347`)
+
+> 环境:macOS OrbStack、3×(2 核+2GiB)容器、mTLS+token、durable raft log。**17/18 档绿**(W9 见下注)。
+> 数字一律以该目录 `report.md` + raw JSON 为准;此处仅为判据结论索引。
+
+| 指标 | 实测结论 |
+|---|---|
+| knee TPS(写,1024B) | ≤4000/s 全干净(0 err);8000/s 起 3.7% err(p99 11.9s),16000/s 3.4% err(p99 34s)——**knee ≈ 4000–8000/s**(128B 到 32k/s 未触 knee;4096B 见该目录 W1 表,极端带宽是另一种饱和形态) |
+| p99 @ ~50% knee | 2000/s: **476ms**(p50 10.3ms;macOS 磁盘延迟烙印显著,Linux 宿主正式值待 M5) |
+| 安全税(TLS+mTLS+token) | **≈0**:W8(明文)与 W1(TLS)同档 p50 几乎重合(100/s:10.16ms vs 10.20ms) |
+| **raft-log 持久化成本** | rocks-log vs mem-log(W11):p50 **固定 +7~8ms 延迟底**(100/s:10.2ms vs 4.1ms;4000/s:11.0ms vs 2.5ms),绝对值不随速率放大 → 形似 IoBatcher 组提交窗口/磁盘 flush 的固定成本而非带宽瓶颈。**归因二选一未分:IoBatcher flush 窗口 vs OrbStack virtiofs 磁盘延迟(本环境烙印);A-0010 重判见 `rr-wal-impl.md`** |
+| lin-read 成本 | @6000/s:lin p99 8.6ms vs local 6.9ms(**+25%**);p50 2.6ms vs 1.6ms |
+| 快照毛刺 | W7(threshold 5000)全阶梯 0 err,8000/s p99 326ms vs W1 同档 11.9s(该档 W1 已饱和带 err)——**未见快照毛刺**(活性修复后) |
+| soak 稳定性 | **写 2h 零失败**(970,984/970,984),TransferLeader 成功;判 W9 ❌ 的原因是 bench 读探针问题(见下) |
+| Kafka 摄入 | commit 2005/s 对齐 producer 2000/s,lag max 100,p99 端到端见 raw-w6 |
+
+**W9 挂账(tool 侧)**:soak 写 100% acked 且 0 失败,但读探针(warmup 写入的固定 key 的线性一致回读)从 ~16min 起 ~87% 返回错误值,导致 load 腿 rc=1、oracle 未执行。写侧证据干净(零失败、服务端 p50 5.2ms/p99 14ms、无选举风暴、无重启)——probe/读路径疑点(两次 run 失败数同为 623,非随机),列 bench 工具 issue;不判为集群数据丢失(写全 ack + 服务端指标健康)。
+
+**本轮同时验证(非判据项)**:sec 明文全拒;W7 滚动重建(membership sidecar 修复实证);活性修复全套(vendor×2 + sidecar + pre-vote + full_snapshot)在矩阵级生效——对比首轮(20260912-000736)同档 100% err 假绿,本轮 W1-4096 高 rung 已能恢复(16000/s 档 0 err)。**16KiB×3000/s 被排除**:1.6GB 状态 vs 2GiB 内存上限,example 全量 bincode 快照的内存悬崖(环境/形态限制,非 raft 活性问题)。

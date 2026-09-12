@@ -1,0 +1,98 @@
+{
+  "meta": {
+    "tool": "rr-perf-bench",
+    "version": "0.2.0",
+    "git_sha": "unknown",
+    "rustc": "unknown",
+    "os": "linux",
+    "arch": "aarch64",
+    "storage": "external",
+    "durability": "external",
+    "payload_bytes": 128,
+    "warmup_secs": 5,
+    "duration_secs": 30,
+    "concurrency_levels": [
+      1,
+      10,
+      50,
+      100,
+      200,
+      500
+    ],
+    "client_id": 0,
+    "captured_unix_secs": 1789228835
+  },
+  "s1": null,
+  "s2": [],
+  "s3": [],
+  "soak": null,
+  "mix": {
+    "rates": [
+      6000
+    ],
+    "rung_secs": 30,
+    "warmup_secs": 5,
+    "poisson": false,
+    "mix": "local:90,lin:10",
+    "key_dist": "uniform",
+    "key_space": 1000000,
+    "payload_bytes": 128,
+    "client_id": 0,
+    "seed": 6840227782638526189,
+    "max_in_flight": 32768,
+    "op_timeout_ms": 30000,
+    "started_unix_secs": 1789228805,
+    "server_side": {
+      "window_start_unix_secs": 1789228805,
+      "window_end_unix_secs": 1789228835,
+      "server_request_rate": 6601.5917734581235,
+      "server_p50_us": 258.3120307669469,
+      "server_p99_us": 880.0364881934195,
+      "replication_lag_max_entries": 3149976.0
+    },
+    "runs": [
+      {
+        "rung": 0,
+        "rate": 6000,
+        "offered": 179975,
+        "window_secs": 30,
+        "ops": [
+          {
+            "op": "local",
+            "offered": 161818,
+            "ok": 161818,
+            "err": 0,
+            "incomplete": 0,
+            "tps": 5393.933333333333,
+            "p50_us": 2069,
+            "p95_us": 5820,
+            "p99_us": 6713,
+            "p999_us": 7970,
+            "max_us": 11722,
+            "svc_p50_us": 766,
+            "svc_p99_us": 2977,
+            "lag_p50_us": 1017,
+            "lag_p99_us": 5304
+          },
+          {
+            "op": "lin",
+            "offered": 18157,
+            "ok": 18157,
+            "err": 0,
+            "incomplete": 0,
+            "tps": 605.2333333333333,
+            "p50_us": 2914,
+            "p95_us": 7106,
+            "p99_us": 8388,
+            "p999_us": 10043,
+            "max_us": 15327,
+            "svc_p50_us": 1559,
+            "svc_p99_us": 4804,
+            "lag_p50_us": 1023,
+            "lag_p99_us": 5292
+          }
+        ]
+      }
+    ]
+  }
+}

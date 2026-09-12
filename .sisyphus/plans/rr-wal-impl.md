@@ -15,6 +15,19 @@
    (codec / replication / apply), not fsync or the RocksDB LSM. **WAL stays deferred** —
    and IoBatcher tuning would be equally pointless (fsync is cold). Next perf lever requires
    CPU profiling of the hot path; revisit A-0010 only if a future profile shows storage-bound.
+
+   → **⚠️ RE-JUDGED 2026-09-12 (production-shape W11 A/B, baseline `docs/perf/prod/20260912-234352-9fa8347`)**:
+   生产形态(3 节点复制 + mTLS + 2 核 cpuset + durable raft log)下 rocks-log vs mem-log
+   呈现 R-7 开发态未见的结构差异:**p50 固定 +7~8ms 延迟底**(100/s:10.2ms vs 4.1ms;
+   4000/s:11.0ms vs 2.5ms;绝对值不随速率放大,形似 IoBatcher 组提交窗口/磁盘 flush 的
+   固定成本),吞吐 knee 也显著低于 mem-log 对照(4000–8000/s vs 8000+ 干净)。
+   **但归因二选一未分**:① IoBatcher flush 窗口(可调,不需要 WAL)② OrbStack
+   virtiofs 磁盘延迟(本环境烙印,Linux 宿主上可能 ≪1ms)。**结论:维持 deferred,
+   但给出明确的解锁路径**——(a) 先在 Linux 宿主重测 W11 A/B(plan §8 本就要求正式
+   基线出自 Linux);(b) 若延迟底仍在,做 IoBatcher flush 窗口调优实验(改窗口,
+   不是写 WAL);(c) 仅当 (a)(b) 后 fsync 路径仍是主成本,A-0010 才具备开工条件。
+   一句话:**WAL 的假想敌可能根本不存在——先用调参和环境对照把"存储税"的真实归属
+   钉死,再决定要不要为一个 LSM 写一套新存储引擎。**
 3. **Decide on `IoBatcher` reuse vs fork**. Read `crates/rr-raft/src/io_batcher.rs` end-to-end. Either:
    - Extract a `BatchWriter` trait so both `RocksLogStorage` and `WalLogStorage` plug in, or
    - Copy the file to `WalBatcher` and accept some duplication.
