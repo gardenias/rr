@@ -34,6 +34,7 @@ use openraft::type_config::alias::VoteOf;
 use openraft::BasicNode;
 use rr_core::error::NetworkError;
 use rr_core::types::NodeId;
+use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 
 use crate::type_config::RrTypeConfig;
@@ -508,8 +509,8 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         &mut self,
         vote: VoteOf<RrTypeConfig>,
         snapshot: SnapshotOf<RrTypeConfig, Self::SnapshotData>,
-        _cancel: impl std::future::Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
-        _option: RPCOption,
+        cancel: impl std::future::Future<Output = ReplicationClosed> + openraft::OptionalSend + 'static,
+        option: RPCOption,
     ) -> Result<SnapshotResponse<RrTypeConfig>, StreamingError<RrTypeConfig>> {
         let channel = self
             .channel_pool
@@ -524,47 +525,70 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             bincode::serde::encode_to_vec(&(vote, snapshot.meta), bincode::config::standard())
                 .map_err(to_unreachable_streaming)?;
 
-        // Split snapshot data into 64 KB chunks.
-        const CHUNK_SIZE: usize = 65_536;
-        let chunks_data: Vec<&[u8]> = if snapshot_data.is_empty() {
-            vec![&[]]
-        } else {
-            snapshot_data.chunks(CHUNK_SIZE).collect()
-        };
-        let total = chunks_data.len();
+        // Chunk size: honor openraft's recommendation when provided, else 64 KB.
+        let chunk_size = option.snapshot_chunk_size().unwrap_or(65_536).max(1);
+        let len = snapshot_data.len();
+        let total = if len == 0 { 1 } else { len.div_ceil(chunk_size) };
+        let group_id = self.group_id;
 
-        let mut proto_chunks: Vec<ProtoSnapshotChunk> = Vec::with_capacity(total);
-        for (i, chunk_data) in chunks_data.iter().enumerate() {
+        // Lazy chunk stream: each chunk is copied only as it is yielded, so
+        // the transfer stays cancelable / time-outable mid-flight instead of
+        // materializing a second full copy of the snapshot up front.
+        let stream = tokio_stream::iter(0..total).map(move |i| {
             let is_last = i == total - 1;
-            proto_chunks.push(ProtoSnapshotChunk {
-                group_id: self.group_id,
-                offset: (i * CHUNK_SIZE) as u64,
-                data: chunk_data.to_vec(),
+            let start = i * chunk_size;
+            let end = ((i + 1) * chunk_size).min(len);
+            ProtoSnapshotChunk {
+                group_id,
+                offset: start as u64,
+                data: snapshot_data[start..end].to_vec(),
                 done: is_last,
                 // metadata only on the last chunk — server ignores it on earlier ones
                 metadata: if is_last { metadata.clone() } else { vec![] },
-            });
-        }
+            }
+        });
 
         tracing::debug!(
             group_id = self.group_id,
-            snapshot_bytes = snapshot_data.len(),
+            snapshot_bytes = len,
             num_chunks = total,
+            chunk_size,
             "install_snapshot: sending chunked stream"
         );
 
         let mut client = RaftGrpcClient::new(channel);
-        let response = client
-            .install_snapshot(tokio_stream::iter(proto_chunks))
-            .await
-            .map_err(|status| {
-                if status.code() == tonic::Code::Unavailable {
-                    self.channel_pool.remove(self.target);
-                    metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+        let send = client.install_snapshot(stream);
+        let ttl = option.soft_ttl();
+
+        // Honor openraft's cancel signal (RaftCore dropped / leadership lost)
+        // and the RPC soft TTL: a wedged receiver must not stall the
+        // SnapshotTransmitter forever. A timeout maps to `Unreachable` so the
+        // transmitter backs off instead of hot-retrying a struggling peer.
+        let mut cancel = std::pin::pin!(cancel);
+        let response = tokio::select! {
+            closed = &mut cancel => {
+                tracing::info!(target = self.target, "install_snapshot canceled by RaftCore");
+                return Err(closed.into());
+            }
+            res = tokio::time::timeout(ttl, send) => {
+                match res {
+                    Err(_elapsed) => {
+                        let msg = format!("install_snapshot timed out after {ttl:?}");
+                        tracing::warn!(target = self.target, "{}", msg);
+                        return Err(to_unreachable_streaming(msg));
+                    }
+                    Ok(r) => r
+                        .map_err(|status| {
+                            if status.code() == tonic::Code::Unavailable {
+                                self.channel_pool.remove(self.target);
+                                metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+                            }
+                            to_unreachable_streaming(status)
+                        })?
+                        .into_inner(),
                 }
-                to_unreachable_streaming(status)
-            })?
-            .into_inner();
+            }
+        };
 
         // Deserialize the payload to get the InstallSnapshotResponse.
         // For backward compatibility, if payload is empty, use a default vote.

@@ -71,6 +71,8 @@ impl RaftNode {
                 heartbeat_interval: 50,
                 election_timeout_min: 150,
                 election_timeout_max: 300,
+                enable_pre_vote: Some(true),
+                install_snapshot_timeout: 60_000,
                 snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_logs_since_last),
                 ..Default::default()
             }
@@ -162,6 +164,8 @@ impl RaftNode {
                 heartbeat_interval: 50,
                 election_timeout_min: 150,
                 election_timeout_max: 300,
+                enable_pre_vote: Some(true),
+                install_snapshot_timeout: 60_000,
                 snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_logs_since_last),
                 ..Default::default()
             }
