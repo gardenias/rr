@@ -112,6 +112,27 @@ wait_healthy() { # wait_healthy <container> <tries>
   return 1
 }
 
+# Stream node logs to the archive from container start. OrbStack's docker log
+# buffer rotates under load and destroys panic origins (M4 run 20260912:
+# RaftCore panicked and the line was gone from `docker logs` by the time the
+# forensics dump ran). The -f stream is immune to that rotation.
+LOGPIDS="$OUT/.logpids"
+
+stop_log_streams() {
+  [[ -f $LOGPIDS ]] || return 0
+  while read -r pid; do kill "$pid" 2>/dev/null || true; done <"$LOGPIDS"
+  rm -f "$LOGPIDS"
+}
+
+start_log_streams() {
+  stop_log_streams
+  local n
+  for n in 1 2 3; do
+    docker logs -f "perf-kv-$n" >>"$OUT/node$n-stream.log" 2>&1 &
+    echo $! >>"$LOGPIDS"
+  done
+}
+
 stack_up() { # stack_up <label> [extra -f overlay args…]
   local label=$1; shift
   compose_files "$@"
@@ -126,9 +147,11 @@ stack_up() { # stack_up <label> [extra -f overlay args…]
     wait_healthy "perf-kv-$n" 60 || { docker logs "perf-kv-$n" 2>&1 | tail -20; fail "perf-kv-$n never healthy ($label)"; }
   done
   log "$label stack ready"
+  start_log_streams
 }
 
 stack_down() {
+  stop_log_streams
   [[ $KEEP == 1 ]] && return 0
   docker compose -f "$BASE_YML" -f "$KAFKA_YML" -f "$INSECURE_YML" -f "$MEMLOG_YML" down -v >/dev/null 2>&1 || true
 }
@@ -163,6 +186,27 @@ run_bench_plain() {
 # json_field <file> <python-expr-on-r> — tiny read helper.
 json_field() { python3 -c "import json; r=json.load(open('$1')); print($2)"; }
 
+# Post-tier writability gate (M4 lesson, run 20260912-000736): the bench
+# process exits 0 even when every op errored, so a dead cluster used to
+# ledger as "ok" and poison every later tier (2h wasted on a corpse).
+# After each tier the cluster MUST still accept writes; if it cannot, the
+# tier is ledgered as failed and the matrix aborts — later numbers on a
+# dead cluster are garbage. Skipped for `sec` (plaintext is rejected by
+# design) and `w8` (the plaintext stack would reject this TLS probe).
+health_gate() {
+  "${COMPOSE[@]}" --profile bench run --rm \
+    -v "$PWD/$OUT:/out" \
+    bench \
+    "--cluster-addrs=$ADDRS" \
+    "${TLS_ARGS[@]}" \
+    "--json-out=/out/raw-health.json" \
+    --scenario=mix --rate=20 --duration-secs=5 --warmup-secs=1 --mix=write:100 \
+    >>"$OUT/bench-health.log" 2>&1 || return 1
+  local ok
+  ok=$(json_field "$OUT/raw-health.json" 'r["mix"]["runs"][0]["ops"][0]["ok"]' 2>/dev/null) || return 1
+  [[ $ok -gt 0 ]]
+}
+
 # tier <id> <note> <cmd…> — run one tier, ledger the outcome, never abort the
 # matrix on a single-tier failure.
 tier() {
@@ -175,6 +219,11 @@ tier() {
   log "[$id] $note — start"
   local rc=0
   "$@" || rc=$?
+  if [[ $rc == 0 && $id != sec && $id != w8 ]] && ! health_gate; then
+    log "[$id] bench exited 0 but cluster is UNWRITABLE — aborting matrix"
+    printf '%s fail %s (post-tier health gate)\n' "$id" "$note" >>"$LEDGER"
+    fail "cluster unwritable after tier $id"
+  fi
   if [[ $rc == 0 ]]; then
     log "[$id] OK"
     printf '%s ok %s\n' "$id" "$note" >>"$LEDGER"
