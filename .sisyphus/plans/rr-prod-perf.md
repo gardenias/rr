@@ -298,6 +298,6 @@ docs/perf/prod/<date>-<sha>/     ← 产出存档:raw-*.json + prom/ + report.md
 | soak 稳定性 | **写 2h 零失败**(970,984/970,984),TransferLeader 成功;判 W9 ❌ 的原因是 bench 读探针问题(见下) |
 | Kafka 摄入 | commit 2005/s 对齐 producer 2000/s,lag max 100,p99 端到端见 raw-w6 |
 
-**W9 挂账(tool 侧)**:soak 写 100% acked 且 0 失败,但读探针(warmup 写入的固定 key 的线性一致回读)从 ~16min 起 ~87% 返回错误值,导致 load 腿 rc=1、oracle 未执行。写侧证据干净(零失败、服务端 p50 5.2ms/p99 14ms、无选举风暴、无重启)——probe/读路径疑点(两次 run 失败数同为 623,非随机),列 bench 工具 issue;不判为集群数据丢失(写全 ack + 服务端指标健康)。
+**W9 挂账(复核中)**:soak 写 100% acked 且 0 失败,但读探针(warmup 固定 key 的线性一致回读)从 ~16min 起 ~87% 返回错误值,load 腿 rc=1、oracle 当时未执行。两次隔离复现(新集群 30min 179/179 绿;W1 历史+TransferLeader 30min 179/179 绿)均未重现——触发条件与全矩阵历史/时长相关,未定位。**已修脚本:oracle 现在永远执行**(load 腿失败不再抑制一致性裁决),并以全长 W9 单体重跑复核中;复核结论出来前,W9 的数据一致性**暂不定性**(既不判数据丢失,也不判探针误报)。
 
 **本轮同时验证(非判据项)**:sec 明文全拒;W7 滚动重建(membership sidecar 修复实证);活性修复全套(vendor×2 + sidecar + pre-vote + full_snapshot)在矩阵级生效——对比首轮(20260912-000736)同档 100% err 假绿,本轮 W1-4096 高 rung 已能恢复(16000/s 档 0 err)。**16KiB×3000/s 被排除**:1.6GB 状态 vs 2GiB 内存上限,example 全量 bincode 快照的内存悬崖(环境/形态限制,非 raft 活性问题)。

@@ -284,14 +284,28 @@ w9_tier() {
   else
     log "[w9] leader not found via Prom — skipping transfer (non-fatal)"
   fi
-  wait "$load_pid" || {
-    log "[w9] load leg failed — dumping node logs for forensics"
+  wait "$load_pid"
+  local load_rc=$?
+  # Always run the oracle: it is the authoritative consistency verdict on the
+  # ack log (replay + survival reads of the actually-acked writes). The load
+  # leg's own exit code additionally reflects bench-side probe health (the
+  # periodic single-key read-back), which has produced false alarms the oracle
+  # disproves — so the tier verdict is: oracle failure => fail; load-leg
+  # failure with a clean oracle => fail too, but the report must distinguish
+  # "cluster broke" from "bench probe issue".
+  local oracle_rc=0
+  run_bench w9-oracle --scenario=soak --oracle-only --ack-log=/out/ack-w9.jsonl || oracle_rc=$?
+  if [[ $oracle_rc != 0 ]]; then
+    log "[w9] oracle FAILED (rc=$oracle_rc) — real consistency problem"
     for n in 1 2 3; do docker logs "perf-kv-$n" >"$OUT/node$n-w9.log" 2>&1 || true; done
     return 1
-  }
-  # Oracle after the load window (no faults in this scenario; cluster is up).
-  # An empty/missing ack log makes the oracle fail (it proves nothing).
-  run_bench w9-oracle --scenario=soak --oracle-only --ack-log=/out/ack-w9.jsonl
+  fi
+  if [[ $load_rc != 0 ]]; then
+    log "[w9] load leg failed (rc=$load_rc) but oracle clean — likely bench probe issue; dumping node logs"
+    for n in 1 2 3; do docker logs "perf-kv-$n" >"$OUT/node$n-w9.log" 2>&1 || true; done
+    return 1
+  fi
+  return 0
 }
 
 w7_tier() {
