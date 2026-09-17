@@ -510,7 +510,8 @@ impl RrNode {
                 )))
             })?;
 
-            let raft_svc = RaftServiceServer::new(RaftServiceImpl::new(raft_lookup.clone()));
+            let raft_svc = RaftServiceServer::new(RaftServiceImpl::new(raft_lookup.clone()))
+                .max_decoding_message_size(rr_network::RAFT_MAX_DECODING_MESSAGE_SIZE);
             let client_chain = rr_network::ChainedInterceptor {
                 first: self.auth_config.client_interceptor(),
                 second: self.rate_limit_config.client_interceptor(),

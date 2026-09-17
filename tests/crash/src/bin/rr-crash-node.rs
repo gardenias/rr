@@ -173,7 +173,10 @@ async fn run(args: Args) -> Result<()> {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server = tonic::transport::Server::builder()
-        .add_service(RaftServiceServer::new(RaftServiceImpl::new(lookup)))
+        .add_service(
+            RaftServiceServer::new(RaftServiceImpl::new(lookup))
+                .max_decoding_message_size(rr_network::RAFT_MAX_DECODING_MESSAGE_SIZE),
+        )
         .add_service(ClientServiceServer::new(ClientServiceImpl::new(dispatch)))
         .serve_with_shutdown(listen_addr, async move {
             let _ = shutdown_rx.await;

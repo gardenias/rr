@@ -25,6 +25,13 @@ pub mod client_service;
 pub mod raft_service;
 pub mod tcp_raft_server;
 
+/// Decode ceiling for RaftService (server side). tonic's default 4 MiB decode
+/// limit rejects oversized inbound batches — with large payloads a batched
+/// AppendEntries crosses it and the follower drops the leader's replication
+/// stream, permanently wedging the group (perf-lab W5-16KiB, 2026-09-17).
+/// RaftService is internal and mTLS-authenticated, so a generous cap is safe.
+pub const RAFT_MAX_DECODING_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
+
 pub use audit::{ServiceLabel, AUDIT_TARGET};
 pub use auth::{attach_bearer_token, AuthConfig, BearerInterceptor};
 pub use channel_pool::ChannelPool;
