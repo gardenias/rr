@@ -78,5 +78,6 @@ pub use service::Service;
 pub use state_machine::StateMachine;
 pub use storage::{BatchOp, StorageEngine};
 pub use types::{
-    GroupId, GroupMeta, LogIndex, NodeAddr, NodeId, PartitionConfig, PartitionId, RoutingTable,
+    ApplyContext, GroupId, GroupMeta, LogIndex, NodeAddr, NodeId, PartitionConfig, PartitionId,
+    RoutingTable,
 };

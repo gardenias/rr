@@ -18,6 +18,7 @@ use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
 use rr_core::state_machine::StateMachine;
+use rr_core::types::ApplyContext;
 
 use crate::snapshot_store::PersistentSnapshot;
 use crate::snapshot_store::SnapshotStore;
@@ -248,11 +249,16 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
 
             let response = match entry.payload {
                 EntryPayload::Blank => Vec::new(),
-                EntryPayload::Normal(ref data) => self
-                    .inner
-                    .apply(data.as_ref())
-                    .await
-                    .map_err(|e| io::Error::other(e.to_string()))?,
+                EntryPayload::Normal(ref data) => {
+                    // R-1 / A-0033: thread the entry's real Raft log id
+                    // (index + term) down to the state machine instead of
+                    // discarding it here.
+                    let ctx = ApplyContext::new(entry.log_id.index, entry.log_id.leader_id.term);
+                    self.inner
+                        .apply_with_ctx(data.as_ref(), ctx)
+                        .await
+                        .map_err(|e| io::Error::other(e.to_string()))?
+                }
                 EntryPayload::Membership(ref mem) => {
                     self.last_membership = StoredMembership::new(Some(entry.log_id), mem.clone());
                     self.persist_membership();
@@ -820,5 +826,62 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sm = make_sm_with_store(&dir.path().join("sm-snapshot.bin"));
         assert!(sm.get_current_snapshot().await.unwrap().is_none());
+    }
+
+    // ── R-1 / A-0033: ApplyContext threading ─────────────────────────────
+
+    use rr_core::types::ApplyContext;
+
+    /// State machine that records the `ApplyContext` of each `apply_with_ctx`.
+    struct CtxSM {
+        seen: std::sync::Arc<std::sync::Mutex<Vec<ApplyContext>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StateMachine for CtxSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+            Ok(entry.to_vec())
+        }
+        async fn apply_with_ctx(
+            &mut self,
+            entry: &[u8],
+            ctx: ApplyContext,
+        ) -> Result<Vec<u8>, RrError> {
+            self.seen.lock().unwrap().push(ctx);
+            Ok(entry.to_vec())
+        }
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+        async fn restore(&mut self, _snapshot: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+    }
+
+    /// R-1: `RrStateMachine::apply` must pass each entry's real Raft log id
+    /// (index + term) to the state machine instead of discarding it.
+    #[tokio::test]
+    async fn test_apply_threads_real_log_id_to_state_machine() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut sm = RrStateMachine::new(Box::new(CtxSM {
+            seen: std::sync::Arc::clone(&seen),
+        }));
+
+        // `data_entry` uses CommittedLeaderId term 1; apply indices 5 and 6.
+        apply_entries(
+            &mut sm,
+            vec![data_entry(5, b"a".to_vec()), data_entry(6, b"b".to_vec())],
+        )
+        .await;
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.as_slice(),
+            &[ApplyContext::new(5, 1), ApplyContext::new(6, 1)],
+            "each applied entry's log index + term must reach the state machine"
+        );
     }
 }

@@ -110,6 +110,7 @@ pub trait Service: Send + Sync {
 除上述四个核心方法外，`Service` 还提供以下带默认实现的方法，可按需覆盖：
 
 - `handle_with_outputs(request)`：与 `handle` 类似，但允许在请求提交后以至少一次（at-least-once）语义附带投递输出（见 ADR A-0007）。默认委托给 `handle()` 并返回空输出。
+- `handle_with_ctx(request, ctx)`（R-1 / A-0033）：在 apply 时携带该条目的真实 Raft 日志上下文 `ApplyContext { log_index, log_term }`。用于以真实 log index 作为意图记录键 / fencing 基准。默认忽略 `ctx` 并委托给 `handle()`（向后兼容）。适配器在 apply 路径实际调用的是其输出形态 `handle_with_outputs_ctx(request, ctx)`（默认委托给 `handle_with_ctx`）——因此普通服务只需覆盖 `handle_with_ctx` 即可拿到上下文；使用 Output 框架且需要上下文的服务覆盖 `handle_with_outputs_ctx`。
 - `on_leader_elected(group_id)`：当本节点成为该组的 Leader 时调用，适合启动仅 Leader 使用的资源（如挂接 Kafka ingestor、预热缓存）。默认为 no-op。
 - `on_step_down(group_id)`：当本节点卸任 Leader 时调用，适合停止仅 Leader 使用的资源。默认为 no-op。
 - `shutdown()`：在 Raft 组停止前调用，适合 flush 状态、关闭连接或释放外部资源。默认为 no-op。
@@ -119,6 +120,7 @@ pub trait Service: Send + Sync {
 Beyond the four core methods above, `Service` provides the following defaulted methods you can override as needed:
 
 - `handle_with_outputs(request)`: like `handle`, but may also emit outputs delivered at-least-once after the apply commits (see ADR A-0007). Defaults to delegating to `handle()` with empty outputs.
+- `handle_with_ctx(request, ctx)` (R-1 / A-0033): carries the entry's real Raft log context `ApplyContext { log_index, log_term }` on apply. Use it to key intent records on the true log index or as a fencing basis. Defaults to ignoring `ctx` and delegating to `handle()` (backward compatible). The adapter actually invokes its outputs form `handle_with_outputs_ctx(request, ctx)` on the apply path (default delegates to `handle_with_ctx`) — so a plain service only needs to override `handle_with_ctx` to receive the context; Output-framework services that need the context override `handle_with_outputs_ctx`.
 - `on_leader_elected(group_id)`: called when this node becomes the group's leader — the right place to start leader-only resources (e.g. attach a Kafka ingestor, pre-warm caches). Default is a no-op.
 - `on_step_down(group_id)`: called when this node steps down from leadership — the right place to stop leader-only resources. Default is a no-op.
 - `shutdown()`: called before the Raft group is stopped — flush state, close connections, or release external resources. Default is a no-op.

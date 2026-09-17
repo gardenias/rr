@@ -51,7 +51,7 @@ use rr_core::state_machine::{
     IngestorOffsetControl, OutboxControl, StateMachine, StateMachineLifecycleHook,
     StateMachineReader,
 };
-use rr_core::types::{GroupId, LogIndex};
+use rr_core::types::{ApplyContext, GroupId, LogIndex};
 
 use crate::idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
 
@@ -231,13 +231,67 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         }
     }
 
-    async fn handle_and_collect_outputs(&self, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        let result = self
-            .service
-            .read()
-            .await
-            .handle_with_outputs(payload)
-            .await?;
+    /// Shared apply body for [`StateMachine::apply`] and
+    /// [`StateMachine::apply_with_ctx`]. `ctx` is `Some` on the real Raft apply
+    /// path (the entry's log id) and `None` for direct non-context callers.
+    async fn apply_inner(&mut self, entry: &[u8], ctx: Option<ApplyContext>) -> Result<Vec<u8>, RrError> {
+        // Full-chain latency observability: this is the business-apply
+        // segment (idempotency layer + Service::handle). Combined with
+        // rr_proposal_duration_seconds (client_write total) and
+        // rr_server_request_duration_seconds (dispatch total) it closes the
+        // server-side latency budget: server ≈ routing + replication + apply.
+        let apply_started = std::time::Instant::now();
+        let (offset, idem_key, payload) = match FramedEntry::decode(entry)? {
+            Some(framed) => (framed.offset, framed.idem_key, framed.payload),
+            None => (None, None, entry.to_vec()),
+        };
+
+        let result = match idem_key {
+            None => self.handle_and_collect_outputs(payload, ctx).await,
+            Some(key) => self.apply_keyed(key, payload, ctx).await,
+        };
+
+        if result.is_ok() {
+            self.applied_count += 1;
+            // Exact applied-entries TPS source: emitted on every node per
+            // committed entry — no snapshot steps, no leader-switch gaps,
+            // unlike rate(rr_raft_last_log_index).
+            metrics::counter!(
+                "rr_raft_applied_entries_total",
+                "group_id" => self.group_id.to_string()
+            )
+            .increment(1);
+            if let Some(off) = offset {
+                self.set_latest_ingestor_offset(Some(off));
+            }
+        }
+        metrics::histogram!(
+            "rr_raft_apply_duration_seconds",
+            "group_id" => self.group_id.to_string()
+        )
+        .record(apply_started.elapsed().as_secs_f64());
+        result
+    }
+
+    async fn handle_and_collect_outputs(
+        &self,
+        payload: Vec<u8>,
+        ctx: Option<ApplyContext>,
+    ) -> Result<Vec<u8>, RrError> {
+        let result = match ctx {
+            // R-1: the apply path carries the entry's ApplyContext; the service
+            // receives it via `handle_with_outputs_ctx`.
+            Some(ctx) => {
+                self.service
+                    .read()
+                    .await
+                    .handle_with_outputs_ctx(payload, ctx)
+                    .await?
+            }
+            // Non-context callers (direct `StateMachine::apply` use) keep the
+            // legacy `handle_with_outputs` path unchanged.
+            None => self.service.read().await.handle_with_outputs(payload).await?,
+        };
         self.append_outputs(result.outputs);
         Ok(result.response)
     }
@@ -291,6 +345,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         &mut self,
         key: rr_core::idempotency::IdempotencyKey,
         payload: Vec<u8>,
+        ctx: Option<ApplyContext>,
     ) -> Result<Vec<u8>, RrError> {
         let group_id_label = self.group_id.to_string();
         match self.idempotency.decide(&key) {
@@ -342,7 +397,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
                 ApplyOutcome::Success(cached_response).encode()
             }
             IdempotencyDecision::New => {
-                let response = self.handle_and_collect_outputs(payload).await?;
+                let response = self.handle_and_collect_outputs(payload, ctx).await?;
                 self.idempotency.record(&key, response.clone());
                 metrics::gauge!(
                     "rr_idempotency_cache_size",
@@ -358,42 +413,15 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
 #[async_trait]
 impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
-        // Full-chain latency observability: this is the business-apply
-        // segment (idempotency layer + Service::handle). Combined with
-        // rr_proposal_duration_seconds (client_write total) and
-        // rr_server_request_duration_seconds (dispatch total) it closes the
-        // server-side latency budget: server ≈ routing + replication + apply.
-        let apply_started = std::time::Instant::now();
-        let (offset, idem_key, payload) = match FramedEntry::decode(entry)? {
-            Some(framed) => (framed.offset, framed.idem_key, framed.payload),
-            None => (None, None, entry.to_vec()),
-        };
+        self.apply_inner(entry, None).await
+    }
 
-        let result = match idem_key {
-            None => self.handle_and_collect_outputs(payload).await,
-            Some(key) => self.apply_keyed(key, payload).await,
-        };
-
-        if result.is_ok() {
-            self.applied_count += 1;
-            // Exact applied-entries TPS source: emitted on every node per
-            // committed entry — no snapshot steps, no leader-switch gaps,
-            // unlike rate(rr_raft_last_log_index).
-            metrics::counter!(
-                "rr_raft_applied_entries_total",
-                "group_id" => self.group_id.to_string()
-            )
-            .increment(1);
-            if let Some(off) = offset {
-                self.set_latest_ingestor_offset(Some(off));
-            }
-        }
-        metrics::histogram!(
-            "rr_raft_apply_duration_seconds",
-            "group_id" => self.group_id.to_string()
-        )
-        .record(apply_started.elapsed().as_secs_f64());
-        result
+    async fn apply_with_ctx(
+        &mut self,
+        entry: &[u8],
+        ctx: ApplyContext,
+    ) -> Result<Vec<u8>, RrError> {
+        self.apply_inner(entry, Some(ctx)).await
     }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
@@ -1062,5 +1090,95 @@ mod tests {
 
         adapter2.advance_output_watermark(1);
         assert!(adapter2.pending_outputs().is_empty());
+    }
+
+    // ── R-1 / A-0033: ApplyContext threading through the adapter ─────────
+
+    /// Service that records the `ApplyContext` it receives via `handle_with_ctx`.
+    struct CtxRecordingService {
+        seen: Arc<Mutex<Vec<rr_core::types::ApplyContext>>>,
+    }
+
+    #[async_trait]
+    impl Service for CtxRecordingService {
+        async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+            Ok(request)
+        }
+
+        async fn handle_with_ctx(
+            &self,
+            request: Vec<u8>,
+            ctx: rr_core::types::ApplyContext,
+        ) -> Result<Vec<u8>, RrError> {
+            self.seen.lock().await.push(ctx);
+            Ok(request)
+        }
+
+        fn name(&self) -> &str {
+            "ctx-recording"
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+
+        async fn restore(&mut self, _data: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+    }
+
+    /// R-1: `apply_with_ctx` must thread the entry's `ApplyContext` through the
+    /// adapter to the service's `handle_with_ctx`.
+    #[tokio::test]
+    async fn apply_with_ctx_threads_log_context_to_service() {
+        let svc = CtxRecordingService {
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        let seen = Arc::clone(&svc.seen);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let ctx = rr_core::types::ApplyContext::new(42, 3);
+        adapter.apply_with_ctx(b"req", ctx).await.unwrap();
+
+        let seen = seen.lock().await;
+        assert_eq!(
+            seen.as_slice(),
+            &[rr_core::types::ApplyContext::new(42, 3)],
+            "the service must receive the exact ApplyContext from apply_with_ctx"
+        );
+    }
+
+    /// The non-context `apply` path must not fabricate an `ApplyContext`.
+    #[tokio::test]
+    async fn apply_without_ctx_does_not_call_handle_with_ctx() {
+        let svc = CtxRecordingService {
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        let seen = Arc::clone(&svc.seen);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        adapter.apply(b"req").await.unwrap();
+        assert!(
+            seen.lock().await.is_empty(),
+            "the non-ctx apply path must not reach handle_with_ctx"
+        );
+    }
+
+    /// A keyed (idempotent) apply must also thread the context on the New branch.
+    #[tokio::test]
+    async fn apply_keyed_with_ctx_threads_context_on_new() {
+        let svc = CtxRecordingService {
+            seen: Arc::new(Mutex::new(Vec::new())),
+        };
+        let seen = Arc::clone(&svc.seen);
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        let key = rr_core::idempotency::IdempotencyKey::new("transfer", 7);
+        let entry = keyed_entry(b"req", key);
+        let ctx = rr_core::types::ApplyContext::new(9, 2);
+        adapter.apply_with_ctx(&entry, ctx).await.unwrap();
+
+        let seen = seen.lock().await;
+        assert_eq!(seen.as_slice(), &[rr_core::types::ApplyContext::new(9, 2)]);
     }
 }

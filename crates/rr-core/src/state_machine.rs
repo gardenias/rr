@@ -141,6 +141,25 @@ pub trait StateMachine: Send + Sync {
     /// returning, and `self.last_applied` must reflect the applied index.
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError>;
 
+    /// Apply a committed Raft log entry together with its [`ApplyContext`]
+    /// (R-1 / A-0033): the entry's real Raft log index and term.
+    ///
+    /// The default implementation ignores the context and delegates to
+    /// [`apply`](Self::apply), so existing state machines are unaffected.
+    /// Override this (instead of `apply`) when the state machine needs the
+    /// true log index — e.g. as an intent-record key or a fencing basis.
+    /// Implementations that override `apply_with_ctx` should make `apply`
+    /// delegate to it (or implement only `apply_with_ctx` and keep `apply`
+    /// for the non-context callers).
+    async fn apply_with_ctx(
+        &mut self,
+        entry: &[u8],
+        ctx: crate::types::ApplyContext,
+    ) -> Result<Vec<u8>, RrError> {
+        let _ = ctx;
+        self.apply(entry).await
+    }
+
     /// Create a consistent snapshot of the current state.
     ///
     /// **Must satisfy [Invariant 1](Self#invariant-1--snapshot-captures-an-atomically-consistent-view)**:

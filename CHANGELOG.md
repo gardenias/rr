@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ApplyContext` threading (R-1 / A-0033)**: the real Raft log id of each
+  applied entry (index + term) now flows from OpenRaft down to the user's
+  `Service` / `StateMachine`, instead of being discarded at the `sm_adapter`
+  boundary. This lets business logic key intent records on the true log index
+  (retiring `outbox_seq` proxies) and use it as a fencing basis.
+  - New `rr_core::types::ApplyContext { log_index, log_term }`.
+  - `Service::handle_with_ctx(request, ctx)` — the apply-context hook for
+  plain services (default delegates to `handle`, backward compatible);
+  `Service::handle_with_outputs_ctx(request, ctx)` — the ctx counterpart the
+  adapter calls on the apply path (default delegates to `handle_with_ctx`).
+  - `StateMachine::apply_with_ctx(entry, ctx)` (default delegates to `apply`,
+  backward compatible). `RrStateMachine::apply` builds the ctx from
+  `entry.log_id`; `ServiceStateMachineAdapter::apply_with_ctx` threads it to
+  the service on both the plain and idempotency-keyed paths.
+  - Tests: `sm_adapter` (real log id reaches the SM), `service_adapter`
+  (ctx reaches `handle_with_ctx`; the non-ctx path fabricates none; keyed path
+  threads ctx).
+
 - **Durable state-machine snapshots (T1 / R-P0)** — closes the restart
   data-loss wedge on the durable-log (rocks) path. `RrStateMachine` snapshots
   were previously memory-only: after snapshot → log purge → restart, the

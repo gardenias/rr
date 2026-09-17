@@ -11,6 +11,37 @@ pub type PartitionId = u64;
 /// Index of an entry in a Raft log.
 pub type LogIndex = u64;
 
+/// The Raft apply context of a single committed log entry (R-1 / A-0033).
+///
+/// Carries the entry's true Raft identity — its log index and the leader term
+/// that proposed it — from OpenRaft down to the user's `Service` /
+/// `StateMachine`. Before R-1 the framework discarded `entry.log_id` at the
+/// `sm_adapter` boundary, so business logic could not know the real log index
+/// of the entry it was applying (it relied on a local monotonically-increasing
+/// counter as a proxy, which is not a valid fencing basis and does not survive
+/// restore).
+///
+/// Uses (A-0033): intent-record keys upgraded to the real log index (retiring
+/// `outbox_seq` proxies), and as the fencing basis for leader-only side-effect
+/// drivers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct ApplyContext {
+    /// The Raft log index of the applied entry.
+    pub log_index: LogIndex,
+    /// The leader term that proposed the applied entry.
+    pub log_term: u64,
+}
+
+impl ApplyContext {
+    /// Construct an `ApplyContext` from a log index and term.
+    pub fn new(log_index: LogIndex, log_term: u64) -> Self {
+        Self {
+            log_index,
+            log_term,
+        }
+    }
+}
+
 /// Network address of a cluster node.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NodeAddr {

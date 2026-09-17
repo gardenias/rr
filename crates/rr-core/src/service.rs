@@ -15,7 +15,7 @@ use async_trait::async_trait;
 
 use crate::error::RrError;
 use crate::output::HandleResult;
-use crate::types::GroupId;
+use crate::types::{ApplyContext, GroupId};
 
 /// High-level trait for implementing a distributed service.
 ///
@@ -151,6 +151,42 @@ pub trait Service: Send + Sync {
     /// empty outputs — backward compatible.
     async fn handle_with_outputs(&self, request: Vec<u8>) -> Result<HandleResult, RrError> {
         let response = self.handle(request).await?;
+        Ok(HandleResult::from_response(response))
+    }
+
+    /// Handle an incoming client request together with its [`ApplyContext`]
+    /// (R-1 / A-0033): the entry's real Raft log index and term.
+    ///
+    /// This is the hook for logic that must key on the true log index — e.g.
+    /// intent records (retiring `outbox_seq` proxies) or leader-fencing.
+    /// The default implementation ignores the context and delegates to
+    /// [`Self::handle`], so existing services are unaffected; override it to
+    /// receive the context.
+    async fn handle_with_ctx(
+        &self,
+        request: Vec<u8>,
+        ctx: ApplyContext,
+    ) -> Result<Vec<u8>, RrError> {
+        let _ = ctx;
+        self.handle(request).await
+    }
+
+    /// Handle a request with its [`ApplyContext`] and optionally produce
+    /// outputs for delivery (R-1; the [`ApplyContext`]-carrying counterpart of
+    /// [`Self::handle_with_outputs`]).
+    ///
+    /// This is the method `rr_raft::ServiceStateMachineAdapter` calls on the
+    /// apply path. The default delegates to [`Self::handle_with_ctx`] with
+    /// empty outputs, so services that override `handle_with_ctx` (for the log
+    /// index) or plain `handle` keep working unchanged. Services using the
+    /// Output framework (ADR A-0007) that also need the context should
+    /// override this method.
+    async fn handle_with_outputs_ctx(
+        &self,
+        request: Vec<u8>,
+        ctx: ApplyContext,
+    ) -> Result<HandleResult, RrError> {
+        let response = self.handle_with_ctx(request, ctx).await?;
         Ok(HandleResult::from_response(response))
     }
 
