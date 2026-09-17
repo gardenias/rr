@@ -1077,10 +1077,18 @@ Oracle review (`bg_1d8162f6`) 找到 3 P0 + 5 P1。本 wave 修了 P0-2/P0-3/P1-
 **性质**:标准 raft 假设"重启节点不会比它 ACK 过的位置更短";IoBatcher 的
 ack-先于-flush 尾部打破该假设 → 重启降级 → 选举安全失效。**这不是选举代码的 bug,
 是存储层 durability 契约的 bug。**
-**未定点(下一步深挖口)**:node1 对 400040 的 commit 在无任何 follower 持久副本时
-如何形成(node2/node3 恢复均为 400039)——openraft `Condition::IOFlushed` 门控的
-`accepted_log_io` 与 rr batcher `io_completed` 时序需要一次带仪表的复现或 commit
-推进路径精读。
+**对照实验(2026-09-17)**:SIGKILL-under-backlog(16KiB×2000/s=32MB/s,kill leader
+12s 处,oracle 5000/5000 绿)——**裸 kill 不丢数据,io 门控表面健康**。但这不能洗清
+门控嫌疑:该实验无 backlog/无 snapshot crunch,flush 即时,"submitted 门控"与
+"flushed 门控"行为不可区分。原始失败的三要素(W5-16384 49MB/s 造积压 → 三节点
+06:42:52 同刻 snapshot build(~300MB 全量序列化,2 核 CPU 压死+内存翻倍 → 疑似
+OOM 重启波)→ 积压+重启叠加)缺一不可。
+**修正后的未定点(两个候选代码点)**:① leader 的 self-match 是否在 submit 时乐观
+推进(`update_matching` 与 raft_core 的 `Notification::LocalIO` 处理路径);
+② follower 响应门控 `Condition::IOFlushed { accepted_log_io }` 捕获的 io_id 是否
+可能对应更早的已完成 io(engine_impl.rs:617-628)。**判实验**:snapshot crunch
+期间(SIGKILL + oracle)复现,或 vendor 仪表补丁在 commit 推进处打印
+submitted-vs-flushed 差值。
 **修复方向**:① IoBatcher 队列有界+对 append 调用方背压(断"无界积压→OOM 重启波"
 链条,尾部永远 ≤bound);② 核实/加固 ack 门控(响应必须等 flush);③ 容器重启根因
 (OOM 嫌疑)单独确认。
