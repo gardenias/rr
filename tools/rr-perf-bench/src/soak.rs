@@ -149,9 +149,23 @@ pub(crate) fn decode_resp(bytes: &[u8]) -> Result<KvResponse> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AckRecord {
     pub request_id: u64,
+    /// Writer lane (idempotency namespace shard). `0` is the legacy
+    /// single-lane namespace; pre-lanes ack logs deserialize as lane 0.
+    #[serde(default)]
+    pub lane: u32,
     pub key: String,
     pub value_hash: String,
     pub ts_ms: u64,
+}
+
+/// Idempotency namespace for a lane. Lane 0 keeps the legacy bare namespace so
+/// old single-lane ack logs stay replayable; lanes ≥ 1 get a suffix.
+fn namespace_for(lane: u32) -> String {
+    if lane == 0 {
+        REQUEST_TYPE.to_string()
+    } else {
+        format!("{REQUEST_TYPE}-lane{lane}")
+    }
 }
 
 /// One periodic counters snapshot, appended to metrics.jsonl.
@@ -238,6 +252,12 @@ pub struct SoakConfig {
     pub metrics_log: Option<PathBuf>,
     pub read_probe_interval: Duration,
     pub metrics_interval: Duration,
+    /// Writer lanes: the idempotency contract requires monotonically applied
+    /// request ids within a namespace, so a single writer is closed-loop
+    /// serial (~1/RTT ≈ 134 ops/s in the lab — far below the nominal rate).
+    /// Lanes shard the namespace (`…-lane{n}`); each lane stays serial, the
+    /// aggregate reaches the configured rate. `1` = legacy behavior.
+    pub lanes: u32,
     /// Max records the oracle replays (uniform-stride sample + head/tail).
     pub oracle_sample: usize,
     /// Skip the post-load oracle (e.g. when a harness runs it separately
@@ -266,6 +286,9 @@ pub struct SoakStats {
 pub struct SoakSummary {
     pub duration_secs: u64,
     pub rate_per_sec: u32,
+    /// Writer lanes used by the load leg (1 = legacy single serial writer).
+    #[serde(default)]
+    pub lanes: u32,
     pub sent: u64,
     pub acked: u64,
     pub failed: u64,
@@ -333,19 +356,97 @@ async fn warmup(client: &RrClient, timeout: Duration, op_timeout: Duration) -> R
     }
 }
 
-/// The soak load loop: fixed-rate serial keyed writes, ack log on every Ok,
+/// Shared context for lane workers (kept cheap to clone: Arc fields only).
+#[derive(Clone)]
+struct LaneCtx {
+    client: SharedClient,
+    stats: Arc<SoakStats>,
+    latencies: Metrics,
+    ack_tx: tokio::sync::mpsc::Sender<AckRecord>,
+    op_timeout: Duration,
+    payload_size: usize,
+}
+
+/// One lane's serial keyed-writer: receives request ids, writes them in order
+/// (the idempotency contract's per-namespace monotonicity), forwards acks to
+/// the journal writer.
+async fn lane_worker(lane: u32, mut rx: tokio::sync::mpsc::Receiver<u64>, ctx: LaneCtx) {
+    let namespace = namespace_for(lane);
+    while let Some(request_id) = rx.recv().await {
+        let tick = Instant::now();
+        let value = value_for(request_id, ctx.payload_size);
+        let put = encode_req(&KvRequest::Put {
+            key: key_for(request_id),
+            value: value.clone(),
+        });
+        let key = IdempotencyKey::with_client_id(namespace.clone(), request_id, CLIENT_ID);
+        let write = tokio::time::timeout(
+            ctx.op_timeout,
+            ctx.client.send_request_idempotent(PARTITION_ID, put, key),
+        )
+        .await;
+        match write {
+            Ok(Ok(resp)) => {
+                // The Put response shape is fixed (value: None); a decodable
+                // response proves the apply path ran.
+                match decode_resp(&resp) {
+                    Ok(_) => {
+                        ctx.stats.acked.fetch_add(1, Ordering::Relaxed);
+                        ctx.latencies.record(tick.elapsed(), true);
+                        if ctx
+                            .ack_tx
+                            .send(AckRecord {
+                                request_id,
+                                lane,
+                                key: key_for(request_id),
+                                value_hash: value_hash(&value),
+                                ts_ms: now_ms(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::error!("ack writer gone — lane {lane} stopping");
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                        ctx.latencies.record(tick.elapsed(), false);
+                        tracing::warn!(request_id, error = %e, "soak write response undecodable");
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                // Expected during fault windows: not acked, nothing owed.
+                ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                ctx.latencies.record(tick.elapsed(), false);
+                static LOGGED: AtomicU64 = AtomicU64::new(0);
+                if LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
+                    tracing::warn!(request_id, error = %e, "soak write failed (sampled)");
+                }
+            }
+            Err(_) => {
+                // Op deadline exceeded (a wedged RPC mid-transfer): counts as
+                // failed — never acked — and the loop continues.
+                ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                ctx.latencies.record(tick.elapsed(), false);
+                static LOGGED_TO: AtomicU64 = AtomicU64::new(0);
+                if LOGGED_TO.fetch_add(1, Ordering::Relaxed) < 5 {
+                    tracing::warn!(request_id, "soak write op deadline exceeded (sampled)");
+                }
+            }
+        }
+    }
+}
+
+/// The soak load loop: fixed-rate paced schedule, executed by `cfg.lanes`
+/// serial writer lanes (see SoakConfig::lanes), ack log on every Ok,
 /// periodic read probes and metrics records.
 pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<SoakSummary> {
     warmup(&client, Duration::from_secs(60), cfg.op_timeout).await?;
     let started_wall_unix = crate::prom::now_unix_secs();
 
     let stats = Arc::new(SoakStats::default());
-    let mut ack_log = Journal::create(&cfg.ack_log)?;
-    let mut metrics_log = match &cfg.metrics_log {
-        Some(p) => Some(Journal::create(p)?),
-        None => None,
-    };
-
     let latencies = Metrics::new();
     let interval = Duration::from_secs_f64(1.0 / f64::from(cfg.rate_per_sec.max(1)));
     let started = Instant::now();
@@ -356,65 +457,50 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
     let mut last_metrics_acked = 0u64;
     let mut last_metrics_at = started;
 
+    // Single journal writer task: keeps per-record fdatasync off the lanes.
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<AckRecord>(65536);
+    let ack_path = cfg.ack_log.clone();
+    let ack_writer = tokio::task::spawn_blocking(move || -> Result<usize> {
+        let mut journal = Journal::create(&ack_path)?;
+        let mut n = 0usize;
+        while let Some(record) = ack_rx.blocking_recv() {
+            journal.append(&record).context("ack log append failed — run is invalid")?;
+            n += 1;
+        }
+        Ok(n)
+    });
+
+    let mut metrics_log = match &cfg.metrics_log {
+        Some(p) => Some(Journal::create(p)?),
+        None => None,
+    };
+
+    let lanes = cfg.lanes.max(1);
+    let mut lane_txs = Vec::with_capacity(lanes as usize);
+    let mut lane_handles = Vec::with_capacity(lanes as usize);
+    for lane in 0..lanes {
+        // 1024-deep per lane ≈ 16s of slack at default 2000/s × 32 lanes;
+        // a fuller queue backpressures the driver (honest lag, no silent drop).
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        lane_txs.push(tx);
+        let ctx = LaneCtx {
+            client: client.clone(),
+            stats: Arc::clone(&stats),
+            latencies: latencies.clone(),
+            ack_tx: ack_tx.clone(),
+            op_timeout: cfg.op_timeout,
+            payload_size: cfg.payload_size,
+        };
+        lane_handles.push(tokio::spawn(lane_worker(lane, rx, ctx)));
+    }
+
+    let mut scheduled = started;
     while Instant::now() < deadline {
-        let tick = Instant::now();
         request_id += 1;
         stats.sent.fetch_add(1, Ordering::Relaxed);
-
-        let value = value_for(request_id, cfg.payload_size);
-        let put = encode_req(&KvRequest::Put {
-            key: key_for(request_id),
-            value: value.clone(),
-        });
-        let key = IdempotencyKey::with_client_id(REQUEST_TYPE, request_id, CLIENT_ID);
-        let write = tokio::time::timeout(
-            cfg.op_timeout,
-            client.send_request_idempotent(PARTITION_ID, put, key),
-        )
-        .await;
-        match write {
-            Ok(Ok(resp)) => {
-                // The Put response shape is fixed (value: None); a decodable
-                // response proves the apply path ran.
-                match decode_resp(&resp) {
-                    Ok(_) => {
-                        stats.acked.fetch_add(1, Ordering::Relaxed);
-                        latencies.record(tick.elapsed(), true);
-                        ack_log
-                            .append(&AckRecord {
-                                request_id,
-                                key: key_for(request_id),
-                                value_hash: value_hash(&value),
-                                ts_ms: now_ms(),
-                            })
-                            .context("ack log append failed — run is invalid")?;
-                    }
-                    Err(e) => {
-                        stats.failed.fetch_add(1, Ordering::Relaxed);
-                        latencies.record(tick.elapsed(), false);
-                        tracing::warn!(request_id, error = %e, "soak write response undecodable");
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                // Expected during fault windows: not acked, nothing owed.
-                stats.failed.fetch_add(1, Ordering::Relaxed);
-                latencies.record(tick.elapsed(), false);
-                static LOGGED: AtomicU64 = AtomicU64::new(0);
-                if LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
-                    tracing::warn!(request_id, error = %e, "soak write failed (sampled)");
-                }
-            }
-            Err(_) => {
-                // Op deadline exceeded (a wedged RPC mid-transfer): counts as
-                // failed — never acked — and the loop continues.
-                stats.failed.fetch_add(1, Ordering::Relaxed);
-                latencies.record(tick.elapsed(), false);
-                static LOGGED_TO: AtomicU64 = AtomicU64::new(0);
-                if LOGGED_TO.fetch_add(1, Ordering::Relaxed) < 5 {
-                    tracing::warn!(request_id, "soak write op deadline exceeded (sampled)");
-                }
-            }
+        let lane = (request_id % u64::from(lanes)) as usize;
+        if lane_txs[lane].send(request_id).await.is_err() {
+            anyhow::bail!("lane {lane} died mid-run — run is invalid");
         }
 
         let now = Instant::now();
@@ -432,9 +518,21 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
                     }
                     Ok(r) => {
                         stats.reads_failed.fetch_add(1, Ordering::Relaxed);
+                        // Embed the actual bytes (not just a tracing field) so a
+                        // flake recurrence is diagnosable from the log alone.
+                        let head = r
+                            .value
+                            .as_ref()
+                            .map(|v| {
+                                v.iter()
+                                    .take(24)
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<String>()
+                            })
+                            .unwrap_or_default();
                         tracing::warn!(
-                            value_len = r.value.as_ref().map(|v| v.len()),
-                            "soak probe read returned wrong value"
+                            "soak probe read returned wrong value: len={:?} head={head}",
+                            r.value.as_ref().map(|v| v.len()),
                         );
                     }
                     Err(e) => {
@@ -472,16 +570,33 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
             next_metrics = now + cfg.metrics_interval;
         }
 
-        let elapsed = tick.elapsed();
-        if elapsed < interval {
-            tokio::time::sleep(interval - elapsed).await;
+        scheduled += interval;
+        let now = Instant::now();
+        if scheduled > now {
+            tokio::time::sleep_until(scheduled.into()).await;
         }
+        // Behind schedule: don't yield hard, just keep going (soak is a
+        // stability workload, not a saturation probe; lag is visible in
+        // window_tps of the metrics journal).
     }
 
-    let records = read_ack_log(&cfg.ack_log)?.len();
+    // Drain: stop feeding, let lanes finish in-flight ops (bounded by
+    // op_timeout), then close the journal writer.
+    drop(lane_txs);
+    let grace = cfg.op_timeout + Duration::from_secs(5);
+    for handle in lane_handles {
+        let _ = tokio::time::timeout(grace, handle).await;
+    }
+    drop(ack_tx);
+    let records = ack_writer
+        .await
+        .context("ack writer task panicked")?
+        .context("ack writer failed")?;
+
     Ok(SoakSummary {
         duration_secs: started.elapsed().as_secs(),
         rate_per_sec: cfg.rate_per_sec,
+        lanes,
         sent: stats.sent.load(Ordering::Relaxed),
         acked: stats.acked.load(Ordering::Relaxed),
         failed: stats.failed.load(Ordering::Relaxed),
@@ -615,7 +730,8 @@ async fn verify_one(
         key: record.key.clone(),
         value: probe_value_for(record.request_id, payload_size),
     });
-    let key = IdempotencyKey::with_client_id(REQUEST_TYPE, record.request_id, CLIENT_ID);
+    let key =
+        IdempotencyKey::with_client_id(namespace_for(record.lane), record.request_id, CLIENT_ID);
     let evicted = match client
         .send_request_idempotent(PARTITION_ID, probe, key)
         .await
@@ -683,6 +799,19 @@ mod tests {
     }
 
     #[test]
+    fn lane_namespace_mapping_and_legacy_compat() {
+        assert_eq!(namespace_for(0), REQUEST_TYPE);
+        assert_eq!(namespace_for(3), format!("{REQUEST_TYPE}-lane3"));
+
+        // Pre-lanes ack logs (no `lane` field) deserialize as lane 0, mapping
+        // back to the legacy bare namespace.
+        let legacy = r#"{"request_id":7,"key":"soak:00000007","value_hash":"x","ts_ms":1}"#;
+        let record: AckRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(record.lane, 0);
+        assert_eq!(namespace_for(record.lane), REQUEST_TYPE);
+    }
+
+    #[test]
     fn journal_roundtrip() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("ack.jsonl");
@@ -691,6 +820,7 @@ mod tests {
             for i in 1..=3u64 {
                 j.append(&AckRecord {
                     request_id: i,
+                    lane: 0,
                     key: key_for(i),
                     value_hash: value_hash(&value_for(i, 32)),
                     ts_ms: now_ms(),
@@ -708,6 +838,7 @@ mod tests {
         let records: Vec<AckRecord> = (1..=10_000u64)
             .map(|i| AckRecord {
                 request_id: i,
+                lane: 0,
                 key: key_for(i),
                 value_hash: String::new(),
                 ts_ms: 0,

@@ -142,6 +142,12 @@ struct Args {
     #[arg(long, default_value = "10")]
     read_probe_secs: u64,
 
+    /// [soak] Writer lanes (idempotency namespace shards). A single writer is
+    /// closed-loop serial (~1/RTT, far below the nominal rate); lanes keep
+    /// per-namespace monotonicity while the aggregate reaches --rate.
+    #[arg(long, default_value = "32")]
+    lanes: u32,
+
     /// [soak] Seconds between metrics-journal records.
     #[arg(long, default_value = "300")]
     metrics_snapshot_secs: u64,
@@ -591,6 +597,7 @@ async fn main() -> Result<()> {
             metrics_log: args.metrics_log.clone(),
             read_probe_interval: Duration::from_secs(args.read_probe_secs),
             metrics_interval: Duration::from_secs(args.metrics_snapshot_secs),
+            lanes: args.lanes,
             oracle_sample: args.oracle_sample,
             skip_oracle: args.no_oracle || args.oracle_only,
             op_timeout: Duration::from_secs(args.op_timeout_secs),
@@ -614,6 +621,7 @@ async fn main() -> Result<()> {
             soak_summary = Some(soak::SoakSummary {
                 duration_secs: 0,
                 rate_per_sec: args.rate,
+                lanes: args.lanes,
                 sent: 0,
                 acked: 0,
                 failed: 0,
