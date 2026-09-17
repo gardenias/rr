@@ -190,6 +190,33 @@ pub trait Service: Send + Sync {
         Ok(HandleResult::from_response(response))
     }
 
+    /// Handle a request with its [`ApplyContext`], returning a
+    /// [`DeferredHandleResult`] that may defer (park) the client response
+    /// (R-2 / A-0033 deferred response).
+    ///
+    /// This is the two-phase-apply hook: return
+    /// [`DeferredHandleResult::Pending`] to park the client's response under a
+    /// `correlation_id`, and have a later command's apply return
+    /// [`DeferredHandleResult::Complete`] to deliver it. Return
+    /// [`DeferredHandleResult::Immediate`] for the normal single-phase path.
+    ///
+    /// The default delegates to [`Self::handle_with_outputs_ctx`] and wraps it
+    /// in `Immediate`, so existing services (plain `handle`, `handle_with_ctx`,
+    /// or the Output framework) behave exactly as before — deferral is opt-in.
+    /// Services that want two-phase responses override this method.
+    ///
+    /// Note: deferred responses do **not** compose with the framework's
+    /// idempotency-key layer (a parked response cannot be cached); services
+    /// using deferral key their dedup in application state (A-0033 `client_oid`).
+    async fn handle_deferred(
+        &self,
+        request: Vec<u8>,
+        ctx: ApplyContext,
+    ) -> Result<crate::deferred::DeferredHandleResult, RrError> {
+        let result = self.handle_with_outputs_ctx(request, ctx).await?;
+        Ok(crate::deferred::DeferredHandleResult::Immediate(result))
+    }
+
     /// Return the name of this service (used for identification and logging).
     fn name(&self) -> &str;
 

@@ -96,6 +96,10 @@ pub struct RrClient {
     retry_config: RetryConfig,
     tls_config: Option<TlsConfig>,
     bearer_token: Option<String>,
+    /// Optional per-request timeout applied to a single gRPC `request` attempt
+    /// (R-2 / A-0033 "超时映射"). `None` (default) = unbounded wait, preserving
+    /// prior behavior. See [`RrClientBuilder::with_request_timeout`].
+    request_timeout_ms: Option<u64>,
 }
 
 /// Builder for [`RrClient`] with optional TLS and bearer-token configuration.
@@ -118,6 +122,7 @@ pub struct RrClientBuilder {
     tls_config: Option<TlsConfig>,
     bearer_token: Option<String>,
     strict_security: bool,
+    request_timeout_ms: Option<u64>,
 }
 
 impl RrClientBuilder {
@@ -129,6 +134,7 @@ impl RrClientBuilder {
             tls_config: None,
             bearer_token: None,
             strict_security: false,
+            request_timeout_ms: None,
         }
     }
 
@@ -154,6 +160,18 @@ impl RrClientBuilder {
     /// Override the default retry configuration.
     pub fn with_retry_config(mut self, cfg: RetryConfig) -> Self {
         self.retry_config = cfg;
+        self
+    }
+
+    /// Bound each single gRPC `request` attempt to `timeout` (R-2 / A-0033
+    /// "超时映射"). When a response is deferred (R-2 two-phase apply), the
+    /// client's gRPC call parks until the `Complete` arrives; this timeout
+    /// maps that wait to a retryable [`NetworkError::Timeout`] instead of an
+    /// unbounded hang (safe under business-key idempotency — at-least-once +
+    /// dedup, per A-0033). Set it for `respMode=full`-style callers that park
+    /// on deferred responses. Omit to keep the default unbounded wait.
+    pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.request_timeout_ms = Some(timeout.as_millis() as u64);
         self
     }
 
@@ -209,6 +227,7 @@ impl RrClientBuilder {
             retry_config: self.retry_config,
             tls_config: self.tls_config,
             bearer_token: self.bearer_token,
+            request_timeout_ms: self.request_timeout_ms,
         })
     }
 }
@@ -597,7 +616,41 @@ impl RrClient {
                 Err(e) => return Err(e),
             };
 
-            match grpc_client.request(tonic_req).await {
+            // R-2 / A-0033 "超时映射": bound a single request attempt. A deferred
+            // (two-phase) response parks this call; the timeout maps that wait to
+            // a retryable NetworkError::Timeout instead of an unbounded hang.
+            let request_future = grpc_client.request(tonic_req);
+            let request_outcome = match self.request_timeout_ms {
+                Some(ms) => match tokio::time::timeout(
+                    std::time::Duration::from_millis(ms),
+                    request_future,
+                )
+                .await
+                {
+                    Ok(res) => res,
+                    Err(_elapsed) => {
+                        tracing::warn!(
+                            attempt,
+                            group_id,
+                            timeout_ms = ms,
+                            "request attempt timed out (deferred response not completed in time)"
+                        );
+                        self.remove_cached_leader(group_id).await;
+                        last_error = Some(RrError::Network(NetworkError::Timeout));
+                        if attempt + 1 < max_attempts {
+                            let delay_ms = self
+                                .retry_config
+                                .retry_delay_ms
+                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                        continue;
+                    }
+                },
+                None => request_future.await,
+            };
+
+            match request_outcome {
                 Ok(response) => {
                     let resp = response.into_inner();
 

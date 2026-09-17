@@ -42,6 +42,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
 use rr_core::error::RrError;
+use rr_core::deferred::{DeferredApply, DeferredHandleResult};
 use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::{FramedSnapshot, IngestorState, OutboxState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
@@ -231,10 +232,17 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         }
     }
 
-    /// Shared apply body for [`StateMachine::apply`] and
-    /// [`StateMachine::apply_with_ctx`]. `ctx` is `Some` on the real Raft apply
-    /// path (the entry's log id) and `None` for direct non-context callers.
-    async fn apply_inner(&mut self, entry: &[u8], ctx: Option<ApplyContext>) -> Result<Vec<u8>, RrError> {
+    /// Shared apply body for [`StateMachine::apply`],
+    /// [`StateMachine::apply_with_ctx`], and [`StateMachine::apply_deferred`].
+    /// `ctx` is `Some` on the real Raft apply path and `None` for direct
+    /// non-context callers. `deferred` selects the two-phase dispatch
+    /// (`Service::handle_deferred`) used by the canonical Raft apply path.
+    async fn apply_entry(
+        &mut self,
+        entry: &[u8],
+        ctx: Option<ApplyContext>,
+        deferred: bool,
+    ) -> Result<DeferredApply, RrError> {
         // Full-chain latency observability: this is the business-apply
         // segment (idempotency layer + Service::handle). Combined with
         // rr_proposal_duration_seconds (client_write total) and
@@ -246,9 +254,30 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             None => (None, None, entry.to_vec()),
         };
 
-        let result = match idem_key {
-            None => self.handle_and_collect_outputs(payload, ctx).await,
-            Some(key) => self.apply_keyed(key, payload, ctx).await,
+        let result: Result<DeferredApply, RrError> = match idem_key {
+            Some(key) => {
+                // rr-idempotency-keyed entries always resolve immediately (a
+                // parked response cannot be cached); deferral + rr-idem-key is
+                // unsupported (services key dedup in app state, A-0033).
+                match self.apply_keyed(key, payload, ctx).await {
+                    Ok(resp) => Ok(DeferredApply::Immediate(resp)),
+                    Err(e) => Err(e),
+                }
+            }
+            None => {
+                if deferred {
+                    let ctx = ctx.expect("deferred apply always carries an ApplyContext");
+                    match self.service.read().await.handle_deferred(payload, ctx).await {
+                        Ok(dhr) => Ok(self.map_deferred_result(dhr)),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    match self.handle_and_collect_outputs(payload, ctx).await {
+                        Ok(resp) => Ok(DeferredApply::Immediate(resp)),
+                        Err(e) => Err(e),
+                    }
+                }
+            }
         };
 
         if result.is_ok() {
@@ -271,6 +300,27 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         )
         .record(apply_started.elapsed().as_secs_f64());
         result
+    }
+
+    /// Map a service-level [`DeferredHandleResult`] to the adapter-level
+    /// [`DeferredApply`], collecting any outputs into the outbox.
+    fn map_deferred_result(&self, dhr: DeferredHandleResult) -> DeferredApply {
+        match dhr {
+            DeferredHandleResult::Immediate(hr) => {
+                self.append_outputs(hr.outputs);
+                DeferredApply::Immediate(hr.response)
+            }
+            DeferredHandleResult::Pending { correlation_id } => {
+                DeferredApply::Pending { correlation_id }
+            }
+            DeferredHandleResult::Complete { completions, result } => {
+                self.append_outputs(result.outputs);
+                DeferredApply::Complete {
+                    completions,
+                    response: result.response,
+                }
+            }
+        }
     }
 
     async fn handle_and_collect_outputs(
@@ -413,7 +463,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
 #[async_trait]
 impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
-        self.apply_inner(entry, None).await
+        Ok(self.apply_entry(entry, None, false).await?.into_response())
     }
 
     async fn apply_with_ctx(
@@ -421,7 +471,18 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
         entry: &[u8],
         ctx: ApplyContext,
     ) -> Result<Vec<u8>, RrError> {
-        self.apply_inner(entry, Some(ctx)).await
+        Ok(self
+            .apply_entry(entry, Some(ctx), false)
+            .await?
+            .into_response())
+    }
+
+    async fn apply_deferred(
+        &mut self,
+        entry: &[u8],
+        ctx: ApplyContext,
+    ) -> Result<DeferredApply, RrError> {
+        self.apply_entry(entry, Some(ctx), true).await
     }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {

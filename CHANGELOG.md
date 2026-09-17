@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deferred (two-phase) response (R-2 / A-0033)**: an apply may now park the
+  client response and have a later entry's apply deliver it — the framework
+  capability behind intent-sourcing / two-phase apply. Per the 2026-09-17
+  narrowing, this is **opt-in per request** and serves "wait for the result"
+  (`respMode=full`) semantics; the `ack` style (return at phase-1 commit,
+  outcome via the event stream) does not use it.
+  - New `rr_core::deferred`: `DeferredHandleResult` (service-level:
+  `Immediate` / `Pending{correlation_id}` / `Complete{completions, result}`)
+  and `DeferredApply` (state-machine-level), with `CorrelationId = u64`
+  (the phase-1 log index, via R-1 `ApplyContext`, is the natural value).
+  - `Service::handle_deferred(request, ctx)` — the two-phase hook (default
+  wraps `handle_with_outputs_ctx` in `Immediate`, backward compatible);
+  `StateMachine::apply_deferred(entry, ctx)` (default wraps `apply_with_ctx`).
+  - `RrStateMachine` owns the client responders: `Pending` parks the entry's
+  responder in an in-memory per-node registry keyed by `correlation_id`;
+  `Complete` delivers the parked bytes and answers the completing entry's own
+  client. Parked responders are never snapshotted; dropping them (stop /
+  restart) errors the held `client_write` so the client retries.
+  - `rr-client`: new `RrClientBuilder::with_request_timeout(d)` — bounds a
+  single gRPC attempt, mapping a never-completed deferred wait to a retryable
+  `NetworkError::Timeout` ("超时映射"). Default stays unbounded (unchanged).
+  - Tests: `group_manager` end-to-end (`Pending` parks the `client_write`,
+  `Complete` delivers it); integration `test_deferred_response_client_timeout_mapping`
+  (parked response maps to `NetworkError::Timeout`; immediate path unaffected).
+
 - **`ApplyContext` threading (R-1 / A-0033)**: the real Raft log id of each
   applied entry (index + term) now flows from OpenRaft down to the user's
   `Service` / `StateMachine`, instead of being discarded at the `sm_adapter`

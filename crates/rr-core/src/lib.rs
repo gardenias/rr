@@ -46,6 +46,7 @@
 
 pub mod codec;
 pub mod config;
+pub mod deferred;
 pub mod error;
 pub mod framed_entry;
 pub mod framed_snapshot;
@@ -62,6 +63,7 @@ pub mod types;
 
 pub use codec::{BincodeCodec, Codec};
 pub use config::{ConfigProvider, RoutingTableChange};
+pub use deferred::{CompletedResponse, CorrelationId, DeferredApply, DeferredHandleResult};
 pub use error::{
     CodecError, ConfigError, NetworkError, RaftError, RouterError, RrError, StorageError,
 };

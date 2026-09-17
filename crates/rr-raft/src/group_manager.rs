@@ -1503,10 +1503,135 @@ mod tests {
         assert!(result.is_ok(), "write failed: {:?}", result.err());
     }
 
+    // ── R-2 / A-0033: deferred (two-phase) response ──────────────────────
+
+    /// A service whose `handle_deferred` parks the response for `defer` and
+    /// completes it for `complete`, mimicking the intent/feedback two-phase
+    /// flow (the completing command learns the correlation id out-of-band, the
+    /// way an effector learns the intent_seq from the committed intent).
+    struct DeferredEchoService {
+        last_pending: Arc<std::sync::Mutex<Option<u64>>>,
+    }
+
+    #[async_trait]
+    impl Service for DeferredEchoService {
+        async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+            Ok(request)
+        }
+
+        async fn handle_deferred(
+            &self,
+            request: Vec<u8>,
+            ctx: rr_core::types::ApplyContext,
+        ) -> Result<rr_core::deferred::DeferredHandleResult, RrError> {
+            use rr_core::deferred::{CompletedResponse, DeferredHandleResult};
+            use rr_core::output::HandleResult;
+            Ok(match request.as_slice() {
+                b"defer" => {
+                    *self.last_pending.lock().unwrap() = Some(ctx.log_index);
+                    DeferredHandleResult::Pending {
+                        correlation_id: ctx.log_index,
+                    }
+                }
+                b"complete" => {
+                    let cid = self
+                        .last_pending
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("a pending intent was recorded");
+                    DeferredHandleResult::Complete {
+                        completions: vec![CompletedResponse {
+                            correlation_id: cid,
+                            response: b"done".to_vec(),
+                        }],
+                        result: HandleResult::from_response(b"ack".to_vec()),
+                    }
+                }
+                _ => DeferredHandleResult::Immediate(HandleResult::from_response(request)),
+            })
+        }
+
+        fn name(&self) -> &str {
+            "deferred-echo"
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+
+        async fn restore(&mut self, _data: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+    }
+
+    /// R-2: a `Pending` apply parks the client (its `client_write` stays open);
+    /// a later `Complete` apply delivers the held response bytes.
+    #[tokio::test]
+    async fn test_deferred_response_parks_then_completes() {
+        let last_pending = Arc::new(std::sync::Mutex::new(None));
+        let lp = Arc::clone(&last_pending);
+        let factory: StateMachineFactory = Box::new(move |gid| {
+            Box::new(ServiceStateMachineAdapter::new(
+                gid,
+                DeferredEchoService {
+                    last_pending: Arc::clone(&lp),
+                },
+            ))
+        });
+        let mgr = RaftGroupManager::new(1, factory);
+        mgr.start_group(1).await.unwrap();
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        mgr.init_cluster(1, members).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+        // Fire the deferred write without awaiting it — it should park.
+        let raft = mgr.get_raft(1).await.unwrap();
+        let defer_handle =
+            tokio::spawn(async move { raft.client_write(b"defer".to_vec().into()).await });
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        assert!(
+            !defer_handle.is_finished(),
+            "a Pending apply must leave the client_write open (parked)"
+        );
+
+        // The completing write delivers the parked response.
+        let raft2 = mgr.get_raft(1).await.unwrap();
+        let complete_resp = raft2
+            .client_write(b"complete".to_vec().into())
+            .await
+            .unwrap();
+        assert_eq!(
+            complete_resp.data.as_ref(),
+            b"ack",
+            "the completing entry's own client gets its immediate response"
+        );
+
+        let defer_resp = tokio::time::timeout(tokio::time::Duration::from_secs(5), defer_handle)
+            .await
+            .expect("the parked client_write must be delivered after Complete")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            defer_resp.data.as_ref(),
+            b"done",
+            "the parked client must receive the Complete response bytes"
+        );
+        mgr.stop_group(1).await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_set_ingestor_offset_updates_adapter_control() {
         let mgr = RaftGroupManager::new(1, offset_capable_factory());
         mgr.start_group(1).await.unwrap();
+
+
 
         mgr.set_ingestor_offset(1, Some(123)).await.unwrap();
         let raw = mgr

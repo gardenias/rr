@@ -17,6 +17,7 @@ use openraft::StoredMembership;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
+use rr_core::deferred::DeferredApply;
 use rr_core::state_machine::StateMachine;
 use rr_core::types::ApplyContext;
 
@@ -48,6 +49,15 @@ pub struct RrStateMachine {
     /// restart recovers the snapshotted state instead of silently rebuilding
     /// an empty state machine after the log prefix is purged.
     snapshot_store: Option<SnapshotStore>,
+    /// R-2 / A-0033 deferred response: client responders parked by a
+    /// `DeferredApply::Pending` apply, keyed by `correlation_id`, completed by
+    /// a later `DeferredApply::Complete`. In-memory only (a parked responder
+    /// is a live client wait); dropped on stop/restart, which errors the held
+    /// `client_write` so the client retries — it is never snapshotted.
+    pending_deferred: std::collections::HashMap<
+        rr_core::deferred::CorrelationId,
+        openraft::storage::ApplyResponder<RrTypeConfig>,
+    >,
 }
 
 impl RrStateMachine {
@@ -62,6 +72,7 @@ impl RrStateMachine {
             snapshot_idx: 0,
             membership_sidecar: None,
             snapshot_store: None,
+            pending_deferred: std::collections::HashMap::new(),
         }
     }
 
@@ -244,30 +255,63 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         Strm: Stream<Item = Result<EntryResponder<RrTypeConfig>, io::Error>> + Send + Unpin,
     {
         while let Some(item) = entries.next().await {
-            let (entry, responder) = item?;
+            let (entry, mut responder) = item?;
             self.last_applied = Some(entry.log_id);
 
-            let response = match entry.payload {
-                EntryPayload::Blank => Vec::new(),
-                EntryPayload::Normal(ref data) => {
-                    // R-1 / A-0033: thread the entry's real Raft log id
-                    // (index + term) down to the state machine instead of
-                    // discarding it here.
-                    let ctx = ApplyContext::new(entry.log_id.index, entry.log_id.leader_id.term);
-                    self.inner
-                        .apply_with_ctx(data.as_ref(), ctx)
-                        .await
-                        .map_err(|e| io::Error::other(e.to_string()))?
+            match entry.payload {
+                EntryPayload::Blank => {
+                    if let Some(r) = responder.take() {
+                        r.send(Vec::new().into());
+                    }
                 }
                 EntryPayload::Membership(ref mem) => {
                     self.last_membership = StoredMembership::new(Some(entry.log_id), mem.clone());
                     self.persist_membership();
-                    Vec::new()
+                    if let Some(r) = responder.take() {
+                        r.send(Vec::new().into());
+                    }
                 }
-            };
-
-            if let Some(responder) = responder {
-                responder.send(response.into());
+                EntryPayload::Normal(ref data) => {
+                    // R-1/R-2 / A-0033: thread the entry's real log id (R-1) and
+                    // drive the two-phase (deferred) apply dispatch (R-2).
+                    let ctx = ApplyContext::new(entry.log_id.index, entry.log_id.leader_id.term);
+                    let effect = self
+                        .inner
+                        .apply_deferred(data.as_ref(), ctx)
+                        .await
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    match effect {
+                        DeferredApply::Immediate(bytes) => {
+                            if let Some(r) = responder.take() {
+                                r.send(bytes.into());
+                            }
+                        }
+                        DeferredApply::Pending { correlation_id } => {
+                            // R-2: park this entry's client responder under the
+                            // correlation id; a later `Complete` delivers the
+                            // response. On a follower (no responder) there is
+                            // nothing to park.
+                            if let Some(r) = responder.take() {
+                                self.pending_deferred.insert(correlation_id, r);
+                            }
+                        }
+                        DeferredApply::Complete {
+                            completions,
+                            response,
+                        } => {
+                            for completion in completions {
+                                if let Some(r) =
+                                    self.pending_deferred.remove(&completion.correlation_id)
+                                {
+                                    r.send(completion.response.into());
+                                }
+                            }
+                            if let Some(r) = responder.take() {
+                                r.send(response.into());
+                            }
+                        }
+                    }
+                }
             }
         }
 

@@ -160,6 +160,25 @@ pub trait StateMachine: Send + Sync {
         self.apply(entry).await
     }
 
+    /// Apply a committed Raft log entry with its [`ApplyContext`], returning a
+    /// [`DeferredApply`] that may defer (park) the client response (R-2 /
+    /// A-0033 deferred response).
+    ///
+    /// This is the canonical apply entry point used by `RrStateMachine`. The
+    /// default delegates to [`apply_with_ctx`](Self::apply_with_ctx) and wraps
+    /// the response in [`DeferredApply::Immediate`], so existing state machines
+    /// behave exactly as before — deferral is opt-in. Override this (via
+    /// `rr_raft::ServiceStateMachineAdapter` and `Service::handle_deferred`) to
+    /// park and later complete client responses.
+    async fn apply_deferred(
+        &mut self,
+        entry: &[u8],
+        ctx: crate::types::ApplyContext,
+    ) -> Result<crate::deferred::DeferredApply, RrError> {
+        let response = self.apply_with_ctx(entry, ctx).await?;
+        Ok(crate::deferred::DeferredApply::Immediate(response))
+    }
+
     /// Create a consistent snapshot of the current state.
     ///
     /// **Must satisfy [Invariant 1](Self#invariant-1--snapshot-captures-an-atomically-consistent-view)**:

@@ -62,6 +62,7 @@ impl Output {
 }
 
 /// Return value of Service::handle_with_outputs().
+#[derive(Debug, Clone)]
 pub struct HandleResult {
     /// Response bytes sent back to the original caller.
     pub response: Vec<u8>,

@@ -1255,6 +1255,114 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// R-2 / A-0033 "超时映射": a deferred (parked) response that never completes
+    /// must surface to the client as a retryable `NetworkError::Timeout`, not an
+    /// unbounded hang. A normal (immediate) request on the same cluster succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_deferred_response_client_timeout_mapping() {
+        use rr_client::RrClientBuilder;
+        use rr_core::deferred::DeferredHandleResult;
+        use rr_core::error::{NetworkError, RrError};
+        use rr_core::output::HandleResult;
+        use rr_core::service::Service;
+        use rr_core::types::ApplyContext;
+        use rr_raft::ServiceStateMachineAdapter;
+
+        // Parks "park" forever; answers everything else immediately.
+        struct ParkService;
+        #[async_trait::async_trait]
+        impl Service for ParkService {
+            async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+                Ok(request)
+            }
+            async fn handle_deferred(
+                &self,
+                request: Vec<u8>,
+                ctx: ApplyContext,
+            ) -> Result<DeferredHandleResult, RrError> {
+                Ok(if request.as_slice() == b"park" {
+                    DeferredHandleResult::Pending {
+                        correlation_id: ctx.log_index,
+                    }
+                } else {
+                    DeferredHandleResult::Immediate(HandleResult::from_response(request))
+                })
+            }
+            fn name(&self) -> &str {
+                "park"
+            }
+            async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+                Ok(vec![])
+            }
+            async fn restore(&mut self, _data: &[u8]) -> Result<(), RrError> {
+                Ok(())
+            }
+        }
+
+        let factory: StateMachineFactory =
+            Box::new(|gid| Box::new(ServiceStateMachineAdapter::new(gid, ParkService)));
+
+        // Single-node harness with a known address.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        drop(listener);
+
+        let provider = Arc::new(MemConfigProvider::new());
+        provider
+            .add_partition(1, PartitionConfig::SingleId(1), 1, vec![1])
+            .await;
+        provider
+            .add_node(1, rr_core::types::NodeAddr { addr: addr.clone() })
+            .await;
+        let provider_dyn: Arc<dyn ConfigProvider> = provider.clone();
+
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
+        let mgr = Arc::new(RaftGroupManager::new_with_network(1, factory, pool));
+        let router = Arc::new(ShardRouter::new(Arc::clone(&provider_dyn)));
+        let lookup = Arc::new(RaftGroupLookupImpl::new(Arc::clone(&mgr)));
+        let dispatch = Arc::new(ClientDispatchImpl::new(Arc::clone(&mgr), router));
+        let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
+        let config = NodeConfig::new(1, addr.clone(), storage, provider_dyn, echo_factory())
+            .with_group_manager(Arc::clone(&mgr))
+            .with_raft_lookup(lookup)
+            .with_client_dispatch(dispatch)
+            .with_allow_insecure(true);
+        let node = Arc::new(RrNode::new(config).unwrap());
+        node.start().await.unwrap();
+
+        let mut members = BTreeMap::new();
+        members.insert(1u64, BasicNode { addr: addr.clone() });
+        node.group_manager().init_cluster(1, members).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Client with a short per-request timeout and a single attempt.
+        let client = RrClientBuilder::new(vec![addr.clone()])
+            .with_retry_config(RetryConfig {
+                max_retries: 0,
+                retry_delay_ms: 50,
+            })
+            .with_request_timeout(Duration::from_millis(400))
+            .build()
+            .await
+            .unwrap();
+
+        // The parked request must fail with NetworkError::Timeout (mapped), not hang.
+        let err = client
+            .send_request(1, b"park".to_vec())
+            .await
+            .expect_err("a parked response must map to a timeout error");
+        assert!(
+            matches!(err, RrError::Network(NetworkError::Timeout)),
+            "expected NetworkError::Timeout, got: {err:?}"
+        );
+
+        // A normal (immediate) request succeeds — the cluster is healthy.
+        let resp = client.send_request(1, b"hello".to_vec()).await.unwrap();
+        assert_eq!(resp, b"hello");
+
+        node.shutdown().await.unwrap();
+    }
+
     /// T23d — Client leader failover: kill leader, cluster elects new one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_client_leader_failover() {
