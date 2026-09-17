@@ -1056,14 +1056,34 @@ Oracle review (`bg_1d8162f6`) 找到 3 P0 + 5 P1。本 wave 修了 P0-2/P0-3/P1-
 
 ---
 
-## 🔴 开放项(2026-09-17 立案):罕见一致性 flake
+## 🔴 开放项(2026-09-17 深挖):选举安全级 INV-1——重启降级 → 陈旧多数派 → 已提交数据被毁
 
-lanes 化后 soak 压力 ×15(134→2000/s),smoke W9 曾以 ~1/4 率出现真实 INV-1
-(acked write 读回 None,伴随选举风暴 T31→T36/1s + TransferLeader 失败;禁 snapshot
-则绿,快照全开近 3 连绿)。疑似 openraft churn×snapshot 竞态家族(A-0015 相邻),
-vendor patch #1/#2 未排除嫌疑但无实证。**复现配方**:`WORKLOADS=w9 scripts/prod-perf.sh
---smoke`(循环跑)。下次出现时日志流+oracle 已可取证。首轮矩阵 W9 红的探针
-wrong-value 与本次 INV-1 是否同源未知。
+**复现配方**:`scripts/prod-perf.sh --smoke`(全档;~1/4 率,归档 20260917-143506-ed6e9f9)。
+**已实证的失败解剖**(全部来自流式日志 + 取证 dump):
+1. soak 中三节点于 ~45s 内相继重启(node1/node2 于 06:43:00 同一波,node3 于 06:43:36;
+  死因疑似 OOM 未坐实)——重启前日志戛然而止于 snapshot build(06:42:52)。
+2. node1(时任 T27 leader)重启恢复:`get_initial_state ... last_log_id: T27-N1.400039`
+  ——**持久日志比客户端已 ACK 的位置(400040,即 write#1)短一条**;node2 同波恢复同为
+  400039。即 **acked/committed 写(400040)在任何节点都不持久**(IoBatcher 异步
+  尾部在死亡前未落盘;为何落后 ~8s 未 flush:疑似 snapshot build+2000/s 下 batcher
+  被饿死,fsync 队列积压无界——无背压)。
+3. node3(last_log 400039,落后 1 条)于 06:42:56 竞选 T28:重启后的 node1(400039)
+  因 recency 相等而授予,node3+node1 = 2/3 **陈旧多数派当选**(node2 拒,无效)。
+4. node3 的空白条目(T28)覆盖 400040 → **已提交写在最后的持有处被截断** → oracle
+  INV-1(读回 None)。
+5. **membership sidecar 经受住实战**:重启恢复 membership 完整(index 0 已被 purge,
+  sidecar 仍给出 {1,2,3})——上轮修复在此闭环验证。
+
+**性质**:标准 raft 假设"重启节点不会比它 ACK 过的位置更短";IoBatcher 的
+ack-先于-flush 尾部打破该假设 → 重启降级 → 选举安全失效。**这不是选举代码的 bug,
+是存储层 durability 契约的 bug。**
+**未定点(下一步深挖口)**:node1 对 400040 的 commit 在无任何 follower 持久副本时
+如何形成(node2/node3 恢复均为 400039)——openraft `Condition::IOFlushed` 门控的
+`accepted_log_io` 与 rr batcher `io_completed` 时序需要一次带仪表的复现或 commit
+推进路径精读。
+**修复方向**:① IoBatcher 队列有界+对 append 调用方背压(断"无界积压→OOM 重启波"
+链条,尾部永远 ≤bound);② 核实/加固 ack 门控(响应必须等 flush);③ 容器重启根因
+(OOM 嫌疑)单独确认。
 
 ## 未完成 / 需要重做 / Open Work
 
