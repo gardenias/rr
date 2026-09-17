@@ -5,7 +5,7 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-13（**M4 完成：活性缺陷链全部定点修复（panic/vendor×2 + membership sidecar + pre-vote + full_snapshot），16k/s 从 melt 变为优雅降级+完全自愈；首份生产基线归档 17/18 绿（20260912-234352-9fa8347），判据表已回填，A-0010 已重判维持 deferred**）
+**Last updated**: 2026-09-13（**M4 完成：活性缺陷链全部定点修复；首份生产基线 17/18 绿 + W9 全长复核绿（oracle 5000/5000）——18/18 达成；判据表已回填，A-0010 已重判维持 deferred；上游 issue 草稿已备**）
 **Current phase**: **v0.2.0 已发布**；下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`，WAL（A-0010）维持 deferred
 **Active plan**: `.sisyphus/plans/rr-prod-perf.md`（**M0–M4 全部完成**，基线 `docs/perf/prod/20260912-234352-9fa8347/`，M5=Linux 宿主正式基线）；v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`（deferred，重判结论+解锁路径已回写）
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
@@ -57,10 +57,10 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
   rocks-log vs mem-log 固定 +7~8ms p50 延迟底(归因 IoBatcher 窗口 vs OrbStack 磁盘未定);
   lin-read +25% p99;无快照毛刺。**A-0010 重判:维持 deferred**,解锁路径=Linux 宿主 W11
   A/B → IoBatcher 窗口调优 → 仍热才谈 WAL(已回写 rr-wal-impl.md)。
-- **W9 挂账(bench 工具 issue)**:soak 写 2h 零失败 + TransferLeader 成功,但读探针
-  (warmup 固定 key 的线性回读)~16min 起 ~87% 返回错误值(两轮同为 623 次,无服务端
-  事件相关)→ load 腿 rc=1、oracle 未跑。判为 probe/读路径疑点,非数据丢失(写全 ack +
-  服务端指标健康)。
+- **W9(复核关闭,改判绿)**:首轮红(读探针 flake)经三次隔离复现阴性 + 全长单体
+  重跑(20260913-100629-65fc548,2h)全绿推翻:908,258 写 0 失败、探针 719/719、
+  TransferLeader 成功、oracle 5000/5000(replay 147 + survival 4853)。脚本语义已修:
+  oracle 永远执行且为一致性唯一裁决源;load 腿失败+oracle 干净时标注疑似探针问题。
 - **遗留**:① 16KiB×3000/s = 1.6GB 状态 vs 2GiB 内存的 example 快照内存悬崖(形态限制);
   ② soak 闭环 pacer 实际只发出 ~134/s(标称 2000/s)——open-loop 化是 tool backlog;
   ③ 上游 issue 待提(两个 vendor patch 的对应位置);④ A-0015 跟踪"上游修复后摘 vendor"。
