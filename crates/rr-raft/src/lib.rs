@@ -21,6 +21,7 @@ pub mod output_runner;
 pub mod raft_node;
 pub mod service_adapter;
 pub mod sm_adapter;
+pub mod snapshot_store;
 pub mod tcp_transport;
 pub mod type_config;
 
@@ -53,5 +54,6 @@ pub use network_factory::GrpcRaftNetwork;
 pub use raft_node::RaftNode;
 pub use service_adapter::ServiceStateMachineAdapter;
 pub use sm_adapter::RrStateMachine;
+pub use snapshot_store::SnapshotStore;
 pub use tcp_transport::{TcpConnectionPool, TcpRaftNetwork, TcpRaftNetworkFactory};
 pub use type_config::RrTypeConfig;

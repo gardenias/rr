@@ -249,7 +249,7 @@ Raft 协议保证：
 |---|---|---|---|
 | Raft 日志 | `raft_log` | Strict: fsync/batch；ReplicatedOnly: WAL only | IoBatcher 写入；snapshot 后被 purge |
 | Raft 元数据 | `metadata` | 每次写 fsync | vote / last_purged（写入频率极低）|
-| 业务快照 | 仅内存（`RrStateMachine` 内的 `snapshot_bytes`） | 不落盘；`get_current_snapshot()` 每次从用户 `Service` 重新捕获 | openraft 管理；用于 InstallSnapshot；重启后状态机靠日志重放恢复 |
+| 业务快照 | 内存缓存 + rocks 模式落盘 `sm-snapshot.bin` | rocks 模式原子落盘（tmp→fsync→rename） | openraft 管理；用于 InstallSnapshot + 重启恢复；mem 模式仅内存 |
 
 ### IoBatcher Group Commit 效果
 

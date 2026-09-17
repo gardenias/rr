@@ -65,7 +65,7 @@ LAYOUT_WITH_LEGEND()
 
 | External | Role |
 | :--- | :--- |
-| **RocksDB Data Dir** | Per-group persistent Raft log storage (`{base_path}/{group_id}`, one independent RocksDB per group). Not a separate process — a library embedded in the node writing to local disk. **Caveat**: the stock `rr-server` binary always uses in-memory raft-log storage (`RaftGroupManager::new_with_network`); RocksDB raft-log persistence is currently exercised only by integration tests. Shown here for deployment clarity. |
+| **RocksDB Data Dir** | Per-group persistent Raft log, vote, and SM-snapshot storage (`{base_path}/{group_id}`, one independent RocksDB per group, plus `sm-snapshot.bin`). Not a separate process — a library embedded in the node writing to local disk. Wired by the stock `rr-server --storage rocks` (ADR A-0016 + T1); `--storage mem` keeps everything in-memory. |
 | **Prometheus** | Optional metrics scraper |
 | **External ConfigProvider** | Optional production source of routing table (vs. in-process `MemConfigProvider` used in dev/tests) |
 

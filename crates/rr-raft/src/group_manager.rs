@@ -1685,4 +1685,181 @@ mod tests {
         assert!(recovered >= committed, "log must survive restart via shim");
         mgr2.stop_group(1).await.unwrap();
     }
+
+    // ── T1 / R-P0 acceptance: snapshot persisted → recovered after purge+restart ──
+
+    /// A state machine that concatenates applied payloads; `snapshot`/`restore`
+    /// round-trips that state. Every `restore()` payload is recorded in a shared
+    /// log so the test can prove the post-restart SM was rebuilt from the
+    /// persisted snapshot (and with what bytes).
+    #[cfg(feature = "rocks")]
+    struct RecorderSM {
+        state: Vec<u8>,
+        restores: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    #[cfg(feature = "rocks")]
+    #[async_trait]
+    impl StateMachine for RecorderSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+            self.state.extend_from_slice(entry);
+            Ok(entry.to_vec())
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(self.state.clone())
+        }
+
+        async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError> {
+            self.state = snapshot.to_vec();
+            self.restores.lock().unwrap().push(snapshot.to_vec());
+            Ok(())
+        }
+
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+    }
+
+    /// Build a fresh factory on each call (factories aren't `Clone`), with all
+    /// produced SMs sharing one `restores` log across manager restarts.
+    #[cfg(feature = "rocks")]
+    fn recorder_factory(restores: Arc<std::sync::Mutex<Vec<Vec<u8>>>>) -> StateMachineFactory {
+        Box::new(move |_group_id| {
+            Box::new(RecorderSM {
+                state: Vec::new(),
+                restores: Arc::clone(&restores),
+            })
+        })
+    }
+
+    /// Poll until the node's snapshot metric covers at least `min_index`.
+    #[cfg(feature = "rocks")]
+    async fn wait_snapshot_index(mgr: &RaftGroupManager, group: u64, min_index: u64) -> u64 {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(raft) = mgr.get_raft(group).await {
+                if let Some(snap) = raft.metrics().borrow_watched().snapshot {
+                    if snap.index >= min_index {
+                        return snap.index;
+                    }
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for snapshot index >= {min_index}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// T1 acceptance ("快照落盘并可从磁盘恢复"): with a durable snapshot
+    /// persisted, a restart whose Raft log was purged up to the snapshot point
+    /// recovers the state machine from disk — the snapshot is the only
+    /// surviving copy of that state, so this fails without the T1 fix.
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_restart_recovers_state_from_persisted_snapshot() {
+        use crate::rocks_log_storage::RocksLogStorage;
+        use openraft::storage::RaftLogStorage;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("raft-log").to_string_lossy().into_owned();
+        let snap_file = tmp.path().join("raft-log/1/sm-snapshot.bin");
+
+        let restores = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+
+        // ── Phase 1: single-node rocks group, write A,B,C, snapshot, stop ──
+        let mgr = RaftGroupManager::new(1, recorder_factory(Arc::clone(&restores)))
+            .with_rocks_base_path(base.clone());
+        mgr.start_group(1).await.unwrap();
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        mgr.init_cluster(1, members).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+        for payload in [b"A".to_vec(), b"B".to_vec(), b"C".to_vec()] {
+            mgr.write(1, payload).await.unwrap();
+        }
+        // membership(1) + A,B,C(2,3,4) ⇒ frontier 4.
+        let frontier = wait_last_log_index(&mgr, 1, 4).await;
+
+        // Force a snapshot covering the full frontier and wait until OpenRaft
+        // reports it. The T1 persist hook writes `{base}/1/sm-snapshot.bin`.
+        let raft = mgr.get_raft(1).await.unwrap();
+        raft.trigger().snapshot().await.unwrap();
+        let snap_index = wait_snapshot_index(&mgr, 1, frontier).await;
+        assert_eq!(snap_index, frontier, "snapshot must cover the full frontier");
+        assert!(
+            snap_file.exists(),
+            "T1: snapshot must be persisted to disk at {}",
+            snap_file.display()
+        );
+        assert!(
+            restores.lock().unwrap().is_empty(),
+            "phase 1 is a fresh start; no restore may happen before a restart"
+        );
+        mgr.stop_group(1).await.unwrap();
+
+        // ── Simulate the production post-snapshot purge: drive the storage's
+        //    own `purge` (the exact op OpenRaft's PurgeLog command issues) to
+        //    remove every entry the snapshot covers, so the snapshot becomes
+        //    the ONLY surviving copy of the "ABC" state. ──
+        {
+            use openraft::vote::leader_id_adv::CommittedLeaderId;
+            use openraft::vote::RaftLeaderId;
+            let mut log = RocksLogStorage::open(&format!("{base}/1")).unwrap();
+            let purge_id = openraft::LogId::new(CommittedLeaderId::new(1, 1), frontier);
+            log.purge(purge_id).await.unwrap();
+            let state = log.get_log_state().await.unwrap();
+            assert_eq!(
+                state.last_purged_log_id.map(|id| id.index),
+                Some(frontier),
+                "the covered log prefix must be purged, leaving the snapshot as the only copy"
+            );
+            log.close().await.unwrap();
+            drop(log);
+        }
+
+        // ── Phase 2: restart on the same base path. Raft::new →
+        //    restore_from_snapshot must install the persisted snapshot into the
+        //    fresh (empty) SM, recovering "ABC" despite the purged log. ──
+        let mgr2 = RaftGroupManager::new(1, recorder_factory(Arc::clone(&restores)))
+            .with_rocks_base_path(base);
+        mgr2.start_group(1).await.unwrap();
+
+        // install_snapshot runs inside Raft::new, so by the time start_group
+        // returns the restore has been applied to the inner SM.
+        let restored = restores.lock().unwrap().clone();
+        assert_eq!(
+            restored,
+            vec![b"ABC".to_vec()],
+            "restart must restore the SM from the persisted snapshot (log was purged)"
+        );
+
+        // The recovered node is functional: it re-elects and accepts new writes.
+        let mut members2 = BTreeMap::new();
+        members2.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        // initialize() returns NotAllowed/AlreadyInitialized on a recovered
+        // node — tolerate both (membership was restored from the snapshot).
+        let _ = mgr2.init_cluster(1, members2).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+        mgr2.write(1, b"D".to_vec()).await.unwrap();
+        let recovered_frontier = wait_last_log_index(&mgr2, 1, frontier + 1).await;
+        assert!(
+            recovered_frontier > frontier,
+            "recovered node must keep appending after snapshot recovery"
+        );
+        mgr2.stop_group(1).await.unwrap();
+    }
 }

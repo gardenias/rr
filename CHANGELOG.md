@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Durable state-machine snapshots (T1 / R-P0)** — closes the restart
+  data-loss wedge on the durable-log (rocks) path. `RrStateMachine` snapshots
+  were previously memory-only: after snapshot → log purge → restart, the
+  covered state was gone and the node silently rebuilt an empty state machine
+  (and could serve that empty snapshot to lagging peers). Now, on the rocks
+  path (`RaftGroupManager::with_rocks_base_path` / `rr-server --storage
+  rocks`), every built or installed snapshot is persisted atomically
+  (write → fsync → rename) to `{base_path}/{group_id}/sm-snapshot.bin` via the
+  new `snapshot_store::SnapshotStore`, and `get_current_snapshot()` serves the
+  persisted snapshot during the startup-recovery window so OpenRaft's
+  `StorageHelper::restore_from_snapshot` re-installs it before replaying the
+  un-purged log tail.
+  - Persist is **fail-closed**: a snapshot that cannot be written aborts the
+  build/install, so OpenRaft never purges a log prefix that has no durable
+  snapshot behind it. A present-but-corrupt snapshot file fails node startup
+  loudly instead of restarting empty.
+  - `get_current_snapshot()` only serves the persisted snapshot while the
+  state machine is still behind it (`last_applied < snapshot.last_log_id`);
+  once caught up it re-captures live state, so follower catch-up and the
+  ingestor-offset seeding path (`fetch_snapshot_bytes`) are unchanged.
+  - New public API: `rr_raft::snapshot_store::SnapshotStore` and
+    `RrStateMachine::with_snapshot_store` (wired automatically by
+    `RaftNode::new_with_rocks_factory`).
+  - Tests: `snapshot_store` unit tests (round-trip, atomic overwrite,
+    monotonic guard, corrupt fail-closed, torn-tmp ignored); `sm_adapter`
+    restart-recovery unit tests; and the acceptance test
+    `group_manager::tests::test_restart_recovers_state_from_persisted_snapshot`
+    (write → snapshot → purge the covered log → restart → SM recovered from
+    disk, verified by an independent restore observer).
+
 - **Durable Raft log in production binaries (ADR A-0016)**: the Raft log is
   no longer memory-only outside tests. `RaftGroupManager` gained
   `with_rocks_base_path(path)` (feature `rocks`): `start_group` now selects

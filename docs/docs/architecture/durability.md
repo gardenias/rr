@@ -101,19 +101,19 @@ CLI: `--durability strict|replicated_only|test_only` (env `RR_DURABILITY`).
 
 - **`mem` 模式**：每个 Raft 组一个独立的内存 `RrLogStorage`（`crates/rr-raft/src/log_storage.rs:57`，内部 `BTreeMap<u64, Entry>`）。进程重启后日志、vote、元数据全部丢失。
 - **`rocks` 模式**：每个 Raft 组一个**独立的 RocksDB 实例**，路径 `{base_path}/{group_id}`（`crates/rr-raft/src/group_manager.rs:1071`）。组与组之间不共享 DB 句柄——单组的 compaction / 故障不影响其他组。
-- **列族**：`raft_log`（日志条目，大端序 index 作 key 保证范围扫描有序）、`metadata`（**只有两个键**：`vote` 与 `last_purged`，`crates/rr-raft/src/rocks_log_storage.rs:41-44`；快照元数据不落盘）、`state_machine`（经 `StorageEngine` 的用户数据）。
+- **列族**：`raft_log`（日志条目，大端序 index 作 key 保证范围扫描有序）、`metadata`（`vote`、`last_purged` 等键，`crates/rr-raft/src/rocks_log_storage.rs:41-44`）、`state_machine`（经 `StorageEngine` 的用户数据）。**SM 快照不再走内存**——它经 `snapshot_store::SnapshotStore` 原子落盘到 `{base_path}/{group_id}/sm-snapshot.bin`（见下「快照」节）。
 
 ---
 
 - **mem mode**: each Raft group gets its own in-memory `RrLogStorage` (`crates/rr-raft/src/log_storage.rs:57`, a `BTreeMap<u64, Entry>` inside). Log, vote, and metadata are all lost on process restart.
 - **rocks mode**: each Raft group gets an **independent RocksDB instance** at `{base_path}/{group_id}` (`crates/rr-raft/src/group_manager.rs:1071`). Groups share no DB handle — one group's compaction or failure does not affect the others.
-- **Column families**: `raft_log` (entries keyed by big-endian index so range scans stay ordered), `metadata` (**exactly two keys**: `vote` and `last_purged`, `crates/rr-raft/src/rocks_log_storage.rs:41-44`; snapshot metadata is not persisted), `state_machine` (user data via `StorageEngine`).
+- **Column families**: `raft_log` (entries keyed by big-endian index so range scans stay ordered), `metadata` (keys such as `vote` and `last_purged`, `crates/rr-raft/src/rocks_log_storage.rs:41-44`), `state_machine` (user data via `StorageEngine`). **SM snapshots no longer live only in memory** — they are persisted atomically to `{base_path}/{group_id}/sm-snapshot.bin` via `snapshot_store::SnapshotStore` (see "Snapshots" below).
 
 ## 快照 / Snapshots
 
 快照由 openraft 的 `SnapshotPolicy::LogsSinceLast(N)` 在 apply 路径内自动触发（`crates/rr-raft/src/raft_node.rs:74`）——每追加 N 条日志触发一次。**默认 N = 50_000**（`rr-raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST`），可用 `NodeConfig::snapshot_logs_since_last` / `--snapshot-logs-since-last` / `RR_SNAPSHOT_LOGS_SINCE_LAST` 覆盖（ADR A-0008 的取舍：N 越小恢复时重放越短，但快照开销越频繁）。
 
-**快照是纯内存的。** `RrStateMachine` 把快照字节缓存在 `snapshot_bytes: Vec<u8>`（`crates/rr-raft/src/sm_adapter.rs:30`）；`get_current_snapshot()` **每次调用都重新调用用户 `Service::snapshot()` 捕获**（`sm_adapter.rs:176-198`），不存在"从磁盘读回快照"的路径。快照的唯一传输方向是 leader → follower 的 `InstallSnapshot` 流式 RPC。
+**rocks 模式下快照持久化落盘（T1/R-P0）。** 每个构建或安装的快照都经 `rr_raft::snapshot_store::SnapshotStore` 原子写入（写 tmp → fsync 文件 → rename → fsync 目录）到 `{base_path}/{group_id}/sm-snapshot.bin`，由 `RaftNode::new_with_rocks_factory` 自动接线。重启时 `get_current_snapshot()` 在**启动恢复窗口**（`last_applied < snapshot.last_log_id`，即 SM 尚未追平快照）返回该持久化快照，openraft 的 `StorageHelper::restore_from_snapshot` 据此重装，再重放未清理的日志尾部；SM 追平后 `get_current_snapshot()` 回到对活跃状态的实时捕获（follower 追赶与 ingestor offset 播种路径行为不变）。持久化是 fail-closed 的：写盘失败即中止快照构建/安装——openraft 绝不会在快照未落盘前 purge 对应日志前缀；快照文件损坏则节点启动响亮失败（绝不静默从空状态重启）。**mem 模式不变**：快照仍只在内存，重启即丢。
 
 快照构建是 fail-closed 的（ADR A-0011 C6）：要么拿到 `Service::snapshot()` 成功产生的完整字节，要么不存在——绝不会有"空字节 + 合法 meta"的快照。构建失败计入 `rr_snapshot_build_failures_total` 指标。
 
@@ -121,25 +121,27 @@ CLI: `--durability strict|replicated_only|test_only` (env `RR_DURABILITY`).
 
 Snapshots are triggered inside the apply path by openraft's `SnapshotPolicy::LogsSinceLast(N)` (`crates/rr-raft/src/raft_node.rs:74`) — one snapshot every N appended entries. **N defaults to 50_000** (`rr-raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST`) and can be overridden via `NodeConfig::snapshot_logs_since_last` / `--snapshot-logs-since-last` / `RR_SNAPSHOT_LOGS_SINCE_LAST` (the ADR A-0008 trade-off: smaller N shortens recovery replay but pays snapshot cost more often).
 
-**Snapshots are memory-only.** `RrStateMachine` caches snapshot bytes in `snapshot_bytes: Vec<u8>` (`crates/rr-raft/src/sm_adapter.rs:30`); `get_current_snapshot()` **re-captures from the user `Service::snapshot()` on every call** (`sm_adapter.rs:176-198`) — there is no "read snapshot back from disk" path. The only direction a snapshot travels is leader → follower via the streaming `InstallSnapshot` RPC.
+**In rocks mode snapshots are persisted to disk (T1/R-P0).** Every built or installed snapshot is written atomically (write tmp → fsync file → rename → fsync dir) to `{base_path}/{group_id}/sm-snapshot.bin` via `rr_raft::snapshot_store::SnapshotStore`, wired automatically by `RaftNode::new_with_rocks_factory`. On restart, `get_current_snapshot()` serves the persisted snapshot during the **startup-recovery window** (`last_applied < snapshot.last_log_id`, i.e. the SM has not caught up to it yet), so openraft's `StorageHelper::restore_from_snapshot` re-installs it before replaying the un-purged log tail; once the SM catches up, `get_current_snapshot()` returns to re-capturing live state (follower catch-up and the ingestor-offset seeding path are unchanged). Persistence is fail-closed: a write failure aborts the snapshot build/install — OpenRaft never purges a log prefix that has no durable snapshot behind it — and a corrupt snapshot file fails node startup loudly (never a silent empty restart). **Mem mode is unchanged**: snapshots stay in-memory and are lost on restart.
 
 Snapshot building is fail-closed (ADR A-0011 C6): a snapshot is either complete bytes from a successful `Service::snapshot()` or it does not exist — never "empty bytes + valid meta". Build failures increment the `rr_snapshot_build_failures_total` counter.
 
 ### 恢复契约 / The recovery contract
 
 :::warning 每个 Service 实现者都必须理解 / Every Service implementor must understand this
-快照**无法在进程重启后存活**。重启恢复 = openraft 从持久化日志（rocks 模式）重放 + vote 恢复；快照只在节点**在线**时用于 leader → follower 同步。因此：
+在 **rocks 模式**下，快照已随日志、vote 一同持久化，因此**重启后状态机可以幸存**：openraft 启动时用持久化的快照（`sm-snapshot.bin`）恢复 SM 到快照点，再重放未清理的日志尾部；持久化的 membership sidecar（`sm-membership.bin`）保住已提交成员关系。kill -9 重启后状态幸存（有验收单测锁定）。在 **mem 模式**下，一切仍在内存，重启即丢。因此：
 
-- rocks 模式 + 日志未被清理：重启后状态机由**日志重放**重建，无需任何快照。
-- 日志已清理（purge）且本地状态落后：唯一出路是 `rr-admin node-reset` 清空后作为 learner 重新加入，从集群快照传输追赶（ADR A-0002 恢复路径 case 4）。
-- **如果你需要超出 Raft 日志本身的持久性，你的 `Service` 必须自行持久化业务数据**（自己的数据库、自己的文件）。框架的 `snapshot()`/`restore()` 契约是"从字节重建内存视图"，不是"替你落盘"。
+- rocks 模式：重启后状态机由**持久化快照 + 日志尾部重放**重建；快照点之前的状态来自快照，之后来自日志。
+- rocks 模式但快照与日志都不可用（数据目录损坏、人为清空）：唯一出路是 `rr-admin node-reset` 清空后作为 learner 重新加入，从集群快照传输追赶（ADR A-0002 恢复路径 case 4）。
+- mem 模式：重启 = 状态全丢，只能靠重新加入集群从 leader 同步。
+- **如果你需要超出 Raft 日志 + 快照本身的持久性（如独立审计、跨集群），你的 `Service` 仍应自行持久化业务数据**。框架的 `snapshot()`/`restore()` 契约是"从字节重建内存视图"，框架负责把这份字节在 rocks 模式下落盘，但不替你做业务级备份。
 :::
 
-Snapshots **do not survive a process restart**. Restart recovery = openraft replays the persisted log (rocks mode) + restores the vote; snapshots exist only for leader → follower synchronization while nodes are **online**. Therefore:
+In **rocks mode**, snapshots are persisted alongside the log and vote, so **the state machine survives a restart**: on startup openraft restores the SM to the snapshot point from the persisted snapshot (`sm-snapshot.bin`), then replays the un-purged log tail; the persisted membership sidecar (`sm-membership.bin`) preserves the committed membership. kill -9 restart survival is covered by an acceptance unit test. In **mem mode** everything stays in memory and is lost on restart. Therefore:
 
-- rocks mode with the log intact: the state machine is rebuilt by **log replay** after restart, no snapshot involved.
-- Log purged and local state behind: the only way out is `rr-admin node-reset` (wipe), rejoin as a learner, and catch up via snapshot transfer from the cluster (ADR A-0002 recovery flow, case 4).
-- **If you need durability beyond the Raft log itself, your `Service` must persist its own business data** (its own database, its own files). The framework's `snapshot()`/`restore()` contract is "rebuild an in-memory view from bytes", not "persist on your behalf".
+- rocks mode: after restart the state machine is rebuilt from the **persisted snapshot + log-tail replay** — pre-snapshot state from the snapshot, post-snapshot state from the log.
+- rocks mode but both snapshot and log are unusable (corrupt or wiped data dir): the only way out is `rr-admin node-reset`, rejoin as a learner, and catch up via snapshot transfer from the cluster (ADR A-0002 recovery flow, case 4).
+- mem mode: restart = total state loss; the node can only re-sync from the leader by rejoining.
+- **If you need durability beyond the Raft log + snapshot itself (independent audit, cross-cluster), your `Service` should still persist its own business data.** The framework's `snapshot()`/`restore()` contract is "rebuild an in-memory view from bytes"; the framework persists those bytes on the rocks path, but it is not a business-level backup.
 
 ### FramedSnapshot 信封 / The FramedSnapshot envelope
 
@@ -214,15 +216,15 @@ Accidental quorum loss on the shrink path is backstopped by the membership guard
 ## 现状说明与务实建议 / Honest status & what to do today
 
 :::warning rocks 模式当前的接线状态 / Current wiring status of rocks mode
-**官方 rr-server 二进制目前不会把 Raft 日志接入 RocksDB**：无论 `--storage` 选什么，组管理器始终走 `RaftGroupManager::new_with_network`（内存日志）；`--storage rocks` 打开的 `RocksStorage` 只落入 `NodeConfig.storage_engine`，该字段当前**没有消费者**（`crates/rr-server/src/main.rs:125-169, 315-350`）。RocksDB 日志持久化目前只在集成测试（`new_with_rocks` / `start_group_rocks`）中生效，或由库使用方自行接线。这一限制与 [storage.md](./storage.md) 中的说明一致。
+**`rr-server --storage rocks` 现已把 Raft 日志、vote 与 SM 快照全部接入 RocksDB**：`--storage rocks` 时组管理器追加 `with_rocks_base_path("{data_dir}/raft-log")`（`crates/rr-server/src/main.rs`，ADR A-0016），`start_group` 据此在 `{data_dir}/raft-log/{group_id}` 打开独立的 `RocksLogStorage`，并经 `RaftNode::new_with_rocks_factory` 自动接上快照持久化（`sm-snapshot.bin`）与 membership sidecar。`--storage mem` 行为不变（全内存）。注意 `NodeConfig.storage_engine` 字段仍是**无消费者的遗留字段**——持久化按组经 `with_rocks_base_path` / `--storage rocks` 后端开关驱动，不经该字段。
 :::
 
-**The stock rr-server binary does not wire Raft logs to RocksDB today**: regardless of `--storage`, the group manager always goes through `RaftGroupManager::new_with_network` (in-memory log); the `RocksStorage` opened by `--storage rocks` only lands in `NodeConfig.storage_engine`, which currently has **no consumer** (`crates/rr-server/src/main.rs:125-169, 315-350`). RocksDB log persistence currently takes effect only in integration tests (`new_with_rocks` / `start_group_rocks`), or when library users wire it themselves. This mirrors the note in [storage.md](./storage.md).
+**`rr-server --storage rocks` now wires the Raft log, vote, and SM snapshot into RocksDB**: with `--storage rocks` the group manager gets `with_rocks_base_path("{data_dir}/raft-log")` (`crates/rr-server/src/main.rs`, ADR A-0016), so `start_group` opens an independent `RocksLogStorage` at `{data_dir}/raft-log/{group_id}` and `RaftNode::new_with_rocks_factory` automatically attaches snapshot persistence (`sm-snapshot.bin`) and the membership sidecar. `--storage mem` is unchanged (all in-memory). Note the `NodeConfig.storage_engine` field remains a **vestigial field with no consumer** — persistence is driven per-group via `with_rocks_base_path` / the `--storage rocks` backend flag, not via that field.
 
 在此基础上，生产用户的务实建议：
 
-1. **把"重启 = 状态丢失"当作默认假设**，除非你在 `Service` 里自行持久化业务数据并能从它重建。这是当前二进制下最重要的一条。
-2. **库用户**：现在就通过 `RaftGroupManager::new_with_rocks` + `start_group_rocks` 接线 RocksDB 日志（集成测试已覆盖该路径），并始终使用 `DurabilityPolicy::Strict`。
+1. **rocks 模式下重启状态可幸存**（日志 + vote + 快照均落盘）；**mem 模式下"重启 = 状态丢失"仍是默认假设**。按部署形态选择后端；需要跨重启的业务都应跑 `--storage rocks`。
+2. **库用户**：经 `RaftGroupManager::new_with_network(...)` / `new_with_tcp_network(...)` + `with_rocks_base_path(...)` 接线 durable 日志 + 快照（集成测试已覆盖），并始终使用 `DurabilityPolicy::Strict`。
 3. **合理设置 `--snapshot-logs-since-last`**：默认 50_000 在 100k ops/s 下约每 500ms 一次快照；调小可缩短崩溃后的日志重放，代价是更频繁的快照序列化。
 4. **关机前先 drain**：`rr-admin node drain`（或停机流程中的 `DrainNode`）把 leader 转走；退役节点用 `rr-admin node decommission`，不要直接 `change_membership` 缩到 1 voter。
 5. **定期备份**：在线用 `OnlineBackup`（每 group 快照）；需要整目录归档时按滚动流程（转 leader → SIGTERM → `rr-admin backup` → 重启）做离线备份，并校验 SHA-256。
@@ -233,8 +235,8 @@ Accidental quorum loss on the shrink path is backstopped by the membership guard
 
 On top of that, practical guidance for production users:
 
-1. **Treat "restart = state loss" as the default assumption** unless your `Service` persists its own business data and can rebuild from it. This is the single most important point under the current binary.
-2. **Library users**: wire RocksDB log storage now via `RaftGroupManager::new_with_rocks` + `start_group_rocks` (the path is covered by integration tests), and always use `DurabilityPolicy::Strict`.
+1. **In rocks mode, state survives a restart** (log + vote + snapshot all durable); **in mem mode "restart = state loss" is still the default assumption**. Choose the backend per deployment; anything that must survive a restart should run `--storage rocks`.
+2. **Library users**: wire durable log + snapshot via `RaftGroupManager::new_with_network(...)` / `new_with_tcp_network(...)` + `with_rocks_base_path(...)` (covered by integration tests), and always use `DurabilityPolicy::Strict`.
 3. **Tune `--snapshot-logs-since-last`**: the default 50_000 snapshots roughly every 500ms at 100k ops/s; lowering it shortens post-crash log replay at the cost of more frequent snapshot serialization.
 4. **Drain before shutdown**: `rr-admin node drain` (or `DrainNode` in your stop procedure) moves leadership away; retire nodes with `rr-admin node decommission` instead of shrinking straight to 1 voter via `change_membership`.
 5. **Back up regularly**: `OnlineBackup` for live per-group snapshots; for whole-dir archives follow the rolling procedure (transfer leader → SIGTERM → `rr-admin backup` → restart) and verify the SHA-256.

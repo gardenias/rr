@@ -175,7 +175,7 @@ impl Service for MyService {
 2. **`restore()` 必须清空现有状态** —— 否则会把 leader 已丢弃的陈旧条目留下。
 3. **序列化格式稳定** —— 版本升级时需要处理旧格式兼容（字段添加/删除）。推荐使用 `bincode` + `#[serde(default)]`。
 4. **不阻塞 Raft 任务** —— `snapshot()` 对大状态可能很慢。rr **不会**把它放进 `spawn_blocking`：捕获在 openraft 的状态机任务里直接 `.await`（见 `sm_adapter.rs` 的 `snapshot_builder_inner`），所以实现应自身保持高效。
-5. **快照不持久化** —— `RrStateMachine` 的快照只存在于内存（`snapshot_bytes` 缓存 + `get_current_snapshot()` 每次从用户 Service 重新捕获）。重启后**没有**快照可加载：rocks 模式靠日志重放恢复状态；mem 模式重启即丢失全部状态，只能靠重新加入集群从 leader 同步。
+5. **快照持久化（rocks 模式）** —— rocks 路径下每个快照都经 `snapshot_store::SnapshotStore` 原子落盘到 `{base_path}/{group_id}/sm-snapshot.bin`；重启时 openraft 用它恢复 SM 再重放日志尾部。mem 模式快照仍只在内存，重启即丢，只能靠重新加入集群从 leader 同步。
 
 ---
 
@@ -183,7 +183,7 @@ impl Service for MyService {
 2. **`restore()` must replace existing state** — otherwise you leak stale entries the leader already discarded.
 3. **Stable serialization format** — version upgrades need backward-compat handling (field add/remove). `bincode` + `#[serde(default)]` recommended.
 4. **Do not block the Raft task** — `snapshot()` can be slow for large state. rr does **not** run it in `spawn_blocking`: capture is `.await`ed directly in openraft's state machine task (see `snapshot_builder_inner` in `sm_adapter.rs`), so implementations should be efficient on their own.
-5. **Snapshots are not persisted** — `RrStateMachine` snapshots live in memory only (the `snapshot_bytes` cache, plus `get_current_snapshot()` re-capturing from the user Service on every call). After a restart there is **no** snapshot to load: rocks mode recovers state by log replay; mem mode loses all state on restart and can only re-sync from the leader by rejoining the cluster.
+5. **Snapshots are persisted (rocks mode)** — on the rocks path every snapshot is written atomically to `{base_path}/{group_id}/sm-snapshot.bin` via `snapshot_store::SnapshotStore`; on restart openraft restores the SM from it, then replays the log tail. Mem-mode snapshots stay in-memory only and are lost on restart — the node can only re-sync from the leader by rejoining.
 
 ## 相关 / Related
 

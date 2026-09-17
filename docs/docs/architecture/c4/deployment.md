@@ -4,11 +4,11 @@ sidebar_position: 7
 
 # Deployment — 部署拓扑 / Production Deployment Topology
 
-本图展示一个典型的**三节点生产部署**：rr-server 运行在独立主机上，监听分离的 Raft/Client 与 Admin 端口，由 Prometheus 抓取指标，由运维通过 rr-admin CLI 管理。存储注意：stock 二进制目前始终使用**内存** raft 日志（`RaftGroupManager::new_with_network`）；RocksDB raft 日志持久化（每 group 独立实例，`{base_path}/{group_id}`）仅在集成测试中接线，尚未由二进制启用。
+本图展示一个典型的**三节点生产部署**：rr-server 运行在独立主机上，监听分离的 Raft/Client 与 Admin 端口，由 Prometheus 抓取指标，由运维通过 rr-admin CLI 管理。存储注意：`--storage rocks` 时每 group 在 `{data_dir}/raft-log/{group_id}` 打开独立 RocksDB 实例，持久化 raft 日志、vote 与 SM 快照（`sm-snapshot.bin`，ADR A-0016 + T1）；`--storage mem` 则全内存、重启即丢。
 
 ---
 
-This diagram shows a typical **three-node production deployment**: rr-server running on separate hosts, listening on separated Raft/Client and Admin ports, scraped by Prometheus, administered via rr-admin CLI. Storage note: the stock binary currently always uses **in-memory** raft logs (`RaftGroupManager::new_with_network`); RocksDB raft-log persistence (one independent instance per group at `{base_path}/{group_id}`) is only wired in integration tests, not yet enabled by the binary.
+This diagram shows a typical **three-node production deployment**: rr-server running on separate hosts, listening on separated Raft/Client and Admin ports, scraped by Prometheus, administered via rr-admin CLI. Storage note: with `--storage rocks` each group opens an independent RocksDB instance at `{data_dir}/raft-log/{group_id}`, persisting the raft log, vote, and SM snapshot (`sm-snapshot.bin`, ADR A-0016 + T1); `--storage mem` is fully in-memory and loses everything on restart.
 
 ## 图示 / Diagram
 

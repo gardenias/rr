@@ -19,6 +19,8 @@ use tokio_stream::StreamExt;
 
 use rr_core::state_machine::StateMachine;
 
+use crate::snapshot_store::PersistentSnapshot;
+use crate::snapshot_store::SnapshotStore;
 use crate::type_config::RrTypeConfig;
 
 /// Bridges openraft's `RaftStateMachine` to the user-defined `StateMachine` trait.
@@ -28,12 +30,23 @@ pub struct RrStateMachine {
     last_membership: StoredMembershipOf<RrTypeConfig>,
     /// Cached snapshot bytes from the inner state machine.
     snapshot_bytes: Vec<u8>,
+    /// Meta of the snapshot currently held in `snapshot_bytes` — the durable
+    /// recovery anchor. `Some` once a snapshot has been built or installed
+    /// (and persisted, when a [`SnapshotStore`] is attached). Tracked
+    /// separately from `last_applied` because the snapshot legitimately lags
+    /// the applied frontier between snapshot triggers.
+    snapshot_meta: Option<SnapshotMetaOf<RrTypeConfig>>,
     /// Counts installed snapshots (openraft's `SnapshotMeta` no longer
     /// carries a `snapshot_id`; kept so tests can observe installs).
     snapshot_idx: u64,
     /// Durable sidecar (bincode-encoded `StoredMembership`) preserving the
     /// committed membership across restarts; see `with_membership_sidecar`.
     membership_sidecar: Option<std::path::PathBuf>,
+    /// Durable snapshot store (T1 / R-P0). When attached (the durable-log /
+    /// rocks path), every built or installed snapshot is persisted so a
+    /// restart recovers the snapshotted state instead of silently rebuilding
+    /// an empty state machine after the log prefix is purged.
+    snapshot_store: Option<SnapshotStore>,
 }
 
 impl RrStateMachine {
@@ -44,8 +57,10 @@ impl RrStateMachine {
             last_applied: None,
             last_membership: StoredMembership::default(),
             snapshot_bytes: Vec::new(),
+            snapshot_meta: None,
             snapshot_idx: 0,
             membership_sidecar: None,
+            snapshot_store: None,
         }
     }
 
@@ -109,19 +124,89 @@ impl RrStateMachine {
         }
     }
 
+    /// Attach a durable snapshot store, loading any persisted snapshot.
+    ///
+    /// This is the T1 / R-P0 fix that makes snapshots survive a restart. With
+    /// a transient (in-memory) inner state machine + a durable-but-purgeable
+    /// Raft log, an un-persisted snapshot is a data-loss wedge: once OpenRaft
+    /// purges the covered log prefix, a restart loses that state and silently
+    /// rebuilds an empty SM. Attaching a store makes `build_snapshot` /
+    /// `install_snapshot` persist every snapshot, and makes
+    /// [`Self::get_current_snapshot`] return the persisted bytes + meta so
+    /// OpenRaft's startup `restore_from_snapshot` re-installs them.
+    ///
+    /// On construction the persisted snapshot's bytes and meta are loaded into
+    /// memory (so `get_current_snapshot` can hand them to OpenRaft), but
+    /// `last_applied` is deliberately left `None`: the inner SM is still
+    /// empty, and OpenRaft must drive the restore through `install_snapshot`
+    /// so `applied_state()` never claims an applied point the inner SM has not
+    /// actually reached.
+    ///
+    /// Fails (node startup aborts loudly) if a present snapshot cannot be
+    /// read or decoded — see [`SnapshotStore::load`].
+    pub fn with_snapshot_store(mut self, store: SnapshotStore) -> Result<Self, io::Error> {
+        if let Some(persisted) = store.load()? {
+            let meta = persisted.meta();
+            self.snapshot_bytes = persisted.data;
+            self.snapshot_meta = Some(meta);
+        }
+        self.snapshot_store = Some(store);
+        Ok(self)
+    }
+
+    /// Persist the given snapshot bytes + meta through the attached store.
+    ///
+    /// No-op when no store is attached (in-memory path). Fail-closed when a
+    /// store IS attached: a persist error is propagated so the caller
+    /// (`build_snapshot` / `install_snapshot`) fails and OpenRaft does **not**
+    /// purge the covered log prefix — the unpurged log remains the durable
+    /// copy and the snapshot is retried later. Uses a monotonic guard so a
+    /// stale snapshot never overwrites a newer persisted one.
+    fn persist_snapshot(
+        &self,
+        last_applied: Option<LogIdOf<RrTypeConfig>>,
+        last_membership: &StoredMembershipOf<RrTypeConfig>,
+        data: &[u8],
+    ) -> Result<(), io::Error> {
+        let Some(store) = &self.snapshot_store else {
+            return Ok(());
+        };
+        let snap = PersistentSnapshot {
+            last_log_id: last_applied,
+            last_membership: last_membership.clone(),
+            data: data.to_vec(),
+        };
+        store.save_if_newer(&snap).map(|_written| ())
+    }
+
     /// Fallible snapshot capture shared by both openraft entry points
     /// (`get_snapshot_builder` and `try_create_snapshot_builder`).
     ///
     /// ADR A-0011 C6: a snapshot is either complete bytes from a successful
     /// `inner.snapshot()` call or it does not exist — never "empty bytes +
     /// valid meta". Callers decide how to surface the failure.
+    ///
+    /// T1 / R-P0: when a [`SnapshotStore`] is attached, the snapshot is
+    /// persisted here — *before* `build_snapshot()` returns and OpenRaft
+    /// purges the covered log prefix. The persist is fail-closed: an error
+    /// aborts the build, so the durable log is never purged without a durable
+    /// snapshot behind it.
     async fn snapshot_builder_inner(&mut self) -> Result<RrSnapshotBuilder, io::Error> {
         let data = self
             .inner
             .snapshot()
             .await
             .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Persist first (no-op on the in-memory path). Only after this
+        // succeeds is it safe for OpenRaft to purge the covered log prefix.
+        self.persist_snapshot(self.last_applied, &self.last_membership, &data)?;
+
         self.snapshot_bytes = data.clone();
+        self.snapshot_meta = Some(SnapshotMeta {
+            last_log_id: self.last_applied,
+            last_membership: self.last_membership.clone(),
+        });
         Ok(RrSnapshotBuilder {
             data,
             last_applied: self.last_applied,
@@ -227,6 +312,15 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         snapshot: Self::SnapshotData,
     ) -> Result<(), io::Error> {
         let data = snapshot.into_inner();
+
+        // T1 / R-P0: persist the incoming snapshot BEFORE mutating any
+        // in-memory state. OpenRaft purges this node's log up to
+        // `meta.last_log_id` once the install succeeds; if the snapshot were
+        // not durable first, a restart after that purge would lose the covered
+        // state. Fail-closed: a persist error aborts the install, leaving the
+        // SM untouched and the log retained so replication can retry.
+        self.persist_snapshot(meta.last_log_id, &meta.last_membership, &data)?;
+
         self.inner
             .restore(&data)
             .await
@@ -235,6 +329,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         self.last_membership = meta.last_membership.clone();
         self.persist_membership();
         self.snapshot_bytes = data;
+        self.snapshot_meta = Some(meta.clone());
         self.snapshot_idx += 1;
         Ok(())
     }
@@ -242,6 +337,30 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<SnapshotOf<RrTypeConfig, Self::SnapshotData>>, io::Error> {
+        // T1 / R-P0: serve the persisted snapshot ONLY while the inner SM is
+        // still behind it — i.e. the startup-recovery window before OpenRaft's
+        // `restore_from_snapshot` re-installs it. That is what lets a restarted
+        // node recover the persisted state instead of regenerating an empty one
+        // from the (transient, now-empty) inner SM.
+        //
+        // Once the SM has caught up to the snapshot (`last_applied >=
+        // snapshot.last_log_id`), fall through to a fresh capture so runtime
+        // callers — follower catch-up and the ingestor-offset seeding path
+        // (`fetch_snapshot_bytes`) — always observe the latest applied state,
+        // not a stale snapshot taken at an earlier index.
+        let persisted_is_ahead = match (&self.snapshot_meta, &self.last_applied) {
+            (Some(meta), last_applied) => *last_applied < meta.last_log_id,
+            (None, _) => false,
+        };
+        if persisted_is_ahead {
+            let meta = self.snapshot_meta.clone().expect("checked above");
+            return Ok(Some(Snapshot {
+                meta,
+                snapshot: Cursor::new(self.snapshot_bytes.clone()),
+            }));
+        }
+
+        // Fresh capture from the live SM (original behavior).
         let data = self
             .inner
             .snapshot()
@@ -613,5 +732,93 @@ mod tests {
         let (_, membership) = sm.applied_state().await.unwrap();
         assert_eq!(membership.membership().nodes().count(), 0);
         assert!(!sidecar.exists(), "no sidecar may be created before a membership is applied");
+    }
+
+    // ── T1 / R-P0: durable snapshot store ────────────────────────────────
+
+    use crate::snapshot_store::SnapshotStore;
+
+    fn make_sm_with_store(path: &std::path::Path) -> RrStateMachine {
+        RrStateMachine::new(Box::new(VecSM { state: vec![] }))
+            .with_snapshot_store(SnapshotStore::new(path.to_path_buf()))
+            .unwrap()
+    }
+
+    /// T1 core: a snapshot built with a store attached is persisted to disk,
+    /// and a simulated restart (fresh adapter over the same path) offers it
+    /// back through `get_current_snapshot` so OpenRaft re-installs it. The
+    /// inner SM must NOT claim an applied point before the install runs.
+    #[tokio::test]
+    async fn test_snapshot_persisted_and_offered_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap_path = dir.path().join("sm-snapshot.bin");
+
+        // Node A: apply two entries, then build a snapshot.
+        let mut a = make_sm_with_store(&snap_path);
+        apply_entries(&mut a, vec![data_entry(1, b"foo".to_vec())]).await;
+        apply_entries(&mut a, vec![data_entry(2, b"bar".to_vec())]).await;
+        let mut builder = a.try_create_snapshot_builder(true).await.unwrap();
+        let snap = builder.build_snapshot().await.unwrap();
+        assert_eq!(snap.meta.last_log_id.unwrap().index, 2);
+        assert!(snap_path.exists(), "snapshot must be persisted to disk");
+        drop(a);
+
+        // Node B (restart): fresh adapter over the same store. Before any
+        // install, the persisted snapshot is offered with its true meta while
+        // the (transient) inner SM still reports no applied state.
+        let mut b = make_sm_with_store(&snap_path);
+        let (applied_before, _) = b.applied_state().await.unwrap();
+        assert!(
+            applied_before.is_none(),
+            "transient SM must not claim an applied point before install"
+        );
+        let current = b
+            .get_current_snapshot()
+            .await
+            .unwrap()
+            .expect("persisted snapshot must be offered after restart");
+        let meta = current.meta.clone();
+        assert_eq!(meta.last_log_id.unwrap().index, 2);
+        assert_eq!(current.snapshot.into_inner(), b"foobar");
+
+        // OpenRaft's startup path installs it; applied_state then reflects it.
+        b.install_snapshot(&meta, Cursor::new(b"foobar".to_vec()))
+            .await
+            .unwrap();
+        let (applied_after, _) = b.applied_state().await.unwrap();
+        assert_eq!(applied_after.unwrap().index, 2);
+    }
+
+    /// Once the SM has applied past the tracked snapshot, `get_current_snapshot`
+    /// re-captures the live state — runtime callers (follower catch-up, ingestor
+    /// offset seeding) must observe the latest applied state, not a stale
+    /// snapshot. The persisted snapshot is only served while the SM lags it
+    /// (the startup-recovery window, covered by
+    /// `test_snapshot_persisted_and_offered_across_restart`).
+    #[tokio::test]
+    async fn test_get_current_snapshot_regenerates_when_sm_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = make_sm_with_store(&dir.path().join("sm-snapshot.bin"));
+
+        apply_entries(&mut sm, vec![data_entry(1, b"abc".to_vec())]).await;
+        let mut builder = sm.get_snapshot_builder().await;
+        let snap = builder.build_snapshot().await.unwrap();
+        assert_eq!(snap.meta.last_log_id.unwrap().index, 1);
+
+        // Apply more AFTER the snapshot: the SM is now AHEAD of the snapshot,
+        // so get_current_snapshot re-captures the live state (index 2, "abcdef").
+        apply_entries(&mut sm, vec![data_entry(2, b"def".to_vec())]).await;
+        let current = sm.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.last_log_id.unwrap().index, 2);
+        assert_eq!(current.snapshot.into_inner(), b"abcdef");
+    }
+
+    /// A store-backed fresh node (no snapshot persisted yet) still reports no
+    /// snapshot, preserving the empty-start contract.
+    #[tokio::test]
+    async fn test_store_backed_fresh_node_has_no_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sm = make_sm_with_store(&dir.path().join("sm-snapshot.bin"));
+        assert!(sm.get_current_snapshot().await.unwrap().is_none());
     }
 }

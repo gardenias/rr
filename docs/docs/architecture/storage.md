@@ -115,10 +115,10 @@ Key interface methods include:
 - **Key Encoding**: For numeric keys like Raft log indices, big-endian encoding is used to ensure byte order in RocksDB matches logical order, enabling correct range scans.
 - **Serialization**: Raft types and metadata are serialized using `bincode` v2.
 
-:::warning 当前限制 / Current Limitation
-`rocks` 特性提供 RocksDB 后端与 `RocksLogStorage`，但**官方 rr-server 二进制尚未将 Raft 日志接入 RocksDB**：二进制始终通过 `RaftGroupManager::new_with_network` 使用内存版 `RrLogStorage`；`--storage rocks` 打开的 `RocksStorage` 仅落入 `NodeConfig.storage_engine`，而该字段目前没有任何消费者。RocksDB 日志持久化目前只在集成测试中生效（`RaftGroupManager::new_with_rocks` / `start_group_rocks`），或由库使用方自行接线。
+:::warning 当前接线状态 / Current wiring status
+`rocks` 特性提供 RocksDB 后端与 `RocksLogStorage`。`rr-server --storage rocks` 现已把 **Raft 日志、vote 与 SM 快照**接入 RocksDB：`start_node` 为组管理器追加 `with_rocks_base_path("{data_dir}/raft-log")`（ADR A-0016），并经 `RaftNode::new_with_rocks_factory` 自动接上快照持久化（`sm-snapshot.bin`）。`--storage mem` 仍为全内存。注意：`NodeConfig.storage_engine` 字段仍是无消费者的遗留字段——持久化按组经 `with_rocks_base_path` / `--storage rocks` 后端开关驱动。
 
-The `rocks` feature provides the RocksDB backend and `RocksLogStorage`, but **the stock rr-server binary does not wire Raft logs to RocksDB yet**: it always uses the in-memory `RrLogStorage` via `RaftGroupManager::new_with_network`; the `RocksStorage` opened by `--storage rocks` only lands in `NodeConfig.storage_engine`, which currently has no consumer. RocksDB log persistence currently takes effect only in integration tests (`RaftGroupManager::new_with_rocks` / `start_group_rocks`), or when library users wire it up themselves.
+The `rocks` feature provides the RocksDB backend and `RocksLogStorage`. `rr-server --storage rocks` now wires the **Raft log, vote, and SM snapshot** into RocksDB: `start_node` adds `with_rocks_base_path("{data_dir}/raft-log")` to the group manager (ADR A-0016), and `RaftNode::new_with_rocks_factory` automatically attaches snapshot persistence (`sm-snapshot.bin`). `--storage mem` remains fully in-memory. Note: the `NodeConfig.storage_engine` field is still a vestigial field with no consumer — persistence is driven per-group via `with_rocks_base_path` / the `--storage rocks` backend flag.
 :::
 
 ## 列族 / Column Families

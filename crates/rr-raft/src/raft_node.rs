@@ -186,14 +186,26 @@ impl RaftNode {
         // Keep a cheap clone (Arc inside) as the close handle: `stop_group`
         // flushes the batcher after `raft.shutdown()` (ADR A-0011 C3).
         let log_storage_close = Some(log_storage.clone());
-        // A-0016 durability gap: the SM snapshot is not persisted, so after a
-        // restart only the un-purged log tail replays and the membership entry
-        // (written once at initialize) would be lost — leaving zero voters and
-        // a permanently wedged group. The sidecar preserves the committed
-        // membership across restarts (perf-lab W7 reproduced the wedge 2/2).
-        let sm = RrStateMachine::new(state_machine).with_membership_sidecar(
-            std::path::PathBuf::from(rocks_path).join("sm-membership.bin"),
-        );
+        // Durability sidecars (A-0016 membership + T1/R-P0 snapshot). With a
+        // durable-but-purgeable Raft log and an in-memory state machine, the
+        // committed membership and every SM snapshot must be persisted or a
+        // restart after a log purge loses them: the membership wedge (zero
+        // voters, perf-lab W7) and the silent empty-SM rebuild respectively.
+        // `with_snapshot_store` loads any persisted snapshot so OpenRaft's
+        // startup `restore_from_snapshot` re-installs it; a present-but-
+        // undecodable snapshot fails startup loudly rather than losing data.
+        let sm = RrStateMachine::new(state_machine)
+            .with_membership_sidecar(std::path::PathBuf::from(rocks_path).join("sm-membership.bin"))
+            .with_snapshot_store(crate::snapshot_store::SnapshotStore::new(
+                std::path::PathBuf::from(rocks_path).join("sm-snapshot.bin"),
+            ))
+            .map_err(|e| {
+                RrError::Raft(RaftError::InitializationFailed {
+                    reason: format!(
+                        "failed to load persisted snapshot at {rocks_path}/sm-snapshot.bin: {e}"
+                    ),
+                })
+            })?;
         let network = network_factory;
 
         let raft = Raft::new(node_id, config, network, log_storage, sm)
