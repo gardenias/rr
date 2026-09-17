@@ -1056,6 +1056,28 @@ Oracle review (`bg_1d8162f6`) 找到 3 P0 + 5 P1。本 wave 修了 P0-2/P0-3/P1-
 
 ---
 
+## 🔴 重磅新发现(2026-09-17 晚):重启+purge 形态的第二条数据丢失路径——SM 级
+
+> 与 LOG 级(IoBatcher 未 flush 尾部)并列且更凶:**重启节点向同伴投毒空快照,级联
+> 抹掉整个集群的状态机**。
+
+- **实锤日志**(crunch 实验后集群,kv-1):`get_snapshot: sending back snapshot:
+  meta: {last_log:None, ...}`;kv-2:`install_full_snapshot ... data_len=14`(空 HashMap)
+  反复安装。
+- **机制**:重启 → in-mem SM 全新(last_applied=None)→ 同伴(落后)来要快照 →
+  openraft 无条件向 SM 要 → **把"刚重启的空状态"当全量快照发出去** → 安装方
+  `restore(空)` 且 last_applied=None → **健康节点被抹空** → 级联 → 集群僵尸
+  (leader 在、term 在涨、写全部超时)。
+- **第二个同源面**:重启后 SM 只能 replay 未 purge 尾部(~1000 条)——**SM 永久
+  部分化**(99% 的 key 消失),因为 kv-store 的快照从不持久化。LOG 完好也没用。
+- **根因归属**:A-0016(durable log)形状下,SM 快照不持久 + openraft 不防
+  "回退式快照安装"(install 不校验 snapshot.last_log ≥ 本地 applied)。
+- **修复方向(待拍板)**:α. 发送侧拒绝:last_applied 未追上日志尖峰时不发快照
+  (sm worker get_snapshot guard);β. 接收侧防回退:install 时 snapshot.last_log
+  < 本地 applied 则拒(vendor patch #4 候选);γ. **治本:kv-store 持久化 SM 快照**
+  (data-dir 写盘,重启 restore——A-0016 形状的必要补全);δ. 背压(原 C)依然需要,
+  断积压→OOM→重启波触发链。
+
 ## 🔴 开放项(2026-09-17 深挖):选举安全级 INV-1——重启降级 → 陈旧多数派 → 已提交数据被毁
 
 **复现配方**:`scripts/prod-perf.sh --smoke`(全档;~1/4 率,归档 20260917-143506-ed6e9f9)。
