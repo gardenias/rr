@@ -104,6 +104,14 @@ container gets its own cpuset (default 6-7). Override via `.env`
 comparable within the same quota matrix**; record the actual quotas plus
 hardware/OS in every report's meta section.
 
+**16KiB tier history**: W5-16384 @ 3000/s used to wedge the cluster — the
+root cause turned out to be tonic's default 4 MiB decode limit on
+RaftService (batched AppendEntries crossed it; fixed 2026-09-17 via
+`RAFT_MAX_DECODING_MESSAGE_SIZE`), NOT the earlier-suspected memory cliff.
+`KV_MEM_LIMIT` remains as an escape hatch for genuinely memory-heavy
+payload shapes (the example's whole-map bincode snapshot transiently
+doubles the state during build).
+
 macOS note: cpusets apply to the Docker Desktop VM, not the host, and its
 network/filesystem layers distort absolute numbers (plan §8). The official
 baselines are collected on a Linux host; macOS numbers are indicative only.

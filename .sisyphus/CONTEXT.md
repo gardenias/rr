@@ -5,7 +5,8 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-13（**M4 完成：活性缺陷链全部定点修复；首份生产基线 17/18 绿 + W9 全长复核绿（oracle 5000/5000）——18/18 达成；判据表已回填，A-0010 已重判维持 deferred；上游 issue 草稿已备**）
+**Last updated**: 2026-09-17（**perf-lab 加固批次：soak lanes open-loop 化（134→2000/s 实测达标）、RaftService gRPC 4MiB 解码上限修复（16KiB 档 wedge 真凶）、探针取证加固；W9 罕见 INV-1 flake 立案观察**）
+> 前情 2026-09-13（**M4 完成：活性缺陷链全部定点修复；首份生产基线 17/18 绿 + W9 全长复核绿（oracle 5000/5000）——18/18 达成；判据表已回填，A-0010 已重判维持 deferred；上游 issue 草稿已备**）
 **Current phase**: **v0.2.0 已发布**；下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`，WAL（A-0010）维持 deferred
 **Active plan**: `.sisyphus/plans/rr-prod-perf.md`（**M0–M4 全部完成**，基线 `docs/perf/prod/20260912-234352-9fa8347/`，M5=Linux 宿主正式基线）；v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`（deferred，重判结论+解锁路径已回写）
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
@@ -61,7 +62,7 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
   重跑(20260913-100629-65fc548,2h)全绿推翻:908,258 写 0 失败、探针 719/719、
   TransferLeader 成功、oracle 5000/5000(replay 147 + survival 4853)。脚本语义已修:
   oracle 永远执行且为一致性唯一裁决源;load 腿失败+oracle 干净时标注疑似探针问题。
-- **遗留**:① 16KiB×3000/s = 1.6GB 状态 vs 2GiB 内存的 example 快照内存悬崖(形态限制);
+- **遗留**:① 【已查明并推翻】16KiB 档 wedge 真凶 = RaftService tonic 4MiB 解码上限(批量 AppendEntries 超限),非内存悬崖;2026-09-17 修复;
   ② soak 闭环 pacer 实际只发出 ~134/s(标称 2000/s)——open-loop 化是 tool backlog;
   ③ 上游 issue 待提(两个 vendor patch 的对应位置);④ A-0015 跟踪"上游修复后摘 vendor"。
 - **commits**:`e59eba6`(full_snapshot+pre-vote)→ `b709cc7`(tooling 门禁+日志流)→
@@ -109,8 +110,8 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
   超 knee melt 记 known-issue（A-0015 跟踪）；②继续挖 wedge（vendor patch #2，工作量未知）；
   ③openraft 版本变更（0.9.25 stable，port 成本高，A-0015 正式立项）；④产品级入口背压/拒载
   （独立于 raft 版本的应有防御，不替代 raft 健壮性）。**建议 ①+④ 短期、③ 中期**。
-- **开放项**：kv-2/kv-3 容器负载下重启（疑似 OOM：2GiB limit vs ~1GB 状态 snapshot 序列化翻倍，
-  kv-store example 全量 bincode 所致，实验室可提 mem_limit 绕过）。
+- **开放项**：kv-2/kv-3 容器负载下重启（疑似 OOM，未坐实;16KiB wedge 的内存悬崖假说已被
+  2026-09-17 的 gRPC 4MiB 解码上限发现推翻——重启原因待另行确认）。
 - **下一步**：Louis 拍板战略方向 → commit（修复 4 文件 + vendor + CONTEXT.md，等确认）→
   按拍板结果重跑全矩阵 → 基线归档入 git → 判据表回填（plan §9）+ A-0010 用 W11 数据重判。
 
@@ -1054,6 +1055,15 @@ Oracle review (`bg_1d8162f6`) 找到 3 P0 + 5 P1。本 wave 修了 P0-2/P0-3/P1-
   可重复 QA 清单。
 
 ---
+
+## 🔴 开放项(2026-09-17 立案):罕见一致性 flake
+
+lanes 化后 soak 压力 ×15(134→2000/s),smoke W9 曾以 ~1/4 率出现真实 INV-1
+(acked write 读回 None,伴随选举风暴 T31→T36/1s + TransferLeader 失败;禁 snapshot
+则绿,快照全开近 3 连绿)。疑似 openraft churn×snapshot 竞态家族(A-0015 相邻),
+vendor patch #1/#2 未排除嫌疑但无实证。**复现配方**:`WORKLOADS=w9 scripts/prod-perf.sh
+--smoke`(循环跑)。下次出现时日志流+oracle 已可取证。首轮矩阵 W9 红的探针
+wrong-value 与本次 INV-1 是否同源未知。
 
 ## 未完成 / 需要重做 / Open Work
 

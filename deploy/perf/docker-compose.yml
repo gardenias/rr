@@ -44,7 +44,9 @@ x-kv-common: &kv-common
   # with the Helm limits. cpusets are env-overridable for hosts with <8 cores;
   # on macOS Docker Desktop they apply to the VM, not the host (numbers from
   # this machine are indicative only — record actual quotas in report meta).
-  mem_limit: 2g
+  # KV_MEM_LIMIT: escape hatch for memory-heavy payload shapes (the
+  # example's whole-map bincode snapshot transiently doubles the state).
+  mem_limit: ${KV_MEM_LIMIT:-2g}
   restart: unless-stopped
   healthcheck:
     test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/ready"]
