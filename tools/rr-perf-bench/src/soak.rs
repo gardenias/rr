@@ -665,7 +665,7 @@ pub async fn run_oracle(client: SharedClient, cfg: &SoakConfig) -> Result<Oracle
     let mut survival_only = 0usize;
 
     for (i, record) in sample.iter().enumerate() {
-        match verify_one(&client, record, cfg.payload_size)
+        match verify_one(&client, record, cfg.payload_size, cfg.op_timeout)
             .await
             .with_context(|| {
                 format!(
@@ -718,6 +718,7 @@ async fn verify_one(
     client: &RrClient,
     record: &AckRecord,
     payload_size: usize,
+    op_timeout: Duration,
 ) -> Result<VerifyOutcome> {
     let original = value_for(record.request_id, payload_size);
     let expected_hash = value_hash(&original);
@@ -740,13 +741,19 @@ async fn verify_one(
     });
     let key =
         IdempotencyKey::with_client_id(namespace_for(record.lane), record.request_id, CLIENT_ID);
-    let evicted = match client
-        .send_request_idempotent(PARTITION_ID, probe, key)
-        .await
+    // rr-client has no per-RPC deadline: without an explicit cap a single
+    // wedged RPC (mid-churn cluster) hangs the whole oracle forever
+    // (observed 2026-09-17: 44 minutes stuck on one record).
+    let evicted = match tokio::time::timeout(
+        op_timeout,
+        client.send_request_idempotent(PARTITION_ID, probe, key),
+    )
+    .await
     {
-        Ok(_) => false,
-        Err(rr_core::error::RrError::IdempotencyExpired { .. }) => true,
-        Err(e) => return Err(e).context("probe Put failed after client retries"),
+        Ok(Ok(_)) => false,
+        Ok(Err(rr_core::error::RrError::IdempotencyExpired { .. })) => true,
+        Ok(Err(e)) => return Err(e).context("probe Put failed after client retries"),
+        Err(_) => anyhow::bail!("probe Put op deadline exceeded"),
     };
 
     // 2. Linearizable read: the value must be the ORIGINAL — any other value
@@ -754,9 +761,9 @@ async fn verify_one(
     let get = encode_req(&KvRequest::Get {
         key: record.key.clone(),
     });
-    let resp = client
-        .read_linearizable(PARTITION_ID, get)
+    let resp = tokio::time::timeout(op_timeout, client.read_linearizable(PARTITION_ID, get))
         .await
+        .map_err(|_| anyhow::anyhow!("oracle Get op deadline exceeded"))?
         .context("oracle Get failed after client retries")?;
     let got = decode_resp(&resp)?.value;
     anyhow::ensure!(
