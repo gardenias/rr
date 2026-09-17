@@ -580,12 +580,20 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
         // window_tps of the metrics journal).
     }
 
-    // Drain: stop feeding, let lanes finish in-flight ops (bounded by
-    // op_timeout), then close the journal writer.
+    // Drain: stop feeding, give the in-flight op per lane a bounded grace to
+    // land, then ABORT the lanes. Waiting for a lane's full backlog is not an
+    // option (1024 queued × op_timeout each = hours), and a detached lane
+    // keeps its ack_tx clone alive, which would hang the journal writer
+    // forever (observed: post-transfer wedge held the run hostage ~40min).
+    // Aborted in-flight ops simply never ack — the oracle only verifies
+    // acked writes, so this is sound.
     drop(lane_txs);
     let grace = cfg.op_timeout + Duration::from_secs(5);
-    for handle in lane_handles {
+    for handle in &mut lane_handles {
         let _ = tokio::time::timeout(grace, handle).await;
+    }
+    for handle in &lane_handles {
+        handle.abort();
     }
     drop(ack_tx);
     let records = ack_writer
