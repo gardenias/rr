@@ -217,6 +217,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Integration-suite election flakes (test harness only)**: since the
+  openraft alpha.34 migration, freshly elected leaders fast-fail
+  lease-gated proposals with `ForwardToLeader::empty()` until their blank
+  entry commits — but the `wait_for_*` helpers only observe
+  `current_leader`, so one-shot writes right after an election raced lease
+  establishment (`test_leader_isolation_and_recovery` /
+  `test_minority_partition_blocks_writes` / `test_3node_leader_failover`
+  flaked at ~1/3 under parallel load; attribution runs proved it
+  independent of the W9 vendor patch). New harness helper
+  `write_when_lease_ready` retries on `ForwardToLeader` until the lease is
+  up; applied at all four post-election write sites. 15/15 full-suite
+  rounds green afterwards (baseline 4/12 failed).
+
 - **Vendored openraft patch #3 — become-leader flush-cursor inflation
   (W9 INV-1 root cause, 2026-09-21)**: the become-leader path emitted
   `Command::UpdateIOProgress { when: None }`, and `run_update_io_progress`

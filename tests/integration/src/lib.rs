@@ -434,6 +434,34 @@ pub async fn wait_for_new_leader(
     }
 }
 
+/// `client_write` with retry while a freshly elected leader establishes its
+/// lease. openraft ≥ 0.10-alpha.34 fast-fails lease-gated proposals with
+/// `ForwardToLeader::empty()` until the leader commits its blank entry, and
+/// the `wait_for_*` helpers only observe `current_leader` — so a one-shot
+/// write right after an election races lease establishment (observed as
+/// flaky `ForwardToLeader { leader_id: None }` failures under parallel load,
+/// integration suite, 2026-09-21).
+pub async fn write_when_lease_ready(
+    raft: &openraft::Raft<rr_raft::RrTypeConfig, rr_raft::sm_adapter::RrStateMachine>,
+    payload: &[u8],
+    timeout_ms: u64,
+) -> Result<()> {
+    use std::time::Instant;
+    let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+        match raft.client_write(payload.to_vec().into()).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                if e.forward_to_leader().is_some() && Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                } else {
+                    anyhow::bail!("client_write failed after lease window: {e:?}");
+                }
+            }
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -933,10 +961,11 @@ mod tests {
             "new leader must differ from failed node"
         );
 
-        // Write after failover should succeed
+        // Write after failover should succeed (retry while the fresh leader
+        // establishes its lease)
         let new_leader = nodes.iter().find(|n| n.node_id() == new_leader_id).unwrap();
         let raft = new_leader.group_manager().get_raft(1).await.unwrap();
-        raft.client_write(b"post-failover".to_vec().into())
+        write_when_lease_ready(&raft, b"post-failover", 8_000)
             .await
             .unwrap();
 
@@ -1813,10 +1842,11 @@ mod tests {
         // Restore the previously-isolated node
         injector.restore(original_leader_id);
 
-        // Write to new leader — must succeed
+        // Write to new leader — must succeed (retry while the fresh leader
+        // establishes its lease)
         let new_leader_node = nodes.iter().find(|n| n.node_id() == new_leader_id).unwrap();
         let raft = new_leader_node.group_manager().get_raft(1).await.unwrap();
-        raft.client_write(b"post-isolation".to_vec().into())
+        write_when_lease_ready(&raft, b"post-isolation", 8_000)
             .await
             .expect("write after isolation recovery must succeed");
 
@@ -1983,7 +2013,7 @@ mod tests {
 
         let leader_node = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
         let raft = leader_node.group_manager().get_raft(1).await.unwrap();
-        raft.client_write(b"post-flapping".to_vec().into())
+        write_when_lease_ready(&raft, b"post-flapping", 8_000)
             .await
             .expect("post-flapping write must succeed");
 
@@ -2048,7 +2078,7 @@ mod tests {
 
         let new_leader_node = nodes.iter().find(|n| n.node_id() == new_leader).unwrap();
         let raft = new_leader_node.group_manager().get_raft(1).await.unwrap();
-        raft.client_write(b"majority-write".to_vec().into())
+        write_when_lease_ready(&raft, b"majority-write", 8_000)
             .await
             .expect("3-node majority must accept writes");
 

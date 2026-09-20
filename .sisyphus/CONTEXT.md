@@ -1138,13 +1138,18 @@ INV-1 强制点 #7);② ack 门控修复 = vendor patch #3 + **`save_vote` 屏�
 `test_save_vote_waits_for_pending_appends`,INV-1 登记);③ 容器重启根因(OOM
 嫌疑)——①落地后 16KiB 档在途字节有界,待 W9 复跑实证。
 
-**⚠️ 既有 flake 登记(2026-09-21,与本次修复无关)**:integration 套件在并行全量跑下,
-选举/恢复类测试偶发失败——`test_leader_isolation_and_recovery` /
-`test_minority_partition_blocks_writes` / `test_3node_leader_failover` 各见过
-(症状:恢复后写撞到 `ForwardToLeader{leader:None}`,即选主尚未收敛)。
-**归因实验**:vendor patch #3 摘掉的基线 ×12 轮复现 4 次,带补丁 ×15 轮 2 次——
-补丁前后同族同率,判为既有 flake(本机并行负载下的选举时序敏感),不是回归。
-后续若要根治:这三个测试的等待窗口/重试策略审查(非本批次范围)。
+**⚠️ 既有 flake 登记(2026-09-21,与本次修复无关)→ 已根治(同日)**:
+integration 套件在并行全量跑下,选举/恢复类测试偶发失败——
+`test_leader_isolation_and_recovery` / `test_minority_partition_blocks_writes` /
+`test_3node_leader_failover` 各见过(症状:恢复后写撞到
+`ForwardToLeader{leader:None}`,即选主尚未收敛)。**归因实验**:vendor patch #3
+摘掉的基线 ×12 轮复现 4 次,带补丁 ×15 轮 2 次——补丁前后同族同率,判为既有
+flake。**根因**:openraft alpha.34 起"leader-lease 门控提案"(`ForwardToLeader::empty()`
+快败,见 CHANGELOG 0.2.0 迁移注记),而 `wait_for_*` 只看 `current_leader`——
+一次性写在新 leader 提交空白条目(租约建立)前必撞竞态。修复:测试 harness 新增
+`write_when_lease_ready`(对 ForwardToLeader 重试至租约建立),替换 4 处一次性写
+(isolation-recovery / 3node-failover / minority-partition 多数侧 / flapping)。
+**修复后 ×15 轮全绿**(基线失败率 ~1/3)。
 
 ## 未完成 / 需要重做 / Open Work
 
