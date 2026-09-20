@@ -41,8 +41,8 @@ use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
 
-use rr_core::error::RrError;
 use rr_core::deferred::{DeferredApply, DeferredHandleResult};
+use rr_core::error::RrError;
 use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::{FramedSnapshot, IngestorState, OutboxState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyDecision};
@@ -267,7 +267,13 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             None => {
                 if deferred {
                     let ctx = ctx.expect("deferred apply always carries an ApplyContext");
-                    match self.service.read().await.handle_deferred(payload, ctx).await {
+                    match self
+                        .service
+                        .read()
+                        .await
+                        .handle_deferred(payload, ctx)
+                        .await
+                    {
                         Ok(dhr) => Ok(self.map_deferred_result(dhr)),
                         Err(e) => Err(e),
                     }
@@ -313,7 +319,10 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             DeferredHandleResult::Pending { correlation_id } => {
                 DeferredApply::Pending { correlation_id }
             }
-            DeferredHandleResult::Complete { completions, result } => {
+            DeferredHandleResult::Complete {
+                completions,
+                result,
+            } => {
                 self.append_outputs(result.outputs);
                 DeferredApply::Complete {
                     completions,
@@ -340,7 +349,13 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             }
             // Non-context callers (direct `StateMachine::apply` use) keep the
             // legacy `handle_with_outputs` path unchanged.
-            None => self.service.read().await.handle_with_outputs(payload).await?,
+            None => {
+                self.service
+                    .read()
+                    .await
+                    .handle_with_outputs(payload)
+                    .await?
+            }
         };
         self.append_outputs(result.outputs);
         Ok(result.response)

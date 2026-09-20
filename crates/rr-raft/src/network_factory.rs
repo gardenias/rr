@@ -528,7 +528,11 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         // Chunk size: honor openraft's recommendation when provided, else 64 KB.
         let chunk_size = option.snapshot_chunk_size().unwrap_or(65_536).max(1);
         let len = snapshot_data.len();
-        let total = if len == 0 { 1 } else { len.div_ceil(chunk_size) };
+        let total = if len == 0 {
+            1
+        } else {
+            len.div_ceil(chunk_size)
+        };
         let group_id = self.group_id;
 
         // Lazy chunk stream: each chunk is copied only as it is yielded, so

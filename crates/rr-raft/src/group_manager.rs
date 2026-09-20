@@ -1631,8 +1631,6 @@ mod tests {
         let mgr = RaftGroupManager::new(1, offset_capable_factory());
         mgr.start_group(1).await.unwrap();
 
-
-
         mgr.set_ingestor_offset(1, Some(123)).await.unwrap();
         let raw = mgr
             .latest_ingestor_offset(1)
@@ -1919,7 +1917,10 @@ mod tests {
         let raft = mgr.get_raft(1).await.unwrap();
         raft.trigger().snapshot().await.unwrap();
         let snap_index = wait_snapshot_index(&mgr, 1, frontier).await;
-        assert_eq!(snap_index, frontier, "snapshot must cover the full frontier");
+        assert_eq!(
+            snap_index, frontier,
+            "snapshot must cover the full frontier"
+        );
         assert!(
             snap_file.exists(),
             "T1: snapshot must be persisted to disk at {}",

@@ -621,32 +621,32 @@ impl RrClient {
             // a retryable NetworkError::Timeout instead of an unbounded hang.
             let request_future = grpc_client.request(tonic_req);
             let request_outcome = match self.request_timeout_ms {
-                Some(ms) => match tokio::time::timeout(
-                    std::time::Duration::from_millis(ms),
-                    request_future,
-                )
-                .await
-                {
-                    Ok(res) => res,
-                    Err(_elapsed) => {
-                        tracing::warn!(
+                Some(ms) => {
+                    match tokio::time::timeout(std::time::Duration::from_millis(ms), request_future)
+                        .await
+                    {
+                        Ok(res) => res,
+                        Err(_elapsed) => {
+                            tracing::warn!(
                             attempt,
                             group_id,
                             timeout_ms = ms,
                             "request attempt timed out (deferred response not completed in time)"
                         );
-                        self.remove_cached_leader(group_id).await;
-                        last_error = Some(RrError::Network(NetworkError::Timeout));
-                        if attempt + 1 < max_attempts {
-                            let delay_ms = self
-                                .retry_config
-                                .retry_delay_ms
-                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
-                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            self.remove_cached_leader(group_id).await;
+                            last_error = Some(RrError::Network(NetworkError::Timeout));
+                            if attempt + 1 < max_attempts {
+                                let delay_ms = self
+                                    .retry_config
+                                    .retry_delay_ms
+                                    .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                            }
+                            continue;
                         }
-                        continue;
                     }
-                },
+                }
                 None => request_future.await,
             };
 

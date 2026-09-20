@@ -113,18 +113,23 @@ impl SnapshotStore {
             Err(e) => {
                 return Err(io::Error::new(
                     e.kind(),
-                    format!("snapshot store: failed to read {}: {e}", self.path.display()),
+                    format!(
+                        "snapshot store: failed to read {}: {e}",
+                        self.path.display()
+                    ),
                 ))
             }
         };
         let (snap, _): (PersistentSnapshot, usize) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).map_err(|e| {
-                io::Error::other(format!(
-                    "snapshot store: failed to decode {} ({} bytes): {e}",
-                    self.path.display(),
-                    bytes.len()
-                ))
-            })?;
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).map_err(
+                |e| {
+                    io::Error::other(format!(
+                        "snapshot store: failed to decode {} ({} bytes): {e}",
+                        self.path.display(),
+                        bytes.len()
+                    ))
+                },
+            )?;
         Ok(Some(snap))
     }
 
@@ -206,7 +211,12 @@ mod tests {
     use openraft::{LogId, Membership, StoredMembership};
     use std::collections::BTreeSet;
 
-    fn make_meta(index: u64) -> (Option<LogIdOf<RrTypeConfig>>, StoredMembershipOf<RrTypeConfig>) {
+    fn make_meta(
+        index: u64,
+    ) -> (
+        Option<LogIdOf<RrTypeConfig>>,
+        StoredMembershipOf<RrTypeConfig>,
+    ) {
         let log_id = LogId::new(CommittedLeaderId::new(1, 1), index);
         let membership = StoredMembership::new(
             Some(log_id),

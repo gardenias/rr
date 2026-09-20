@@ -24,7 +24,9 @@ pub type LogIndex = u64;
 /// Uses (A-0033): intent-record keys upgraded to the real log index (retiring
 /// `outbox_seq` proxies), and as the fencing basis for leader-only side-effect
 /// drivers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct ApplyContext {
     /// The Raft log index of the applied entry.
     pub log_index: LogIndex,

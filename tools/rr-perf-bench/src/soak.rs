@@ -464,7 +464,9 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
         let mut journal = Journal::create(&ack_path)?;
         let mut n = 0usize;
         while let Some(record) = ack_rx.blocking_recv() {
-            journal.append(&record).context("ack log append failed — run is invalid")?;
+            journal
+                .append(&record)
+                .context("ack log append failed — run is invalid")?;
             n += 1;
         }
         Ok(n)

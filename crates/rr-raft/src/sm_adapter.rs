@@ -123,14 +123,15 @@ impl RrStateMachine {
         let Some(path) = &self.membership_sidecar else {
             return;
         };
-        let bytes = match bincode::serde::encode_to_vec(&self.last_membership, bincode::config::standard())
-        {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "membership sidecar encode failed");
-                return;
-            }
-        };
+        let bytes =
+            match bincode::serde::encode_to_vec(&self.last_membership, bincode::config::standard())
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "membership sidecar encode failed");
+                    return;
+                }
+            };
         if let Err(e) = std::fs::write(path, bytes) {
             tracing::warn!(error = %e, "membership sidecar write failed");
         }
@@ -754,12 +755,15 @@ mod tests {
         let mut sm = RrStateMachine::new(Box::new(VecSM { state: vec![] }))
             .with_membership_sidecar(sidecar.clone());
         apply_entries(&mut sm, vec![entry]).await;
-        assert!(sidecar.exists(), "membership apply must persist the sidecar");
+        assert!(
+            sidecar.exists(),
+            "membership apply must persist the sidecar"
+        );
         drop(sm);
 
         // Simulated restart: fresh adapter, same path.
-        let mut restarted = RrStateMachine::new(Box::new(VecSM { state: vec![] }))
-            .with_membership_sidecar(sidecar);
+        let mut restarted =
+            RrStateMachine::new(Box::new(VecSM { state: vec![] })).with_membership_sidecar(sidecar);
         let (last_applied, restored) = restarted.applied_state().await.unwrap();
         assert_eq!(
             restored.membership().nodes().count(),
@@ -781,7 +785,10 @@ mod tests {
             .with_membership_sidecar(sidecar.clone());
         let (_, membership) = sm.applied_state().await.unwrap();
         assert_eq!(membership.membership().nodes().count(), 0);
-        assert!(!sidecar.exists(), "no sidecar may be created before a membership is applied");
+        assert!(
+            !sidecar.exists(),
+            "no sidecar may be created before a membership is applied"
+        );
     }
 
     // ── T1 / R-P0: durable snapshot store ────────────────────────────────
