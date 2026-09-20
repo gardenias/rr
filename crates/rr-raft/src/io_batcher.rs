@@ -107,6 +107,16 @@ pub struct IoBatcherConfig {
     /// On expiry `close()` returns `Err` and logs a warning — it never
     /// panics and never reports a half-closed batcher as closed.
     pub close_timeout: Duration,
+
+    /// Byte budget for accepted-but-unflushed payload (keys + values).
+    ///
+    /// The entry-count channel bound (512 items) is payload-blind: with
+    /// 16 KiB values it allowed ~2 GiB of in-flight bytes, and a slow
+    /// fsync path turned that backlog into an OOM-restart wave — which,
+    /// combined with the async tail, is the perf-lab W9 INV-1 trigger
+    /// (2026-09-17). When the budget is exhausted, submitters await
+    /// capacity: natural back-pressure into the Raft proposal pipeline.
+    pub max_inflight_bytes: usize,
 }
 
 impl Default for IoBatcherConfig {
@@ -115,6 +125,7 @@ impl Default for IoBatcherConfig {
             window: Duration::from_micros(500),
             max_entries: 256,
             close_timeout: Duration::from_secs(30),
+            max_inflight_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -128,6 +139,7 @@ impl IoBatcherConfig {
         Self {
             window,
             max_entries,
+            max_inflight_bytes: 64 * 1024 * 1024,
             ..Default::default()
         }
     }
@@ -187,6 +199,10 @@ enum BatchItem {
     Ops {
         ops: Vec<BatchOp>,
         completions: Vec<BatchCompletion>,
+        /// Byte-budget permits; released only when the worker has flushed the
+        /// batch containing these ops (permits ride the batch, not the item,
+        /// because `accumulate` unpacks items before the flush).
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     },
     /// Control message: the worker answers it after the flush carrying every
     /// item accepted before it ("read-your-submit" barrier).
@@ -223,6 +239,11 @@ struct BatcherState {
 pub struct IoBatcher {
     tx: mpsc::Sender<BatchItem>,
     state: Arc<BatcherState>,
+    /// In-flight byte budget; submitters acquire permits before enqueueing
+    /// and the worker releases them after the covering flush completes.
+    inflight_bytes: Arc<tokio::sync::Semaphore>,
+    /// Total permit count of `inflight_bytes` (for clamping oversize ops).
+    inflight_budget: u32,
 }
 
 impl IoBatcher {
@@ -234,6 +255,10 @@ impl IoBatcher {
     /// R-4) — can back the group-commit path.
     pub fn new(storage: Arc<dyn StorageEngine>, config: IoBatcherConfig) -> Self {
         let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
+        // Clamp into [1, u32::MAX]: a zero budget would make the permit
+        // clamp panic, and `acquire_many_owned` takes u32.
+        let budget = config.max_inflight_bytes.clamp(1, u32::MAX as usize);
+        let inflight_bytes = Arc::new(tokio::sync::Semaphore::new(budget));
         let worker = tokio::spawn(batcher_worker(rx, storage, config.clone()));
         Self {
             tx,
@@ -242,7 +267,35 @@ impl IoBatcher {
                 worker: Mutex::new(Some(worker)),
                 close_timeout: config.close_timeout,
             }),
+            inflight_bytes,
+            inflight_budget: budget as u32,
         }
+    }
+
+    /// Payload bytes of a batch of ops (keys + values; the dominant memory
+    /// term). CF names are small constants and deliberately ignored.
+    fn ops_bytes(ops: &[BatchOp]) -> usize {
+        ops.iter()
+            .map(|op| match op {
+                BatchOp::Put { key, value, .. } => key.len() + value.len(),
+                BatchOp::Delete { key, .. } => key.len(),
+            })
+            .sum()
+    }
+
+    /// Acquire `bytes` of in-flight budget (clamped to the total budget so a
+    /// single oversized submission still passes, alone). Waits while the
+    /// worker is behind — that wait IS the back-pressure.
+    async fn acquire_bytes(
+        &self,
+        bytes: usize,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+        let want = bytes.clamp(1, self.inflight_budget as usize) as u32;
+        self.inflight_bytes
+            .clone()
+            .acquire_many_owned(want)
+            .await
+            .map_err(|_| "io batcher budget semaphore closed".to_string())
     }
 
     /// Submit a batch of write operations and await their durability.
@@ -258,10 +311,12 @@ impl IoBatcher {
         if self.state.closing.load(Ordering::SeqCst) {
             return Err("io batcher is closing".to_string());
         }
+        let permit = self.acquire_bytes(Self::ops_bytes(&ops)).await?;
         let (result_tx, result_rx) = oneshot::channel();
         let item = BatchItem::Ops {
             ops,
             completions: vec![BatchCompletion::Submit(result_tx)],
+            permit: Some(permit),
         };
         if self.tx.send(item).await.is_err() {
             return Err("io batcher worker has exited".to_string());
@@ -287,9 +342,11 @@ impl IoBatcher {
         if self.state.closing.load(Ordering::SeqCst) {
             return Err("io batcher is closing".to_string());
         }
+        let permit = self.acquire_bytes(Self::ops_bytes(&ops)).await?;
         let item = BatchItem::Ops {
             ops,
             completions: vec![BatchCompletion::Flushed(callback)],
+            permit: Some(permit),
         };
         self.tx
             .send(item)
@@ -315,12 +372,14 @@ impl IoBatcher {
         if self.state.closing.load(Ordering::SeqCst) {
             return Err("io batcher is closing".to_string());
         }
+        let permit = self.acquire_bytes(Self::ops_bytes(&ops)).await?;
         let item = BatchItem::Ops {
             ops,
             completions: vec![
                 BatchCompletion::Flushed(callback),
                 BatchCompletion::Hook(Box::new(hook)),
             ],
+            permit: Some(permit),
         };
         self.tx
             .send(item)
@@ -445,33 +504,44 @@ impl IoBatcher {
 
 // ── Worker task ──────────────────────────────────────────────────────────────
 
-fn accumulate(
-    item: BatchItem,
-    ops: &mut Vec<BatchOp>,
-    completions: &mut Vec<BatchCompletion>,
-    close_acks: &mut Vec<oneshot::Sender<()>>,
-    barriers: &mut Vec<oneshot::Sender<()>>,
-    submissions: &mut usize,
-    closing: &mut bool,
-) {
+/// Batch-scoped accumulation buffers for the worker loop.
+#[derive(Default)]
+struct BatchAcc {
+    ops: Vec<BatchOp>,
+    completions: Vec<BatchCompletion>,
+    permits: Vec<tokio::sync::OwnedSemaphorePermit>,
+    close_acks: Vec<oneshot::Sender<()>>,
+    barriers: Vec<oneshot::Sender<()>>,
+    submissions: usize,
+    closing: bool,
+}
+
+fn accumulate(item: BatchItem, acc: &mut BatchAcc) {
     match item {
         BatchItem::Ops {
             ops: item_ops,
             completions: item_completions,
+            permit,
         } => {
-            ops.extend(item_ops);
-            completions.extend(item_completions);
-            *submissions += 1;
+            acc.ops.extend(item_ops);
+            acc.completions.extend(item_completions);
+            if let Some(p) = permit {
+                // Held until this batch's flush completes (dropped after
+                // `flush` returns), so the byte budget covers the whole
+                // accepted-but-unflushed window.
+                acc.permits.push(p);
+            }
+            acc.submissions += 1;
         }
         BatchItem::Barrier(ack) => {
             // Answered after the flush of the batch it was accumulated into
             // — which, thanks to the ordered channel, covers every item
             // accepted before the barrier.
-            barriers.push(ack);
+            acc.barriers.push(ack);
         }
         BatchItem::Close(ack) => {
-            close_acks.push(ack);
-            *closing = true;
+            acc.close_acks.push(ack);
+            acc.closing = true;
         }
     }
 }
@@ -500,34 +570,13 @@ async fn batcher_worker(
             None => break, // all senders dropped → clean shutdown
         };
 
-        let mut all_ops = Vec::new();
-        let mut completions: Vec<BatchCompletion> = Vec::new();
-        let mut close_acks: Vec<oneshot::Sender<()>> = Vec::new();
-        let mut barriers: Vec<oneshot::Sender<()>> = Vec::new();
-        let mut submissions = 0usize;
-        let mut closing = false;
-        accumulate(
-            first,
-            &mut all_ops,
-            &mut completions,
-            &mut close_acks,
-            &mut barriers,
-            &mut submissions,
-            &mut closing,
-        );
+        let mut acc = BatchAcc::default();
+        accumulate(first, &mut acc);
 
         // ── Phase 2: non-blocking drain (zero-latency high-throughput path) ─
-        while !closing && all_ops.len() < config.max_entries {
+        while !acc.closing && acc.ops.len() < config.max_entries {
             match rx.try_recv() {
-                Ok(item) => accumulate(
-                    item,
-                    &mut all_ops,
-                    &mut completions,
-                    &mut close_acks,
-                    &mut barriers,
-                    &mut submissions,
-                    &mut closing,
-                ),
+                Ok(item) => accumulate(item, &mut acc),
                 Err(_) => break, // channel momentarily empty
             }
         }
@@ -536,10 +585,10 @@ async fn batcher_worker(
         // Only wait if exactly ONE submission arrived so far (a second one
         // already coalesced) — completion count can't gate this because one
         // submission may carry several completions (callback + hook).
-        if !closing && submissions == 1 && !config.window.is_zero() {
+        if !acc.closing && acc.submissions == 1 && !config.window.is_zero() {
             let deadline = tokio::time::Instant::now() + config.window;
             loop {
-                if closing || all_ops.len() >= config.max_entries {
+                if acc.closing || acc.ops.len() >= config.max_entries {
                     break;
                 }
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -547,15 +596,7 @@ async fn batcher_worker(
                     break;
                 }
                 match tokio::time::timeout(remaining, rx.recv()).await {
-                    Ok(Some(item)) => accumulate(
-                        item,
-                        &mut all_ops,
-                        &mut completions,
-                        &mut close_acks,
-                        &mut barriers,
-                        &mut submissions,
-                        &mut closing,
-                    ),
+                    Ok(Some(item)) => accumulate(item, &mut acc),
                     Ok(None) => break, // channel closed
                     Err(_) => break,   // timeout
                 }
@@ -563,8 +604,12 @@ async fn batcher_worker(
         }
 
         // ── Phase 4+5: single write for the entire batch, then notify ─────
-        flush(&*storage, all_ops, completions).await;
-        for barrier in barriers.drain(..) {
+        let closing = acc.closing;
+        let mut close_acks = std::mem::take(&mut acc.close_acks);
+        let barriers = std::mem::take(&mut acc.barriers);
+        flush(&*storage, acc.ops, acc.completions).await;
+        drop(acc.permits); // flush done: byte budget released to submitters
+        for barrier in barriers {
             let _ = barrier.send(());
         }
 
@@ -573,25 +618,16 @@ async fn batcher_worker(
             // already received into one final write_batch (final fsync under
             // Strict), answer every pending completion, ack all closers, exit.
             rx.close();
-            let mut rest_ops = Vec::new();
-            let mut rest_completions = Vec::new();
-            let mut dummy = true;
+            let mut rest = BatchAcc::default();
             while let Ok(item) = rx.try_recv() {
-                accumulate(
-                    item,
-                    &mut rest_ops,
-                    &mut rest_completions,
-                    &mut close_acks,
-                    &mut barriers,
-                    &mut submissions,
-                    &mut dummy,
-                );
+                accumulate(item, &mut rest);
             }
-            flush(&*storage, rest_ops, rest_completions).await;
-            for barrier in barriers.drain(..) {
+            flush(&*storage, rest.ops, rest.completions).await;
+            drop(rest.permits);
+            for barrier in rest.barriers {
                 let _ = barrier.send(());
             }
-            for ack in close_acks {
+            for ack in close_acks.drain(..).chain(rest.close_acks) {
                 let _ = ack.send(());
             }
             return;
@@ -619,6 +655,50 @@ mod tests {
             key: i.to_be_bytes().to_vec(),
             value: i.to_be_bytes().to_vec(),
         }]
+    }
+
+    /// Byte budget: a submit that would exceed the in-flight byte budget
+    /// must wait until the covering flush of the earlier op completes.
+    /// INV-1: bounds the accepted-but-unflushed tail so backpressure reaches
+    /// the Raft proposal pipeline instead of growing an OOM-triggering
+    /// backlog (perf-lab W9 flake, 2026-09-17).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn byte_budget_backpressures_submitters() {
+        use rr_core::storage_fault::{FaultConfig, FaultInjectingStorage};
+
+        let tmp = TempDir::new().unwrap();
+        let rocks =
+            rr_storage::rocks::RocksStorage::open_default(tmp.path().to_str().unwrap()).unwrap();
+        let storage = Arc::new(FaultInjectingStorage::new(
+            rocks,
+            FaultConfig::seeded(1).with_latency(Duration::from_millis(300)),
+        ));
+        let config = IoBatcherConfig {
+            window: Duration::ZERO,
+            max_entries: 256,
+            close_timeout: Duration::from_secs(30),
+            // put_op(i) is 8 bytes (4 key + 4 value): exactly one op in flight.
+            max_inflight_bytes: 8,
+        };
+        let batcher = IoBatcher::new(storage, config);
+
+        let b1 = batcher.clone();
+        let first = tokio::spawn(async move { b1.submit(put_op(1)).await });
+        // Let the first submit win the budget.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let b2 = batcher.clone();
+        let second = tokio::spawn(async move { b2.submit(put_op(2)).await });
+
+        // While the first op's flush is still in flight (300ms latency),
+        // the second must still be blocked on the budget.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !second.is_finished(),
+            "second submit must be back-pressured while the first flush is in flight"
+        );
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+        batcher.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -742,6 +822,7 @@ mod tests {
                 .send(BatchItem::Ops {
                     ops: put_op(i),
                     completions: vec![BatchCompletion::Submit(result_tx)],
+                    permit: None,
                 })
                 .await
                 .expect("send must succeed while the batcher is open");
@@ -787,6 +868,7 @@ mod tests {
             .send(BatchItem::Ops {
                 ops: put_op(41),
                 completions: vec![],
+                permit: None,
             })
             .await
             .expect("send while open");

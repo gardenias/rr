@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **IoBatcher in-flight byte budget (W9 / INV-1 hardening)**: new
+  `IoBatcherConfig::max_inflight_bytes` (default 64 MiB). Submissions
+  acquire byte permits (keys + values) before enqueueing and the worker
+  releases them only after the covering flush completes, so the
+  accepted-but-unflushed tail is bounded in bytes — the entry-count channel
+  bound alone was payload-blind (512 × 16 KiB ≈ unbounded GiB-scale backlog
+  under a starved fsync path, the trigger chain of the 2026-09-17 perf-lab
+  W9 flake: backlog → OOM-restart wave → restart demotion). Exhaustion
+  back-pressures submitters, i.e. the Raft proposal pipeline itself.
+  Budget is clamped into `[1, u32::MAX]` so a zero/oversized config cannot
+  panic or wedge. New test `byte_budget_backpressures_submitters`
+  (registered under INV-1).
+
 - **Deferred (two-phase) response (R-2 / A-0033)**: an apply may now park the
   client response and have a later entry's apply deliver it — the framework
   capability behind intent-sourcing / two-phase apply. Per the 2026-09-17
@@ -201,6 +214,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on the oldest sampled records — a latent limit first exposed by the
     perf-lab's W9 smoke (16.7k acks). The crash-harness oracle
     (tests/crash) is unchanged.
+
+### Fixed
+
+- **Vendored openraft patch #3 — become-leader flush-cursor inflation
+  (W9 INV-1 root cause, 2026-09-21)**: the become-leader path emitted
+  `Command::UpdateIOProgress { when: None }`, and `run_update_io_progress`
+  reports `Notification::LocalIO` at submit time — which `handle_local_io`
+  treats as *flushed* (`log_progress.try_flush` + leader
+  `update_local_progress`). Harmless with synchronous storage
+  (accepted == durable), but under rr's async append + pending overlay
+  (A-0015: submitted ⇒ visible) a node elected with an unflushed backlog
+  had its `flushed()` cursor inflated over entries no fsync had covered:
+  the new leader self-matched its unflushed tail, so a quorum could commit
+  (and ACK) an entry that was durable on only one node — the exact W9
+  anatomy (stale-majority election then truncated the last holder). The
+  command is now gated on the real flush of the pre-election accepted IO
+  (`when: Condition::IOFlushed { prev_accepted }`), mirroring the existing
+  follower duplicate-append guard. Fresh-start behavior (`None`) is
+  unchanged — a recovered on-disk log is already durable.
+- **`RocksLogStorage::save_vote` now drains the append backlog first**
+  (W9 / INV-1, same root family): the vote write bypasses the IoBatcher
+  (direct `put`), so a fast vote completion reached openraft's monotonic
+  `flushed` cursor while log appends were still queued — and because `IOId`
+  ordering is vote-dominant, the cursor jumped over the unflushed tail,
+  releasing `Condition::IOFlushed`-gated AppendEntries responses for
+  entries no fsync had covered. `save_vote` now awaits the batcher's
+  `flush_barrier()` first, restoring "vote flushed ⟹ prior log IO
+  flushed". New test `test_save_vote_waits_for_pending_appends`
+  (registered under INV-1).
 
 ### Changed
 

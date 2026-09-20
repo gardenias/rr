@@ -98,6 +98,7 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
 | 4 | `crates/rr-raft/src/rocks_log_storage.rs:234-249` | 空批次立即 `io_completed(Ok)`;非空批次经 batcher,无"先 ACK 后落盘"路径 |
 | 5 | `crates/rr-raft/src/group_manager.rs:405-417` | `stop_group` 等待 `in_flight_writes` 归零后才 shutdown raft |
 | 6 | `crates/rr-server/src/main.rs` `with_raft_log_dir` | 生产接线(ADR A-0016):`--storage rocks` 时 raft log 落盘 `{data_dir}/raft-log/{group_id}`——默认部署形态的 durable log 自此成立 |
+| 7 | `crates/rr-raft/src/io_batcher.rs` `acquire_bytes`/`max_inflight_bytes` | 在途未落盘字节预算(默认 64 MiB):submit 前先取信号量许可,permit 随批次持有到 flush 完成才释放——异步尾部有界,背压进入提案管线(断"无界积压→OOM 重启波"链,W9 flake 2026-09-17) |
 
 ### 现有测试
 
@@ -107,6 +108,9 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   20 条已 ACK 写在 abrupt drop 后全部存活)
 - `crates/rr-raft/src/rocks_log_storage.rs:490` `test_rocks_vote_persistence`、`:512`
   `test_rocks_log_persistence`(reopen 存活)
+- `crates/rr-raft/src/rocks_log_storage.rs`
+  `test_save_vote_waits_for_pending_appends`(vote 写入必须先排空 append 积压:
+  vote 完成会把 openraft vote 主导的 flushed 光标推过未落盘日志尾)
 - `crates/rr-raft/src/io_batcher.rs:292` `batcher_exits_cleanly_on_drop`(drop 后 worker 退出)
 - `tests/integration/src/lib.rs:2010` `test_concurrent_writes_under_chaos_linearizability`
   (chaos 下"已 ACK 不丢"压力验证)
@@ -126,6 +130,8 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   `slow_disk_latency_completes_correctly_just_slower`
 - `crates/rr-raft/src/io_batcher.rs` `flush_barrier_*`、`submit_with_hook_*`
   (屏障排序与 post-flush hook 语义)
+- `crates/rr-raft/src/io_batcher.rs` `byte_budget_backpressures_submitters`
+  (字节预算背压:预算耗尽时 submit 挂起,直到在途批次 flush 完成释放许可)
 - `crates/rr-raft/src/group_manager.rs` `test_start_group_persists_log_with_rocks_base_path`、
   `test_start_group_rocks_shim_still_persists`(ADR A-0016,rocks-gated:统一 log 选择 +
   shim 兼容,直开存储字节级验证 + `Raft::new` 恢复路径验证)

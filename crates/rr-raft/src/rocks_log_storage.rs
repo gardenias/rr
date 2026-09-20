@@ -378,6 +378,16 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
     }
 
     async fn save_vote(&mut self, vote: &RrVote) -> Result<(), io::Error> {
+        // Order the vote write after every append accepted so far. The vote
+        // write below is direct (bypasses the batcher), while appends flush
+        // asynchronously — so without this barrier a fast vote completion
+        // reaches openraft's `try_flush` first and, because IOId ordering is
+        // vote-dominant, jumps the monotonic `flushed` cursor past the still
+        // queued log backlog. AppendEntries responses gated on
+        // `Condition::IOFlushed` would then fire for entries no fsync has
+        // covered (perf-lab W9 INV-1 chain, 2026-09-17). Draining first makes
+        // "vote flushed ⟹ prior log IO flushed" true again.
+        self.await_batcher_drain().await;
         let bytes = ser(vote)?;
         self.storage
             .put(CF_META, KEY_VOTE, &bytes)
@@ -604,6 +614,52 @@ mod tests {
         s.save_vote(&vote).await.unwrap();
 
         assert_eq!(RaftLogReader::read_vote(&mut s).await.unwrap(), Some(vote));
+    }
+
+    // INV-1: a vote write must complete only after every previously accepted
+    // append has flushed — otherwise openraft's vote-dominant `flushed`
+    // cursor jumps over the unflushed log backlog and AppendEntries responses
+    // gated on it acknowledge replication no fsync has covered (W9, 2026-09-17).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_save_vote_waits_for_pending_appends() {
+        use openraft::type_config::async_runtime::{AsyncRuntime, Oneshot};
+        use std::time::Duration;
+
+        let tmp = TempDir::new().unwrap();
+        // Long accumulation window: the append stays unflushed observably.
+        let mut s = RocksLogStorage::open_with_config(
+            tmp.path().to_str().unwrap(),
+            IoBatcherConfig::new(Duration::from_millis(500), 256),
+        )
+        .expect("open db");
+
+        let (tx, rx) =
+            <<RrTypeConfig as openraft::RaftTypeConfig>::AsyncRuntime as AsyncRuntime>::Oneshot::channel();
+        s.append(vec![make_entry(1, 1)], IOFlushed::signal(tx))
+            .await
+            .expect("append enqueue");
+
+        let vote = Vote::new(2, 0);
+        let vote_task = {
+            let mut s2 = s.clone();
+            tokio::spawn(async move { s2.save_vote(&vote).await })
+        };
+
+        // Well before the window flush, neither the append callback nor the
+        // vote write may have completed.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !vote_task.is_finished(),
+            "save_vote must wait for the pending append to flush"
+        );
+
+        // When save_vote returns, the append's durability callback has fired.
+        vote_task.await.unwrap().expect("save_vote");
+        rx.await
+            .expect("append callback must have fired before save_vote returned")
+            .expect("append flush ok");
+        assert_eq!(RaftLogReader::read_vote(&mut s).await.unwrap(), Some(vote));
+        s.close().await.unwrap();
     }
 
     // ── 3: truncate_after keeps boundary log id ─────────────────────────────
