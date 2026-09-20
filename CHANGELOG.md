@@ -232,7 +232,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command is now gated on the real flush of the pre-election accepted IO
   (`when: Condition::IOFlushed { prev_accepted }`), mirroring the existing
   follower duplicate-append guard. Fresh-start behavior (`None`) is
-  unchanged — a recovered on-disk log is already durable.
+  unchanged — a recovered on-disk log is already durable. Companion fix in
+  `run_update_io_progress`: the gated command can run after the new
+  leader's blank append, so its `submit()` is now `try_submit()` — a plain
+  `submit` would regress the monotonic submitted cursor (debug panic) when
+  the gate delays execution. Vendor regression test
+  `test_become_leader_gates_io_progress_on_prior_accepted_io` (note:
+  openraft's own test suite requires network-unavailable dev-deps to
+  execute locally; the test is compile-reviewed and runs in any networked
+  checkout).
 - **`RocksLogStorage::save_vote` now drains the append backlog first**
   (W9 / INV-1, same root family): the vote write bypasses the IoBatcher
   (direct `put`), so a fast vote completion reached openraft's monotonic

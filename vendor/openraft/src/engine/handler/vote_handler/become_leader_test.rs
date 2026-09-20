@@ -9,6 +9,7 @@ use crate::Vote;
 use crate::batch::Batch;
 use crate::core::ServerState;
 use crate::engine::Command;
+use crate::engine::Condition;
 use crate::engine::Engine;
 use crate::engine::TargetProgress;
 use crate::engine::testing::UTConfig;
@@ -89,6 +90,40 @@ fn test_become_leader() -> anyhow::Result<()> {
             }
         }
     ]);
+
+    Ok(())
+}
+
+/// rr patch #3 (2026-09-21): when a log IO was accepted before the election
+/// (i.e. it may still be unflushed on stores with deferred append
+/// completion), the become-leader `UpdateIOProgress` must be gated on that
+/// IO's real flush — otherwise `handle_local_io` would mark the unflushed
+/// tail as flushed and the new leader could self-match entries that are not
+/// durable anywhere on this node.
+#[test]
+fn test_become_leader_gates_io_progress_on_prior_accepted_io() -> anyhow::Result<()> {
+    let mut eng = eng();
+
+    // A previously accepted log IO, standing in for an in-flight append.
+    let prev = IOId::new_log_io(Vote::new(1, 1).to_committed(), Some(log_id(1, 1, 3)));
+    eng.state.accept_log_io(prev.clone());
+
+    eng.vote_handler().become_leader();
+
+    let cmds = eng.output.take_commands();
+    let Some(Command::UpdateIOProgress { when, io_id }) = cmds.first() else {
+        panic!("first command must be UpdateIOProgress, got: {cmds:?}");
+    };
+    assert_eq!(
+        *when,
+        Some(Condition::IOFlushed { io_id: prev }),
+        "the update must wait for the pre-election IO to flush"
+    );
+    assert_eq!(
+        *io_id,
+        IOId::new_log_io(Vote::new(2, 1).to_committed(), None),
+        "the io being marked is still the leader's current tip"
+    );
 
     Ok(())
 }

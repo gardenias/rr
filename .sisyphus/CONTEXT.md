@@ -1105,15 +1105,46 @@ ack-先于-flush 尾部打破该假设 → 重启降级 → 选举安全失效�
 "flushed 门控"行为不可区分。原始失败的三要素(W5-16384 49MB/s 造积压 → 三节点
 06:42:52 同刻 snapshot build(~300MB 全量序列化,2 核 CPU 压死+内存翻倍 → 疑似
 OOM 重启波)→ 积压+重启叠加)缺一不可。
-**修正后的未定点(两个候选代码点)**:① leader 的 self-match 是否在 submit 时乐观
-推进(`update_matching` 与 raft_core 的 `Notification::LocalIO` 处理路径);
-② follower 响应门控 `Condition::IOFlushed { accepted_log_io }` 捕获的 io_id 是否
-可能对应更早的已完成 io(engine_impl.rs:617-628)。**判实验**:snapshot crunch
-期间(SIGKILL + oracle)复现,或 vendor 仪表补丁在 commit 推进处打印
-submitted-vs-flushed 差值。
-**修复方向**:① IoBatcher 队列有界+对 append 调用方背压(断"无界积压→OOM 重启波"
-链条,尾部永远 ≤bound);② 核实/加固 ack 门控(响应必须等 flush);③ 容器重启根因
-(OOM 嫌疑)单独确认。
+
+**✅ 已定点并修复(2026-09-21,vendor patch #3)**:原两个候选代码点(① leader
+self-match 经 `update_local_progress`;② follower `Condition::IOFlushed` 捕获的
+io_id)在常规路径上**都是正确的 flush 门控**——但二者共享的判据
+`log_progress.flushed()` 存在一条**无 IO 的膨胀路径**:become-leader 时
+`vote_handler` 无条件(`when: None`)发 `Command::UpdateIOProgress`,而
+`run_update_io_progress` 在 **submit 时刻**就发 `Notification::LocalIO`,
+`handle_local_io` 一律按"已 flush"处理(`try_flush` + leader `update_local_progress`)。
+同步存储下无害(accepted==durable),但 rr 的 A-0015 pending overlay 让
+`last_log_id` 包含未落盘尾部 → **带积压当选的节点 flushed 光标瞬间越过未 fsync
+的条目**:作为 leader 自匹配未落盘尾部(quorum 只差一个真 flush 即可 commit),
+下台后作为 follower 时 AppendEntries 响应门控同样被膨胀光标放行。IOId 排序
+vote 优先,每换任期重新放大一次。完整链条:重启波 → 选举频繁 + snapshot crunch
+积压 → 新 leader 自匹配未落盘尾部 → commit/ACK 时条目仅单点持久 → 第二波重启 →
+陈旧多数派(node1+node3 @400039,node2 @400040 拒票无效)→ T28 空白条目截断
+最后的持有处 → INV-1 违反。修复:`UpdateIOProgress` 改挂
+`when: Condition::IOFlushed{prev_accepted}`(`accept_log_io` 返回的前置 accepted;
+与 follower 重复追加路径的既有守卫同构;fresh start 为 None 保持原行为——重启
+恢复的盘上日志本就持久)。**伴随修复**:带门控的 UpdateIOProgress 可能被推迟到
+新任 leader 空白条目的 append 之后执行,`run_update_io_progress` 里原样的
+`submit()` 会把 submitted 光标回退(debug 下直接 panic)——改用上游预留的
+`try_submit()`(只在落后时推进;有序命令通道下"光标之后必已提交存储"成立)。
+**注意**:IoBatcher 字节预算(同一批落地)只是缩小
+暴露窗口,真正闭环是本补丁。回归承载:W9 smoke 复跑 + crash-nightly。
+
+**修复方向终态**:① IoBatcher 字节预算背压 ✅(2026-09-21 落地,默认 64 MiB,
+INV-1 强制点 #7);② ack 门控修复 = vendor patch #3 + **`save_vote` 屏障**(rr 侧,
+同日):vote 直写绕过 batcher,快速完成会把 vote 主导的 flushed 光标推过仍在排队的
+日志尾,放行 `Condition::IOFlushed` 门控的 AppendEntries 响应——现已改为
+`flush_barrier()` 先行,"vote flushed ⟹ 此前日志已 flushed"重新成立(回归测试
+`test_save_vote_waits_for_pending_appends`,INV-1 登记);③ 容器重启根因(OOM
+嫌疑)——①落地后 16KiB 档在途字节有界,待 W9 复跑实证。
+
+**⚠️ 既有 flake 登记(2026-09-21,与本次修复无关)**:integration 套件在并行全量跑下,
+选举/恢复类测试偶发失败——`test_leader_isolation_and_recovery` /
+`test_minority_partition_blocks_writes` / `test_3node_leader_failover` 各见过
+(症状:恢复后写撞到 `ForwardToLeader{leader:None}`,即选主尚未收敛)。
+**归因实验**:vendor patch #3 摘掉的基线 ×12 轮复现 4 次,带补丁 ×15 轮 2 次——
+补丁前后同族同率,判为既有 flake(本机并行负载下的选举时序敏感),不是回归。
+后续若要根治:这三个测试的等待窗口/重试策略审查(非本批次范围)。
 
 ## 未完成 / 需要重做 / Open Work
 

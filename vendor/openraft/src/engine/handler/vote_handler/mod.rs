@@ -212,10 +212,25 @@ where
             (leader.last_log_id().cloned(), leader.noop_log_id().clone())
         };
 
-        self.state.accept_log_io(IOId::new_log_io(leader_vote.clone(), last_log_id.clone()));
+        // rr patch (vendor #3, 2026-09-21): gate the io-progress update on the
+        // real flush of the pre-election accepted IO. With an async log
+        // writer whose submitted entries are readable before they are durable
+        // (rr's IoBatcher pending-overlay), `last_log_id` may cover
+        // submitted-but-unflushed entries. Firing this command unconditionally
+        // makes `run_update_io_progress` emit `Notification::LocalIO`, which
+        // `handle_local_io` treats as FLUSHED — inflating
+        // `log_progress.flushed()` past durable state and letting the new
+        // leader self-match unflushed entries, so a quorum can commit an
+        // entry that is durable on only one node (perf-lab W9 INV-1 flake,
+        // 2026-09-17). `accept_log_io` returns the previously accepted io;
+        // `None` (fresh start) keeps the original immediate behavior — a
+        // recovered on-disk log is already durable.
+        let prev_accepted = self
+            .state
+            .accept_log_io(IOId::new_log_io(leader_vote.clone(), last_log_id.clone()));
 
         self.output.push_command(Command::UpdateIOProgress {
-            when: None,
+            when: prev_accepted.map(|io_id| Condition::IOFlushed { io_id }),
             io_id: IOId::new_log_io(leader_vote, last_log_id.clone()),
         });
 

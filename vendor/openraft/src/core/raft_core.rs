@@ -2279,7 +2279,15 @@ where
         // Notify that I/O is about to be submitted.
         self.io_broadcast.accepted.send_if_greater(io_id.clone());
 
-        self.engine.state.log_progress_mut().submit(io_id.clone());
+        // rr patch (vendor #3 companion, 2026-09-21): `UpdateIOProgress` may
+        // carry a `when` gate (see the become-leader path in vote_handler), so
+        // it can execute AFTER later commands — e.g. the new leader's blank
+        // append already advanced the `submitted` cursor past `io_id`. A plain
+        // `submit()` would regress the cursor (and panic on debug builds);
+        // `try_submit` advances only when behind, which is correct here: the
+        // in-order command channel implies everything up to the cursor has
+        // reached storage.
+        self.engine.state.log_progress_mut().try_submit(io_id.clone());
 
         let notify = Notification::LocalIO { io_id: io_id.clone() };
 

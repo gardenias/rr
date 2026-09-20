@@ -58,6 +58,64 @@ step down) but keep answering `granted = false`. Safety is preserved because
 the candidate is told it was rejected, and because the recency branch runs
 first, no equal/lower-term replay can turn the local record into a real grant.
 
+## Issue 3: become-leader `UpdateIOProgress { when: None }` marks unflushed log IO as flushed
+
+**Location**: `openraft/src/engine/handler/vote_handler/mod.rs` (become-leader
+path) + `openraft/src/core/raft_core.rs::run_update_io_progress` /
+`handle_local_io`
+
+```rust
+// vote_handler (become leader):
+self.state.accept_log_io(IOId::new_log_io(leader_vote.clone(), last_log_id.clone()));
+self.output.push_command(Command::UpdateIOProgress { when: None, io_id: ... });
+
+// raft_core::run_update_io_progress:
+let notify = Notification::LocalIO { io_id: io_id.clone() };
+self.tx_notification.send(notify).await.ok();   // at SUBMIT time
+
+// raft_core::handle_local_io:
+self.engine.state.log_progress_mut().try_flush(io_id.clone());   // treated as FLUSHED
+... self.engine.replication_handler().update_local_progress(log_io_id.log_id);
+```
+
+**What happens**: `handle_local_io` treats every `Notification::LocalIO` as a
+completed flush, but the become-leader `UpdateIOProgress` generates one without
+any IO at all. With a `RaftLogStorage` whose `append` completes asynchronously
+(callback fires after return — which the `IOFlushed` callback design explicitly
+supports, cf. the comment "Submit IO request, do not wait for the response"),
+a node elected while appends are still in flight gets its
+`log_progress.flushed()` cursor advanced over entries no storage write has
+covered. Two consequences:
+
+1. The new leader's `update_local_progress` self-matches its unflushed tail, so
+   a quorum can reach commit with the entry durable on fewer nodes than the
+   quorum implies — potentially exactly one.
+2. The inflated `flushed()` cursor also releases `Condition::IOFlushed`-gated
+   `Respond` commands (e.g. AppendEntries replies) early. Because `IOId`
+   ordering is vote-dominant, a later vote IO completion (`save_vote` is a
+   fast direct write in most stores) can likewise jump the cursor past a
+   queued log backlog — same effect from the follower side.
+
+We observed the end-to-end result in the rr perf-lab (W9): an entry was ACKed
+to the client while durable on one node only; a restart wave then let a stale
+majority elect a leader without it and truncate the last copy. With
+synchronous stores (`append` durable before return) the window is empty, which
+is presumably why it has never bitten upstream.
+
+**Suggested fix** (what our vendor patch does): gate the become-leader
+`UpdateIOProgress` on the real flush of the previously accepted IO —
+`when: prev_accepted.map(|io_id| Condition::IOFlushed { io_id })` where
+`prev_accepted` is the return of `accept_log_io` — mirroring the existing
+guard in `following_handler`'s duplicate-append path. Fresh starts
+(`prev_accepted == None`) keep the immediate behavior. Note this makes the
+command conditionally deferred, so `run_update_io_progress` must also use
+`try_submit` instead of `submit` for the `submitted` cursor: the new leader's
+blank append can execute first, and a plain `submit` would regress the
+monotonic cursor (debug panic). Additionally, stores with deferred append
+completion must order `save_vote` completion after previously accepted
+appends (or the vote IO completion re-opens the same cursor jump); worth one
+line in the `RaftLogStorage` contract docs either way.
+
 ## Context
 
 Found by rr's production-shape perf matrix (3 nodes, mTLS, cpuset-limited,
