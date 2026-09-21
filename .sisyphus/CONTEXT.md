@@ -5,7 +5,7 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-21（**W9 INV-1 闭环:flushed 光标两条膨胀路径定点 + vendor patch #3 + save_vote 屏障 + IoBatcher 字节预算;既有选举 flake 根治;A-0012 watch 守卫闭环;快照防回退(β)与 step-down 在途写两个遗留问题查明结案**）
+**Last updated**: 2026-09-21（**W9 INV-1 全链路闭环:根因定点 + 三修复落地 + perf-lab smoke ×3 / 宿主机 oracle 5000/5000 双路实证;既有选举 flake 根治;A-0012 watch 守卫闭环**）
 > 前情 2026-09-17（**perf-lab 加固批次：soak lanes open-loop 化（134→2000/s 实测达标）、RaftService gRPC 4MiB 解码上限修复（16KiB 档 wedge 真凶）、探针取证加固；W9 罕见 INV-1 flake 立案观察**）
 > 前情 2026-09-13（**M4 完成：活性缺陷链全部定点修复；首份生产基线 17/18 绿 + W9 全长复核绿（oracle 5000/5000）——18/18 达成；判据表已回填，A-0010 已重判维持 deferred；上游 issue 草稿已备**）
 **Current phase**: **v0.2.0 已发布**；下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`，WAL（A-0010）维持 deferred
@@ -89,8 +89,16 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
   端口(本轮用 53001-3)。编排脚本在 `target/w9-host/w9-host-repro.sh`(一次性,
   未入库);证据目录 `target/w9-host/run-20260921-101053/`。
 - **结论**:字节预算 + save_vote 屏障 + vendor patch #3 在"快照 crunch + 双杀
-  重启波 + 全集群冷重启"下保持 INV-1。perf-lab `--smoke` 复跑(容器 OOM 维度)
-  仍待有网后补。
+  重启波 + 全集群冷重启"下保持 INV-1。~~perf-lab `--smoke` 复跑(容器 OOM 维度)
+  仍待有网后补。~~
+
+- **✅ perf-lab 实证(同日下午,网络恢复后)**:补齐 `rust:1.98-bookworm` /
+  `debian:bookworm-slim` / redpanda 镜像后,`prod-perf.sh --smoke` **连跑 3 轮
+  MATRIX PASS**(归档 `docs/perf/prod/20260921-{104153,110559,112441}-985b594`,
+  未入库):W9 档 soak 60s + TransferLeader 全部 0 失败(如 119,999/119,999)、
+  oracle 干净;W5-16384(原 wedge/积压档)、W7 快照压力全绿。W9 INV-1 flake
+  (~1/4 率)三连绿 + 宿主机强验证 = 关闭观察。残留观察项:上游 issue(3 个)
+  待提;`target/w9-host/w9-host-repro.sh` 保留为无 Docker 环境的复跑入口。
 
 ### Session 2026-09-05/06 — 可靠性专项批次(R-1 执法 + R-6 性质测试 + R-7 基线)
 
@@ -1146,7 +1154,12 @@ Oracle review (`bg_1d8162f6`) 找到 3 P0 + 5 P1。本 wave 修了 P0-2/P0-3/P1-
   (data-dir 写盘,重启 restore——A-0016 形状的必要补全);δ. 背压(原 C)依然需要,
   断积压→OOM→重启波触发链。
 
-## 🔴 开放项(2026-09-17 深挖):选举安全级 INV-1——重启降级 → 陈旧多数派 → 已提交数据被毁
+## ✅ 已闭环(2026-09-21):选举安全级 INV-1——重启降级 → 陈旧多数派 → 已提交数据被毁
+
+> 原为 🔴 开放项(2026-09-17 深挖立案);2026-09-21 定点 + 修复 + 双路实证闭环,
+> 细节保留如下。修复:IoBatcher 字节预算 + save_vote 屏障 + vendor patch #3
+> (+try_submit);实证:perf-lab `--smoke` ×3 全绿(W9 含)+ 宿主机近似
+> oracle 5000/5000(双杀重启波 + 全集群冷重启)。
 
 **复现配方**:`scripts/prod-perf.sh --smoke`(全档;~1/4 率,归档 20260917-143506-ed6e9f9)。
 **已实证的失败解剖**(全部来自流式日志 + 取证 dump):
