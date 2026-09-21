@@ -5,7 +5,8 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-17（**perf-lab 加固批次：soak lanes open-loop 化（134→2000/s 实测达标）、RaftService gRPC 4MiB 解码上限修复（16KiB 档 wedge 真凶）、探针取证加固；W9 罕见 INV-1 flake 立案观察**）
+**Last updated**: 2026-09-21（**W9 INV-1 闭环:flushed 光标两条膨胀路径定点 + vendor patch #3 + save_vote 屏障 + IoBatcher 字节预算;既有选举 flake 根治;A-0012 watch 守卫闭环;快照防回退(β)与 step-down 在途写两个遗留问题查明结案**）
+> 前情 2026-09-17（**perf-lab 加固批次：soak lanes open-loop 化（134→2000/s 实测达标）、RaftService gRPC 4MiB 解码上限修复（16KiB 档 wedge 真凶）、探针取证加固；W9 罕见 INV-1 flake 立案观察**）
 > 前情 2026-09-13（**M4 完成：活性缺陷链全部定点修复；首份生产基线 17/18 绿 + W9 全长复核绿（oracle 5000/5000）——18/18 达成；判据表已回填，A-0010 已重判维持 deferred；上游 issue 草稿已备**）
 **Current phase**: **v0.2.0 已发布**；下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`，WAL（A-0010）维持 deferred
 **Active plan**: `.sisyphus/plans/rr-prod-perf.md`（**M0–M4 全部完成**，基线 `docs/perf/prod/20260912-234352-9fa8347/`，M5=Linux 宿主正式基线）；v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`（deferred，重判结论+解锁路径已回写）
@@ -23,6 +24,46 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-09-21 — W9 INV-1 闭环 + 既有 flake 根治 + A-0012 watch 守卫 + 两个遗留问题结案
+
+> 承接 09-17 的 W9 立案。 commits:`f3aad0f`(fmt 漂移)→ `6eb02d6`(字节预算 +
+> save_vote 屏障)→ `bd698d2`(vendor patch #3 + try_submit + issue 草稿)→
+> `eb1119e`(flake 根治)→ `bc641e1`(watch 守卫)。
+
+- **W9 INV-1 根因定点并修复**(细节见上文 🔴 开放项节的"已定点并修复"改写):
+  `log_progress.flushed()` 光标的两条无 IO 膨胀路径——become-leader 的
+  `UpdateIOProgress{when:None}`(vendor patch #3 改挂 `Condition::IOFlushed{
+  prev_accepted}`,伴随 `run_update_io_progress` 的 `submit→try_submit` 防光标回退)
+  与 `save_vote` 直写越过 batcher(rr 侧改 `flush_barrier` 先行)。IoBatcher 字节预算
+  (默认 64 MiB)断"无界积压→OOM 重启波"链,INV-1 强制点 #7。验证:rr-raft 166、
+  integration 80/80、crash harness 10/10(SIGKILL 场景含)、clippy/fmt/invariants-lint
+  (68 links)全绿。**perf-lab W9 smoke 复跑阻塞**:本机 Docker 缺 `rust:1.98-bookworm`
+  /`debian:bookworm-slim` 基础镜像且 registry 不可达(按环境约定未拉取)——有网后
+  连跑 3-4 轮 `--smoke` 实证(flake 率 ~1/4)。
+- **既有 flake 根治**(非 W9 引入,归因实验:基线 ×12 轮败 4 次):openraft alpha.34
+  起 lease 门控提案快败 `ForwardToLeader::empty()`,而 `wait_for_*` 只看
+  `current_leader` → 选主后一次性写撞租约竞态。新增 `write_when_lease_ready`
+  (ForwardToLeader 重试至租约建立),4 处站点替换;修复后 ×15 轮全绿。
+- **A-0012 follow-up 闭环**:watch-loop `NodeRemoved` 自动摘除接入同一
+  `membership_change_is_safe` 谓词,目标 voter < 2 拒绝 + warn 留痕;自动路径刻意
+  无 force(刻意拆除走 `--force`/`node-reset`);维持 Option B(不下沉 manager 层)。
+  测试 `test_node_removed_quorum_guard` 含负面对照(摘守卫即变红)。
+- **遗留查明结案 ×2**:
+  ① **快照安装防回退(β,09-17)——无需补丁**:openraft `install_full_snapshot`
+  已有接收侧守卫(`snap_last_log <= local_committed` 直接跳过,含矛盾断言);
+  空快照(last_log=None)在已有 committed 的节点上天然被拒;发送侧空快照投毒已由
+  T1(rocks 路径快照持久化)闭合;mem 路径按设计全量易失。α/β/γ/δ 四方向全部闭环。
+  ② **step-down 在途 client_write(09-10)——已查明,行为可接受**:openraft 在
+  step-down(`become_following`/`CloseReplicationStreams`)时**不主动应答**在途
+  responder;它们在 (a) 被新 leader AppendEntries 截断/快照 purge 时收
+  `ForwardToLeader` 错误(`run_truncate_log`/`run_purge_log` 的 drain),(b) 分区
+  失联场景则悬挂至客户端超时——客户端侧止血即 R-2 的 `with_request_timeout`
+  (映射为可重试 `NetworkError::Timeout`)。无需服务端改动。
+- **归档清理**:`docs/perf/prod/` 31 → 4 目录(1.7G → 265M),保留两个入库基线 +
+  W9 活跃取证对。
+- **上游**:issue 草稿补 Issue 3(become-leader 膨胀对一切"延迟完成 append"的
+  存储后端都成立;含 try_submit 伴随修复说明)。提交动作待有网 + 用户决策。
 
 ### Session 2026-09-05/06 — 可靠性专项批次(R-1 执法 + R-6 性质测试 + R-7 基线)
 
