@@ -277,7 +277,7 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-doc-test-${{ hashFiles('**/Cargo.lock') }}
       - name: Run doc tests
-        run: cargo test --doc --workspace --no-deps
+        run: cargo test --doc --workspace
 
   audit:
     runs-on: ubuntu-latest

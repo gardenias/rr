@@ -242,6 +242,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test`, `clippy`, `bench`, … all failed at `rr-network` codegen with
   "Could not find `protoc`".
 
+- **CI runner image gaps beyond protoc — libsasl2, cargo args, advisories**:
+  - `sasl2-sys` is now `vendored` (cyrus-sasl built from source) in
+    `rr-ingestor-kafka` and `rr-lab-producer` — runners lack `libsasl2-dev`;
+    same rationale as `ssl-vendored`. SASL client capability is unchanged.
+  - doc-test job: dropped `--no-deps` from `cargo test --doc --workspace`
+    (cargo 1.98 rejects the flag for `test`).
+  - Dependency bumps clearing the 10 error-level `cargo audit` advisories:
+    aws-lc-sys 0.38→0.45 (+aws-lc-rs 1.16.1→1.18.1), rustls
+    0.23.37→0.23.45, rustls-webpki 0.103.9→0.103.15, h2 0.4.13→0.4.19,
+    quinn-proto 0.11.14→0.11.18, crossbeam-epoch 0.9.18→0.9.21, anyhow
+    1.0.102→1.0.104. `rand` deliberately stays at 0.8 — the crash harness's
+    `CRASH_SEED` replay contract depends on a stable `StdRng` stream;
+    remaining advisories are warning-level.
+
 - **Watch-loop `NodeRemoved` now honors the membership quorum guard**
   (ADR A-0012 follow-up, closes the last unguarded entry of INV-7): the
   config-watch path applied `change_membership(group, replicas − nid)`
