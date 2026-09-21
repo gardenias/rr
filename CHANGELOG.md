@@ -248,6 +248,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     same rationale as `ssl-vendored`. SASL client capability is unchanged.
   - doc-test job: dropped `--no-deps` from `cargo test --doc --workspace`
     (cargo 1.98 rejects the flag for `test`).
+  - All workspace-building jobs install `protobuf-compiler` (apt; `brew` on
+    macOS): third-party `etcd-client`'s build script compiles protos with the
+    system protoc — it cannot use our vendored one. (`rr-network` itself
+    stays vendored, so dev machines still need nothing.)
   - Dependency bumps clearing the 10 error-level `cargo audit` advisories:
     aws-lc-sys 0.38→0.45 (+aws-lc-rs 1.16.1→1.18.1), rustls
     0.23.37→0.23.45, rustls-webpki 0.103.9→0.103.15, h2 0.4.13→0.4.19,
