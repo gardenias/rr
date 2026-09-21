@@ -21,6 +21,12 @@ members = [
     "crates/rr-admin",
     "tools/rr-perf-bench",
     "tools/rr-lab-producer",
+    # vendor/openraft 列入 members（非 workspace 依赖继承）：让下游以
+    # `git+tag` 方式拿到打过 rr 补丁的 openraft——依赖方的 [patch] 不传递，
+    # my-biz 经 `[patch.crates-io] openraft = { git = <本仓>, tag = ... }`
+    # 指向它（其清单是 crates.io 归一化形态，autotests=false，不会把
+    # openraft 自带测试卷进本仓 --workspace 运行面）。
+    "vendor/openraft",
 ]
 resolver = "2"
 [workspace.package]
