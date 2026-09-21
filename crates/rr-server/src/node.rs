@@ -15,6 +15,7 @@ use tracing::{info, instrument, warn};
 
 use rr_core::config::{ConfigProvider, RoutingTableChange};
 use rr_core::error::{ConfigError, RrError};
+use rr_core::membership::membership_change_is_safe;
 use rr_core::types::NodeId;
 use rr_network::client_service::{ClientDispatch, ClientServiceImpl};
 use rr_network::proto::admin::admin_service_server::AdminServiceServer;
@@ -433,6 +434,31 @@ impl RrNode {
                                             .copied()
                                             .filter(|&id| id != nid)
                                             .collect();
+                                        // ADR A-0012 follow-up: the watch path
+                                        // applies the same quorum guard as the
+                                        // admin RPC. An automatic removal that
+                                        // would drop the group below
+                                        // MIN_VOTERS_AFTER_REMOVAL (or to zero)
+                                        // is refused — the event is likely a
+                                        // transient config-provider glitch, and
+                                        // a deliberate shrink below quorum must
+                                        // go through `change-membership
+                                        // --force` / `node-reset`.
+                                        if new_members.len() < meta.replicas.len()
+                                            && !membership_change_is_safe(new_members.len())
+                                        {
+                                            warn!(
+                                                group_id,
+                                                node_id = nid,
+                                                current_voters = meta.replicas.len(),
+                                                target_voters = new_members.len(),
+                                                "watch: refusing unsafe membership change on \
+                                                 NodeRemoved (below quorum guard); group left \
+                                                 unchanged — use change-membership --force or \
+                                                 node-reset for a deliberate teardown"
+                                            );
+                                            continue;
+                                        }
                                         if let Err(e) =
                                             gm.change_membership(group_id, new_members).await
                                         {

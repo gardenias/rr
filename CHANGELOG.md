@@ -217,6 +217,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Watch-loop `NodeRemoved` now honors the membership quorum guard**
+  (ADR A-0012 follow-up, closes the last unguarded entry of INV-7): the
+  config-watch path applied `change_membership(group, replicas − nid)`
+  unconditionally, so a transient config-provider glitch (or a hasty
+  `remove_node`) could shrink a group below `MIN_VOTERS_AFTER_REMOVAL` —
+  or to zero — with no operator involvement. The automatic path now shares
+  the `membership_change_is_safe` predicate with the Admin RPC guard:
+  unsafe removals are refused with a `warn!` audit line and the group is
+  left unchanged. There is deliberately no `force` on this path — an
+  automatic event carries no operator intent; a sub-quorum teardown must
+  go through `change-membership --force` / `node-reset`. Per A-0012 Option
+  B the guard stays out of the manager layer (no raft-membership vs
+  routing-table divergence). New integration test
+  `test_node_removed_quorum_guard` (negative control verified: without the
+  guard the group is shrunk to 1 voter).
+
 - **Integration-suite election flakes (test harness only)**: since the
   openraft alpha.34 migration, freshly elected leaders fast-fail
   lease-gated proposals with `ForwardToLeader::empty()` until their blank

@@ -1107,6 +1107,51 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
+    /// INV-7: the config-watch NodeRemoved path honors the membership quorum
+    /// guard (A-0012 follow-up): an automatic removal that would drop a group
+    /// below MIN_VOTERS_AFTER_REMOVAL is refused, so a config-provider glitch
+    /// cannot silently kill a group's quorum.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_node_removed_quorum_guard() {
+        // 2-voter group: removing one node would leave exactly 1 voter,
+        // below the A-0012 guard minimum of 2.
+        let builder = ClusterBuilder::new(2, 1).with_real_network();
+        let provider = builder.config_provider();
+        let nodes = builder.build().await.unwrap();
+
+        let leader = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+
+        // Sanity: a write commits on the 2-node group.
+        let leader_node = nodes.iter().find(|n| n.node_id() == leader).unwrap();
+        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        write_when_lease_ready(&raft, b"pre-guard", 8_000)
+            .await
+            .expect("2-node group must accept writes");
+
+        // Remove node 2 from the config provider: every node's watch loop
+        // computes the target voter set {1} and MUST refuse it.
+        let removed: NodeId = 2;
+        provider.remove_node(removed).await;
+
+        // Give the watch loop time to (attempt to) apply the removal.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        // The raft membership must be unchanged (guard refused the shrink).
+        let metrics = raft.metrics().borrow_watched().clone();
+        let voter_count = metrics.membership_config.membership().voter_ids().count();
+        assert_eq!(
+            voter_count, 2,
+            "guard must keep the 2-voter membership after an unsafe NodeRemoved"
+        );
+
+        // And the group must still accept writes (quorum intact).
+        write_when_lease_ready(&raft, b"post-guard", 8_000)
+            .await
+            .expect("group must keep accepting writes after refused removal");
+
+        shutdown_all(&nodes).await;
+    }
+
     /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
     /// T22 — RocksDB persistence: write data, restart node, verify log survives.
     #[cfg(feature = "rocks")]

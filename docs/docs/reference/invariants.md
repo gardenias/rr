@@ -579,7 +579,10 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
    (`admin.rs:552-565`),随后直通 `RaftGroupManager::change_membership`
    (`crates/rr-raft/src/group_manager.rs:330-350`)→ openraft。**无 quorum-loss 守卫。**
 2. **入口 B(config watch loop)**:`NodeRemoved` 事件会让每个 group 以"剔除该节点后的副本集"
-   直接调 `change_membership`(`crates/rr-server/src/node.rs:340-372`),同样无守卫。
+   直接调 `change_membership`(`crates/rr-server/src/node.rs:421-454`)。~~同样无守卫~~
+   **✅ 已闭环(2026-09-21)**:自动摘除与 Admin RPC 共用同一谓词——目标 voter 集 <
+   `MIN_VOTERS_AFTER_REMOVAL` 时拒绝并 warn(自动事件不携带操作员意图,无 `force` 通道;
+   刻意缩到 quorum 以下须走 `change-membership --force` / `node-reset`)。
 3. **入口 C(client-side 工作流,唯一存在的守卫)**:`rr-admin` 的 decommission 编排器在
    移除前检查 `remaining.len() < MIN_VOTERS_AFTER_REMOVAL`(= 2,
    `crates/rr-admin/src/decommission.rs:57`、`:174-184`),违反则 `AbortedQuorumLoss` 且不触
@@ -591,11 +594,15 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
 |---|---|---|
 | 1 | `crates/rr-admin/src/decommission.rs:57`、`:174-184` | client-side 唯一守卫:移除后 voter < 2 即中止 |
 | 2 | `crates/rr-server/src/admin.rs:552-565` | server 端仅有"非空"校验——**不构成 quorum 守卫,列为缺口证据** |
+| 3 | `crates/rr-server/src/node.rs` NodeRemoved watch 分支 | 自动摘除共享同一谓词:目标 voter < 2 拒绝并 warn(无 force 通道) |
 
 ### 现有测试
 
 - `crates/rr-admin/src/decommission.rs:339` `report_quorum_loss_does_not_count_as_progress`、
   `:396` `min_voters_after_removal_constant_is_two`(client-side 守卫的间接覆盖)
+- `tests/integration/src/lib.rs` `test_node_removed_quorum_guard`(watch 路径守卫:
+  2-voter 组收到 NodeRemoved 后 membership 保持 2 voter 且仍可写;负面对照——摘掉守卫
+  即变红——实测 2026-09-21)
 - 形式化(R-2):`formal/tla/MembershipGuard.tla`(TLC 小模型 11,545 态零反例,2026-09-10;
   n→0 无条件拒绝 / 低于下限必经 force+审计 / 审计完备 / 并发提交任意交错安全;
   植入的去 guard 反例被 TLC 抓到——`formal/tla/bugs/MembershipGuardBuggy.tla`)
@@ -620,10 +627,14 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
   `tests/integration/src/membership_guard.rs:166`(3→1 拒绝 / 3→2 放行 / 2→1 force 放行)
   ——验收标准达成。
 
-  **仍 open(A-0012 follow-up)**:入口 B——watch-loop `NodeRemoved` 自动摘除
-  (`crates/rr-server/src/node.rs:391-421`)——仍无守卫。A-0012 Option B 已论证不在 manager
-  层下沉(否则 raft membership 与 routing table 持久分歧,且该路径无 `force` 语义);
-  自动化路径守卫需单独设计,连同 R-2 TLA+ 建模一并考虑。
+  **~~仍 open(A-0012 follow-up)~~ ✅ 已闭环(2026-09-21)**:入口 B——watch-loop
+  `NodeRemoved` 自动摘除(`crates/rr-server/src/node.rs:421-454`)——已接入同一谓词
+  `membership_change_is_safe`:剔除后 voter 数 < 2 时拒绝该次自动变更并 warn 留下
+  审计线索;自动化路径刻意不给 `force`(自动事件无操作员意图,刻意拆除须走 Admin
+  `--force` / `node-reset`)。保持 A-0012 Option B 论证(守卫不下沉 manager 层——避免
+  raft membership 与 routing table 持久分歧)。回归:
+  `test_node_removed_quorum_guard`(集成,含负面对照实测)。TLA+ 侧既有
+  `MembershipGuard.tla` 的性质陈述不变(watch 路径只是第三个入口,策略同构)。
 
 ## INV-8 Security Gates — 生产配置无未加门控的监听端口
 
@@ -729,7 +740,7 @@ gRPC 平面的五个 gate 全部通过才允许 `RrNode` 构造成功;`allow_ins
 | IoBatcher/callback untracked spawn + `stop_group` 不 flush(✅ 已闭环 2026-08-29:显式 `close()` 协议 + `stop_group` 接线) | P0#5 | INV-1 | WS-4(shutdown durability 契约) | ADR A-0011 |
 | `kafka_offset_to_request_id` 非法 bytes 静默回 0(✅ 已闭环 2026-08-29:返回 `Result` + runner fail-closed) | P0#6 | INV-3 | WS-4(返回 `Result` + 分层审计) | ADR A-0011 |
 | TCP raft transport 无安全 gate(✅ 已闭环 2026-08-29:G6/G7 transport-aware 门控,G7 不可绕过) | P0#4 | INV-8 | WS-5(transport-aware 门控) | ADR A-0014 |
-| change-membership 无 server-side quorum guard(✅ server 端已闭环 2026-08-29;**watch-loop `NodeRemoved` 自动摘除仍 open** → A-0012 follow-up,连同 R-2 设计) | P0#7 | INV-7 | WS-6(守卫上移 + force 逃生) | ADR A-0012 |
+| change-membership 无 server-side quorum guard(✅ server 端已闭环 2026-08-29;watch-loop `NodeRemoved` 自动摘除 ✅ 已闭环 2026-09-21,共享 `membership_change_is_safe` 谓词 + `test_node_removed_quorum_guard`) | P0#7 | INV-7 | WS-6(守卫上移 + force 逃生) | ADR A-0012 |
 | `GroupMeta.leader` stale 错误抽象(✅ 已闭环 2026-08-29:字段与消费链删除,leader 发现走 SDK redirect) | P0#8 / 设计#5 | INV-6 | WS-7(删除字段,leader 发现走 SDK redirect) | ADR A-0013 |
 | 无 linearizable read 3 节点集成测试 | A-0009 follow-up | INV-2 | 路线图 RC 并行项 | — |
 | audit 配对不完整 / ClientService mutation 无 audit | P1 | INV-8 | 路线图 RC 并行项 | — |
