@@ -1553,7 +1553,7 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
   (T1 持久快照 / R-1 ApplyContext / R-2 deferred / T6 评估)+ W9 INV-1 三修复
   (字节预算 / save_vote 屏障 / vendor patch #3+try_submit)+ flake 根治 +
   A-0012 watch 守卫 + vendor fmt(成员化后续)+ 并行会话的 vendor 入 members /
-  patch#2 测试钉 / T5 AC-1 契约测试。HEAD = `0229d25`。
+  patch#2 测试钉 / T5 AC-1 契约测试。HEAD = `d1c75d4`(合并 16 commit + vendor fmt + 本注记)。
 - **Push 被网络阻塞**:github.com 经本地代理(198.18.0.38)拒连(2026-09-21 午后,
   Docker Hub 正常而 GitHub 被掐;重试 3 次无效)。已挂 cron `01M32183P8KKFC531588A75P8V`
   (每 7 分钟)自动重试:网络恢复即 `git push origin main iter/r0-persistence` +
