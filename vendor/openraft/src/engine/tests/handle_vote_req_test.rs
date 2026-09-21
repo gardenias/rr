@@ -136,14 +136,23 @@ fn test_handle_vote_req_reject_smaller_last_log_id() -> anyhow::Result<()> {
         leadership_transfer: false,
     });
 
-    assert_eq!(VoteResponse::new(Vote::new(2, 1), Some(log_id(2, 1, 3)), false), resp);
+    // rr patch #2: the response echoes the CURRENT (adopted) vote (3,2) while
+    // still rejecting (granted=false, recency branch first).
+    assert_eq!(VoteResponse::new(Vote::new(3, 2), Some(log_id(2, 1, 3)), false), resp);
 
-    assert_eq!(Vote::new(2, 1), *eng.state.vote_ref());
+    // rr patch #2 (2026-09-12, overload-churn heal): the recency branch still
+    // rejects (granted=false — a lagging candidate can never count this), but
+    // the strictly higher incoming vote IS adopted locally so cluster terms
+    // reconverge. Upstream pinned vote=(2,1) here; the patched truth is (3,2).
+    assert_eq!(Vote::new(3, 2), *eng.state.vote_ref());
     assert!(eng.leader.is_none());
-    assert_eq!(eng.candidate_ref().unwrap().vote_ref(), &Vote::new(2, 1));
-
-    assert_eq!(ServerState::Candidate, eng.state.server_state);
-    assert_eq!(0, eng.output.take_commands().len());
+    // rr patch #2 续：采纳更高 vote 触发标准 raft 的 term 采纳——候选句柄
+    // 失效，server_state 回落 Follower；采纳落盘（SaveVote）等命令随输出
+    // 发出（上游此处为 0——不采纳就无落盘）。
+    assert!(eng.candidate_ref().is_none());
+    assert_eq!(ServerState::Follower, eng.state.server_state);
+    let cmds = eng.output.take_commands();
+    assert_eq!(2, cmds.len(), "adoption emits SaveVote + transition commands: {cmds:?}");
     Ok(())
 }
 
