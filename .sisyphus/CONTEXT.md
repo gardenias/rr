@@ -65,6 +65,33 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **上游**:issue 草稿补 Issue 3(become-leader 膨胀对一切"延迟完成 append"的
   存储后端都成立;含 try_submit 伴随修复说明)。提交动作待有网 + 用户决策。
 
+### Session 2026-09-21(午后)— 宿主机 W9 近似验证(Docker 不可用的替代路径)
+
+> perf-lab 重建被双重阻塞(registry 不可达 + 本地无基础镜像),改走宿主机路径实证
+> W9 修复三件套。**结果:oracle 5000/5000 全绿**。
+
+- **形态**:release 构建(kv-store `--features rocks` + rr-perf-bench);3 节点
+  `--data-dir`(durable log + T1 持久快照)+ `--snapshot-logs-since-last 2000`
+  (快照搅动比 perf-lab 的 5000 更密);soak 2000/s × **16KiB**(=32MB/s,W5-16384
+  的积压形态)180s;两次 kill 注入:T+60s SIGKILL node1、T+120s 同时 SIGKILL
+  node2+node3,5s 后重启;oracle 前还有一次全集群冷重启(从数据目录拉起)。
+- **结果**:soak sent=133,766 / acked=132,251 / failed=1,515(1.1%,全部集中在
+  双杀+重建窗口,op_timeout 止血——无悬挂);**oracle 5000/5000**(replay 375 +
+  survival-only 4625,跨 LRU 窗记录走线性一致读存活证明);零 panic;node2 重启经
+  T1 路径从持久快照恢复(快照点 T1-N1.50005,replay 尾部 [50006..98579))。
+- **观察(非阻塞项)**:① 重启+全量 RocksDB open + 快照恢复在本机 ~31s(快照
+  300MB 级);② kill 窗口内 term 搅到 T148(有 pre-vote 仍多轮竞选,收敛正常);
+  ③ 探针在失 quorum 窗口报 "KvResponse decode failed" ×9——**响亮失败而非静默
+  陈旧读**,可接受;④ RSS 峰值 6.3GB = 16KiB×133k 条目的内存 KV 本体 + 快照
+  序列化拷贝 + RocksDB 缓存(kv-store 演示形态使然),非 batcher 积压(字节预算
+  上限 64MB/组)。⑤ **踩坑**:首轮跑进了 OrbStack 对 51001/51002 的转发(my-biz
+  的 cex-node 容器占用),客户端打到了别的协议——宿主机复现实验务必避开已发布
+  端口(本轮用 53001-3)。编排脚本在 `target/w9-host/w9-host-repro.sh`(一次性,
+  未入库);证据目录 `target/w9-host/run-20260921-101053/`。
+- **结论**:字节预算 + save_vote 屏障 + vendor patch #3 在"快照 crunch + 双杀
+  重启波 + 全集群冷重启"下保持 INV-1。perf-lab `--smoke` 复跑(容器 OOM 维度)
+  仍待有网后补。
+
 ### Session 2026-09-05/06 — 可靠性专项批次(R-1 执法 + R-6 性质测试 + R-7 基线)
 
 > 执行目标(用户原话):"生产级别的稳定性和可靠性,简洁的集成使用体验,极高的吞吐和极低的延迟"。
