@@ -1549,16 +1549,18 @@ machine wrapper 对 `Service::snapshot()` 原子性的假设）。A-0001 + A-000
 
 ## Git 状态
 
-- `main` 比 `origin/main` 超前 **8 个 commit**(未 push;HEAD = 下列最后一个):
-  - `ddd908b` feat(reliability) — 批次一+二:R-1/R-6/R-7 + R-4/R-5 + A-0015(09-06)
-  - `6eb03b7` docs(context) — 批次二 handoff(09-06)
-  - `193fa94` test(reliability) — 批次三:R-3 spike + 替代 + R-8 soak(09-10)
-  - `4d36c43` docs(context) — 批次三 handoff(09-10)
-  - `c5e9211` test(formal) — 批次四:R-2 TLA+ 形式化(09-10,专项收官)
-  - `f3cb626` docs(context) — 批次四 handoff(09-10)
-  - `b77f227` chore(release) — v0.2.0 定版(CHANGELOG 合并/release notes/freeze 签字);**tag `v0.2.0` 打在此 commit**
-  - 最后一个 commit ci(semver-checks) — 转阻塞门禁,baseline v0.2.0(本段随其入库)
-- 工作树干净。**待 push**:`git push origin main v0.2.0`;tag 落远端后 release.yml 自动发布 Docker 镜像 + Helm chart(OCI)。
+- **`iter/r0-persistence` 已 ff 合并进 `main`(2026-09-21)**:16 个 commit——iter 迭代
+  (T1 持久快照 / R-1 ApplyContext / R-2 deferred / T6 评估)+ W9 INV-1 三修复
+  (字节预算 / save_vote 屏障 / vendor patch #3+try_submit)+ flake 根治 +
+  A-0012 watch 守卫 + vendor fmt(成员化后续)+ 并行会话的 vendor 入 members /
+  patch#2 测试钉 / T5 AC-1 契约测试。HEAD = `0229d25`。
+- **Push 被网络阻塞**:github.com 经本地代理(198.18.0.38)拒连(2026-09-21 午后,
+  Docker Hub 正常而 GitHub 被掐;重试 3 次无效)。已挂 cron `01M32183P8KKFC531588A75P8V`
+  (每 7 分钟)自动重试:网络恢复即 `git push origin main iter/r0-persistence` +
+  两个 tag(`v0.2.0` 触发 release.yml 发布 Docker+Helm;`v0.2.0-rc3` 供 my-biz
+  [patch] git 依赖)。合并前验证:fmt / invariants-lint(68 links)/ rr-raft 166 /
+  integration 81 / rr-server 112 / openraft 551 / crash 10/10 全绿。
+- 工作树干净(除未跟踪的本地证据目录 docs/perf/prod/2026091* 与 target/w9-host/)。
 
 ---
 
