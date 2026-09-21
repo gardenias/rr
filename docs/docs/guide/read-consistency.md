@@ -66,7 +66,7 @@ let value = client.read_linearizable(group_id, payload).await?;
 - **必须不过期时用 `read_linearizable`**：读己之写（写后立刻读）、基于最新状态做决策（如抢锁前检查）、结算类逻辑；
 - **写永远走 `send_request` / `send_request_idempotent`**——不要试图用读路径"确认"写结果，需要确认就用线性一致读；
 - **重试是 SDK 内置的**：leader 重定向和指数退避（`retry_delay_ms * 2^attempt`）由 `rr-client` 处理，业务层通常只需配置 `RetryConfig`；
-- 注意 `GetClusterInfo` 目前返回的是**占位数据**（`leader_node_id = 0`、空副本列表），leader 发现的实际机制是上面的 `leader_info` 重定向，不要依赖 `GetClusterInfo` 做路由。
+- `GetClusterInfo` 返回的是 raft 运行时拓扑（leader/副本真实，选举中 leader 为 0），但 leader 发现的实际机制是上面的 `leader_info` 重定向——SDK 不依赖 `GetClusterInfo` 做路由。
 
 ---
 
@@ -134,4 +134,4 @@ ADR A-0009 therefore decided: **write, local read, and linearizable read are thr
 - **Use `read_linearizable` when staleness is unacceptable**: read-your-writes (reading right after writing), decisions based on the latest state (e.g. checking before acquiring a lock), settlement-style logic;
 - **Always write via `send_request` / `send_request_idempotent`** — don't try to "confirm" a write through the read path; if you need confirmation, use a linearizable read;
 - **Retries are built into the SDK**: leader redirects and exponential backoff (`retry_delay_ms * 2^attempt`) are handled by `rr-client`; the business layer usually only tunes `RetryConfig`;
-- Note that `GetClusterInfo` currently returns **placeholder data** (`leader_node_id = 0`, empty replica list). The real leader-discovery mechanism is the `leader_info` redirect described above — do not rely on `GetClusterInfo` for routing.
+- `GetClusterInfo` returns real raft-runtime topology (leader/replicas; leader is 0 mid-election). Still, the leader-discovery mechanism is the `leader_info` redirect described above — the SDK does not rely on `GetClusterInfo` for routing.

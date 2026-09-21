@@ -1523,7 +1523,7 @@ mod tests {
         }
 
         let shared = Arc::new(Mutex::new(BTreeMap::new()));
-        let mut svc = TwoPhaseEcho {
+        let svc = TwoPhaseEcho {
             pending: Arc::clone(&shared),
         };
 

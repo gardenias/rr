@@ -140,6 +140,11 @@ pub struct RocksLogStorage {
     /// openraft's "submitted ⇒ visible" contract for the async append path
     /// (module docs). Bounded by the batcher channel depth × max batch size;
     /// pruned by the post-flush hook attached to every append.
+    ///
+    /// `lock().unwrap()` on this mutex is deliberate: every critical section
+    /// is a few BTreeMap ops with no user code and no `.await`, so poisoning
+    /// can only follow an internal panic — fail-closed, rather than running
+    /// on with a suspect overlay.
     pending: Arc<Mutex<BTreeMap<u64, RrEntry>>>,
 }
 

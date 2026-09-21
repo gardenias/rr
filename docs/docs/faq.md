@@ -42,7 +42,7 @@ openraft 给你**一个**共识组的引擎，存储、网络、部署都要自�
 
 ### 客户端怎么找到 leader？
 
-靠**重定向**，不是靠服务发现。客户端从 bootstrap 地址中任选一个发送请求；若该节点不是 leader，响应里的 `leader_info` 会给出 leader 的 `NodeId` 和地址，SDK 把它写入无 TTL 的 `HashMap<GroupId, (NodeId, String)>` 缓存并重试。`GetClusterInfo` RPC 目前是**服务端占位实现**（`leader_node_id = 0`、空副本列表，见 `crates/rr-server/src/dispatch.rs:191`），不能用于 leader 发现。leader 宕机时缓存会失效：旧 leader 拒绝服务或不可达，SDK 清缓存后重新走 bootstrap 轮询。
+靠**重定向**，不是靠服务发现。客户端从 bootstrap 地址中任选一个发送请求；若该节点不是 leader，响应里的 `leader_info` 会给出 leader 的 `NodeId` 和地址，SDK 把它写入无 TTL 的 `HashMap<GroupId, (NodeId, String)>` 缓存并重试。`GetClusterInfo` RPC 返回真实的 raft 运行时拓扑（leader 与副本来自 `metrics`，选举中 leader 显示为 0；见 `crates/rr-server/src/dispatch.rs`），但 SDK 的 leader 发现仍走重定向缓存而非它。leader 宕机时缓存会失效：旧 leader 拒绝服务或不可达，SDK 清缓存后重新走 bootstrap 轮询。
 
 ## 运维 / Operations
 
@@ -129,7 +129,7 @@ That is deliberate: the server never forwards; it returns `ClientResponse{succes
 
 ### How do clients find the leader?
 
-By **redirect**, not by service discovery. The client sends its request to any bootstrap address; if that node is not the leader, the response's `leader_info` carries the leader's `NodeId` and address, and the SDK stores it in a TTL-less `HashMap<GroupId, (NodeId, String)>` cache and retries. The `GetClusterInfo` RPC is currently a **server-side placeholder** (`leader_node_id = 0`, empty replica list — see `crates/rr-server/src/dispatch.rs:191`) and cannot be used for leader discovery. When a leader dies, the cache self-heals: the old leader refuses or is unreachable, the SDK evicts the entry, and falls back to bootstrap round-robin.
+By **redirect**, not by service discovery. The client sends its request to any bootstrap address; if that node is not the leader, the response's `leader_info` carries the leader's `NodeId` and address, and the SDK stores it in a TTL-less `HashMap<GroupId, (NodeId, String)>` cache and retries. The `GetClusterInfo` RPC returns real raft-runtime topology (leader and replicas from `metrics`; the leader reads 0 mid-election — see `crates/rr-server/src/dispatch.rs`), but the SDK still discovers leaders via the redirect cache rather than this RPC. When a leader dies, the cache self-heals: the old leader refuses or is unreachable, the SDK evicts the entry, and falls back to bootstrap round-robin.
 
 ## Operations
 

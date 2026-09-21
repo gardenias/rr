@@ -350,14 +350,14 @@ After a write to the leader's listen port (51001), `last_log_index` advances on 
 - **REPL 中 `put` 打印 `OK` ≠ 已提交**：它只表示传输成功，不检查 raft 的 success 标志（`crates/rr-admin/src/main.rs:1174`）。请通过每个节点 `group status` 的 `last_log_index` 验证复制。
 - **stock `rr-server` 是冒烟服务**：内置 EchoStateMachine，`get <key>` 会回显 key 本身（即使该 key 从未写入），不是 KV 语义。
 - **端口职责分离**：AdminService 只在 `--admin-port` 上提供；ClientService 只在 `--listen-addr` 上提供。
-- **`GetClusterInfo` 是占位实现**：只返回真实的 group id 列表，`leader_node_id` 恒为 0、副本列表为空（`crates/rr-server/src/dispatch.rs:191-207`）。查询真实拓扑请用 Admin 端口上的 `group status` / `group membership`。
+- **`GetClusterInfo` 返回 raft 运行时拓扑**：group id、leader（选举中为 0）、副本列表均来自 raft `metrics`（`crates/rr-server/src/dispatch.rs`）。逐 group 的更详细状态仍可用 Admin 端口上的 `group status` / `group membership`。
 
 - **`--peers` is irrelevant to consensus formation**: it only seeds the local routing table (peer node IDs are guessed by list index — see `crates/rr-server/src/main.rs:295-310`); the Raft group is actually formed by the `add-learner` + `change-membership` commands above.
 - **Client writes must go to the leader's listen port** (51001): the stock `ClientDispatchImpl` does not forward to the leader — a follower returns `success=false` ("Error: request not successful" in the REPL).
 - **`put` printing `OK` in the REPL ≠ committed**: it only means transport success, without checking the raft success flag (`crates/rr-admin/src/main.rs:1174`). Verify replication via `last_log_index` in `group status` on every node.
 - **Stock `rr-server` is a smoke service**: the built-in EchoStateMachine makes `get <key>` echo the key itself (even for never-written keys) — not KV semantics.
 - **Ports have separate roles**: AdminService is served only on `--admin-port`; ClientService only on `--listen-addr`.
-- **`GetClusterInfo` is a placeholder**: only the group id list is real — `leader_node_id` is always 0 and the replica list is empty (`crates/rr-server/src/dispatch.rs:191-207`). Use `group status` / `group membership` on the admin port for real topology.
+- **`GetClusterInfo` returns raft-runtime topology**: group ids, leader (0 mid-election), and replica lists are all sourced from raft `metrics` (`crates/rr-server/src/dispatch.rs`). For per-group detail use `group status` / `group membership` on the admin port.
 :::
 
 :::note 配置文件方式 / Config-file variant

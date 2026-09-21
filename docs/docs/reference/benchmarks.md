@@ -134,12 +134,25 @@ cargo build --release -p rr-server -p rr-admin -p rr-perf-bench
 ./target/release/rr-perf-bench --payload 1024              # payload 字节 / payload size
 ./target/release/rr-perf-bench --use-tcp-transport         # 实验性 TCP raft 传输 / experimental TCP raft transport
 ./target/release/rr-perf-bench --client-rps 2000           # 服务端限流 / server-side rate limit
+./target/release/rr-perf-bench --groups 4                  # 多组扩展:4 个 Raft 组,S1/S2/S3 按分片轮转 / multi-group: 4 Raft groups, ops round-robin across partitions
 ./target/release/rr-perf-bench --concurrency 1,10,100 --duration-secs 20
 
 # 微基准 / Micro-benchmarks
 cargo bench -p rr-benches                                  # 内存存储/编解码 / in-memory & codec
 cargo bench -p rr-benches --features rocks                 # 含 RocksDB 存储层 / incl. RocksDB layer
 ```
+
+> **多组扩展实测(2026-09-22, M3 Pro 3 节点 loopback, mem/strict, 128B)**:`--groups 1/2/4`
+> 在 k=100/200 下聚合吞吐均为 ~26k TPS——**持平而非增长**。原因:stock 拓扑里每个组都复制到全部
+> 3 个节点,单机 CPU 已饱和(见 v0.2.0 基线 Finding 4),加组不产生新 CPU。multi-raft 的扩展性
+> 前提是**组的副本集合不相交 + 加机器**(如 3 组 × 3 副本部署在 9 台主机);在固定 3 节点上堆组
+> 只是换来更多上下文切换。容量规划请按"每组吞吐 ≈ 单组基线,组数随节点池扩展"建模。
+>
+> Measured 2026-09-22 (M3 Pro, 3-node loopback, mem/strict, 128B): aggregate TPS stays flat
+> (~26k) for `--groups 1/2/4` at k=100/200. With the stock topology every group replicates to
+> all 3 nodes and the host CPU is already saturated (baseline Finding 4) — more groups add no
+> CPU. Multi-raft scaling assumes **disjoint replica sets over a growing node pool**; piling
+> groups onto fixed nodes only buys context-switching.
 
 更多参数见 `./target/release/rr-perf-bench --help`。压测期间的客户端重试/重定向诊断可用 `RUST_LOG=rr_client=debug` 打开。
 

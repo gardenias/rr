@@ -1,4 +1,4 @@
-//! The two R-4 scenarios. Both are gated on `--features rocks` (they spawn a
+//! The R-4 scenarios. All are gated on `--features rocks` (they spawn a
 //! rocks-backed node binary); a plain `cargo test -p crash-tests` runs only
 //! the skip notice below plus the pure unit tests.
 
@@ -59,6 +59,10 @@ mod rocks_scenarios {
 
     impl Harness {
         async fn setup(scenario: &str) -> Result<Self> {
+            Self::setup_with(scenario, None).await
+        }
+
+        async fn setup_with(scenario: &str, snapshot_logs_since_last: Option<u64>) -> Result<Self> {
             let run_dir = run_dir(scenario);
             if run_dir.exists() {
                 std::fs::remove_dir_all(&run_dir)
@@ -86,6 +90,7 @@ mod rocks_scenarios {
                 // forensics, e.g. `openraft::core::sm=debug,openraft::engine=debug`.
                 log_level: std::env::var("CRASH_NODE_LOG_LEVEL")
                     .unwrap_or_else(|_| "info".to_string()),
+                snapshot_logs_since_last,
             };
 
             let mut fault_log = Journal::create(run_dir.join("fault-log.jsonl"))?;
@@ -395,6 +400,110 @@ mod rocks_scenarios {
         assert!(report.checked > 0, "scenario B acked nothing — vacuous run");
 
         h.teardown("scenario-b-sigkill").await;
+        Ok(())
+    }
+
+    /// INV-1, INV-5: an ACKed write survives a crash landing after snapshot +
+    /// log-purge cycles — recovery composes the durable SM snapshot with the
+    /// un-purged log tail (T1), and a node that fell behind the purge horizon
+    /// catches up via snapshot install.
+    /// R-4 scenario C — snapshot/purge under crash. With
+    /// `--snapshot-logs-since-last 100` the default 50 writes/s produce a
+    /// snapshot + purge roughly every 2s, so the SIGKILL and the dead window
+    /// straddle real snapshot cycles — the path scenarios A/B (threshold
+    /// 50_000) never reach.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scenario_c_snapshot_purge_kill() {
+        let _guard = SCENARIO_LOCK.lock().await;
+        tokio::time::timeout(SCENARIO_TIMEOUT, scenario_c_body())
+            .await
+            .expect("scenario C exceeded its 10-minute ceiling")
+            .unwrap();
+    }
+
+    async fn scenario_c_body() -> Result<()> {
+        let mut h = Harness::setup_with("scenario-c-snapshot-purge-kill", Some(100)).await?;
+        h.warmup_barrier().await?;
+        // Let a few snapshot/purge cycles complete on ALL nodes before the
+        // fault lands (~280 writes at the default 50 writes/s ≫ threshold).
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let target = h.rng.gen_range(1..=3u64);
+        let frontier = h.acked_on_disk()?;
+        println!(
+            "[crash-harness] SIGKILL node {target} at frontier={frontier} \
+             under snapshot threshold 100 (seed={})",
+            h.seed
+        );
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "sigkill",
+            Some(target),
+            None,
+            None,
+            Some(format!("frontier={frontier} snapshot_threshold=100")),
+        )?;
+        h.cluster.kill_node(target).await?;
+
+        // Dead window: the surviving quorum keeps writing and cycles through
+        // several snapshot+purge rounds, so the dead node falls behind the
+        // purge horizon — its restart must compose durable snapshot + log
+        // tail, or install a snapshot outright.
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
+        h.cluster.restart_node(target).await?;
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "restart",
+            Some(target),
+            None,
+            None,
+            None,
+        )?;
+
+        // Re-sample: the frontier moved while the node was dead.
+        let frontier = h.acked_on_disk()?;
+        let caught_up = h
+            .cluster
+            .wait_caught_up(target, frontier, Duration::from_secs(90))
+            .await?;
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "rejoined",
+            Some(target),
+            None,
+            None,
+            Some(format!("applied={caught_up} frontier={frontier}")),
+        )?;
+
+        // T1 artifact: the restarted node must persist `sm-snapshot.bin`
+        // (write → fsync → rename) once it applies past the low threshold
+        // again. Poll with a deadline — the trigger is apply-count-based and
+        // load is still running. (The node may already have persisted one
+        // pre-kill; the post-condition we rely on is that the artifact is
+        // present and recovery above succeeded.)
+        let snap_deadline = Instant::now() + Duration::from_secs(30);
+        while !h.cluster.sm_snapshot_path(target).exists() {
+            if Instant::now() >= snap_deadline {
+                anyhow::bail!(
+                    "node {target} has no durable sm-snapshot.bin 30s after catch-up — \
+                     the T1 persist-on-build path regressed"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+
+        // Oracle: the whole ack log — including writes acked during the
+        // snapshot-cycling dead window — must replay from the idempotency
+        // cache on the surviving quorum.
+        let report = h.run_oracle("post-snapshot-kill").await?;
+        assert!(report.checked > 0, "scenario C acked nothing — vacuous run");
+        assert_eq!(report.verified, report.checked);
+
+        h.teardown("scenario-c-snapshot-purge-kill").await;
         Ok(())
     }
 }

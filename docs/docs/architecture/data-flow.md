@@ -135,12 +135,12 @@ Leader --> Client : Success response
 
 ## 读请求路径 / Read Request Path
 
-`ClientService` 提供两个专门的读 RPC（写请求走 `Request`；另有 `GetClusterInfo` 返回集群拓扑，但目前该实现只有 group_id 列表是真实的，leader/副本字段为占位值，客户端实际通过重定向发现领导者），客户端 SDK 侧对应 `RrClient::read` 和 `RrClient::read_linearizable`：
+`ClientService` 提供两个专门的读 RPC（写请求走 `Request`；另有 `GetClusterInfo` 返回集群拓扑——group/leader/副本均来自 raft 运行时，客户端实际通过重定向发现领导者），客户端 SDK 侧对应 `RrClient::read` 和 `RrClient::read_linearizable`：
 
 - **ReadLocal（本地读）**：任何节点都可以直接用自己的本地状态机副本服务读取——状态机通过可选的 `StateMachineReader` 读句柄（`StateMachine::read_handle`）暴露读取能力。该路径完全绕过 Raft 共识，延迟最低，但可能读到旧数据（Stale Reads），且不做领导者重定向。
 - **ReadLinearizable（线性化读）**：服务端通过 openraft 的 ReadIndex 确认领导者已提交的位置，等待本地状态机 apply 到该位置后再执行读取，保证读到最新提交的数据。若收到请求的节点不是领导者，openraft 返回 `ForwardToLeader`，服务端将其展开为正常响应中的 `ReadLocalResponse.leader_info` 字段（与写路径相同的重定向方式），SDK 自动向领导者地址重试。
 
-`ClientService` exposes two dedicated read RPCs (writes go through `Request`; `GetClusterInfo` returns cluster topology, though in the current implementation only the group_id list is real — the leader/replica fields are placeholders, so clients discover leaders via redirects), mapped to `RrClient::read` and `RrClient::read_linearizable` on the client SDK:
+`ClientService` exposes two dedicated read RPCs (writes go through `Request`; `GetClusterInfo` returns cluster topology with group/leader/replica fields sourced from the raft runtime, though clients discover leaders via redirects), mapped to `RrClient::read` and `RrClient::read_linearizable` on the client SDK:
 
 - **ReadLocal (local read)**: Any node can serve the read directly from its local state machine replica — the state machine exposes read capability via the optional `StateMachineReader` handle (`StateMachine::read_handle`). This path bypasses Raft consensus entirely, has the lowest latency, but may return stale data, and performs no leader redirect.
 - **ReadLinearizable (linearizable read)**: The server confirms the leader's committed position via openraft's ReadIndex, waits until the local state machine has applied through that point, then serves the read — guaranteeing the latest committed data. If the contacted node is not the leader, openraft returns `ForwardToLeader`; the server flattens it into the `ReadLocalResponse.leader_info` field of a normal response (the same redirect mechanism as the write path), and the SDK automatically retries against the leader's address.

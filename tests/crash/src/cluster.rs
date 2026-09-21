@@ -146,6 +146,9 @@ pub struct ClusterConfig {
     pub run_dir: PathBuf,
     pub port_base: u16,
     pub log_level: String,
+    /// Per-node `--snapshot-logs-since-last` override (scenario C lowers it
+    /// to force snapshot/purge cycles); `None` keeps the production default.
+    pub snapshot_logs_since_last: Option<u64>,
 }
 
 struct NodeSpec {
@@ -169,6 +172,7 @@ pub struct CrashCluster {
     server_bin: PathBuf,
     run_dir: PathBuf,
     log_level: String,
+    snapshot_logs_since_last: Option<u64>,
     /// Owns the per-node data dirs; dropped last (after children are dead).
     _data_root: TempDir,
 }
@@ -238,8 +242,15 @@ impl CrashCluster {
                 data_dir,
                 boot: 1,
             };
-            let child = spawn_node(&cfg.server_bin, &spec, &roster, &cfg.log_level, &log_dir)
-                .with_context(|| format!("spawn node {}", p.id))?;
+            let child = spawn_node(
+                &cfg.server_bin,
+                &spec,
+                &roster,
+                &cfg.log_level,
+                cfg.snapshot_logs_since_last,
+                &log_dir,
+            )
+            .with_context(|| format!("spawn node {}", p.id))?;
             nodes.push(RunningNode {
                 spec,
                 child: Some(child),
@@ -254,6 +265,7 @@ impl CrashCluster {
             server_bin: cfg.server_bin.clone(),
             run_dir: cfg.run_dir.clone(),
             log_level: cfg.log_level.clone(),
+            snapshot_logs_since_last: cfg.snapshot_logs_since_last,
             _data_root: data_root,
         };
 
@@ -289,6 +301,17 @@ impl CrashCluster {
         let node = self.node(id);
         self.log_dir()
             .join(format!("node{}.boot{}.log", id, node.spec.boot))
+    }
+
+    /// Path of the node's persisted state-machine snapshot (the T1 durable
+    /// artifact). The `group-{GROUP_ID}` segment mirrors rr-crash-node's
+    /// `data_dir/group-{GROUP_ID}` rocks layout.
+    pub fn sm_snapshot_path(&self, id: u64) -> PathBuf {
+        self.node(id)
+            .spec
+            .data_dir
+            .join(format!("group-{GROUP_ID}"))
+            .join("sm-snapshot.bin")
     }
 
     /// SIGKILL a node and reap it. Returns after the process is dead.
@@ -339,13 +362,21 @@ impl CrashCluster {
         let roster = roster_arg(&self.ports);
         let server_bin = self.server_bin.clone();
         let log_level = self.log_level.clone();
+        let snapshot_logs_since_last = self.snapshot_logs_since_last;
         let node = self.node_mut(id);
         if node.child.is_some() {
             bail!("node {id} is still running — kill/term it first");
         }
         node.spec.boot += 1;
-        let child = spawn_node(&server_bin, &node.spec, &roster, &log_level, &log_dir)
-            .with_context(|| format!("respawn node {id}"))?;
+        let child = spawn_node(
+            &server_bin,
+            &node.spec,
+            &roster,
+            &log_level,
+            snapshot_logs_since_last,
+            &log_dir,
+        )
+        .with_context(|| format!("respawn node {id}"))?;
         node.child = Some(child);
         self.wait_node_tcp(id, 30)
             .await
@@ -452,6 +483,7 @@ fn spawn_node(
     spec: &NodeSpec,
     roster: &str,
     log_level: &str,
+    snapshot_logs_since_last: Option<u64>,
     log_dir: &Path,
 ) -> Result<Child> {
     let log_path = log_dir.join(format!("node{}.boot{}.log", spec.ports.id, spec.boot));
@@ -472,6 +504,9 @@ fn spawn_node(
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::from(log_file.try_clone()?))
         .stderr(Stdio::from(log_file));
+    if let Some(n) = snapshot_logs_since_last {
+        cmd.arg("--snapshot-logs-since-last").arg(n.to_string());
+    }
     if spec.ports.id == 1 && spec.boot == 1 {
         // Node 1 initializes the full roster membership — exactly once per
         // data dir. A restarted node (boot >= 2) recovers membership from

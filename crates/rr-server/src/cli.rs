@@ -92,6 +92,13 @@ pub struct ServeArgs {
     #[arg(long = "peers", env = "RR_PEERS", value_delimiter = ',')]
     pub peers: Vec<String>,
 
+    /// Number of Raft groups (and partitions) the node hosts. The stock
+    /// topology maps partition i → group i with all peers as replicas;
+    /// default 1. Multi-group setups exist for benchmarking and demos —
+    /// dynamic group management goes through rr-admin / ConfigProvider.
+    #[arg(long = "groups", env = "RR_GROUPS")]
+    pub groups: Option<u64>,
+
     /// Log level filter (passed to tracing-subscriber EnvFilter).
     /// Examples: `info`, `debug`, `rr_raft=debug,info`.
     #[arg(long = "log-level", env = "RUST_LOG", default_value = "info")]

@@ -55,9 +55,6 @@ use tokio::sync::{mpsc, Semaphore};
 use crate::soak::{decode_resp, encode_req, KvRequest};
 use crate::workload::SharedClient;
 
-/// Partition the engine drives (kv-store serves group 1, same as soak).
-const PARTITION_ID: u64 = 1;
-
 /// Safety net: how long to wait for in-flight ops after the last scheduled
 /// instant before counting them incomplete. Client retries are bounded, so a
 /// healthy drain takes seconds; this only trips on a wedged cluster.
@@ -444,6 +441,10 @@ pub struct OpenLoopConfig {
     pub client_id: u32,
     pub seed: u64,
     pub max_in_flight: usize,
+    /// Partition count for multi-group runs: an op's partition is derived
+    /// from its key (`key_id % partitions + 1`), preserving per-key routing
+    /// stickiness. 1 = the historical single-group behavior.
+    pub partitions: u64,
     /// Per-op deadline: a slow op past this is counted as an error and its
     /// permit freed — bounds the drain (a wedged cluster can stall the
     /// firing loop's semaphore wait forever otherwise; W5-16KiB smoke found
@@ -525,11 +526,13 @@ fn next_interval(rng: &mut SplitMix64, rate: f64, poisson: bool) -> Duration {
 /// (the apply path demonstrably ran); any transport error or undecodable
 /// response counts as a failure, matching soak's strictness. Writes are
 /// unkeyed (see module docs); reads decode-validate the `KvResponse`.
-async fn exec_op(client: &RrClient, op: BenchOp, payload: Vec<u8>) -> bool {
+/// `partition` is derived from the op's key by the caller (key-sticky
+/// routing across `1..=partitions`).
+async fn exec_op(client: &RrClient, op: BenchOp, partition: u64, payload: Vec<u8>) -> bool {
     let result = match op {
-        BenchOp::Write => client.send_request(PARTITION_ID, payload).await,
-        BenchOp::ReadLocal => client.read(PARTITION_ID, payload).await,
-        BenchOp::ReadLin => client.read_linearizable(PARTITION_ID, payload).await,
+        BenchOp::Write => client.send_request(partition, payload).await,
+        BenchOp::ReadLocal => client.read(partition, payload).await,
+        BenchOp::ReadLin => client.read_linearizable(partition, payload).await,
     };
     match result {
         Ok(resp) => match decode_resp(&resp) {
@@ -604,6 +607,7 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
             let mut keygen = KeyGen::new(cfg.key_space, cfg.key_dist)?;
             let op_timeout = cfg.op_timeout;
             let payload_size = cfg.payload_size;
+            let partitions = cfg.partitions.max(1);
             let mut seq = 0u64;
             let mut next = t0;
 
@@ -651,6 +655,9 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
                 // cannot tax the driver's iteration rate.
                 tokio::spawn(async move {
                     let key = kv_key(key_id);
+                    // Key-sticky partition routing: the same key always lands
+                    // on the same group, preserving per-key write ordering.
+                    let partition = (key_id % partitions) + 1;
                     let payload = match op {
                         BenchOp::Write => encode_req(&KvRequest::Put {
                             value: put_value(&key, seq, payload_size),
@@ -662,8 +669,11 @@ pub async fn run(client: SharedClient, cfg: &OpenLoopConfig) -> Result<EngineOut
                     };
                     // Per-op deadline bounds every op's lifetime — and hence
                     // the drain — even when the cluster is wedged.
-                    let ok = match tokio::time::timeout(op_timeout, exec_op(&client, op, payload))
-                        .await
+                    let ok = match tokio::time::timeout(
+                        op_timeout,
+                        exec_op(&client, op, partition, payload),
+                    )
+                    .await
                     {
                         Ok(ok) => ok,
                         Err(_) => {

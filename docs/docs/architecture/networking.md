@@ -115,7 +115,7 @@ To avoid the overhead of establishing a new TCP connection for every Raft RPC, r
 
 `ClientServiceImpl` 负责处理来自 SDK 的客户端请求。
 
-- **请求类型**：共四个 RPC——`Request`（写请求）、`ReadLocal`（本地副本读，绕过共识，可能读到旧数据）、`ReadLinearizable`（基于 ReadIndex 的线性化读）和 `GetClusterInfo`（集群拓扑；当前实现仅 group_id 列表为真实数据，leader/副本字段为占位值，客户端实际经重定向发现领导者）。
+- **请求类型**：共四个 RPC——`Request`（写请求）、`ReadLocal`（本地副本读，绕过共识，可能读到旧数据）、`ReadLinearizable`（基于 ReadIndex 的线性化读）和 `GetClusterInfo`（集群拓扑；group、leader、副本均来自 raft 运行时，选举中 leader 返回 0；客户端实际经重定向发现领导者）。
 - **调度逻辑**：使用 `ClientDispatch` trait。`ClientDispatchImpl` 会通过 `ShardRouter` 确定分片所在的 Raft 组，然后执行 `client_write`。
 - **领导者重定向**：如果当前节点不是该组的 Leader，它会返回 Leader 的地址信息，供客户端 SDK 进行透明重定向。
 
@@ -123,7 +123,7 @@ To avoid the overhead of establishing a new TCP connection for every Raft RPC, r
 
 `ClientServiceImpl` is responsible for handling client requests from the SDK.
 
-- **Request Types**: Four RPCs in total — `Request` (write requests), `ReadLocal` (local replica reads bypassing consensus, may return stale data), `ReadLinearizable` (linearizable reads via ReadIndex), and `GetClusterInfo` (cluster topology; in the current implementation only the group_id list is real — leader/replica fields are placeholders, and clients discover leaders via redirects).
+- **Request Types**: Four RPCs in total — `Request` (write requests), `ReadLocal` (local replica reads bypassing consensus, may return stale data), `ReadLinearizable` (linearizable reads via ReadIndex), and `GetClusterInfo` (cluster topology; group, leader, and replica fields all come from the raft runtime, with leader 0 mid-election; clients discover leaders via redirects).
 - **Dispatch Logic**: Uses the `ClientDispatch` trait. `ClientDispatchImpl` determines the Raft group where the shard resides via `ShardRouter`, then executes `client_write`.
 - **Leader Redirect**: If the current node is not the Leader of the group, it returns the Leader's address information, enabling transparent redirection by the client SDK.
 

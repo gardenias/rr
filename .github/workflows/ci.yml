@@ -193,12 +193,13 @@ jobs:
 
   bench:
     runs-on: ubuntu-latest
-    # Perf regression gate (R-7) is NON-BLOCKING on purpose: GitHub hosted
-    # runner timing noise is uncontrolled. Run continue-on-error for >=2 weeks,
-    # record the false-positive rate, then decide on promotion to blocking.
-    # Thresholds: scripts/bench-compare.sh (>15% significant => red, 5-15% =>
-    # warning annotation).
-    continue-on-error: true
+    # Perf regression gate (R-7) — PROMOTED to blocking on 2026-09-22, after
+    # the >=2-week non-blocking window (added 2026-09-06). Caveat: the window
+    # was polluted by the CI-wide protoc outage, so the recorded false-positive
+    # rate is thin; if the gate proves noisy on GitHub runners, demote by
+    # restoring `continue-on-error: true` and file an issue instead of
+    # widening thresholds. Thresholds: scripts/bench-compare.sh (>15%
+    # significant => red, 5-15% => warning annotation).
     env:
       RUSTFLAGS: "--deny=warnings"
     strategy:
@@ -239,8 +240,9 @@ jobs:
           key: criterion-main-${{ github.run_id }}
       - name: Bench (compare against main baseline on PRs)
         if: github.event_name == 'pull_request'
+        # No `|| true`: a bench crash must fail the gate, not pass it.
         run: |
-          cargo bench --workspace --features rr-benches/rocks -- --baseline main | tee bench-output.txt || true
+          cargo bench --workspace --features rr-benches/rocks -- --baseline main | tee bench-output.txt
           scripts/bench-compare.sh bench-output.txt
 
   msrv:

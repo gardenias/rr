@@ -269,7 +269,7 @@ async fn start_node(
     };
 
     if cfg.bootstrap {
-        bootstrap_single_member(&node, cfg).await?;
+        bootstrap_hosted_groups(&node, cfg).await?;
     }
 
     Ok((node, tcp_raft_handle))
@@ -310,9 +310,18 @@ async fn build_config_provider(cfg: &ResolvedConfig) -> Result<Arc<MemConfigProv
         ids
     };
 
-    provider
-        .add_partition(1, PartitionConfig::SingleId(1), 1, all_node_ids)
-        .await;
+    // Stock topology: partition i → group i, every group replicated across
+    // all peers. Multi-group (`--groups N`) exists for benchmarking/demos.
+    for group_id in 1..=cfg.groups {
+        provider
+            .add_partition(
+                group_id,
+                PartitionConfig::SingleId(group_id),
+                group_id,
+                all_node_ids.clone(),
+            )
+            .await;
+    }
 
     Ok(provider)
 }
@@ -376,32 +385,38 @@ fn echo_factory() -> rr_raft::group_manager::StateMachineFactory {
     Box::new(|_group_id| -> Box<dyn StateMachine> { Box::new(EchoStateMachine::new()) })
 }
 
-async fn bootstrap_single_member(node: &Arc<RrNode>, cfg: &ResolvedConfig) -> Result<()> {
-    let raft = node
-        .group_manager()
-        .get_raft(1)
-        .await
-        .ok_or_else(|| anyhow!("group 1 not started after node.start()"))?;
+/// Initialize every hosted group (`1..=cfg.groups`) with this node as the
+/// single voter. Runs ONCE per cluster life (`--bootstrap`).
+async fn bootstrap_hosted_groups(node: &Arc<RrNode>, cfg: &ResolvedConfig) -> Result<()> {
+    for group_id in 1..=cfg.groups {
+        let raft = node
+            .group_manager()
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| anyhow!("group {group_id} not started after node.start()"))?;
 
-    let mut members = BTreeMap::new();
-    members.insert(
-        cfg.node_id,
-        BasicNode {
-            addr: cfg.listen_addr.clone(),
-        },
-    );
+        let mut members = BTreeMap::new();
+        members.insert(
+            cfg.node_id,
+            BasicNode {
+                addr: cfg.listen_addr.clone(),
+            },
+        );
 
-    match raft.initialize(members).await {
-        Ok(()) => info!(node_id = cfg.node_id, "cluster bootstrapped"),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("already") || msg.contains("Initialized") {
-                warn!(
-                    node_id = cfg.node_id,
-                    "cluster already initialized; continuing"
-                );
-            } else {
-                return Err(anyhow!("raft.initialize failed: {msg}"));
+        match raft.initialize(members).await {
+            Ok(()) => info!(node_id = cfg.node_id, group_id, "cluster bootstrapped"),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("already") || msg.contains("Initialized") {
+                    warn!(
+                        node_id = cfg.node_id,
+                        group_id, "cluster already initialized; continuing"
+                    );
+                } else {
+                    return Err(anyhow!(
+                        "raft.initialize failed for group {group_id}: {msg}"
+                    ));
+                }
             }
         }
     }

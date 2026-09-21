@@ -93,9 +93,9 @@ service ClientService {
 }
 ```
 
-`ClientResponse` 可能携带 `LeaderInfo { node_id, addr }`（`success=false` 的普通响应字段，而非 gRPC Status 错误）——这是 **ForwardToLeader 机制** 的协议层实现。注意：stock 实现的 `GetClusterInfo` 只返回真实的 group id 列表——`leader_node_id` 恒为占位值 `0`、`replica_node_ids` 为空；leader 发现依赖重定向，见 [dynamic-put-request.md](./dynamic-put-request.md)。
+`ClientResponse` 可能携带 `LeaderInfo { node_id, addr }`（`success=false` 的普通响应字段，而非 gRPC Status 错误）——这是 **ForwardToLeader 机制** 的协议层实现。注意：`GetClusterInfo` 返回 raft 运行时拓扑（leader 来自 `metrics`，选举中为 `0`；副本为全量成员），但客户端 leader 发现依赖重定向而非该 RPC，见 [dynamic-put-request.md](./dynamic-put-request.md)。
 
-`ClientResponse` may carry `LeaderInfo { node_id, addr }` (a normal response field with `success=false`, not a gRPC Status error) — this is the protocol-level realization of the **ForwardToLeader mechanism**. Note: the stock `GetClusterInfo` implementation returns only real group ids — `leader_node_id` is always the placeholder `0` and `replica_node_ids` is empty; leader discovery relies on redirects, see [dynamic-put-request.md](./dynamic-put-request.md).
+`ClientResponse` may carry `LeaderInfo { node_id, addr }` (a normal response field with `success=false`, not a gRPC Status error) — this is the protocol-level realization of the **ForwardToLeader mechanism**. Note: `GetClusterInfo` returns raft-runtime topology (leader from `metrics`, `0` mid-election; replicas are the full membership), but client leader discovery relies on redirects rather than this RPC, see [dynamic-put-request.md](./dynamic-put-request.md).
 
 ### `admin.proto` → AdminService
 运维 CLI 的目标。

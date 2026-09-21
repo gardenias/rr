@@ -77,7 +77,7 @@ N2 -> N2 : state = Leader\ninitialize next_index[], match_index[]
 N2 -> N3 : AppendEntries (empty, heartbeat with new term)
 N3 --> N2 : ack
 
-note over N2, Client : Nothing writes the new leader to ConfigProvider —\nthe routing table has no leader field (ADR A-0013).\nGetClusterInfo only returns group ids (leader_node_id=0 placeholder),\nso clients learn the leader exclusively via redirects.
+note over N2, Client : Nothing writes the new leader to ConfigProvider —\nthe routing table has no leader field (ADR A-0013).\nGetClusterInfo reports runtime topology (leader from raft metrics),\nbut clients learn the leader via redirects (the SDK does not poll it).
 
 note over Client : Next request lands on old leader (N1)\n→ connection fails\n→ client tries next bootstrap → N3\n→ N3 returns a redirect response (success=false + leader_info{N2})
 Client -> N3 : ClientRequest(partition=42)

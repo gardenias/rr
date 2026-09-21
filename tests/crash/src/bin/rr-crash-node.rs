@@ -96,6 +96,11 @@ struct Args {
     /// Log level filter (tracing EnvFilter syntax).
     #[arg(long, default_value = "info")]
     log_level: String,
+    /// Openraft `LogsSinceLast` snapshot trigger. Defaults to the production
+    /// value; scenario C lowers it so snapshot/purge cycles land inside the
+    /// short harness window.
+    #[arg(long, default_value_t = SNAPSHOT_LOGS_SINCE_LAST)]
+    snapshot_logs_since_last: u64,
 }
 
 fn main() -> Result<()> {
@@ -152,7 +157,7 @@ async fn run(args: Args) -> Result<()> {
         Box::new(state_machine),
         network,
         rocks_path_str,
-        SNAPSHOT_LOGS_SINCE_LAST,
+        args.snapshot_logs_since_last,
     )
     .await
     .map_err(|e| anyhow!("raft node start failed: {e}"))?;

@@ -9,7 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **IoBatcher in-flight byte budget (W9 / INV-1 hardening)**: new
+- **Multi-group stock topology (`rr-server --groups N` / `[cluster].groups`)**:
+  the stock server now hosts N Raft groups with partition i → group i and all
+  peers as replicas (default 1 — behavior unchanged). Bootstrap initializes
+  every hosted group (`bootstrap_hosted_groups`). `rr-perf-bench --groups N`
+  drives the same topology and spreads S1/S2/S3 ops across partitions
+  (round-robin by op sequence; key-sticky in the open-loop mix/wladder
+  engine), so aggregate multi-raft scaling is measurable end-to-end. Soak
+  stays single-group (keyed oracle). New config validation: `groups = 0` is
+  rejected.
+
+- **Crash scenario C — snapshot/purge under SIGKILL**
+  (`scenario_c_snapshot_purge_kill`, INV-1/INV-5): `rr-crash-node` accepts
+  `--snapshot-logs-since-last`; the scenario runs it at 100 so snapshot and
+  log-purge cycles straddle both the kill and the 15s dead window, then
+  verifies catch-up (durable snapshot + un-purged log tail compose, or
+  snapshot install past the purge horizon), the `sm-snapshot.bin` durable
+  artifact on the restarted node (T1), and a full ack-log oracle replay.
+  Registered in the INV-1 / INV-5 test lists (check-invariants.sh enforced).
+
   `IoBatcherConfig::max_inflight_bytes` (default 64 MiB). Submissions
   acquire byte permits (keys + values) before enqueueing and the worker
   releases them only after the covering flush completes, so the
@@ -217,6 +235,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Build no longer requires a system `protoc`**: `rr-network`'s build script
+  now sets `PROTOC` from `protoc-bin-vendored`, so CI runner images (which no
+  longer ship `protobuf-compiler`) and fresh dev machines build the workspace
+  with zero system protobuf install. This un-reds every CI job — `build`,
+  `test`, `clippy`, `bench`, … all failed at `rr-network` codegen with
+  "Could not find `protoc`".
+
 - **Watch-loop `NodeRemoved` now honors the membership quorum guard**
   (ADR A-0012 follow-up, closes the last unguarded entry of INV-7): the
   config-watch path applied `change_membership(group, replicas − nid)`
@@ -282,6 +307,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (registered under INV-1).
 
 ### Changed
+
+- **`GetClusterInfo` returns real raft-runtime topology** (previously a
+  documented placeholder): `leader_node_id` is now sourced from
+  `raft.metrics()` (`current_leader`; `0` while no leader is known, e.g.
+  mid-election — 0 is not a valid `NodeId`), and `replica_node_ids` carries
+  the full live membership (voters + learners). Runtime-sourced per ADR
+  A-0013 — the routing-table `GroupMeta.leader` must not be reintroduced.
+  Groups whose raft instance is mid-teardown are skipped instead of failing
+  the whole RPC. Client-side leader discovery is unchanged: the SDK still
+  relies on the `leader_info` redirect cache.
 
 - **`RaftGroupManager::start_group_rocks` is now a compatibility shim**
   (ADR A-0016): it asserts `rocks_base_path` is set (same error as before)

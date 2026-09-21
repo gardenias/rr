@@ -110,6 +110,14 @@ struct Args {
     #[arg(long)]
     client_rps: Option<u32>,
 
+    /// Number of Raft groups the cluster hosts: spawned rr-server nodes get
+    /// `--groups N`, and S1/S2/S3/mix/wladder spread ops across partitions
+    /// 1..=N (stock topology: partition i → group i). In --cluster-addrs mode
+    /// this only selects the partition spread — the external cluster must
+    /// already host N groups. Soak stays single-group (keyed oracle).
+    #[arg(long, default_value = "1")]
+    groups: u64,
+
     /// Print an interim progress line every N seconds during S1 (elapsed,
     /// ok/err counters, instantaneous TPS since the previous line).
     /// Useful for long runs; S2/S3 already print per-level tables.
@@ -427,6 +435,7 @@ async fn main() -> Result<()> {
                 port_base: args.port_base,
                 use_tcp_transport: args.use_tcp_transport,
                 client_rps: args.client_rps,
+                groups: args.groups,
             };
 
             println!(
@@ -469,6 +478,7 @@ async fn main() -> Result<()> {
                 duration,
                 warmup,
                 progress,
+                workload::PartitionSet::new(args.groups),
             )
             .await;
             let snap = m.snapshot();
@@ -488,6 +498,7 @@ async fn main() -> Result<()> {
                 &concurrency_levels,
                 duration,
                 warmup,
+                workload::PartitionSet::new(args.groups),
             )
             .await;
             for (k, snap) in &results {
@@ -508,6 +519,7 @@ async fn main() -> Result<()> {
                 &concurrency_levels,
                 duration,
                 warmup,
+                workload::PartitionSet::new(args.groups),
             )
             .await;
             for (kind, k, snap) in &results {
@@ -552,6 +564,7 @@ async fn main() -> Result<()> {
             client_id: args.client_id,
             seed: args.seed,
             max_in_flight: args.max_in_flight,
+            partitions: args.groups,
             op_timeout: Duration::from_secs(args.op_timeout_secs),
             timeseries: args.timeseries_out.is_some(),
         };

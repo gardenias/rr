@@ -116,7 +116,7 @@ Every rr-server has a `ShardRouter`. Given a `partition_id`, it returns the owni
 | 场景 / Scenario | Client-side cache | 结果 / Outcome |
 | :--- | :--- | :--- |
 | Leader changed | Stale | Client sends to old leader → gets a `leader_info` redirect (or a connection failure) → updates cache → retries |
-| Partition / group added | Missing entry | Client round-robins the bootstrap list; the first response (success or `leader_info` redirect) fills the cache. `GetClusterInfo` is not usable for discovery — the stock implementation returns placeholder leader/replica fields |
+| Partition / group added | Missing entry | Client round-robins the bootstrap list; the first response (success or `leader_info` redirect) fills the cache. `GetClusterInfo` reports real runtime topology, but the SDK still discovers leaders via redirects rather than polling it |
 
 **设计原则 / Design principle**：
 *宁可让客户端缓存短暂 stale，也不要把易变的 leader 运行时状态放进配置面路由表。*

@@ -57,6 +57,9 @@ pub struct ClusterConfig {
     pub use_tcp_transport: bool,
     /// Optional per-node client rate limit (req/s), passed as `--client-rps`.
     pub client_rps: Option<u32>,
+    /// Number of Raft groups per node, passed as `--groups` (stock topology:
+    /// partition i → group i, all nodes replicate every group). Default 1.
+    pub groups: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +100,9 @@ pub struct Cluster {
     pub ports: Vec<NodePorts>,
     _data_dir: Option<TempDir>,
     admin_bin: PathBuf,
+    /// Hosted Raft group count (`--groups` on each node) — the bootstrap
+    /// membership choreography runs per group.
+    groups: u64,
 }
 
 impl Drop for Cluster {
@@ -164,6 +170,7 @@ impl Cluster {
                 cfg.durability,
                 cfg.use_tcp_transport,
                 cfg.client_rps,
+                cfg.groups,
                 cfg.log_to_files
                     .then(|| log_dir.join(format!("node{}.log", p.id))),
             )
@@ -183,6 +190,7 @@ impl Cluster {
             ports: ports.clone(),
             _data_dir: data_dir_owned,
             admin_bin: cfg.admin_bin.clone(),
+            groups: cfg.groups,
         };
 
         // Wait for gRPC ports + (when TCP transport enabled) TCP Raft ports
@@ -269,45 +277,51 @@ impl Cluster {
         // Give node 1 a moment to finish raft.initialize() after bootstrap
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        for p in &self.ports[1..] {
+        // Membership choreography runs per group: every node hosts every
+        // group (stock static topology), so each group needs its own
+        // learner-add + promotion round.
+        for group_id in 1..=self.groups {
+            let group = group_id.to_string();
+            for p in &self.ports[1..] {
+                run_admin(
+                    &self.admin_bin,
+                    &admin_addr,
+                    &[
+                        "group",
+                        "add-learner",
+                        "--group",
+                        &group,
+                        "--node-id",
+                        &p.id.to_string(),
+                        "--addr",
+                        &format!("127.0.0.1:{}", p.grpc),
+                    ],
+                )
+                .await
+                .with_context(|| format!("add-learner node {} (group {group_id})", p.id))?;
+            }
+
+            let voters = self
+                .ports
+                .iter()
+                .map(|p| p.id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
             run_admin(
                 &self.admin_bin,
                 &admin_addr,
                 &[
                     "group",
-                    "add-learner",
+                    "change-membership",
                     "--group",
-                    "1",
-                    "--node-id",
-                    &p.id.to_string(),
-                    "--addr",
-                    &format!("127.0.0.1:{}", p.grpc),
+                    &group,
+                    "--voters",
+                    voters.as_str(),
                 ],
             )
             .await
-            .with_context(|| format!("add-learner node {}", p.id))?;
+            .with_context(|| format!("change-membership to voters {voters} (group {group_id})"))?;
         }
-
-        let voters = self
-            .ports
-            .iter()
-            .map(|p| p.id.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        run_admin(
-            &self.admin_bin,
-            &admin_addr,
-            &[
-                "group",
-                "change-membership",
-                "--group",
-                "1",
-                "--voters",
-                voters.as_str(),
-            ],
-        )
-        .await
-        .with_context(|| format!("change-membership to voters {voters}"))?;
 
         Ok(())
     }
@@ -349,6 +363,7 @@ async fn spawn_server(
     durability: DurabilityKind,
     use_tcp_transport: bool,
     client_rps: Option<u32>,
+    groups: u64,
     log_file: Option<PathBuf>,
 ) -> Result<Child> {
     let mut cmd = Command::new(bin);
@@ -386,6 +401,10 @@ async fn spawn_server(
 
     if let Some(rps) = client_rps {
         cmd.arg("--client-rps").arg(rps.to_string());
+    }
+
+    if groups > 1 {
+        cmd.arg("--groups").arg(groups.to_string());
     }
 
     if let Some(log_path) = log_file {

@@ -132,6 +132,8 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   (屏障排序与 post-flush hook 语义)
 - `crates/rr-raft/src/io_batcher.rs` `byte_budget_backpressures_submitters`
   (字节预算背压:预算耗尽时 submit 挂起,直到在途批次 flush 完成释放许可)
+- `tests/crash/src/scenarios.rs` `scenario_c_snapshot_purge_kill`(R-4 场景 C:
+  快照/清理周期中 SIGKILL,ACK 写在持久化快照 + 日志尾部合成恢复后全量存活)
 - `crates/rr-raft/src/group_manager.rs` `test_start_group_persists_log_with_rocks_base_path`、
   `test_start_group_rocks_shim_still_persists`(ADR A-0016,rocks-gated:统一 log 选择 +
   shim 兼容,直开存储字节级验证 + `Raft::new` 恢复路径验证)
@@ -470,6 +472,8 @@ index 的状态一致(相关契约经 openraft 源码级核对,见 ADR A-0002)�
 - `crates/rr-raft/src/idempotency.rs:352` `restore_replaces_existing_cache_entries_not_merge`
 - `tests/integration/src/lib.rs:802` `test_snapshot_state_digest_consistent_across_nodes`(3 节点快照字节一致)
 - `tests/integration/src/lib.rs:1430` `test_snapshot_catchup`(落后 follower 经快照追平)
+- `tests/crash/src/scenarios.rs` `scenario_c_snapshot_purge_kill`(快照/清理周期下的 SIGKILL:
+  持久化 SM 快照 + 未清理日志尾部合成恢复,落后过清理界线的节点经快照安装追平)
 
 ### 已知缺口
 

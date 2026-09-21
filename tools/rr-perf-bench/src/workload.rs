@@ -9,7 +9,28 @@ use crate::metrics::{Metrics, MetricsSnapshot};
 
 pub type SharedClient = Arc<RrClient>;
 
-const PARTITION_ID: u64 = 1;
+/// Partition selector for multi-group runs (`--groups N`). The stock
+/// topology maps partition i → group i, so round-robining ops across
+/// partitions `1..=N` spreads load over N independent Raft groups.
+/// `PartitionSet::new(1)` pins every op to partition 1 — the historical
+/// single-group behavior.
+#[derive(Clone, Copy, Debug)]
+pub struct PartitionSet {
+    count: u64,
+}
+
+impl PartitionSet {
+    pub fn new(count: u64) -> Self {
+        Self {
+            count: count.max(1),
+        }
+    }
+
+    /// Partition for the op with 0-based sequence number `seq`.
+    pub fn of(&self, seq: u64) -> u64 {
+        (seq % self.count) + 1
+    }
+}
 
 /// Which client operation the reactive pipeline fires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,12 +71,15 @@ pub async fn run_s1_serial(
     duration: Duration,
     warmup: Duration,
     progress: Option<Duration>,
+    partitions: PartitionSet,
 ) -> Metrics {
     let payload = vec![0u8; payload_size];
+    let mut seq = 0u64;
 
     let warmup_end = Instant::now() + warmup;
     while Instant::now() < warmup_end {
-        let _ = client.send_request_blocking(PARTITION_ID, payload.clone());
+        let _ = client.send_request_blocking(partitions.of(seq), payload.clone());
+        seq += 1;
     }
 
     let m = Metrics::new();
@@ -65,8 +89,9 @@ pub async fn run_s1_serial(
     while Instant::now() < deadline {
         let t0 = Instant::now();
         let ok = client
-            .send_request_blocking(PARTITION_ID, payload.clone())
+            .send_request_blocking(partitions.of(seq), payload.clone())
             .is_ok();
+        seq += 1;
         m.record(t0.elapsed(), ok);
 
         if let Some(interval) = progress {
@@ -102,6 +127,7 @@ pub async fn run_s2_pipeline_sweep(
     levels: &[usize],
     duration: Duration,
     warmup: Duration,
+    partitions: PartitionSet,
 ) -> Vec<(usize, MetricsSnapshot)> {
     let mut results = Vec::new();
 
@@ -113,6 +139,7 @@ pub async fn run_s2_pipeline_sweep(
             duration,
             warmup,
             OpKind::Write,
+            partitions,
         )
         .await;
         results.push((depth, snap));
@@ -136,6 +163,7 @@ pub async fn run_s3_read_sweep(
     levels: &[usize],
     duration: Duration,
     warmup: Duration,
+    partitions: PartitionSet,
 ) -> Vec<(ReadKind, usize, MetricsSnapshot)> {
     let mut results = Vec::new();
 
@@ -151,6 +179,7 @@ pub async fn run_s3_read_sweep(
                 duration,
                 warmup,
                 op,
+                partitions,
             )
             .await;
             results.push((kind, depth, snap));
@@ -176,6 +205,7 @@ async fn run_reactive_pipeline(
     duration: Duration,
     warmup: Duration,
     op: OpKind,
+    partitions: PartitionSet,
 ) -> MetricsSnapshot {
     let payload = Arc::new(vec![0u8; payload_size]);
     let measure_start = Instant::now() + warmup;
@@ -195,6 +225,7 @@ async fn run_reactive_pipeline(
         let client = Arc::clone(&client);
         let payload = Arc::clone(&payload);
         async move {
+            let mut fire_seq = 0u64;
             loop {
                 let permit = Arc::clone(&sem)
                     .acquire_owned()
@@ -209,10 +240,12 @@ async fn run_reactive_pipeline(
                 let tx_cb = tx.clone();
                 let inf = Arc::clone(&in_flight);
                 inf.fetch_add(1, Ordering::Relaxed);
+                let partition = partitions.of(fire_seq);
+                fire_seq += 1;
 
                 // Reactive: returns immediately; callback fires on a tokio
                 // worker thread when the cluster responds.
-                fire_op(&client, op, (*payload).clone(), move |ok| {
+                fire_op(&client, op, partition, (*payload).clone(), move |ok| {
                     drop(permit); // release slot → unblocks firing loop
                     inf.fetch_sub(1, Ordering::Relaxed);
                     let _ = tx_cb.send((t0, t0.elapsed(), ok));
@@ -253,24 +286,25 @@ fn log_op_error<E: std::fmt::Display>(op: OpKind, e: &E) {
 fn fire_op(
     client: &RrClient,
     op: OpKind,
+    partition: u64,
     payload: Vec<u8>,
     callback: impl FnOnce(bool) + Send + 'static,
 ) {
     match op {
-        OpKind::Write => client.send_request_reactive(PARTITION_ID, payload, move |r| {
+        OpKind::Write => client.send_request_reactive(partition, payload, move |r| {
             if let Err(e) = &r {
                 log_op_error(op, e);
             }
             callback(r.is_ok())
         }),
-        OpKind::ReadLocal => client.read_reactive(PARTITION_ID, payload, move |r| {
+        OpKind::ReadLocal => client.read_reactive(partition, payload, move |r| {
             if let Err(e) = &r {
                 log_op_error(op, e);
             }
             callback(r.is_ok())
         }),
         OpKind::ReadLinearizable => {
-            client.read_linearizable_reactive(PARTITION_ID, payload, move |r| {
+            client.read_linearizable_reactive(partition, payload, move |r| {
                 if let Err(e) = &r {
                     log_op_error(op, e);
                 }

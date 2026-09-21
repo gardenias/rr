@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
 use rr_core::error::{RaftError, RrError};
 use rr_core::framed_entry::FramedEntry;
@@ -233,20 +234,33 @@ impl ClientDispatch for ClientDispatchImpl {
 
     #[instrument(skip(self))]
     async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
-        let group_ids = self.group_manager.group_ids().await;
-        let groups = group_ids
-            .into_iter()
-            .map(|group_id| GroupInfo {
+        let mut group_ids = self.group_manager.group_ids().await;
+        group_ids.sort_unstable();
+        let mut groups = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            // A group whose raft instance is gone (mid-teardown) is skipped
+            // rather than failing the whole RPC.
+            let Some(raft) = self.group_manager.get_raft(group_id).await else {
+                continue;
+            };
+            let metrics = raft.metrics().borrow_watched().clone();
+            // Topology comes from the raft runtime (`metrics`), never from
+            // the routing table — ADR A-0013 removed `GroupMeta.leader` and
+            // it must NOT be reintroduced. `leader_node_id = 0` means "no
+            // known leader right now" (e.g. mid-election); 0 is not a valid
+            // NodeId. Replicas are the full membership (voters + learners).
+            let replica_node_ids = metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .map(|(id, _)| *id)
+                .collect();
+            groups.push(GroupInfo {
                 group_id,
-                // Placeholder: `0` carries no information. If a real value is
-                // ever provided here, it MUST be sourced from the raft runtime
-                // (`metrics.current_leader`, as `admin.rs` does) — the
-                // routing-table `GroupMeta.leader` field was removed by
-                // ADR A-0013 and must NOT be reintroduced.
-                leader_node_id: 0,
-                replica_node_ids: vec![],
-            })
-            .collect();
+                leader_node_id: metrics.current_leader.unwrap_or(0),
+                replica_node_ids,
+            });
+        }
         Ok(groups)
     }
 }
@@ -344,5 +358,39 @@ mod tests {
         assert!(result.is_ok());
         let groups = result.unwrap();
         assert!(groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_get_cluster_info_reports_runtime_topology() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        let mut members = std::collections::BTreeMap::new();
+        members.insert(1u64, openraft::BasicNode::default());
+        mgr.init_cluster(1, members).await.unwrap();
+
+        // Wait for single-node self-election.
+        let raft = mgr.get_raft(1).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let metrics = raft.metrics().borrow_watched().clone();
+            if metrics.current_leader == Some(1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "single-node self-election timed out"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let config = Arc::new(MemConfigProvider::default());
+        let router = Arc::new(ShardRouter::new(config));
+        let dispatch = ClientDispatchImpl::new(Arc::clone(&mgr), router);
+
+        let groups = dispatch.get_cluster_info().await.unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, 1);
+        assert_eq!(groups[0].leader_node_id, 1);
+        assert_eq!(groups[0].replica_node_ids, vec![1]);
     }
 }

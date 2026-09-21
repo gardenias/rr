@@ -75,6 +75,9 @@ pub struct StorageSection {
 pub struct ClusterSection {
     pub bootstrap: Option<bool>,
     pub peers: Option<Vec<String>>,
+    /// Number of Raft groups/partitions the node hosts (stock topology:
+    /// partition i → group i, replicas = all peers). Default 1.
+    pub groups: Option<u64>,
     /// `grpc` (default) or `tcp`. `tcp` is plaintext with no peer
     /// authentication: requires `allow_insecure` and a loopback
     /// `listen_addr` (G6/G7, ADR A-0014).
@@ -148,6 +151,9 @@ pub struct ResolvedConfig {
     pub durability: DurabilityChoice,
     pub bootstrap: bool,
     pub peers: Vec<String>,
+    /// Number of Raft groups/partitions the node hosts (stock topology:
+    /// partition i → group i, replicas = all peers). Default 1.
+    pub groups: u64,
     pub log_level: String,
     pub tls: Option<ResolvedTls>,
     pub auth: ResolvedAuth,
@@ -343,6 +349,13 @@ impl ResolvedConfig {
             ));
         }
 
+        let groups = args.groups.or(file.cluster.groups).unwrap_or(1);
+        if groups == 0 {
+            return Err(invalid(
+                "groups must be >= 1 (0 would start no Raft group at all)",
+            ));
+        }
+
         let tls = resolve_tls(args, &file.tls)?;
         let auth = resolve_auth(&file.auth)?;
         let rate_limit = ResolvedRateLimit {
@@ -381,6 +394,7 @@ impl ResolvedConfig {
             durability,
             bootstrap,
             peers,
+            groups,
             log_level: args.log_level.clone(),
             tls,
             auth,
@@ -545,6 +559,47 @@ mod tests {
         let resolved = ResolvedConfig::resolve(&args).unwrap();
         assert_eq!(resolved.node_id, 42);
         assert_eq!(resolved.listen_addr, "0.0.0.0:60000");
+    }
+
+    #[test]
+    fn groups_default_override_and_validation() {
+        // Default: single group (historical behavior).
+        let args = ServeArgs {
+            log_level: "info".to_string(),
+            node_id: Some(1),
+            listen_addr: Some("127.0.0.1:51001".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(ResolvedConfig::resolve(&args).unwrap().groups, 1);
+
+        // CLI wins over the file.
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+            [cluster]
+            groups = 3
+            "#,
+        );
+        let args = ServeArgs {
+            config: Some(f.path().to_path_buf()),
+            log_level: "info".to_string(),
+            groups: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(ResolvedConfig::resolve(&args).unwrap().groups, 5);
+
+        // 0 is rejected — it would start no Raft group at all.
+        let args = ServeArgs {
+            log_level: "info".to_string(),
+            node_id: Some(1),
+            listen_addr: Some("127.0.0.1:51001".to_string()),
+            groups: Some(0),
+            ..Default::default()
+        };
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(err.to_string().contains("groups"), "got: {err}");
     }
 
     #[test]

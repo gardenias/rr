@@ -19,7 +19,7 @@ rr uses **table-based routing** rather than hash rings. This diagram shows how `
 title Component Diagram - rr-router + rr-config
 
 Container_Ext(rr_server, "rr-server", "Rust binary", "Owns & queries the router")
-Container_Ext(rr_client, "rr-client SDK", "Rust library", "Queries group ids via GetClusterInfo RPC (leader/replicas are placeholders)")
+Container_Ext(rr_client, "rr-client SDK", "Rust library", "Queries topology via GetClusterInfo RPC; leader discovery via redirects")
 Container_Ext(source, "Config Source", "In-memory / etcd / file / custom", "Production-varies backing store")
 
 Container_Boundary(routing_system, "Routing System") {
@@ -36,7 +36,7 @@ Container_Boundary(routing_system, "Routing System") {
 }
 
 Rel(rr_server, shard_router, "route(partition_id) for client writes")
-Rel(rr_client, rr_server, "GetClusterInfo() → group ids (leader_node_id=0, empty replicas — placeholder)", "gRPC")
+Rel(rr_client, rr_server, "GetClusterInfo() → runtime topology (leader + replicas)", "gRPC")
 
 Rel(shard_router, cfg_trait, "get_routing_table() on every route() call")
 Rel(shard_router, routing_table, "Clones full table per request (no cache)")
