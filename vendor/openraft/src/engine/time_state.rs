@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Config {
     /// The sampled time interval after which the next election will be initiated once the current
     /// lease has expired. A new interval is sampled whenever a Pre-Vote or election campaign

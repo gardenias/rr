@@ -3,7 +3,8 @@ use crate::log_id::ref_log_id::RefLogId;
 use crate::vote::RaftCommittedLeaderId;
 
 pub(crate) trait OptionRefLogIdExt<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// Creates a new owned [`LogId`] from the reference log ID.
     ///
@@ -12,9 +13,11 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> OptionRefLogIdExt<CLID> for Option<RefLogId<'_, CLID>>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn to_log_id(&self) -> Option<LogId<CLID>> {
-        self.as_ref().map(|r| LogId::new(r.leader_id.clone(), r.index))
+        self.as_ref()
+            .map(|r| LogId::new(r.leader_id.clone(), r.index))
     }
 }

@@ -19,7 +19,10 @@ use crate::utime::Leased;
 use crate::vote::RaftLeaderIdExt;
 
 fn log_id(term: u64, node_id: NodeIdOf<UTConfig<u64>>, index: u64) -> LogIdOf<UTConfig<u64>> {
-    LogIdOf::<UTConfig<u64>>::new(LeaderIdOf::<UTConfig<u64>>::new_committed(term, node_id), index)
+    LogIdOf::<UTConfig<u64>>::new(
+        LeaderIdOf::<UTConfig<u64>>::new_committed(term, node_id),
+        index,
+    )
 }
 
 fn m12() -> Membership<u64, u64> {
@@ -29,10 +32,20 @@ fn m12() -> Membership<u64, u64> {
 #[test]
 fn test_forward_to_leader_vote_not_committed() {
     let rs = RaftState::<UTConfig<u64>> {
-        vote: Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(1, 2)),
+        vote: Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(1, 2),
+        ),
         membership_state: MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(Some(log_id(1, 0, 1)), m12())),
-            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(Some(log_id(1, 0, 1)), m12())),
+            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(
+                Some(log_id(1, 0, 1)),
+                m12(),
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(
+                Some(log_id(1, 0, 1)),
+                m12(),
+            )),
         ),
         ..Default::default()
     };
@@ -49,8 +62,14 @@ fn test_forward_to_leader_not_a_member() {
             Vote::new_committed(1, 3),
         ),
         membership_state: MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(Some(log_id(1, 0, 1)), m12())),
-            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(Some(log_id(1, 0, 1)), m12())),
+            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(
+                Some(log_id(1, 0, 1)),
+                m12(),
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(
+                Some(log_id(1, 0, 1)),
+                m12(),
+            )),
         ),
         ..Default::default()
     };
@@ -60,7 +79,8 @@ fn test_forward_to_leader_not_a_member() {
 
 #[test]
 fn test_forward_to_leader_has_leader() {
-    let m123 = || Membership::<u64, u64>::new(vec![btreeset! {1,2}], btreemap! {1=>4,2=>5,3=>6}).unwrap();
+    let m123 =
+        || Membership::<u64, u64>::new(vec![btreeset! {1,2}], btreemap! {1=>4,2=>5,3=>6}).unwrap();
 
     let rs = RaftState::<UTConfig<u64>> {
         vote: Leased::new(
@@ -69,8 +89,14 @@ fn test_forward_to_leader_has_leader() {
             Vote::new_committed(1, 3),
         ),
         membership_state: MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(Some(log_id(1, 0, 1)), m123())),
-            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(Some(log_id(1, 0, 1)), m123())),
+            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(
+                Some(log_id(1, 0, 1)),
+                m123(),
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig<u64>>::new(
+                Some(log_id(1, 0, 1)),
+                m123(),
+            )),
         ),
         ..Default::default()
     };

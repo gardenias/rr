@@ -13,7 +13,8 @@ use crate::type_config::alias::WatchSenderOf;
 /// [`RaftCore`]: crate::core::RaftCore
 /// [`MetricsChannels`]: crate::core::MetricsChannels
 pub(crate) struct IoBroadcast<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Reports a completed storage IO back to [`RaftCore`], written by `IOFlushed` callbacks.
     ///

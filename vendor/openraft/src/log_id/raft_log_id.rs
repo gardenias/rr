@@ -12,7 +12,8 @@ use crate::vote::RaftCommittedLeaderId;
     change = "removed `C: RaftTypeConfig` generic parameter, added `CommittedLeaderId` associated type"
 )]
 pub trait RaftLogId
-where Self: Eq + Clone + fmt::Debug
+where
+    Self: Eq + Clone + fmt::Debug,
 {
     /// The committed leader ID type used by this log ID.
     #[since(version = "0.10.0")]
@@ -36,7 +37,9 @@ where Self: Eq + Clone + fmt::Debug
 
     /// Converts this log ID into another type that implements [`RaftLogId`].
     fn to_type<T>(&self) -> T
-    where T: RaftLogId<CommittedLeaderId = Self::CommittedLeaderId> {
+    where
+        T: RaftLogId<CommittedLeaderId = Self::CommittedLeaderId>,
+    {
         T::new(self.committed_leader_id().clone(), self.index())
     }
 
@@ -47,7 +50,8 @@ where Self: Eq + Clone + fmt::Debug
 }
 
 impl<T> RaftLogId for &T
-where T: RaftLogId
+where
+    T: RaftLogId,
 {
     type CommittedLeaderId = T::CommittedLeaderId;
 

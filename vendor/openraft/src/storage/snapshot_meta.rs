@@ -104,7 +104,9 @@ where
     N: Node,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         use serde::ser::SerializeStruct;
 
         // The field count is the compatibility contract: it must stay 3.
@@ -156,7 +158,11 @@ where
     pub fn signature(&self) -> SnapshotSignature<CLID> {
         SnapshotSignature {
             last_log_id: self.last_log_id.clone(),
-            last_membership_log_id: self.last_membership.log_id().as_ref().map(|x| Box::new(x.clone())),
+            last_membership_log_id: self
+                .last_membership
+                .log_id()
+                .as_ref()
+                .map(|x| Box::new(x.clone())),
         }
     }
 
@@ -194,12 +200,18 @@ mod tests {
         let want = r#"{"last_log_id":{"leader_id":{"term":1,"node_id":2},"index":3},"last_membership":{"log_id":{"leader_id":{"term":4,"node_id":5},"index":6},"membership":{"configs":[[1,2]],"nodes":{"1":null,"2":null}}},"snapshot_id":""}"#;
 
         assert_eq!(want, serde_json::to_string(&meta).unwrap());
-        assert_eq!(meta, serde_json::from_str::<SnapshotMetaOf<UTConfig>>(want).unwrap());
+        assert_eq!(
+            meta,
+            serde_json::from_str::<SnapshotMetaOf<UTConfig>>(want).unwrap()
+        );
 
         // Data written by openraft 0.9, when `snapshot_id` was still a field of `SnapshotMeta`,
         // deserializes to the same value; the id is ignored.
         let v09 = r#"{"last_log_id":{"leader_id":{"term":1,"node_id":2},"index":3},"last_membership":{"log_id":{"leader_id":{"term":4,"node_id":5},"index":6},"membership":{"configs":[[1,2]],"nodes":{"1":null,"2":null}}},"snapshot_id":"1-2-3-4"}"#;
 
-        assert_eq!(meta, serde_json::from_str::<SnapshotMetaOf<UTConfig>>(v09).unwrap());
+        assert_eq!(
+            meta,
+            serde_json::from_str::<SnapshotMetaOf<UTConfig>>(v09).unwrap()
+        );
     }
 }

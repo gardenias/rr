@@ -10,11 +10,19 @@ use crate::vote::RaftCommittedLeaderId;
 /// Errors occur when building a [`Membership`].
 ///
 /// [`Membership`]: crate::membership::Membership
-#[since(version = "0.10.0", change = "removed `C: RaftTypeConfig` generic parameter")]
+#[since(
+    version = "0.10.0",
+    change = "removed `C: RaftTypeConfig` generic parameter"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum MembershipError<NID>
-where NID: NodeId
+where
+    NID: NodeId,
 {
     /// The membership configuration is empty.
     #[error(transparent)]

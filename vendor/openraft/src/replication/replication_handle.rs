@@ -8,7 +8,8 @@ use crate::type_config::alias::WatchSenderOf;
 
 /// The handle to a spawned replication stream.
 pub(crate) struct ReplicationHandle<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Identifies this replication session (leader vote + target node).
     pub(crate) stream_id: StreamId,
@@ -27,7 +28,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> ReplicationHandle<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(
         stream_id: StreamId,

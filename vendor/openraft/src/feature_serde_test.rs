@@ -4,9 +4,7 @@ mod serde_enabled {
     use crate::AppDataResponse;
     use crate::OptionalSerde;
 
-    #[derive(Clone, Debug)]
-    #[derive(serde::Serialize, serde::Deserialize)]
-    #[derive(derive_more::Display)]
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, derive_more::Display)]
     struct SerdeEnabled {
         i: u32,
     }
@@ -52,8 +50,7 @@ mod serde_disabled {
     use crate::AppDataResponse;
     use crate::OptionalSerde;
 
-    #[derive(Clone, Debug)]
-    #[derive(derive_more::Display)]
+    #[derive(Clone, Debug, derive_more::Display)]
     struct SerdeDisabled {
         #[allow(dead_code)]
         i: u32,

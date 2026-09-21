@@ -61,7 +61,10 @@ where
 }
 
 fn seeded_log_id(term: u64, node_id: u64, index: u64) -> LogIdOf<SeededConfig> {
-    LogIdOf::<SeededConfig>::new(LeaderIdOf::<SeededConfig>::new_committed(term, node_id), index)
+    LogIdOf::<SeededConfig>::new(
+        LeaderIdOf::<SeededConfig>::new_committed(term, node_id),
+        index,
+    )
 }
 
 fn seeded_engine(id: u64, config: EngineConfig<SeededConfig>) -> Engine<SeededConfig> {
@@ -69,10 +72,13 @@ fn seeded_engine(id: u64, config: EngineConfig<SeededConfig>) -> Engine<SeededCo
     engine.config = config;
     engine.state.log_ids = LogIdList::new(None, [seeded_log_id(0, 0, 0)]);
     engine.state.enable_validation(false);
-    engine.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<SeededConfig>::new(
-        Some(seeded_log_id(0, 1, 1)),
-        m12(),
-    )));
+    engine
+        .state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<SeededConfig>::new(
+            Some(seeded_log_id(0, 1, 1)),
+            m12(),
+        )));
     engine
 }
 
@@ -91,8 +97,8 @@ fn reference_timeouts(seed: u64, count: usize) -> Vec<Duration> {
     run_seeded(seed, move || {
         (0..count)
             .map(|_| {
-                let millis =
-                    SeededRuntime::thread_rng().random_range(config.election_timeout_min..config.election_timeout_max);
+                let millis = SeededRuntime::thread_rng()
+                    .random_range(config.election_timeout_min..config.election_timeout_max);
                 Duration::from_millis(millis)
             })
             .collect()
@@ -115,7 +121,11 @@ fn test_default_election_timer_bounds_are_coherent() {
 fn test_direct_transfer_and_pre_vote_campaigns_resample_timeout() {
     const SEED: u64 = 44;
     let expected = reference_timeouts(SEED, 4);
-    assert_eq!(4, expected.iter().collect::<BTreeSet<_>>().len(), "{expected:?}");
+    assert_eq!(
+        4,
+        expected.iter().collect::<BTreeSet<_>>().len(),
+        "{expected:?}"
+    );
 
     let observed = run_seeded(SEED, || {
         let config = EngineConfig::new(1, &election_config());
@@ -135,7 +145,10 @@ fn test_direct_transfer_and_pre_vote_campaigns_resample_timeout() {
 
         assert_eq!(Vote::new(2, 1), *engine.state.vote_ref());
         assert_eq!(leader_lease, engine.config.timer_config.leader_lease);
-        assert_eq!(smaller_log_timeout, engine.config.timer_config.smaller_log_timeout);
+        assert_eq!(
+            smaller_log_timeout,
+            engine.config.timer_config.smaller_log_timeout
+        );
         observed
     });
 
@@ -179,16 +192,19 @@ fn test_tied_initial_samples_can_diverge_after_resampling() {
 fn test_successful_pre_vote_resamples_the_real_campaign() {
     const SEED: u64 = 44;
     let expected = reference_timeouts(SEED, 3);
-    assert_eq!(3, expected.iter().collect::<BTreeSet<_>>().len(), "{expected:?}");
+    assert_eq!(
+        3,
+        expected.iter().collect::<BTreeSet<_>>().len(),
+        "{expected:?}"
+    );
 
     let observed = run_seeded(SEED, || {
         let config = EngineConfig::new(1, &election_config());
         let initial = config.timer_config.election_timeout;
         let mut engine = seeded_engine(1, config);
-        engine.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<SeededConfig>::new(
-            Some(seeded_log_id(0, 1, 1)),
-            m1(),
-        )));
+        engine.state.membership_state.set_effective(Arc::new(
+            StoredMembershipOf::<SeededConfig>::new(Some(seeded_log_id(0, 1, 1)), m1()),
+        ));
 
         engine.pre_elect();
 
@@ -206,10 +222,12 @@ fn test_elect_single_node() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(0, 1, 1)),
-            m1(),
-        )));
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(0, 1, 1)),
+                m1(),
+            )));
 
         eng.elect();
 
@@ -222,7 +240,9 @@ fn test_elect_single_node() -> anyhow::Result<()> {
         assert_eq!(
             vec![
                 //
-                Command::SaveVote { vote: Vote::new(1, 1) },
+                Command::SaveVote {
+                    vote: Vote::new(1, 1)
+                },
                 Command::SendVote {
                     vote_req: VoteRequest {
                         vote: Vote::new(1, 1),
@@ -244,10 +264,12 @@ fn test_elect_by_leadership_transfer_sets_flag() -> anyhow::Result<()> {
     // grant it even when the leader lease has not expired.
     let mut eng = eng();
     eng.config.id = 1;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(0, 1, 1)),
-        m12(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(0, 1, 1)),
+            m12(),
+        )));
 
     eng.elect_by_leadership_transfer();
 
@@ -258,7 +280,9 @@ fn test_elect_by_leadership_transfer_sets_flag() -> anyhow::Result<()> {
     assert_eq!(
         vec![
             //
-            Command::SaveVote { vote: Vote::new(1, 1) },
+            Command::SaveVote {
+                vote: Vote::new(1, 1)
+            },
             Command::SendVote {
                 vote_req: VoteRequest {
                     vote: Vote::new(1, 1),
@@ -275,14 +299,18 @@ fn test_elect_by_leadership_transfer_sets_flag() -> anyhow::Result<()> {
 
 #[test]
 fn test_elect_again_overrides_previous_campaign() -> anyhow::Result<()> {
-    tracing::info!("--- electing again bumps the term off the current vote and overrides the previous campaign");
+    tracing::info!(
+        "--- electing again bumps the term off the current vote and overrides the previous campaign"
+    );
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(0, 1, 1)),
-            m1(),
-        )));
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(0, 1, 1)),
+                m1(),
+            )));
 
         // The first campaign, to be overridden by the second one.
         eng.elect();
@@ -302,7 +330,9 @@ fn test_elect_again_overrides_previous_campaign() -> anyhow::Result<()> {
         assert_eq!(
             vec![
                 //
-                Command::SaveVote { vote: Vote::new(2, 1) },
+                Command::SaveVote {
+                    vote: Vote::new(2, 1)
+                },
                 Command::SendVote {
                     vote_req: VoteRequest {
                         vote: Vote::new(2, 1),
@@ -321,18 +351,26 @@ fn test_elect_again_overrides_previous_campaign() -> anyhow::Result<()> {
 fn test_election_on_leader_is_ignored() -> anyhow::Result<()> {
     let mut eng = eng();
     eng.config.id = 1;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(0, 1, 1)),
-        m12(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(0, 1, 1)),
+            m12(),
+        )));
 
     eng.elect();
     eng.candidate_mut().unwrap().grant_by(&1);
-    eng.handle_vote_resp(2, VoteResponse::new(Vote::new(1, 1), Some(log_id(0, 0, 0)), true));
+    eng.handle_vote_resp(
+        2,
+        VoteResponse::new(Vote::new(1, 1), Some(log_id(0, 0, 0)), true),
+    );
     eng.output.take_commands();
 
     eng.new_pre_candidate(Vote::new(2, 1));
-    assert_eq!(Vote::new(2, 1), *eng.pre_candidate_ref().unwrap().vote_ref());
+    assert_eq!(
+        Vote::new(2, 1),
+        *eng.pre_candidate_ref().unwrap().vote_ref()
+    );
 
     eng.elect();
     eng.elect_by_leadership_transfer();
@@ -353,10 +391,12 @@ fn test_elect_multi_node_enter_candidate() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(0, 1, 1)),
-            m12(),
-        )));
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(0, 1, 1)),
+                m12(),
+            )));
         eng.state.log_ids = LogIdList::new(None, vec![log_id(1, 1, 1)]);
 
         eng.elect();
@@ -367,7 +407,8 @@ fn test_elect_multi_node_enter_candidate() -> anyhow::Result<()> {
 
         assert_eq!(
             Some(btreeset! {},),
-            eng.candidate_ref().map(|x| x.granters().collect::<BTreeSet<_>>())
+            eng.candidate_ref()
+                .map(|x| x.granters().collect::<BTreeSet<_>>())
         );
 
         assert_eq!(ServerState::Candidate, eng.state.server_state);
@@ -375,7 +416,9 @@ fn test_elect_multi_node_enter_candidate() -> anyhow::Result<()> {
         assert_eq!(
             vec![
                 //
-                Command::SaveVote { vote: Vote::new(1, 1) },
+                Command::SaveVote {
+                    vote: Vote::new(1, 1)
+                },
                 Command::SendVote {
                     vote_req: VoteRequest::new(Vote::new(1, 1), Some(log_id(1, 1, 1)))
                 },

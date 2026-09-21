@@ -17,7 +17,8 @@ use crate::network::Backoff;
 ///
 /// [`RaftNetworkV2`]: crate::network::RaftNetworkV2
 pub trait NetBackoff<C>: OptionalSend + OptionalSync + 'static
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Build a backoff instance if the target node is temporarily(or permanently) unreachable.
     ///

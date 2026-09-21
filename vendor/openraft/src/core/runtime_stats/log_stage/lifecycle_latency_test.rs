@@ -233,8 +233,16 @@ fn test_display_one_line_per_segment() {
     let base = C::now();
     let mut latency = LS::new(10, 0);
 
-    record_all(&mut latency, 10, [0, 1, 2, 3, 4, 5].map(|i| instant_at(base, i)));
-    record_all(&mut latency, 20, [10, 11, 12, 13, 14, 15].map(|i| instant_at(base, i)));
+    record_all(
+        &mut latency,
+        10,
+        [0, 1, 2, 3, 4, 5].map(|i| instant_at(base, i)),
+    );
+    record_all(
+        &mut latency,
+        20,
+        [10, 11, 12, 13, 14, 15].map(|i| instant_at(base, i)),
+    );
 
     let s = format!("{}", latency);
     let lines: Vec<_> = s.lines().collect();

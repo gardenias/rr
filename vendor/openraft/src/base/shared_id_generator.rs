@@ -74,10 +74,15 @@ mod tests {
 
         for _ in 0..10 {
             let g = id_gen.clone();
-            handles.push(thread::spawn(move || (0..100).map(|_| g.next_id()).collect::<Vec<_>>()));
+            handles.push(thread::spawn(move || {
+                (0..100).map(|_| g.next_id()).collect::<Vec<_>>()
+            }));
         }
 
-        let mut all_ids: Vec<u64> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+        let mut all_ids: Vec<u64> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
 
         all_ids.sort();
 

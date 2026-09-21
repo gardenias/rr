@@ -64,7 +64,8 @@ where
 
     /// Return whether the leader's lease is valid.
     pub(crate) fn is_lease_valid(&self) -> bool {
-        self.leader.is_lease_valid(self.config.timer_config.leader_lease)
+        self.leader
+            .is_lease_valid(self.config.timer_config.leader_lease)
     }
 
     /// Append new log entries by a leader.
@@ -77,8 +78,13 @@ where
     ///
     /// TODO(xp): if vote indicates this node is not the leader, refuse append
     #[tracing::instrument(level = "debug", skip(self, payloads))]
-    pub(crate) fn leader_append_entries<I>(&mut self, payloads: I) -> Option<LeaderLogIds<CommittedLeaderIdOf<C>>>
-    where I: IntoIterator<Item = EntryPayloadOf<C>> + AsRef<[EntryPayloadOf<C>]> {
+    pub(crate) fn leader_append_entries<I>(
+        &mut self,
+        payloads: I,
+    ) -> Option<LeaderLogIds<CommittedLeaderIdOf<C>>>
+    where
+        I: IntoIterator<Item = EntryPayloadOf<C>> + AsRef<[EntryPayloadOf<C>]>,
+    {
         let log_ids = self.leader.assign_log_ids(payloads.as_ref().len())?;
 
         self.state.extend_log_ids_from_same_leader(log_ids.clone());
@@ -130,16 +136,23 @@ where
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn send_heartbeat(&mut self) {
         let membership_log_id = self.state.membership_state.effective().log_id();
-        let session_id = ReplicationSessionId::new(self.leader.committed_vote.clone(), membership_log_id.clone());
+        let session_id = ReplicationSessionId::new(
+            self.leader.committed_vote.clone(),
+            membership_log_id.clone(),
+        );
 
-        self.output.push_command(Command::BroadcastHeartbeat { session_id });
+        self.output
+            .push_command(Command::BroadcastHeartbeat { session_id });
     }
 
     /// Get the log id for a linearizable read.
     ///
     /// See: [Read Operation](crate::docs::protocol::read)
     pub(crate) fn get_read_log_id(&self) -> ReadLogId<C> {
-        ReadLogId::new(self.leader.noop_log_id.clone(), self.state.local_committed().cloned())
+        ReadLogId::new(
+            self.leader.noop_log_id.clone(),
+            self.state.local_committed().cloned(),
+        )
     }
 
     /// Disable proposing new logs for this Leader and transfer Leader to another node

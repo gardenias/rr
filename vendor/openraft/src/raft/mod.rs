@@ -415,7 +415,9 @@ async fn io_completion_forwarder<C>(
         // Forward the result to notification channel
         let notification = match result {
             Ok(io_id) => Notification::LocalIO { io_id },
-            Err(storage_error) => Notification::StorageError { error: storage_error },
+            Err(storage_error) => Notification::StorageError {
+                error: storage_error,
+            },
         };
 
         if let Err(e) = tx.send(notification).await {
@@ -486,7 +488,8 @@ where
         let (tx_notify, rx_notify) = C::mpsc(notification_channel_size);
         let (tx_metrics, rx_metrics) = C::watch_channel(RaftMetrics::new_initial(id.clone()));
         let (tx_data_metrics, rx_data_metrics) = C::watch_channel(RaftDataMetrics::default());
-        let (tx_server_metrics, rx_server_metrics) = C::watch_channel(RaftServerMetrics::new_initial(id.clone()));
+        let (tx_server_metrics, rx_server_metrics) =
+            C::watch_channel(RaftServerMetrics::new_initial(id.clone()));
 
         // Watch channel for IO completion notifications from storage callbacks.
         // Initial value is a dummy IOId with this node's ID.
@@ -516,7 +519,8 @@ where
         let eng_config = EngineConfig::new(id.clone(), config.as_ref());
 
         let state = {
-            let mut helper = StorageHelper::new(&mut log_store, &mut state_machine).with_id(id.clone());
+            let mut helper =
+                StorageHelper::new(&mut log_store, &mut state_machine).with_id(id.clone());
             helper.get_initial_state().await?
         };
 
@@ -594,7 +598,10 @@ where
         };
 
         // Spawn forwarder task to bridge Watch channel to notification channel
-        let _forwarder_handle = C::spawn(io_completion_forwarder::<C>(rx_io_completed, weak_tx_notify));
+        let _forwarder_handle = C::spawn(io_completion_forwarder::<C>(
+            rx_io_completed,
+            weak_tx_notify,
+        ));
 
         StepDownWatcher::<C>::spawn(
             rx_server_metrics.clone(),
@@ -603,7 +610,10 @@ where
             &config,
         );
 
-        let core_handle = C::spawn(core.main(rx_shutdown).instrument(trace_span!("spawn").or_current()));
+        let core_handle = C::spawn(
+            core.main(rx_shutdown)
+                .instrument(trace_span!("spawn").or_current()),
+        );
 
         let inner = RaftInner {
             id,
@@ -690,7 +700,9 @@ where
     /// ```
     #[since(version = "0.10.0")]
     pub fn extension<T>(&self) -> T
-    where T: OptionalSend + Clone + Default + 'static {
+    where
+        T: OptionalSend + Clone + Default + 'static,
+    {
         self.inner.extensions.get::<T>()
     }
 
@@ -700,7 +712,9 @@ where
     /// This returns a snapshot of the stats at the time of the call.
     #[cfg(feature = "runtime-stats")]
     pub async fn runtime_stats(&self) -> Result<RuntimeStats<C>, Fatal<C>> {
-        self.inner.call_core_oneshot(|tx| RaftMsg::GetRuntimeStats { tx }).await
+        self.inner
+            .call_core_oneshot(|tx| RaftMsg::GetRuntimeStats { tx })
+            .await
     }
 
     /// Check if this node is currently the leader.
@@ -763,7 +777,11 @@ where
                 last_quorum_acked: metrics.last_quorum_acked.map(|s| s.into_inner()),
             })
         } else {
-            let node = metrics.membership_config.membership().get_node(node_id).cloned();
+            let node = metrics
+                .membership_config
+                .membership()
+                .get_node(node_id)
+                .cloned();
 
             Err(ForwardToLeader {
                 leader_id: Some(node_id.clone()),
@@ -800,7 +818,12 @@ where
     pub fn voter_ids(&self) -> impl Iterator<Item = C::NodeId> {
         // borrow_watched() holds a lock that blocks RaftCore.
         // Clone and collect immediately to release the lock quickly.
-        let membership = self.inner.rx_metrics.borrow_watched().membership_config.clone();
+        let membership = self
+            .inner
+            .rx_metrics
+            .borrow_watched()
+            .membership_config
+            .clone();
         membership.voter_ids().collect::<Vec<_>>().into_iter()
     }
 
@@ -819,8 +842,17 @@ where
     pub fn learner_ids(&self) -> impl Iterator<Item = C::NodeId> {
         // borrow_watched() holds a lock that blocks RaftCore.
         // Clone and collect immediately to release the lock quickly.
-        let membership = self.inner.rx_metrics.borrow_watched().membership_config.clone();
-        membership.membership().learner_ids().collect::<Vec<_>>().into_iter()
+        let membership = self
+            .inner
+            .rx_metrics
+            .borrow_watched()
+            .membership_config
+            .clone();
+        membership
+            .membership()
+            .learner_ids()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     /// Create a new [`ProtocolApi`] to handle Raft protocol RPCs received by this Raft node.
@@ -889,8 +921,13 @@ where
     /// # Errors
     ///
     /// Returns [`Fatal`] error if RaftCore is shut down or has a storage error.
-    pub async fn set_metrics_recorder(&self, recorder: Option<Arc<dyn MetricsRecorder>>) -> Result<(), Fatal<C>> {
-        self.inner.send_external_command(ExternalCommand::SetMetricsRecorder { recorder }).await
+    pub async fn set_metrics_recorder(
+        &self,
+        recorder: Option<Arc<dyn MetricsRecorder>>,
+    ) -> Result<(), Fatal<C>> {
+        self.inner
+            .send_external_command(ExternalCommand::SetMetricsRecorder { recorder })
+            .await
     }
 
     /// Submit an AppendEntries RPC to this Raft node.
@@ -898,8 +935,14 @@ where
     /// These RPCs are sent by the cluster leader to replicate log entries (§5.3), and are also
     /// used as heartbeats (§5.2).
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn append_entries(&self, rpc: AppendEntriesRequest<C>) -> Result<AppendEntriesResponse<C>, RaftError<C>> {
-        self.protocol_api().append_entries(rpc).await.into_raft_result()
+    pub async fn append_entries(
+        &self,
+        rpc: AppendEntriesRequest<C>,
+    ) -> Result<AppendEntriesResponse<C>, RaftError<C>> {
+        self.protocol_api()
+            .append_entries(rpc)
+            .await
+            .into_raft_result()
     }
 
     /// Submit a stream of AppendEntries RPCs to this Raft node.
@@ -1002,7 +1045,9 @@ where
     /// error only when that worker fails to serve it, e.g., encountering a storage error or having
     /// stopped (`Fatal::Stopped`), which can occur while `RaftCore` is still running.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn get_snapshot(&self) -> Result<Option<SnapshotOf<C, SM::SnapshotData>>, RaftError<C>> {
+    pub async fn get_snapshot(
+        &self,
+    ) -> Result<Option<SnapshotOf<C, SM::SnapshotData>>, RaftError<C>> {
         self.protocol_api().get_snapshot().await.into_raft_result()
     }
 
@@ -1035,7 +1080,9 @@ where
         vote: VoteOf<C>,
         snapshot: SnapshotOf<C, SM::SnapshotData>,
     ) -> Result<SnapshotResponse<C>, Fatal<C>> {
-        self.protocol_api().install_full_snapshot(vote, snapshot).await
+        self.protocol_api()
+            .install_full_snapshot(vote, snapshot)
+            .await
     }
 
     /// Get the ID of the current leader from this Raft node.
@@ -1082,14 +1129,21 @@ where
     /// // Then proceed with the state machine read
     /// ```
     /// Read more about how it works: [Read Operation](crate::docs::protocol::read)
-    #[since(version = "0.10.0", change = "return ReadLogId instead of Option<LogId>")]
+    #[since(
+        version = "0.10.0",
+        change = "return ReadLogId instead of Option<LogId>"
+    )]
     #[since(version = "0.9.0")]
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn ensure_linearizable(
         &self,
         read_policy: ReadPolicy,
     ) -> Result<ReadLogId<C>, RaftError<C, LinearizableReadError<C>>> {
-        let linearizer = self.app_api().get_read_linearizer(read_policy).await.into_raft_result()?;
+        let linearizer = self
+            .app_api()
+            .get_read_linearizer(read_policy)
+            .await
+            .into_raft_result()?;
 
         // Safe unwrap: it never times out.
         let state = linearizer.await_ready(self).await?;
@@ -1108,14 +1162,21 @@ where
     /// **For new code, use [`Raft::get_read_linearizer`]** which provides a better API.
     ///
     /// See [`Raft::get_read_linearizer`] for full documentation.
-    #[since(version = "0.10.0", change = "return ReadLogId instead of Option<LogId>")]
+    #[since(
+        version = "0.10.0",
+        change = "return ReadLogId instead of Option<LogId>"
+    )]
     #[since(version = "0.9.0")]
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn get_read_log_id(
         &self,
         read_policy: ReadPolicy,
     ) -> Result<(ReadLogId<C>, Option<LogIdOf<C>>), RaftError<C, LinearizableReadError<C>>> {
-        let linearizer = self.app_api().get_read_linearizer(read_policy).await.into_raft_result()?;
+        let linearizer = self
+            .app_api()
+            .get_read_linearizer(read_policy)
+            .await
+            .into_raft_result()?;
 
         let read_log_id = linearizer.read_log_id();
         let applied = linearizer.applied();
@@ -1173,7 +1234,10 @@ where
         &self,
         read_policy: ReadPolicy,
     ) -> Result<Linearizer<C>, RaftError<C, LinearizableReadError<C>>> {
-        self.app_api().get_read_linearizer(read_policy).await.into_raft_result()
+        self.app_api()
+            .get_read_linearizer(read_policy)
+            .await
+            .into_raft_result()
     }
 
     /// Submit a mutating client request to Raft to update the state of the system (§5.1).
@@ -1208,7 +1272,10 @@ where
         &self,
         app_data: C::D,
     ) -> Result<ClientWriteResponse<C>, RaftError<C, ClientWriteError<C>>> {
-        self.app_api().client_write(EntryPayload::Normal(app_data)).await.into_raft_result()
+        self.app_api()
+            .client_write(EntryPayload::Normal(app_data))
+            .await
+            .into_raft_result()
     }
 
     /// Write a blank log entry to the Raft log.
@@ -1221,8 +1288,13 @@ where
     /// Returns when the blank entry has been applied to the state machine.
     #[since(version = "0.10.0")]
     #[tracing::instrument(level = "debug", skip(self))]
-    pub async fn write_blank(&self) -> Result<ClientWriteResponse<C>, RaftError<C, ClientWriteError<C>>> {
-        self.app_api().client_write(EntryPayload::Blank).await.into_raft_result()
+    pub async fn write_blank(
+        &self,
+    ) -> Result<ClientWriteResponse<C>, RaftError<C, ClientWriteError<C>>> {
+        self.app_api()
+            .client_write(EntryPayload::Blank)
+            .await
+            .into_raft_result()
     }
 
     /// Submit a mutating client request to Raft to update the state machine, returns an application
@@ -1238,7 +1310,9 @@ where
         app_data: C::D,
         responder: Option<WriteResponderOf<C>>,
     ) -> Result<(), Fatal<C>> {
-        self.app_api().client_write_ff(EntryPayload::Normal(app_data), responder).await
+        self.app_api()
+            .client_write_ff(EntryPayload::Normal(app_data), responder)
+            .await
     }
 
     /// Write multiple application data payloads in a single batch.
@@ -1268,7 +1342,9 @@ where
         &self,
         app_data: impl IntoIterator<Item = C::D>,
     ) -> Result<BoxStream<'static, Result<WriteResult<C>, Fatal<C>>>, Fatal<C>> {
-        self.app_api().client_write_many(app_data.into_iter().map(EntryPayload::Normal)).await
+        self.app_api()
+            .client_write_many(app_data.into_iter().map(EntryPayload::Normal))
+            .await
     }
 
     /// Submit a write request to Raft.
@@ -1390,8 +1466,13 @@ where
     /// ```
     #[tracing::instrument(level = "debug", skip(self))]
     pub async fn initialize<T>(&self, members: T) -> Result<(), RaftError<C, InitializeError<C>>>
-    where T: IntoNodes<C::NodeId, C::Node> + Debug {
-        self.management_api().initialize(members).await.into_raft_result()
+    where
+        T: IntoNodes<C::NodeId, C::Node> + Debug,
+    {
+        self.management_api()
+            .initialize(members)
+            .await
+            .into_raft_result()
     }
 
     /// Provides read-only access to [`RaftState`] through a user-provided function.
@@ -1453,7 +1534,9 @@ where
     /// - Raft core task is panicked due to programming error.
     /// - Raft core task is encountered a storage error.
     pub async fn external_request<F>(&self, req: F) -> Result<(), Fatal<C>>
-    where F: FnOnce(&RaftState<C>) + OptionalSend + 'static {
+    where
+        F: FnOnce(&RaftState<C>) + OptionalSend + 'static,
+    {
         let req: BoxOnce<'static, RaftState<C>> = Box::new(req);
         self.inner.send_msg(RaftMsg::WithRaftState { req }).await
     }
@@ -1657,7 +1740,9 @@ where
 
             // Only call callback if leader_id actually changed
             let fut = if old_leader.as_ref() != Some(&new_leader) {
-                let old_state = prev_vote.as_ref().map(|v| (v.leader_id().clone(), v.is_committed()));
+                let old_state = prev_vote
+                    .as_ref()
+                    .map(|v| (v.leader_id().clone(), v.is_committed()));
                 let new_state = (new_vote.leader_id().clone(), new_vote.is_committed());
                 Some(callback(old_state, new_state))
             } else {
@@ -1891,7 +1976,10 @@ where
     /// raft.wait_for_recovery(Some(Duration::from_secs(5))).await?;
     /// ```
     #[since(version = "0.10.0")]
-    pub async fn wait_for_recovery(&self, timeout: Option<Duration>) -> Result<RaftMetrics<C>, WaitError> {
+    pub async fn wait_for_recovery(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<RaftMetrics<C>, WaitError> {
         let start = C::now();
 
         // Phase 1: wait until the cluster commit is re-established for this node's durable log
@@ -1914,7 +2002,10 @@ where
         // time remaining from the original budget.
         let remaining = timeout.map(|t| t.saturating_sub(C::now() - start));
         self.wait(remaining)
-            .applied_index_at_least(target, "wait_for_recovery: state machine applied cluster commit")
+            .applied_index_at_least(
+                target,
+                "wait_for_recovery: state machine applied cluster commit",
+            )
             .await
     }
 
@@ -1933,7 +2024,10 @@ where
             // A failure to send means the RaftCore is already shutdown. Continue to check the task
             // return value.
             let send_res = tx.send(());
-            tracing::info!("sending shutdown signal to RaftCore, sending res: {:?}", send_res);
+            tracing::info!(
+                "sending shutdown signal to RaftCore, sending res: {:?}",
+                send_res
+            );
         }
         self.inner.join_core_task().await;
         if let Some(join_handle) = self.inner.tick_handle.shutdown() {

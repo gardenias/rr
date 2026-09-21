@@ -20,10 +20,10 @@ use crate::vote::RaftCommittedLeaderId;
 /// For example, given logs from Leader1: 1-3, Leader2: 4-6, Leader3: 7-8, purged at 0:
 /// - `purged` = Some(log_id(0))
 /// - `key_log_ids` = [log_id(1,3), log_id(2,6), log_id(3,8)]
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogIdList<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// The last purged log id, if any logs have been purged.
     purged: Option<LogId<CLID>>,
@@ -33,7 +33,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> Default for LogIdList<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn default() -> Self {
         Self {
@@ -44,7 +45,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> LogIdList<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// Helper function to push a log entry, replacing last entry if same leader.
     ///
@@ -159,7 +161,10 @@ where CLID: RaftCommittedLeaderId
     ///
     /// - `purged`: The last purged log id, if any logs have been purged.
     /// - `key_log_ids`: The last log id of each leader. Each leader has exactly one entry.
-    pub fn new(purged: Option<LogId<CLID>>, key_log_ids: impl IntoIterator<Item = LogId<CLID>>) -> Self {
+    pub fn new(
+        purged: Option<LogId<CLID>>,
+        key_log_ids: impl IntoIterator<Item = LogId<CLID>>,
+    ) -> Self {
         Self {
             purged,
             key_log_ids: key_log_ids.into_iter().collect(),
@@ -218,7 +223,12 @@ where CLID: RaftCommittedLeaderId
     pub(crate) fn append(&mut self, new_log_id: LogId<CLID>) {
         #[cfg(debug_assertions)]
         if let Some(last) = self.last() {
-            debug_assert!(new_log_id > *last, "new_log_id: {}, last: {}", new_log_id, last);
+            debug_assert!(
+                new_log_id > *last,
+                "new_log_id: {}, last: {}",
+                new_log_id,
+                last
+            );
         }
         Self::push_key_log_id(&mut self.key_log_ids, new_log_id);
     }
@@ -237,7 +247,9 @@ where CLID: RaftCommittedLeaderId
             return;
         }
 
-        let res = self.key_log_ids.binary_search_by(|log_id| log_id.index().cmp(&at));
+        let res = self
+            .key_log_ids
+            .binary_search_by(|log_id| log_id.index().cmp(&at));
 
         let i = match res {
             Ok(i) => i, // Exact match at entry i
@@ -263,7 +275,8 @@ where CLID: RaftCommittedLeaderId
         if at > end_after_truncate {
             let truncated_leader = self.key_log_ids[i].committed_leader_id().clone();
             self.key_log_ids.truncate(i);
-            self.key_log_ids.push(LogId::<CLID>::new(truncated_leader, at - 1));
+            self.key_log_ids
+                .push(LogId::<CLID>::new(truncated_leader, at - 1));
         } else {
             // Truncation is before or at entry i's start, remove it entirely
             self.key_log_ids.truncate(i);
@@ -292,7 +305,9 @@ where CLID: RaftCommittedLeaderId
         }
 
         // Find entries that are completely purged (last_index <= upto.index)
-        let res = self.key_log_ids.binary_search_by(|log_id| log_id.index().cmp(&upto_index));
+        let res = self
+            .key_log_ids
+            .binary_search_by(|log_id| log_id.index().cmp(&upto_index));
 
         match res {
             Ok(i) => {
@@ -333,7 +348,9 @@ where CLID: RaftCommittedLeaderId
             };
         }
 
-        let res = self.key_log_ids.binary_search_by(|log_id| log_id.index().cmp(&index));
+        let res = self
+            .key_log_ids
+            .binary_search_by(|log_id| log_id.index().cmp(&index));
 
         // With last-per-leader, find the entry whose range contains the index
         let i = match res {
@@ -359,7 +376,10 @@ where CLID: RaftCommittedLeaderId
             return None;
         }
 
-        Some(RefLogId::new(self.key_log_ids[i].committed_leader_id(), index))
+        Some(RefLogId::new(
+            self.key_log_ids[i].committed_leader_id(),
+            index,
+        ))
     }
 
     /// Get the first log id as a `RefLogId`.

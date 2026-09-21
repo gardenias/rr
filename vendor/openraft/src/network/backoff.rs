@@ -12,7 +12,9 @@ pub struct Backoff {
 impl Backoff {
     /// Create a new Backoff from an iterator of durations.
     pub fn new(iter: impl Iterator<Item = Duration> + OptionalSend + 'static) -> Self {
-        Self { inner: Box::new(iter) }
+        Self {
+            inner: Box::new(iter),
+        }
     }
 }
 

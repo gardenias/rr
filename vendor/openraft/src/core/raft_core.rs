@@ -296,7 +296,10 @@ where
     SM: RaftStateMachine<C>,
 {
     /// The main loop of the Raft protocol.
-    pub(crate) async fn main(mut self, rx_shutdown: OneshotReceiverOf<C, ()>) -> Result<Infallible, Fatal<C>> {
+    pub(crate) async fn main(
+        mut self,
+        rx_shutdown: OneshotReceiverOf<C, ()>,
+    ) -> Result<Infallible, Fatal<C>> {
         let span = tracing::span!(parent: &self.span, Level::DEBUG, "main");
         let res = self.do_main(rx_shutdown).instrument(span).await;
 
@@ -328,7 +331,10 @@ where
 
     #[tracing::instrument(level = "trace", skip_all, fields(id=display(&self.id), cluster=%self.config.cluster_name
     ))]
-    async fn do_main(&mut self, rx_shutdown: OneshotReceiverOf<C, ()>) -> Result<Infallible, Fatal<C>> {
+    async fn do_main(
+        &mut self,
+        rx_shutdown: OneshotReceiverOf<C, ()>,
+    ) -> Result<Infallible, Fatal<C>> {
         tracing::debug!("raft node is initializing");
 
         self.engine.startup();
@@ -353,7 +359,11 @@ where
     // TODO: the second condition is such a read request can only read from state machine only when the last log it sees
     //       at `T1` is committed.
     #[tracing::instrument(level = "trace", skip(self, tx))]
-    pub(super) async fn handle_ensure_linearizable_read(&mut self, read_policy: ReadPolicy, tx: ClientReadTx<C>) {
+    pub(super) async fn handle_ensure_linearizable_read(
+        &mut self,
+        read_policy: ReadPolicy,
+        tx: ClientReadTx<C>,
+    ) {
         // Setup sentinel values to track when we've received majority confirmation of leadership.
 
         let resp = {
@@ -401,7 +411,8 @@ where
 
         // TODO: do not spawn, manage read requests with a queue by RaftCore
 
-        let waiting_fu = Self::wait_for_leadership_quorum(pending, my_vote, eff_mem, granted, core_tx, resp, tx);
+        let waiting_fu =
+            Self::wait_for_leadership_quorum(pending, my_vote, eff_mem, granted, core_tx, resp, tx);
 
         // False positive lint warning(`non-binding `let` on a future`): https://github.com/rust-lang/rust-clippy/issues/9932
         #[allow(clippy::let_underscore_future)]
@@ -415,7 +426,9 @@ where
         &mut self,
         my_vote: &VoteOf<C>,
         eff_mem: &StoredMembershipOf<C>,
-    ) -> impl Stream<Item = Result<ProbeResult<C>, (NodeIdOf<C>, JoinErrorOf<C>)>> + Unpin + use<C, NF, LS, SM> {
+    ) -> impl Stream<Item = Result<ProbeResult<C>, (NodeIdOf<C>, JoinErrorOf<C>)>>
+    + Unpin
+    + use<C, NF, LS, SM> {
         let my_id = self.id.clone();
         let ttl = Duration::from_millis(self.config.heartbeat_interval);
 
@@ -424,7 +437,9 @@ where
 
         let voter_progresses = {
             let l = &self.engine.leader.as_ref().unwrap();
-            l.progress.iter().filter(|item| l.progress.is_voter(&item.id) == Some(true))
+            l.progress
+                .iter()
+                .filter(|item| l.progress.is_voter(&item.id) == Some(true))
         };
 
         for item in voter_progresses {
@@ -444,7 +459,10 @@ where
 
             // Safe unwrap(): target is in membership
             let target_node = eff_mem.get_node(&target).unwrap().clone();
-            let mut client = self.network_factory.new_heartbeat_client(target.clone(), &target_node).await;
+            let mut client = self
+                .network_factory
+                .new_heartbeat_client(target.clone(), &target_node)
+                .await;
 
             let option = RPCOption::new(ttl);
 
@@ -467,7 +485,9 @@ where
                             // Stream returned no response - treat as network error
                             Err((
                                 target,
-                                RPCError::Network(NetworkError::from_string("stream_append returned no response")),
+                                RPCError::Network(NetworkError::from_string(
+                                    "stream_append returned no response",
+                                )),
                             ))
                         }
                         Ok(Err(rpc_err)) => Err((target, rpc_err)),
@@ -485,7 +505,10 @@ where
                 }
             };
 
-            let fu = fu.instrument(tracing::debug_span!("spawn_is_leader", target = target.to_string()));
+            let fu = fu.instrument(tracing::debug_span!(
+                "spawn_is_leader",
+                target = target.to_string()
+            ));
             let task = C::spawn(fu).map_err(move |err| (target, err));
 
             pending.push(task);
@@ -606,7 +629,12 @@ where
             return;
         }
 
-        let res = self.engine.state.membership_state.change_handler().apply(changes, retain);
+        let res = self
+            .engine
+            .state
+            .membership_state
+            .change_handler()
+            .apply(changes, retain);
         let new_membership = match res {
             Ok(x) => x,
             Err(e) => {
@@ -640,7 +668,9 @@ where
     }
 
     /// Ensure this node has a valid leader lease and may accept new writes.
-    fn ensure_writable_leader_handler(&mut self) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
+    fn ensure_writable_leader_handler(
+        &mut self,
+    ) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
         let lh = self.ensure_leader_handler()?;
 
         if !lh.is_lease_valid() {
@@ -699,8 +729,10 @@ where
         #[cfg(feature = "runtime-stats")]
         {
             let right = log_ids.last_ref().index() + 1;
-            self.runtime_stats.record_log_stage(Stage::Proposed, right, proposed_at);
-            self.runtime_stats.record_log_stage_now(Stage::Received, right);
+            self.runtime_stats
+                .record_log_stage(Stage::Proposed, right, proposed_at);
+            self.runtime_stats
+                .record_log_stage_now(Stage::Received, right);
         }
 
         // Record write batch size to external metrics recorder
@@ -756,17 +788,29 @@ where
     #[tracing::instrument(level = "debug", skip_all)]
     pub fn flush_metrics(&mut self) {
         let io_state = self.engine.state.io_state();
-        self.metrics.progress.send_log_progress(io_state.log_progress.flushed().cloned());
-        self.metrics.progress.send_commit_progress(io_state.apply_progress.accepted().cloned());
-        self.metrics.progress.send_apply_progress(io_state.apply_progress.flushed().cloned());
-        self.metrics.progress.send_snapshot_progress(io_state.snapshot.flushed().cloned());
+        self.metrics
+            .progress
+            .send_log_progress(io_state.log_progress.flushed().cloned());
+        self.metrics
+            .progress
+            .send_commit_progress(io_state.apply_progress.accepted().cloned());
+        self.metrics
+            .progress
+            .send_apply_progress(io_state.apply_progress.flushed().cloned());
+        self.metrics
+            .progress
+            .send_snapshot_progress(io_state.snapshot.flushed().cloned());
 
         let (replication, heartbeat) = if let Some(leader) = self.engine.leader.as_ref() {
             let replication_prog = &leader.progress;
-            let replication = Some(replication_prog.collect_mapped(|item| item.id_progress_owned()));
+            let replication =
+                Some(replication_prog.collect_mapped(|item| item.id_progress_owned()));
 
             let clock_prog = &leader.clock_progress;
-            let heartbeat = Some(clock_prog.collect_mapped(|item| (item.id.clone(), item.val.map(SerdeInstant::new))));
+            let heartbeat = Some(
+                clock_prog
+                    .collect_mapped(|item| (item.id.clone(), item.val.map(SerdeInstant::new))),
+            );
 
             (replication, heartbeat)
         } else {
@@ -784,7 +828,11 @@ where
         heartbeat: Option<HeartbeatMetrics<C>>,
     ) {
         let last_quorum_acked = self.last_quorum_acked_time();
-        let is_self_quorum = self.engine.leader.as_ref().is_some_and(|leader| leader.is_self_quorum());
+        let is_self_quorum = self
+            .engine
+            .leader
+            .as_ref()
+            .is_some_and(|leader| leader.is_self_quorum());
         let millis_since_quorum_ack = if is_self_quorum {
             Some(0)
         } else {
@@ -938,7 +986,13 @@ where
             // TODO: change-membership should check leadership or wait for leader to establish?
 
             // Wait for the generated IO to be flushed before respond.
-            let accepted = self.engine.state.io_state().log_progress.accepted().cloned();
+            let accepted = self
+                .engine
+                .state
+                .io_state()
+                .log_progress
+                .accepted()
+                .cloned();
             accepted.map(|io_id| Condition::IOFlushed { io_id })
         };
         self.engine.output.push_command(Command::Respond {
@@ -974,11 +1028,10 @@ where
     #[tracing::instrument(level = "debug", skip(self))]
     pub(crate) fn trigger_routine_actions(&mut self) {
         // Check snapshot policy and trigger snapshot if needed
-        if let Some(at) = self
-            .config
-            .snapshot_policy
-            .should_snapshot(&self.engine.state, self.core_state.snapshot_tried_at.as_ref())
-        {
+        if let Some(at) = self.config.snapshot_policy.should_snapshot(
+            &self.engine.state,
+            self.core_state.snapshot_tried_at.as_ref(),
+        ) {
             tracing::debug!("snapshot policy triggered at: {}", at);
             // Only record the attempt if a build was actually queued. A trigger dropped because a
             // build is already in flight must not advance `snapshot_tried_at`; otherwise the phantom
@@ -1043,7 +1096,12 @@ where
     pub(crate) fn get_leader_node(&self, leader_id: Option<C::NodeId>) -> Option<C::Node> {
         let leader_id = leader_id?;
 
-        self.engine.state.membership_state.effective().get_node(&leader_id).cloned()
+        self.engine
+            .state
+            .membership_state
+            .effective()
+            .get_node(&leader_id)
+            .cloned()
     }
 
     /// Apply log entries to the state machine, from the `first`(inclusive) to `last`(inclusive).
@@ -1090,7 +1148,10 @@ where
         }
 
         let cmd = sm::Command::apply(first, last.clone(), responders);
-        self.sm_handle.send(cmd).await.map_err(|e| StorageError::apply(last, C::err_from_string(e)))?;
+        self.sm_handle
+            .send(cmd)
+            .await
+            .map_err(|e| StorageError::apply(last, C::err_from_string(e)))?;
 
         Ok(())
     }
@@ -1103,13 +1164,17 @@ where
         leader_vote: CommittedVoteOf<C>,
         prog: &TargetProgress<C>,
     ) -> ReplicationHandle<C> {
-        let network = self.network_factory.new_client(prog.target.clone(), &prog.target_node).await;
+        let network = self
+            .network_factory
+            .new_client(prog.target.clone(), &prog.target_node)
+            .await;
 
         let (replicate_tx, replicate_rx) = C::watch_channel(Replicate::default());
 
         let event_watcher = self.new_event_watcher(replicate_rx);
 
-        let (mut replication_handle, replication_context) = self.new_replication(leader_vote, prog, replicate_tx);
+        let (mut replication_handle, replication_context) =
+            self.new_replication(leader_vote, prog, replicate_tx);
 
         let progress = replication_progress::ReplicationProgress {
             local_committed: self.engine.state.local_committed().cloned(),
@@ -1240,11 +1305,18 @@ where
     /// Run all commands that are automatically generated by progress changes.
     async fn run_progress_driven_command(&mut self) -> Result<(), StorageError<C>> {
         while let Some(cmd) = self.engine.next_progress_driven_command() {
-            tracing::debug!("RAFT_event id={:<2}    progress_driven cmd: {}", self.id, cmd);
+            tracing::debug!(
+                "RAFT_event id={:<2}    progress_driven cmd: {}",
+                self.id,
+                cmd
+            );
 
             // IO progress generated command is always ready to run. no need to postpone.
             let res: Option<Command<C, SM>> = self.run_command(cmd).await?;
-            debug_assert!(res.is_none(), "progress driven command should always be executed");
+            debug_assert!(
+                res.is_none(),
+                "progress driven command should always be executed"
+            );
         }
 
         Ok(())
@@ -1265,7 +1337,12 @@ where
             io_state.snapshot.flushed().display(),
         );
 
-        for (phase, respond) in self.engine.output.pending_responds.drain_satisfied(io_state) {
+        for (phase, respond) in self
+            .engine
+            .output
+            .pending_responds
+            .drain_satisfied(io_state)
+        {
             tracing::debug!(
                 "RAFT_stats id={:<2}    cmd: send respond waiting for {}: {}",
                 self.id,
@@ -1280,7 +1357,10 @@ where
     ///
     /// It always returns a [`Fatal`] error upon returning.
     #[tracing::instrument(level = "debug", skip_all, fields(id=display(&self.id)))]
-    async fn runtime_loop(&mut self, mut rx_shutdown: OneshotReceiverOf<C, ()>) -> Result<Infallible, Fatal<C>> {
+    async fn runtime_loop(
+        &mut self,
+        mut rx_shutdown: OneshotReceiverOf<C, ()>,
+    ) -> Result<Infallible, Fatal<C>> {
         // Ratio control the ratio of number of RaftMsg to process to number of Notification to process.
         let mut balancer = Balancer::new(10_000);
 
@@ -1344,7 +1424,9 @@ where
 
             #[allow(clippy::collapsible_else_if)]
             if notify_processed == balancer.notification() {
-                tracing::info!("there may be more Notification to process, increase Notification ratio");
+                tracing::info!(
+                    "there may be more Notification to process, increase Notification ratio"
+                );
                 balancer.increase_notification();
             } else {
                 if raft_msg_processed == balancer.raft_msg() {
@@ -1389,7 +1471,9 @@ where
             if index.saturating_sub(last_log_index) >= run_command_threshold {
                 // After handling all the inputs, batch run all the commands for better performance
                 self.runtime_stats.raft_msg_per_run.record(processed);
-                self.runtime_stats.raft_msg_usage_permille.record(processed * 1000 / at_most);
+                self.runtime_stats
+                    .raft_msg_usage_permille
+                    .record(processed * 1000 / at_most);
                 self.run_engine_commands().await?;
 
                 last_log_index = index;
@@ -1399,11 +1483,16 @@ where
 
         // After handling all the inputs, batch run all the commands for better performance
         self.runtime_stats.raft_msg_per_run.record(processed);
-        self.runtime_stats.raft_msg_usage_permille.record(processed * 1000 / at_most);
+        self.runtime_stats
+            .raft_msg_usage_permille
+            .record(processed * 1000 / at_most);
         self.run_engine_commands().await?;
 
         if total == at_most {
-            tracing::debug!("at_most({}) reached, there are more queued RaftMsg to process", at_most);
+            tracing::debug!(
+                "at_most({}) reached, there are more queued RaftMsg to process",
+                at_most
+            );
         }
 
         Ok(total)
@@ -1444,7 +1533,9 @@ where
             self.run_engine_commands().await?;
         }
 
-        self.runtime_stats.notification_usage_permille.record(processed * 1000 / at_most);
+        self.runtime_stats
+            .notification_usage_permille
+            .record(processed * 1000 / at_most);
 
         if processed == at_most {
             tracing::debug!(
@@ -1464,7 +1555,11 @@ where
     /// quorum and inflate its term. A network that has not implemented `pre_vote` returns
     /// `Ok(granted)` from the default impl, keeping Pre-Vote a no-op during a rolling upgrade.
     #[tracing::instrument(level = "trace", skip_all)]
-    async fn spawn_parallel_vote_requests(&mut self, vote_req: &VoteRequest<C>, kind: VoteRequestKind) {
+    async fn spawn_parallel_vote_requests(
+        &mut self,
+        vote_req: &VoteRequest<C>,
+        kind: VoteRequestKind,
+    ) {
         let vote = vote_req.vote.clone();
         let id = self.id.clone();
         let tx = self.tx_notification.clone();
@@ -1555,7 +1650,11 @@ where
                 let res = match tm_res {
                     Ok(res) => res,
                     Err(timeout) => {
-                        tracing::error!("timeout sending transfer_leader: {}, target: {}", timeout, target);
+                        tracing::error!(
+                            "timeout sending transfer_leader: {}, target: {}",
+                            timeout,
+                            target
+                        );
                         return;
                     }
                 };
@@ -1592,8 +1691,18 @@ where
             }
 
             // Safe unwrap(): target must be in membership
-            let target_node = self.engine.state.membership_state.effective().get_node(&target).unwrap().clone();
-            let client = self.network_factory.new_client(target.clone(), &target_node).await;
+            let target_node = self
+                .engine
+                .state
+                .membership_state
+                .effective()
+                .get_node(&target)
+                .unwrap()
+                .clone();
+            let client = self
+                .network_factory
+                .new_client(target.clone(), &target_node)
+                .await;
 
             let fut = make_rpc(target, client, RPCOption::new(ttl));
 
@@ -1637,7 +1746,11 @@ where
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(super) fn handle_append_entries_request(&mut self, req: AppendEntriesRequest<C>, tx: AppendEntriesTx<C>) {
+    pub(super) fn handle_append_entries_request(
+        &mut self,
+        req: AppendEntriesRequest<C>,
+        tx: AppendEntriesTx<C>,
+    ) {
         tracing::debug!("{}: req: {}", func_name!(), req);
 
         let segment = LogSegment::new(req.prev_log_id, req.entries);
@@ -1655,12 +1768,17 @@ where
     /// Handle a full snapshot received from the dedicated install-snapshot channel.
     #[tracing::instrument(level = "debug", skip(self, req), fields(state = debug(self.engine.state.server_state), id=display(&self.id)
     ))]
-    pub(crate) fn handle_install_full_snapshot_request(&mut self, req: InstallFullSnapshotRequest<C, SM>) {
+    pub(crate) fn handle_install_full_snapshot_request(
+        &mut self,
+        req: InstallFullSnapshotRequest<C, SM>,
+    ) {
         tracing::debug!("RAFT_event id={:<2}  input: {}", self.id, req);
 
-        self.runtime_stats.record_raft_msg(RaftMsgName::InstallSnapshot);
+        self.runtime_stats
+            .record_raft_msg(RaftMsgName::InstallSnapshot);
 
-        self.engine.handle_install_full_snapshot(req.vote, req.snapshot, req.tx);
+        self.engine
+            .handle_install_full_snapshot(req.vote, req.snapshot, req.tx);
     }
 
     // TODO: Make this method non-async. It does not need to run any async command in it.
@@ -1726,11 +1844,19 @@ where
                 );
             }
             RaftMsg::Initialize { members, tx } => {
-                tracing::info!("received RaftMsg::Initialize: {}, members: {:?}", func_name!(), members);
+                tracing::info!(
+                    "received RaftMsg::Initialize: {}, members: {:?}",
+                    func_name!(),
+                    members
+                );
 
                 self.handle_initialize(members, tx);
             }
-            RaftMsg::ChangeMembership { changes, retain, tx } => {
+            RaftMsg::ChangeMembership {
+                changes,
+                retain,
+                tx,
+            } => {
                 tracing::info!(
                     "received RaftMsg::ChangeMembership: {}, members: {:?}, retain: {:?}",
                     func_name!(),
@@ -1767,7 +1893,11 @@ where
                 }
             }
             RaftMsg::ExternalCommand { cmd } => {
-                tracing::info!("{}: received RaftMsg::ExternalCommand, cmd: {:?}", func_name!(), cmd);
+                tracing::info!(
+                    "{}: received RaftMsg::ExternalCommand, cmd: {:?}",
+                    func_name!(),
+                    cmd
+                );
 
                 self.handle_external_command(cmd);
             }
@@ -1795,13 +1925,22 @@ where
                     // rejects the vote request. Leave the established leadership alone.
                     tracing::info!("ExternalCommand: already a Leader, ignore election trigger");
                 } else {
-                    if self.engine.state.membership_state.effective().is_voter(&self.id) {
+                    if self
+                        .engine
+                        .state
+                        .membership_state
+                        .effective()
+                        .is_voter(&self.id)
+                    {
                         if pre_vote {
                             self.engine.pre_elect();
                         } else {
                             self.engine.elect();
                         }
-                        tracing::debug!("ExternalCommand: triggered election, pre_vote: {}", pre_vote);
+                        tracing::debug!(
+                            "ExternalCommand: triggered election, pre_vote: {}",
+                            pre_vote
+                        );
                     } else {
                         // Node is switched to learner.
                     }
@@ -1848,9 +1987,9 @@ where
                 // server state refresh. A `None` skips the corresponding check.
                 let st = &self.engine.state;
                 let vote_unchanged = vote.as_ref().is_none_or(|v| st.vote_ref() == v);
-                let membership_unchanged = membership_log_id
-                    .as_ref()
-                    .is_none_or(|log_id| st.membership_state.effective().log_id().as_ref() == Some(log_id));
+                let membership_unchanged = membership_log_id.as_ref().is_none_or(|log_id| {
+                    st.membership_state.effective().log_id().as_ref() == Some(log_id)
+                });
 
                 if vote_unchanged && membership_unchanged {
                     self.engine.refresh_server_state();
@@ -1860,7 +1999,12 @@ where
                         vote.display(),
                         membership_log_id.display(),
                         self.engine.state.vote_ref(),
-                        self.engine.state.membership_state.effective().log_id().display(),
+                        self.engine
+                            .state
+                            .membership_state
+                            .effective()
+                            .log_id()
+                            .display(),
                     );
                 }
             }
@@ -1892,7 +2036,8 @@ where
                 #[allow(clippy::collapsible_if)]
                 if self.engine.candidate.is_some() {
                     let my_vote = self.engine.candidate_ref().map(|x| x.vote_ref());
-                    if Self::does_vote_match("Candidate", &candidate_vote, my_vote, "VoteResponse") {
+                    if Self::does_vote_match("Candidate", &candidate_vote, my_vote, "VoteResponse")
+                    {
                         self.engine.handle_vote_resp(target, resp);
                     }
                 }
@@ -1912,7 +2057,12 @@ where
                 #[allow(clippy::collapsible_if)]
                 if self.engine.pre_candidate.is_some() {
                     let my_vote = self.engine.pre_candidate_ref().map(|x| x.vote_ref());
-                    if Self::does_vote_match("Pre-Candidate", &candidate_vote, my_vote, "PreVoteResponse") {
+                    if Self::does_vote_match(
+                        "Pre-Candidate",
+                        &candidate_vote,
+                        my_vote,
+                        "PreVoteResponse",
+                    ) {
                         self.engine.handle_pre_vote_resp(target, resp);
                     }
                 }
@@ -1950,7 +2100,10 @@ where
                 progress,
                 inflight_id,
             } => {
-                tracing::debug!("recv Notification::ReplicationProgress: progress: {}", progress);
+                tracing::debug!(
+                    "recv Notification::ReplicationProgress: progress: {}",
+                    progress
+                );
 
                 if let Some(mut rh) = self.engine.try_replication_handler() {
                     rh.update_progress(progress.target, stream_id, progress.result, inflight_id);
@@ -1967,7 +2120,9 @@ where
                 }
             }
 
-            Notification::StateMachine { command_result } => self.handle_state_machine_result(command_result)?,
+            Notification::StateMachine { command_result } => {
+                self.handle_state_machine_result(command_result)?
+            }
         };
         Ok(())
     }
@@ -2002,12 +2157,16 @@ where
 
     /// Handle [`Notification::LocalIO`]: a local log or vote write reached the disk.
     fn handle_local_io(&mut self, io_id: IOId<C>) {
-        self.engine.state.log_progress_mut().try_flush(io_id.clone());
+        self.engine
+            .state
+            .log_progress_mut()
+            .try_flush(io_id.clone());
 
         match io_id {
             IOId::Log(log_io_id) => {
                 if let Some(ref log_id) = log_io_id.log_id {
-                    self.runtime_stats.record_log_stage_now(Stage::Persisted, log_id.index() + 1);
+                    self.runtime_stats
+                        .record_log_stage_now(Stage::Persisted, log_id.index() + 1);
                 }
 
                 // No need to check against membership change,
@@ -2016,8 +2175,15 @@ where
                 #[allow(clippy::collapsible_if)]
                 if self.engine.leader.is_some() {
                     let my_vote = self.engine.leader.as_ref().map(|x| &x.committed_vote);
-                    if Self::does_vote_match("Leader", &log_io_id.committed_vote, my_vote, "LocalIO Notification") {
-                        self.engine.replication_handler().update_local_progress(log_io_id.log_id);
+                    if Self::does_vote_match(
+                        "Leader",
+                        &log_io_id.committed_vote,
+                        my_vote,
+                        "LocalIO Notification",
+                    ) {
+                        self.engine
+                            .replication_handler()
+                            .update_local_progress(log_io_id.log_id);
                     }
                 }
             }
@@ -2028,7 +2194,10 @@ where
     }
 
     /// Handle [`Notification::StateMachine`]: the state machine worker finished a command.
-    fn handle_state_machine_result(&mut self, command_result: sm::CommandResult<C>) -> Result<(), Fatal<C>> {
+    fn handle_state_machine_result(
+        &mut self,
+        command_result: sm::CommandResult<C>,
+    ) -> Result<(), Fatal<C>> {
         tracing::debug!("sm::StateMachine command result: {:?}", command_result);
 
         let res = command_result.result?;
@@ -2051,7 +2220,10 @@ where
                     func_name!()
                 );
 
-                self.engine.state.log_progress_mut().try_flush(IOId::Log(log_io_id));
+                self.engine
+                    .state
+                    .log_progress_mut()
+                    .try_flush(IOId::Log(log_io_id));
 
                 if let Some(meta) = meta {
                     let st = self.engine.state.io_state_mut();
@@ -2062,8 +2234,12 @@ where
                 }
             }
             sm::Response::Apply(res) => {
-                self.runtime_stats.record_log_stage_now(Stage::Applied, res.last_applied.index() + 1);
-                self.engine.state.apply_progress_mut().try_flush(res.last_applied);
+                self.runtime_stats
+                    .record_log_stage_now(Stage::Applied, res.last_applied.index() + 1);
+                self.engine
+                    .state
+                    .apply_progress_mut()
+                    .try_flush(res.last_applied);
             }
         }
 
@@ -2083,7 +2259,13 @@ where
             return;
         }
 
-        if !self.engine.state.membership_state.effective().is_voter(&self.id) {
+        if !self
+            .engine
+            .state
+            .membership_state
+            .effective()
+            .is_voter(&self.id)
+        {
             tracing::debug!("skip election, not a voter");
             return;
         }
@@ -2098,13 +2280,21 @@ where
             election_timeout += self.engine.config.timer_config.smaller_log_timeout;
         }
 
-        let voter_count = self.engine.state.membership_state.effective().voter_ids().count();
+        let voter_count = self
+            .engine
+            .state
+            .membership_state
+            .effective()
+            .voter_ids()
+            .count();
 
         if voter_count == 1 {
             // When a node restart, it may stay in any state but the in progress election(engine.candidate) is
             // empty.
             if self.engine.candidate_ref().is_some() {
-                tracing::debug!("skip election, single voter already has an active election in progress");
+                tracing::debug!(
+                    "skip election, single voter already has an active election in progress"
+                );
                 return;
             }
             tracing::debug!("single voter, elect immediately");
@@ -2112,7 +2302,11 @@ where
             tracing::debug!("multiple voters, check election timeout");
 
             let local_vote = &self.engine.state.vote;
-            tracing::debug!("local vote: {}, election_timeout: {:?}", local_vote, election_timeout,);
+            tracing::debug!(
+                "local vote: {}, election_timeout: {:?}",
+                local_vote,
+                election_timeout,
+            );
 
             if local_vote.is_expired(now, election_timeout) {
                 tracing::info!("election timeout expired, triggering election");
@@ -2124,7 +2318,8 @@ where
 
         // Pre-Vote (multi-voter only): probe a quorum before incrementing the term.
         // A single voter always wins its own Pre-Vote, so it elects directly.
-        let pre_vote = self.runtime_config.enable_pre_vote.load(Ordering::Relaxed) && voter_count > 1;
+        let pre_vote =
+            self.runtime_config.enable_pre_vote.load(Ordering::Relaxed) && voter_count > 1;
 
         if pre_vote {
             // A Pre-Vote does not advance `vote.last_update_time`, so without this guard a node
@@ -2160,7 +2355,12 @@ where
     /// The two votes may have different types: the vote a message was sent under is an
     /// `UncommittedVote`/`CommittedVote`, while the vote this node holds may be the
     /// application's `C::Vote`. They are therefore compared by leader id.
-    fn does_vote_match<V, W>(role: &str, sent_vote: &V, my_vote: Option<&W>, msg: impl fmt::Display) -> bool
+    fn does_vote_match<V, W>(
+        role: &str,
+        sent_vote: &V,
+        my_vote: Option<&W>,
+        msg: impl fmt::Display,
+    ) -> bool
     where
         V: RaftVote,
         W: RaftVote<LeaderId = V::LeaderId>,
@@ -2205,7 +2405,8 @@ where
 
         let committed_vote = lh.leader.committed_vote.clone();
         let membership_log_id = lh.state.membership_state.effective().log_id();
-        let current_session_id = ReplicationSessionId::new(committed_vote, membership_log_id.clone());
+        let current_session_id =
+            ReplicationSessionId::new(committed_vote, membership_log_id.clone());
 
         if current_session_id != session_id {
             // Session changed, skip heartbeat
@@ -2222,11 +2423,14 @@ where
             .filter(|progress_entry| progress_entry.id != self.id)
             .filter(|progress_entry| leader.need_heartbeat(&progress_entry.id, now, min_interval))
             .map(|progress_entry| {
-                (progress_entry.id.clone(), HeartbeatEvent {
-                    time: now,
-                    matching: progress_entry.matching.clone(),
-                    cluster_committed: cluster_committed.clone(),
-                })
+                (
+                    progress_entry.id.clone(),
+                    HeartbeatEvent {
+                        time: now,
+                        matching: progress_entry.matching.clone(),
+                        cluster_committed: cluster_committed.clone(),
+                    },
+                )
             });
 
         self.heartbeat_handle.broadcast(events);
@@ -2287,9 +2491,14 @@ where
         // `try_submit` advances only when behind, which is correct here: the
         // in-order command channel implies everything up to the cursor has
         // reached storage.
-        self.engine.state.log_progress_mut().try_submit(io_id.clone());
+        self.engine
+            .state
+            .log_progress_mut()
+            .try_submit(io_id.clone());
 
-        let notify = Notification::LocalIO { io_id: io_id.clone() };
+        let notify = Notification::LocalIO {
+            io_id: io_id.clone(),
+        };
 
         self.tx_notification.send(notify).await.ok();
     }
@@ -2330,10 +2539,14 @@ where
         // because `append()` may call the callback before returning.
         self.engine.state.log_progress_mut().submit(io_id.clone());
 
-        self.runtime_stats.record_log_stage_now(Stage::Submitted, last_log_index + 1);
+        self.runtime_stats
+            .record_log_stage_now(Stage::Submitted, last_log_index + 1);
 
         // Submit IO request, do not wait for the response.
-        self.log_store.append(entries, callback).await.sto_write_logs()?;
+        self.log_store
+            .append(entries, callback)
+            .await
+            .sto_write_logs()?;
 
         Ok(())
     }
@@ -2397,7 +2610,10 @@ where
 
     /// Run [`Command::TruncateLog`].
     async fn run_truncate_log(&mut self, after: Option<LogIdOf<C>>) -> Result<(), StorageError<C>> {
-        self.log_store.truncate_after(after.clone()).await.sto_write_logs()?;
+        self.log_store
+            .truncate_after(after.clone())
+            .await
+            .sto_write_logs()?;
 
         // Inform clients waiting for logs to be applied.
         let leader_id = self.current_leader();
@@ -2421,11 +2637,15 @@ where
         already_applied: Option<LogIdOf<C>>,
         upto: LogIdOf<C>,
     ) -> Result<(), StorageError<C>> {
-        self.runtime_stats.record_log_stage_now(Stage::Committed, upto.index() + 1);
+        self.runtime_stats
+            .record_log_stage_now(Stage::Committed, upto.index() + 1);
 
         self.engine.state.apply_progress_mut().submit(upto.clone());
 
-        self.log_store.save_committed(Some(upto.clone())).await.sto_write()?;
+        self.log_store
+            .save_committed(Some(upto.clone()))
+            .await
+            .sto_write()?;
 
         // rr patch: a `Command::PurgeLog` (snapshot completion) may run between
         // this command being queued and executed, purging the log id at
@@ -2471,15 +2691,27 @@ where
         target: C::NodeId,
         inflight_id: InflightId,
     ) {
-        let node = self.replications.get(&target).expect("replication to target node exists");
+        let node = self
+            .replications
+            .get(&target)
+            .expect("replication to target node exists");
 
         let snapshot_reader = self.sm_handle.new_snapshot_reader();
         let stream_id = node.stream_id;
         let (replication_task_context, cancel_tx) =
             self.new_replication_task_context(leader_vote, stream_id, target.clone());
 
-        let target_node = self.engine.state.membership_state.effective().get_node(&target).unwrap();
-        let snapshot_network = self.network_factory.new_snapshot_client(target.clone(), target_node).await;
+        let target_node = self
+            .engine
+            .state
+            .membership_state
+            .effective()
+            .get_node(&target)
+            .unwrap();
+        let snapshot_network = self
+            .network_factory
+            .new_snapshot_client(target.clone(), target_node)
+            .await;
 
         let handle = SnapshotTransmitter::<C, NF, SM>::spawn(
             replication_task_context,
@@ -2489,7 +2721,10 @@ where
             cancel_tx,
         );
 
-        let node = self.replications.get_mut(&target).expect("replication to target node exists");
+        let node = self
+            .replications
+            .get_mut(&target)
+            .expect("replication to target node exists");
         // TODO: it is not cleaned when snapshot transmission is done.
         node.snapshot_transmit_handle = Some(handle);
     }
@@ -2540,7 +2775,8 @@ where
             let handle = if let Some(handle) = handle {
                 handle
             } else {
-                self.spawn_replication_stream(leader_vote.clone(), prog).await
+                self.spawn_replication_stream(leader_vote.clone(), prog)
+                    .await
             };
 
             new_replications.insert(prog.target.clone(), handle);
@@ -2556,7 +2792,10 @@ where
     }
 
     /// Run [`Command::StateMachine`], forwarding the inner command to the state machine worker.
-    async fn run_state_machine(&mut self, command: sm::Command<C, SM>) -> Result<(), StorageError<C>> {
+    async fn run_state_machine(
+        &mut self,
+        command: sm::Command<C, SM>,
+    ) -> Result<(), StorageError<C>> {
         let io_id = command.get_log_progress();
 
         if let Some(io_id) = io_id {
@@ -2573,10 +2812,9 @@ where
         }
 
         // Just forward a state machine command to the worker.
-        self.sm_handle
-            .send(command)
-            .await
-            .map_err(|_e| StorageError::write_state_machine(C::err_from_string("cannot send to sm::Worker")))?;
+        self.sm_handle.send(command).await.map_err(|_e| {
+            StorageError::write_state_machine(C::err_from_string("cannot send to sm::Worker"))
+        })?;
 
         Ok(())
     }
@@ -2590,7 +2828,10 @@ where
     LS: RaftLogStorage<C>,
     SM: RaftStateMachine<C>,
 {
-    async fn run_command(&mut self, cmd: Command<C, SM>) -> Result<Option<Command<C, SM>>, StorageError<C>> {
+    async fn run_command(
+        &mut self,
+        cmd: Command<C, SM>,
+    ) -> Result<Option<Command<C, SM>>, StorageError<C>> {
         // tracing::debug!("RAFT_event id={:<2} trycmd: {}", self.id, cmd);
 
         let condition = cmd.condition();
@@ -2620,27 +2861,39 @@ where
             Command::PurgeLog { upto } => self.run_purge_log(upto).await?,
             Command::TruncateLog { after } => self.run_truncate_log(after).await?,
             Command::SendVote { vote_req } => {
-                self.spawn_parallel_vote_requests(&vote_req, VoteRequestKind::Vote).await;
+                self.spawn_parallel_vote_requests(&vote_req, VoteRequestKind::Vote)
+                    .await;
             }
             Command::SendPreVote { vote_req } => {
-                self.spawn_parallel_vote_requests(&vote_req, VoteRequestKind::PreVote).await;
+                self.spawn_parallel_vote_requests(&vote_req, VoteRequestKind::PreVote)
+                    .await;
             }
             Command::ReplicateCommitted { committed } => {
                 self.io_broadcast.committed.send_if_greater(committed);
             }
             Command::BroadcastHeartbeat { session_id } => self.broadcast_heartbeat(session_id),
-            Command::SaveCommittedAndApply { already_applied, upto } => {
-                self.run_save_committed_and_apply(already_applied, upto).await?
+            Command::SaveCommittedAndApply {
+                already_applied,
+                upto,
+            } => {
+                self.run_save_committed_and_apply(already_applied, upto)
+                    .await?
             }
             Command::Replicate { req, target } => {
-                let node = self.replications.get(&target).expect("replication to target node exists");
+                let node = self
+                    .replications
+                    .get(&target)
+                    .expect("replication to target node exists");
                 node.replicate_tx.send(req).ok();
             }
             Command::ReplicateSnapshot {
                 leader_vote,
                 target,
                 inflight_id,
-            } => self.run_replicate_snapshot(leader_vote, target, inflight_id).await,
+            } => {
+                self.run_replicate_snapshot(leader_vote, target, inflight_id)
+                    .await
+            }
             Command::BroadcastTransferLeader { req } => self.broadcast_transfer_leader(req).await,
             Command::CloseReplicationStreams => self.run_close_replication_streams(),
             Command::RebuildReplicationStreams {
@@ -2648,7 +2901,8 @@ where
                 targets,
                 close_old_streams,
             } => {
-                self.run_rebuild_replication_streams(leader_vote, targets, close_old_streams).await;
+                self.run_rebuild_replication_streams(leader_vote, targets, close_old_streams)
+                    .await;
             }
             Command::StateMachine { command } => self.run_state_machine(command).await?,
             Command::Respond { resp, .. } => resp.send(),

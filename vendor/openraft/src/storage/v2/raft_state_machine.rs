@@ -28,14 +28,18 @@ use crate::type_config::alias::StoredMembershipOf;
 /// See: [`StateMachine`](crate::docs::components::state_machine)
 #[add_async_trait]
 pub trait RaftStateMachine<C>: OptionalSend + OptionalSync + 'static
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Snapshot data for exposing a snapshot for reading & writing.
     ///
     /// See the [storage chapter of the guide][sto] for details on log compaction / snapshotting.
     ///
     /// [sto]: crate::docs::getting_started#3-implement-raftlogstorage-and-raftstatemachine
-    #[since(version = "0.10.0", change = "moved from RaftTypeConfig to RaftStateMachine")]
+    #[since(
+        version = "0.10.0",
+        change = "moved from RaftTypeConfig to RaftStateMachine"
+    )]
     type SnapshotData: OptionalSend + 'static;
 
     /// Snapshot builder type.
@@ -54,7 +58,9 @@ where C: RaftTypeConfig
     /// last-applied-log-id.
     /// Because upon startup, the last membership will be loaded by scanning logs from the
     /// `last-applied-log-id`.
-    async fn applied_state(&mut self) -> Result<(Option<LogIdOf<C>>, StoredMembershipOf<C>), io::Error>;
+    async fn applied_state(
+        &mut self,
+    ) -> Result<(Option<LogIdOf<C>>, StoredMembershipOf<C>), io::Error>;
 
     /// Apply the given payload of entries to the state machine.
     ///
@@ -96,7 +102,8 @@ where C: RaftTypeConfig
     /// [`RaftLogStorage::save_committed()`]: crate::storage::RaftLogStorage::save_committed
     #[since(version = "0.10.0", change = "Entry-Responder-Result stream")]
     async fn apply<Strm>(&mut self, entries: Strm) -> Result<(), io::Error>
-    where Strm: Stream<Item = Result<EntryResponder<C>, io::Error>> + Unpin + OptionalSend;
+    where
+        Strm: Stream<Item = Result<EntryResponder<C>, io::Error>> + Unpin + OptionalSend;
 
     /// Try to create a snapshot builder for the state machine.
     ///
@@ -130,7 +137,10 @@ where C: RaftTypeConfig
     /// Returns a snapshot view of the state machine (subsequent changes won't affect the view).
     ///
     /// This method will be replaced by [`Self::try_create_snapshot_builder`] in the future.
-    #[since(version = "0.10.0", change = "deprecated, use `try_create_snapshot_builder` instead")]
+    #[since(
+        version = "0.10.0",
+        change = "deprecated, use `try_create_snapshot_builder` instead"
+    )]
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder;
 
     /// Install a snapshot which has finished streaming from the leader.
@@ -172,7 +182,9 @@ where C: RaftTypeConfig
     /// A proper snapshot implementation will store last-applied-log-id and the
     /// last-applied-membership config as part of the snapshot, which should be decoded for
     /// creating this method's response data.
-    async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<C, Self::SnapshotData>>, io::Error>;
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<SnapshotOf<C, Self::SnapshotData>>, io::Error>;
 }
 
 // Test-only: an unconditional impl would downgrade a missing-state-machine mistake from a compile
@@ -187,7 +199,8 @@ fn unit_state_machine_error() -> io::Error {
 
 #[cfg(any(test, feature = "bench"))]
 impl<C> RaftSnapshotBuilder<C> for ()
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     type SnapshotData = ();
 
@@ -198,18 +211,23 @@ where C: RaftTypeConfig
 
 #[cfg(any(test, feature = "bench"))]
 impl<C> RaftStateMachine<C> for ()
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     type SnapshotData = ();
 
     type SnapshotBuilder = ();
 
-    async fn applied_state(&mut self) -> Result<(Option<LogIdOf<C>>, StoredMembershipOf<C>), io::Error> {
+    async fn applied_state(
+        &mut self,
+    ) -> Result<(Option<LogIdOf<C>>, StoredMembershipOf<C>), io::Error> {
         Err(unit_state_machine_error())
     }
 
     async fn apply<Strm>(&mut self, _entries: Strm) -> Result<(), io::Error>
-    where Strm: Stream<Item = Result<EntryResponder<C>, io::Error>> + Unpin + OptionalSend {
+    where
+        Strm: Stream<Item = Result<EntryResponder<C>, io::Error>> + Unpin + OptionalSend,
+    {
         Err(unit_state_machine_error())
     }
 
@@ -223,7 +241,9 @@ where C: RaftTypeConfig
         Err(unit_state_machine_error())
     }
 
-    async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<C, Self::SnapshotData>>, io::Error> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> Result<Option<SnapshotOf<C, Self::SnapshotData>>, io::Error> {
         Err(unit_state_machine_error())
     }
 }

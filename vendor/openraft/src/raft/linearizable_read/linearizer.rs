@@ -31,14 +31,16 @@ use crate::type_config::alias::LogIdOf;
 #[must_use = "call `try_await_ready()` to ensure linearizability"]
 #[derive(Debug, Clone)]
 pub struct Linearizer<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The state containing the read log ID and last applied log ID for linearizable reads.
     state: LinearizeState<C>,
 }
 
 impl<C> Deref for Linearizer<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     type Target = LinearizeState<C>;
 
@@ -48,7 +50,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Linearizer<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     #[since(version = "0.10.0", change = "accept ReadLogId instead of LogId")]
     #[since(version = "0.10.0")]
@@ -73,7 +76,9 @@ where C: RaftTypeConfig
     /// ```
     #[since(version = "0.10.0")]
     pub async fn await_ready<SM>(self, raft: &Raft<C, SM>) -> Result<LinearizeState<C>, Fatal<C>>
-    where SM: RaftStateMachine<C> {
+    where
+        SM: RaftStateMachine<C>,
+    {
         let state_res = self.try_await_ready(raft, None).await?;
         // Safe unwrap: No timeout error.
         Ok(state_res.unwrap())
@@ -116,10 +121,16 @@ where C: RaftTypeConfig
 
         let expected = Some(self.state.read_log_id().index());
 
-        let res = raft.inner.wait(timeout).applied_index_at_least(expected, "Linearizer::try_await_ready").await;
+        let res = raft
+            .inner
+            .wait(timeout)
+            .applied_index_at_least(expected, "Linearizer::try_await_ready")
+            .await;
 
         match res {
-            Ok(metrics) => Ok(Ok(self.state.with_applied(this_id.clone(), metrics.last_applied))),
+            Ok(metrics) => Ok(Ok(self
+                .state
+                .with_applied(this_id.clone(), metrics.last_applied))),
             Err(e) => match e {
                 WaitError::Timeout(_, _) => {
                     let metrics_rx = raft.metrics();

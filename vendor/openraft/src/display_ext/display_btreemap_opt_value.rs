@@ -9,7 +9,9 @@ use display_more::DisplayOptionExt;
 /// concatenates the key-value pairs with comma.
 ///
 /// For how to format the `opt_value`, see [`DisplayOptionExt`].
-pub(crate) struct DisplayBTreeMapOptValue<'a, K: fmt::Display, V: fmt::Display>(pub &'a BTreeMap<K, Option<V>>);
+pub(crate) struct DisplayBTreeMapOptValue<'a, K: fmt::Display, V: fmt::Display>(
+    pub &'a BTreeMap<K, Option<V>>,
+);
 
 impl<K: fmt::Display, V: fmt::Display> fmt::Display for DisplayBTreeMapOptValue<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -46,7 +48,9 @@ mod tests {
 
     #[test]
     fn test_display_btreemap_opt_value() {
-        let map = (1..=3).map(|num| (num, Some(num))).collect::<BTreeMap<_, _>>();
+        let map = (1..=3)
+            .map(|num| (num, Some(num)))
+            .collect::<BTreeMap<_, _>>();
         let display = DisplayBTreeMapOptValue(&map);
 
         assert_eq!(display.to_string(), "1:1,2:2,3:3");
@@ -62,7 +66,9 @@ mod tests {
 
     #[test]
     fn test_display_btreemap_opt_value_with_1_item() {
-        let map = (1..=1).map(|num| (num, Some(num))).collect::<BTreeMap<_, _>>();
+        let map = (1..=1)
+            .map(|num| (num, Some(num)))
+            .collect::<BTreeMap<_, _>>();
         let display = DisplayBTreeMapOptValue(&map);
 
         assert_eq!(display.to_string(), "1:1");

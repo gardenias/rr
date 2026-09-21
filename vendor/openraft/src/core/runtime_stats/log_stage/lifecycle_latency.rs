@@ -20,14 +20,16 @@ use crate::display_ext::DisplayInstantExt;
 /// Access by name via [`Stage`] variants or the convenience methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogStages<I>
-where I: Instant
+where
+    I: Instant,
 {
     begin: u64,
     inner: MultiRangeMap<u64, I, { Stage::COUNT }>,
 }
 
 impl<I> fmt::Display for LogStages<I>
-where I: Instant
+where
+    I: Instant,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
@@ -48,7 +50,8 @@ where I: Instant
 /// used today.
 #[allow(dead_code)]
 impl<I> LogStages<I>
-where I: Instant
+where
+    I: Instant,
 {
     pub(crate) fn new(capacity: usize, begin: u64) -> Self {
         Self {
@@ -122,7 +125,9 @@ where I: Instant
 
         self.segments().map(move |seg| {
             let proposed = seg.values[Stage::Proposed.index()];
-            let delta = prev_proposed.map(|p| proposed.saturating_duration_since(p)).unwrap_or_default();
+            let delta = prev_proposed
+                .map(|p| proposed.saturating_duration_since(p))
+                .unwrap_or_default();
 
             let mut line = String::new();
             write!(
@@ -172,27 +177,39 @@ where I: Instant
             let n = seg.range.end - seg.range.start;
             let v = &seg.values;
             h.proposed_to_received.record_n(
-                v[Received.index()].saturating_duration_since(v[Proposed.index()]).as_micros() as u64,
+                v[Received.index()]
+                    .saturating_duration_since(v[Proposed.index()])
+                    .as_micros() as u64,
                 n,
             );
             h.received_to_submitted.record_n(
-                v[Submitted.index()].saturating_duration_since(v[Received.index()]).as_micros() as u64,
+                v[Submitted.index()]
+                    .saturating_duration_since(v[Received.index()])
+                    .as_micros() as u64,
                 n,
             );
             h.submitted_to_persisted.record_n(
-                v[Persisted.index()].saturating_duration_since(v[Submitted.index()]).as_micros() as u64,
+                v[Persisted.index()]
+                    .saturating_duration_since(v[Submitted.index()])
+                    .as_micros() as u64,
                 n,
             );
             h.persisted_to_committed.record_n(
-                v[Committed.index()].saturating_duration_since(v[Persisted.index()]).as_micros() as u64,
+                v[Committed.index()]
+                    .saturating_duration_since(v[Persisted.index()])
+                    .as_micros() as u64,
                 n,
             );
             h.committed_to_applied.record_n(
-                v[Applied.index()].saturating_duration_since(v[Committed.index()]).as_micros() as u64,
+                v[Applied.index()]
+                    .saturating_duration_since(v[Committed.index()])
+                    .as_micros() as u64,
                 n,
             );
             h.proposed_to_applied.record_n(
-                v[Applied.index()].saturating_duration_since(v[Proposed.index()]).as_micros() as u64,
+                v[Applied.index()]
+                    .saturating_duration_since(v[Proposed.index()])
+                    .as_micros() as u64,
                 n,
             );
         }

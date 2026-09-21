@@ -35,12 +35,30 @@ impl LogStageHistograms {
 impl LogStageHistograms {
     pub(crate) fn percentile_stats_array(&self) -> [(&'static str, PercentileStats); 6] {
         [
-            ("1:proposed→received", self.proposed_to_received.percentile_stats()),
-            ("2:received→submitted", self.received_to_submitted.percentile_stats()),
-            ("3:submitted→persisted", self.submitted_to_persisted.percentile_stats()),
-            ("4:persisted→committed", self.persisted_to_committed.percentile_stats()),
-            ("5:committed→applied", self.committed_to_applied.percentile_stats()),
-            ("1~5:proposed→applied", self.proposed_to_applied.percentile_stats()),
+            (
+                "1:proposed→received",
+                self.proposed_to_received.percentile_stats(),
+            ),
+            (
+                "2:received→submitted",
+                self.received_to_submitted.percentile_stats(),
+            ),
+            (
+                "3:submitted→persisted",
+                self.submitted_to_persisted.percentile_stats(),
+            ),
+            (
+                "4:persisted→committed",
+                self.persisted_to_committed.percentile_stats(),
+            ),
+            (
+                "5:committed→applied",
+                self.committed_to_applied.percentile_stats(),
+            ),
+            (
+                "1~5:proposed→applied",
+                self.proposed_to_applied.percentile_stats(),
+            ),
         ]
     }
 

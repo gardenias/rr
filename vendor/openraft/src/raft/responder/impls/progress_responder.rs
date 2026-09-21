@@ -62,7 +62,11 @@ where
     /// - The [`ProgressResponder`] that can send both commit and complete notifications
     /// - The commit receiver for receiving the committed log ID
     /// - The complete receiver for receiving the final result
-    pub fn new() -> (Self, OneshotReceiverOf<C, LogIdOf<C>>, OneshotReceiverOf<C, T>) {
+    pub fn new() -> (
+        Self,
+        OneshotReceiverOf<C, LogIdOf<C>>,
+        OneshotReceiverOf<C, T>,
+    ) {
         let (commit_tx, commit_rx) = C::oneshot();
         let (complete_tx, complete_rx) = C::oneshot();
 
@@ -132,8 +136,11 @@ mod tests {
     #[test]
     fn test_twoshot_responder_new() {
         UTConfig::<()>::run(async {
-            let (_responder, mut commit_rx, mut complete_rx): (ProgressResponder<UTConfig, String>, _, _) =
-                ProgressResponder::new();
+            let (_responder, mut commit_rx, mut complete_rx): (
+                ProgressResponder<UTConfig, String>,
+                _,
+                _,
+            ) = ProgressResponder::new();
 
             // Receivers should be created but not yet have values
             assert!(commit_rx.try_recv().is_err());
@@ -173,8 +180,11 @@ mod tests {
     #[test]
     fn test_twoshot_responder_on_commit() {
         UTConfig::<()>::run(async {
-            let (mut responder, commit_rx, _complete_rx): (ProgressResponder<UTConfig, String>, _, _) =
-                ProgressResponder::new();
+            let (mut responder, commit_rx, _complete_rx): (
+                ProgressResponder<UTConfig, String>,
+                _,
+                _,
+            ) = ProgressResponder::new();
 
             let test_log_id = log_id(1, 2, 3);
 
@@ -190,8 +200,11 @@ mod tests {
     #[test]
     fn test_twoshot_responder_on_commit_multiple_calls() {
         UTConfig::<()>::run(async {
-            let (mut responder, commit_rx, _complete_rx): (ProgressResponder<UTConfig, String>, _, _) =
-                ProgressResponder::new();
+            let (mut responder, commit_rx, _complete_rx): (
+                ProgressResponder<UTConfig, String>,
+                _,
+                _,
+            ) = ProgressResponder::new();
 
             let test_log_id_1 = log_id(1, 2, 3);
             let test_log_id_2 = log_id(2, 3, 4);
@@ -228,8 +241,11 @@ mod tests {
     #[test]
     fn test_twoshot_responder_both_channels() {
         UTConfig::<()>::run(async {
-            let (mut responder, commit_rx, complete_rx): (ProgressResponder<UTConfig, String>, _, _) =
-                ProgressResponder::new();
+            let (mut responder, commit_rx, complete_rx): (
+                ProgressResponder<UTConfig, String>,
+                _,
+                _,
+            ) = ProgressResponder::new();
 
             let test_log_id = log_id(1, 2, 3);
             let test_result = "test_result".to_string();
@@ -253,8 +269,11 @@ mod tests {
     #[test]
     fn test_twoshot_responder_send_without_commit() {
         UTConfig::<()>::run(async {
-            let (responder, mut commit_rx, complete_rx): (ProgressResponder<UTConfig, String>, _, _) =
-                ProgressResponder::new();
+            let (responder, mut commit_rx, complete_rx): (
+                ProgressResponder<UTConfig, String>,
+                _,
+                _,
+            ) = ProgressResponder::new();
 
             let test_result = "test_result".to_string();
 

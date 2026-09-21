@@ -21,10 +21,10 @@ use crate::raft_state::LogStateReader;
 use crate::type_config::alias::LogIdOf;
 
 /// State of replication to a target node.
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProgressEntry<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) id: C::NodeId,
 
@@ -35,10 +35,10 @@ where C: RaftTypeConfig
 }
 
 /// Application-owned replication state that is not used for quorum calculation.
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProgressData<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) stream_id: StreamId,
 
@@ -61,7 +61,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> ProgressEntry<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     #[allow(dead_code)]
     pub(crate) fn testing_new(id: C::NodeId, matching: Option<LogIdOf<C>>) -> Self {
@@ -96,13 +97,17 @@ where C: RaftTypeConfig
         self
     }
 
-    pub(crate) fn new_updater<'a>(&'a mut self, engine_config: &'a EngineConfig<C>) -> Updater<'a, C> {
+    pub(crate) fn new_updater<'a>(
+        &'a mut self,
+        engine_config: &'a EngineConfig<C>,
+    ) -> Updater<'a, C> {
         Updater::new(engine_config, self)
     }
 }
 
 impl<C> ProgressData<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(stream_id: StreamId, searching_end: u64) -> Self {
         Self {
@@ -115,7 +120,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> VecProgressEntry for ProgressEntry<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     type Id = C::NodeId;
     type Progress = Option<LogIdOf<C>>;
@@ -134,7 +140,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> VecProgressEntryData for ProgressEntry<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     type Data = ProgressData<C>;
 
@@ -148,7 +155,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> ProgressEntry<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Return if a range of log id `..=log_id` is inflight sending.
     ///
@@ -288,7 +296,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Display for ProgressEntry<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -303,7 +312,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Validate for ProgressEntry<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         validit::less_equal!(self.matching().next_index(), self.data.searching_end);

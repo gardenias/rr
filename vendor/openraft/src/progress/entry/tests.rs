@@ -21,7 +21,11 @@ fn log_id(index: u64) -> LogIdOf<UTConfig> {
 }
 
 fn inflight_logs(prev_index: u64, last_index: u64) -> Inflight<UTConfig> {
-    Inflight::logs(Some(log_id(prev_index)), Some(log_id(last_index)), InflightId::new(0))
+    Inflight::logs(
+        Some(log_id(prev_index)),
+        Some(log_id(last_index)),
+        InflightId::new(0),
+    )
 }
 
 #[test]
@@ -57,12 +61,14 @@ fn test_update_matching() -> anyhow::Result<()> {
     {
         let mut pe = ProgressEntry::<UTConfig>::empty(0, StreamId::new(0), 20);
         pe.data.inflight = inflight_logs(5, 10);
-        pe.new_updater(&engine_config).update_matching(Some(log_id(6)), Some(InflightId::new(0)));
+        pe.new_updater(&engine_config)
+            .update_matching(Some(log_id(6)), Some(InflightId::new(0)));
         assert_eq!(inflight_logs(6, 10), pe.data.inflight);
         assert_eq!(Some(&log_id(6)), pe.matching());
         assert_eq!(20, pe.data.searching_end);
 
-        pe.new_updater(&engine_config).update_matching(Some(log_id(10)), Some(InflightId::new(0)));
+        pe.new_updater(&engine_config)
+            .update_matching(Some(log_id(10)), Some(InflightId::new(0)));
         assert_eq!(Inflight::None, pe.data.inflight);
         assert_eq!(Some(&log_id(10)), pe.matching());
         assert_eq!(20, pe.data.searching_end);
@@ -74,7 +80,8 @@ fn test_update_matching() -> anyhow::Result<()> {
         pe.matching = Some(log_id(6));
         pe.data.inflight = inflight_logs(5, 20);
 
-        pe.new_updater(&engine_config).update_matching(Some(log_id(20)), Some(InflightId::new(0)));
+        pe.new_updater(&engine_config)
+            .update_matching(Some(log_id(20)), Some(InflightId::new(0)));
         assert_eq!(21, pe.data.searching_end);
     }
 
@@ -88,7 +95,8 @@ fn test_update_conflicting() -> anyhow::Result<()> {
     pe.data.inflight = inflight_logs(5, 10);
 
     let engine_config = EngineConfig::new_default(1);
-    pe.new_updater(&engine_config).update_conflicting(5, Some(InflightId::new(0)));
+    pe.new_updater(&engine_config)
+        .update_conflicting(5, Some(InflightId::new(0)));
 
     assert_eq!(Inflight::None, pe.data.inflight);
     assert_eq!(Some(&log_id(3)), pe.matching());
@@ -392,7 +400,11 @@ fn test_next_send_not_pipeline_when_gap_exists() -> anyhow::Result<()> {
     pe.matching = Some(log_id(7));
 
     let res = pe.next_send(&mut new_raft_state(6, 10, 20), 100);
-    assert_eq!(Ok(&inflight_logs(7, 20).with_id(1)), res, "not pipeline: gap exists");
+    assert_eq!(
+        Ok(&inflight_logs(7, 20).with_id(1)),
+        res,
+        "not pipeline: gap exists"
+    );
 
     Ok(())
 }
@@ -411,7 +423,11 @@ fn test_next_send_not_pipeline_without_matching() -> anyhow::Result<()> {
     let mut pe = ProgressEntry::<UTConfig>::empty(0, StreamId::new(0), 20);
 
     let res = pe.next_send(&mut new_raft_state(6, 10, 20), 100);
-    assert_eq!(Ok(&inflight_logs(7, 20).with_id(1)), res, "not pipeline: no matching");
+    assert_eq!(
+        Ok(&inflight_logs(7, 20).with_id(1)),
+        res,
+        "not pipeline: no matching"
+    );
 
     Ok(())
 }
@@ -474,7 +490,10 @@ fn test_next_send_pipeline_fully_purged_caught_up() -> anyhow::Result<()> {
     pe.matching = Some(log_id(20));
 
     let res = pe.next_send(&mut new_raft_state(20, 20, 20), 100);
-    assert_eq!(Ok(&Inflight::logs_since(Some(log_id(20)), InflightId::new(1))), res);
+    assert_eq!(
+        Ok(&Inflight::logs_since(Some(log_id(20)), InflightId::new(1))),
+        res
+    );
 
     Ok(())
 }

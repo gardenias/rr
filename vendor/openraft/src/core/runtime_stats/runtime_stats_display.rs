@@ -24,7 +24,8 @@ use crate::type_config::alias::InstantOf;
 /// All values are computed upfront so `Display::fmt()` is cheap.
 /// Use [`DisplayMode`] to control the output format.
 pub struct RuntimeStatsDisplay<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) mode: DisplayMode,
     pub(crate) apply_batch: PercentileStats,
@@ -45,7 +46,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RuntimeStatsDisplay<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Set the display mode.
     pub fn mode(mut self, mode: DisplayMode) -> Self {
@@ -70,7 +72,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for RuntimeStatsDisplay<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.mode {
@@ -82,7 +85,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RuntimeStatsDisplay<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt_compact(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -164,8 +168,16 @@ where C: RaftTypeConfig
         writeln!(f, "  write_batch: {}", self.write_batch)?;
         writeln!(f, "  raft_msg_budget: {}", self.raft_msg_budget)?;
         writeln!(f, "  notification_budget: {}", self.notification_budget)?;
-        writeln!(f, "  raft_msg_usage_permille: {}", self.raft_msg_usage_permille)?;
-        writeln!(f, "  notification_usage_permille: {}", self.notification_usage_permille)?;
+        writeln!(
+            f,
+            "  raft_msg_usage_permille: {}",
+            self.raft_msg_usage_permille
+        )?;
+        writeln!(
+            f,
+            "  notification_usage_permille: {}",
+            self.notification_usage_permille
+        )?;
 
         writeln!(f, "  commands:")?;
         for (i, name) in CommandName::ALL.iter().enumerate() {
@@ -339,7 +351,9 @@ where C: RaftTypeConfig
 
         // Log stage latencies table (microseconds)
         let mut builder = Builder::default();
-        builder.push_record(["", "#Samples", "P0.1", "P1", "P5", "P10", "P50", "P90", "P99", "P99.9"]);
+        builder.push_record([
+            "", "#Samples", "P0.1", "P1", "P5", "P10", "P50", "P90", "P99", "P99.9",
+        ]);
         for (name, stats) in &self.log_stage_percentiles {
             if stats.samples > 0 {
                 builder.push_record([

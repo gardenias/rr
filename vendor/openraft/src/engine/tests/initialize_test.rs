@@ -57,7 +57,10 @@ fn test_initialize_single_node() -> anyhow::Result<()> {
                 //
                 Command::AppendEntries {
                     committed_vote: Vote::new_with_default_term(1).to_committed(),
-                    entries: Batch::of([EntryOf::<UTConfig>::new_membership(log_id(0, 1, 0), m1())]),
+                    entries: Batch::of([EntryOf::<UTConfig>::new_membership(
+                        log_id(0, 1, 0),
+                        m1()
+                    )]),
                 },
             ],
             eng.output.take_commands()
@@ -101,7 +104,10 @@ fn test_initialize() -> anyhow::Result<()> {
                 //
                 Command::AppendEntries {
                     committed_vote: Vote::new_with_default_term(1).to_committed(),
-                    entries: Batch::of([EntryOf::<UTConfig>::new_membership(log_id(0, 1, 0), m12())]),
+                    entries: Batch::of([EntryOf::<UTConfig>::new_membership(
+                        log_id(0, 1, 0),
+                        m12()
+                    )]),
                 },
             ],
             eng.output.take_commands()
@@ -128,7 +134,11 @@ fn test_initialize() -> anyhow::Result<()> {
     tracing::info!("--- not allowed because of vote");
     {
         let mut eng = eng();
-        eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(1, 1));
+        eng.state.vote = Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(1, 1),
+        );
 
         assert_eq!(
             Err(InitializeError::NotAllowed(NotAllowed {

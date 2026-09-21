@@ -106,7 +106,12 @@ fn test_wait() {
 
             assert_eq!(
                 btreeset![1, 2],
-                got.membership_config.membership().get_joint_config().first().unwrap().clone()
+                got.membership_config
+                    .membership()
+                    .get_joint_config()
+                    .first()
+                    .unwrap()
+                    .clone()
             );
         }
 
@@ -260,7 +265,9 @@ fn test_wait_leader_with_quorum_acked() {
             (got.state, got.last_quorum_acked)
         );
 
-        let got = w.leader_with_quorum_acked(Some(second_acked), "newer quorum ack").await?;
+        let got = w
+            .leader_with_quorum_acked(Some(second_acked), "newer quorum ack")
+            .await?;
         assert_eq!(
             (ServerState::Leader, Some(SerdeInstant::new(second_acked))),
             (got.state, got.last_quorum_acked)
@@ -328,7 +335,9 @@ pub(crate) type InitResult<C> = (RaftMetrics<C>, Wait<C>, WatchSenderOf<C, RaftM
 /// Build a initial state for testing of Wait:
 /// Returns init metrics, Wait, and the tx to send an updated metrics.
 fn init_wait_test<C>() -> InitResult<C>
-where C: RaftTypeConfig<NodeId = u64> {
+where
+    C: RaftTypeConfig<NodeId = u64>,
+{
     #[allow(deprecated)]
     let init = RaftMetrics {
         running_state: Ok(()),
@@ -350,7 +359,10 @@ where C: RaftTypeConfig<NodeId = u64> {
         millis_since_quorum_ack: None,
         last_quorum_acked: None,
         membership_config: Arc::new(StoredMembershipOf::<C>::new(None, Membership::default())),
-        committed_membership_config: Arc::new(StoredMembershipOf::<C>::new(None, Membership::default())),
+        committed_membership_config: Arc::new(StoredMembershipOf::<C>::new(
+            None,
+            Membership::default(),
+        )),
         heartbeat: None,
 
         snapshot: None,

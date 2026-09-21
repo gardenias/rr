@@ -13,7 +13,9 @@ fn bench_m12345_ids_slice(c: &mut Criterion) {
     let m = StoredMembershipOf::<UTConfig>::new(None, m);
     let x = [1, 2, 3, 6, 7];
 
-    c.bench_function("m12345_ids_slice", |b| b.iter(|| m.is_quorum(black_box(x.iter()))));
+    c.bench_function("m12345_ids_slice", |b| {
+        b.iter(|| m.is_quorum(black_box(x.iter())))
+    });
 }
 
 fn bench_m12345_ids_btreeset(c: &mut Criterion) {
@@ -21,7 +23,9 @@ fn bench_m12345_ids_btreeset(c: &mut Criterion) {
     let m = StoredMembershipOf::<UTConfig>::new(None, m);
     let x = btreeset! {1, 2, 3, 6, 7};
 
-    c.bench_function("m12345_ids_btreeset", |b| b.iter(|| m.is_quorum(black_box(x.iter()))));
+    c.bench_function("m12345_ids_btreeset", |b| {
+        b.iter(|| m.is_quorum(black_box(x.iter())))
+    });
 }
 
 fn bench_m12345_678_ids_slice(c: &mut Criterion) {
@@ -29,7 +33,9 @@ fn bench_m12345_678_ids_slice(c: &mut Criterion) {
     let m = StoredMembershipOf::<UTConfig>::new(None, m);
     let x = [1, 2, 3, 6, 7];
 
-    c.bench_function("m12345_678_ids_slice", |b| b.iter(|| m.is_quorum(black_box(x.iter()))));
+    c.bench_function("m12345_678_ids_slice", |b| {
+        b.iter(|| m.is_quorum(black_box(x.iter())))
+    });
 }
 
 fn bench_m12345_678_ids_btreeset(c: &mut Criterion) {

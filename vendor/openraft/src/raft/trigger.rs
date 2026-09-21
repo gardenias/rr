@@ -30,13 +30,15 @@ use crate::type_config::alias::VoteOf;
 ///
 /// [`Raft::trigger()`]: crate::Raft::trigger
 pub struct Trigger<'r, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     raft_inner: &'r RaftInner<C>,
 }
 
 impl<'r, C> Trigger<'r, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(in crate::raft) fn new(raft_inner: &'r RaftInner<C>) -> Self {
         Self { raft_inner }
@@ -62,7 +64,9 @@ where C: RaftTypeConfig
     ///
     /// [`Config::enable_pre_vote`]: crate::Config::enable_pre_vote
     pub async fn elect(&self, pre_vote: bool) -> Result<(), Fatal<C>> {
-        self.raft_inner.send_external_command(ExternalCommand::Elect { pre_vote }).await
+        self.raft_inner
+            .send_external_command(ExternalCommand::Elect { pre_vote })
+            .await
     }
 
     /// Trigger a heartbeat at once and return at once.
@@ -70,14 +74,18 @@ where C: RaftTypeConfig
     /// Returns error when RaftCore has [`Fatal`] error, e.g., shut down or having storage error.
     /// It is not affected by `Raft::enable_heartbeat(false)`.
     pub async fn heartbeat(&self) -> Result<(), Fatal<C>> {
-        self.raft_inner.send_external_command(ExternalCommand::Heartbeat).await
+        self.raft_inner
+            .send_external_command(ExternalCommand::Heartbeat)
+            .await
     }
 
     /// Trigger to build a snapshot at once and return at once.
     ///
     /// Returns error when RaftCore has [`Fatal`] error, e.g., shut down or having storage error.
     pub async fn snapshot(&self) -> Result<(), Fatal<C>> {
-        self.raft_inner.send_external_command(ExternalCommand::Snapshot).await
+        self.raft_inner
+            .send_external_command(ExternalCommand::Snapshot)
+            .await
     }
 
     /// Initiate the log purge up to and including the given `upto` log index.
@@ -96,14 +104,18 @@ where C: RaftTypeConfig
     ///
     /// [`max_in_snapshot_log_to_keep`]: `crate::Config::max_in_snapshot_log_to_keep`
     pub async fn purge_log(&self, upto: u64) -> Result<(), Fatal<C>> {
-        self.raft_inner.send_external_command(ExternalCommand::PurgeLog { upto }).await
+        self.raft_inner
+            .send_external_command(ExternalCommand::PurgeLog { upto })
+            .await
     }
 
     /// Submit a command to inform RaftCore to transfer leadership to the specified node.
     ///
     /// If this node is not a Leader, it is just ignored.
     pub async fn transfer_leader(&self, to: C::NodeId) -> Result<(), Fatal<C>> {
-        self.raft_inner.send_external_command(ExternalCommand::TriggerTransferLeader { to }).await
+        self.raft_inner
+            .send_external_command(ExternalCommand::TriggerTransferLeader { to })
+            .await
     }
 
     /// Request the RaftCore to allow to reset replication for a specific node when log revert is

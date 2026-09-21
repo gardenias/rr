@@ -10,17 +10,22 @@ use crate::type_config::alias::LogIdOf;
 
 /// It implements updating operations for a [`ProgressEntry`]
 pub(crate) struct Updater<'a, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     engine_config: &'a EngineConfig<C>,
     entry: &'a mut ProgressEntry<C>,
 }
 
 impl<'a, C> Updater<'a, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(engine_config: &'a EngineConfig<C>, entry: &'a mut ProgressEntry<C>) -> Self {
-        Self { engine_config, entry }
+        Self {
+            engine_config,
+            entry,
+        }
     }
 
     /// Update the conflicting log index for this follower.
@@ -73,7 +78,8 @@ where C: RaftTypeConfig
         // - If log reversion is allowed, just restart the binary search from the beginning.
         // - Otherwise, panic it.
 
-        let allow_reset = self.entry.data.allow_log_reversion || self.engine_config.allow_log_reversion;
+        let allow_reset =
+            self.entry.data.allow_log_reversion || self.engine_config.allow_log_reversion;
 
         if allow_reset {
             if conflict < self.entry.matching().next_index() {
@@ -113,7 +119,11 @@ where C: RaftTypeConfig
     /// If `inflight_id` is `Some`, the inflight state is acknowledged because the response
     /// corresponds to a replication request with log payload. If `None`, the response is from
     /// an RPC without payload (e.g., heartbeat), and inflight state is not modified.
-    pub(crate) fn update_matching(&mut self, matching: Option<LogIdOf<C>>, inflight_id: Option<InflightId>) {
+    pub(crate) fn update_matching(
+        &mut self,
+        matching: Option<LogIdOf<C>>,
+        inflight_id: Option<InflightId>,
+    ) {
         tracing::debug!(
             "update_matching: current progress_entry: {}; matching: {}",
             self.entry,

@@ -37,7 +37,8 @@ use crate::try_as_ref::TryAsRef;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum RaftError<C, E = Infallible>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// API-specific error returned by Raft API methods.
     #[error(transparent)]
@@ -51,7 +52,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RaftError<C, Infallible>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Convert to a [`Fatal`] error if its `APIError` variant is [`Infallible`],
     /// otherwise panic.
@@ -100,7 +102,9 @@ where
 
     /// Return a reference to ForwardToLeader if Self::APIError contains it.
     pub fn forward_to_leader(&self) -> Option<&ForwardToLeader<C>>
-    where E: TryAsRef<ForwardToLeader<C>> {
+    where
+        E: TryAsRef<ForwardToLeader<C>>,
+    {
         match self {
             RaftError::APIError(api_err) => api_err.try_as_ref(),
             RaftError::Fatal(_) => None,
@@ -109,7 +113,9 @@ where
 
     /// Try to convert self to ForwardToLeader error if APIError is a ForwardToLeader error.
     pub fn into_forward_to_leader(self) -> Option<ForwardToLeader<C>>
-    where E: TryInto<ForwardToLeader<C>> {
+    where
+        E: TryInto<ForwardToLeader<C>>,
+    {
         match self {
             RaftError::APIError(api_err) => api_err.try_into().ok(),
             RaftError::Fatal(_) => None,
@@ -128,7 +134,8 @@ where
 }
 
 impl<C, E> From<StorageError<C>> for RaftError<C, E>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn from(se: StorageError<C>) -> Self {
         RaftError::Fatal(Fatal::from(se))

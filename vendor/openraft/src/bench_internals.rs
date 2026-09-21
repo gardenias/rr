@@ -50,7 +50,10 @@ impl BenchEngine {
             )),
             Arc::new(StoredMembershipOf::<UTConfig>::new(
                 Some(log_id(2, 1, 3)),
-                Membership::<u64, ()>::new_with_defaults(vec![btreeset! {2, 3}], btreeset! {1, 2, 3}),
+                Membership::<u64, ()>::new_with_defaults(
+                    vec![btreeset! {2, 3}],
+                    btreeset! {1, 2, 3},
+                ),
             )),
         );
         eng.testing_new_leader();
@@ -63,8 +66,13 @@ impl BenchEngine {
     /// Append `payloads` as the leader.
     #[inline]
     pub fn append<I>(&mut self, payloads: I)
-    where I: IntoIterator<Item = EntryPayloadOf<UTConfig>> + AsRef<[EntryPayloadOf<UTConfig>]> {
-        self.0.try_leader_handler().unwrap().leader_append_entries(payloads);
+    where
+        I: IntoIterator<Item = EntryPayloadOf<UTConfig>> + AsRef<[EntryPayloadOf<UTConfig>]>,
+    {
+        self.0
+            .try_leader_handler()
+            .unwrap()
+            .leader_append_entries(payloads);
     }
 
     /// Drop the commands [`Self::append()`] has queued, which would otherwise grow without bound.
@@ -82,7 +90,9 @@ impl BenchVecProgress {
     pub fn new_joint_01234_567() -> Self {
         let quorum_set = vec![btreeset! {0, 1, 2, 3, 4}, btreeset! {5, 6, 7}];
 
-        Self(VecProgress::<(u64, u64), _>::new(quorum_set, [], |id| (id, 0)))
+        Self(VecProgress::<(u64, u64), _>::new(quorum_set, [], |id| {
+            (id, 0)
+        }))
     }
 
     /// Set the progress value of `id`, ignoring a value that is not accepted.

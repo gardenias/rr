@@ -8,14 +8,16 @@ use crate::type_config::alias::OneshotSenderOf;
 ///
 /// Use [`close()`](`Self::close`) to stop watching and wait for the task to complete.
 pub struct WatchChangeHandle<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) cancel_tx: Option<OneshotSenderOf<C, ()>>,
     pub(crate) join_handle: Option<JoinHandleOf<C, ()>>,
 }
 
 impl<C> WatchChangeHandle<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Stop watching and wait for the task to complete.
     pub async fn close(&mut self) {

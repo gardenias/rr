@@ -14,7 +14,8 @@ use crate::type_config::alias::WatchSenderOf;
 /// The sender maintains independent channels (log, vote, commit, snapshot, and apply) to allow
 /// efficient filtering of notifications.
 pub(crate) struct IoProgressSender<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Sender for log I/O progress (includes all I/O operations).
     pub(crate) log_tx: WatchSenderOf<C, Option<FlushPoint<C>>>,
@@ -37,7 +38,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> IoProgressSender<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Publish an I/O flush completion notification to watchers.
     ///
@@ -86,11 +88,17 @@ where C: RaftTypeConfig
 
     /// Publish the latest commit log id progress.
     pub(crate) fn send_commit_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
-        tracing::debug!("send_commit_progress: try to update to :{}", log_id.display());
+        tracing::debug!(
+            "send_commit_progress: try to update to :{}",
+            log_id.display()
+        );
 
         self.commit_tx.send_if_modified(move |prev| {
             if prev.as_ref() != log_id.as_ref() {
-                tracing::debug!("send_commit_progress: update commit to :{}", log_id.display());
+                tracing::debug!(
+                    "send_commit_progress: update commit to :{}",
+                    log_id.display()
+                );
                 *prev = log_id.clone();
                 true
             } else {
@@ -103,11 +111,17 @@ where C: RaftTypeConfig
 
     /// Publish the latest snapshot log id progress.
     pub(crate) fn send_snapshot_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
-        tracing::debug!("send_snapshot_progress: try to update to :{}", log_id.display());
+        tracing::debug!(
+            "send_snapshot_progress: try to update to :{}",
+            log_id.display()
+        );
 
         self.snapshot_tx.send_if_modified(move |prev| {
             if prev.as_ref() != log_id.as_ref() {
-                tracing::debug!("send_snapshot_progress: update snapshot to :{}", log_id.display());
+                tracing::debug!(
+                    "send_snapshot_progress: update snapshot to :{}",
+                    log_id.display()
+                );
                 *prev = log_id.clone();
                 true
             } else {
@@ -120,11 +134,17 @@ where C: RaftTypeConfig
 
     /// Publish the latest applied log id progress.
     pub(crate) fn send_apply_progress(&self, log_id: Option<LogIdOf<C>>) -> Option<()> {
-        tracing::debug!("send_apply_progress: try to update to :{}", log_id.display());
+        tracing::debug!(
+            "send_apply_progress: try to update to :{}",
+            log_id.display()
+        );
 
         self.apply_tx.send_if_modified(move |prev| {
             if prev.as_ref() != log_id.as_ref() {
-                tracing::debug!("send_apply_progress: update applied to :{}", log_id.display());
+                tracing::debug!(
+                    "send_apply_progress: update applied to :{}",
+                    log_id.display()
+                );
                 *prev = log_id.clone();
                 true
             } else {

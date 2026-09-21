@@ -52,14 +52,26 @@ fn eng_leader(effective: Membership<u64, ()>, committed: LogIdOf<UTConfig>) -> E
     // target membership state, mirroring the production order: a Leader exists first, then a
     // membership log entry is appended.
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m12(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m12(),
+        )),
     );
     eng.testing_new_leader();
 
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), effective)),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m12(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            effective,
+        )),
     );
     eng.state.server_state = eng.calc_server_state();
     eng.output.clear_commands();
@@ -107,7 +119,10 @@ fn test_refresh_server_state_removed_leader_uncommitted_membership() -> anyhow::
 
     assert!(eng.leader.is_none());
     assert_eq!(ServerState::Learner, eng.state.server_state);
-    assert_eq!(vec![Command::CloseReplicationStreams], eng.output.take_commands());
+    assert_eq!(
+        vec![Command::CloseReplicationStreams],
+        eng.output.take_commands()
+    );
 
     Ok(())
 }
@@ -121,7 +136,10 @@ fn test_refresh_server_state_removed_leader_committed_membership() -> anyhow::Re
 
     assert!(eng.leader.is_none());
     assert_eq!(ServerState::Learner, eng.state.server_state);
-    assert_eq!(vec![Command::CloseReplicationStreams], eng.output.take_commands());
+    assert_eq!(
+        vec![Command::CloseReplicationStreams],
+        eng.output.take_commands()
+    );
 
     Ok(())
 }

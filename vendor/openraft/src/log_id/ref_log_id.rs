@@ -9,14 +9,16 @@ use crate::vote::RaftCommittedLeaderId;
 /// Committed leader ID is the `term` in standard Raft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct RefLogId<'k, CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     pub(crate) leader_id: &'k CLID,
     pub(crate) index: u64,
 }
 
 impl<'l, CLID> RefLogId<'l, CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// Create a new reference log id.
     pub(crate) fn new(leader_id: &'l CLID, index: u64) -> Self {
@@ -40,7 +42,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> Display for RefLogId<'_, CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.{}", self.committed_leader_id(), self.index())
@@ -48,7 +51,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> RaftLogId for RefLogId<'_, CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     type CommittedLeaderId = CLID;
 

@@ -53,10 +53,12 @@ fn eng() -> Engine<UTConfig> {
 fn test_startup_as_leader_without_logs() -> anyhow::Result<()> {
     let mut eng = eng();
     // self.id==2 is a voter:
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 3)),
-        m23(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 3)),
+            m23(),
+        )));
     eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3)]);
     // Committed vote makes it a leader at startup.
     eng.state.vote = Leased::new(
@@ -92,7 +94,10 @@ fn test_startup_as_leader_without_logs() -> anyhow::Result<()> {
             },
             Command::Replicate {
                 target: 3,
-                req: Replicate::new_logs(LogIdRange::new(None, Some(log_id(2, 2, 4))), InflightId::new(1)),
+                req: Replicate::new_logs(
+                    LogIdRange::new(None, Some(log_id(2, 2, 4))),
+                    InflightId::new(1)
+                ),
             }
         ],
         eng.output.take_commands()
@@ -106,10 +111,12 @@ fn test_startup_as_leader_with_proposed_logs() -> anyhow::Result<()> {
     tracing::info!("--- a leader proposed logs and restarted, reuse noop_log_id");
     let mut eng = eng();
     // self.id==2 is a voter:
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m23(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )));
     // Last-per-leader format: leader (1,1) last at index 3, leader (1,2) last at index 6
     eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3), log_id(1, 2, 6)]);
     // Committed vote makes it a leader at startup.
@@ -142,7 +149,10 @@ fn test_startup_as_leader_with_proposed_logs() -> anyhow::Result<()> {
             },
             Command::Replicate {
                 target: 3,
-                req: Replicate::new_logs(LogIdRange::new(None, Some(log_id(1, 2, 6))), InflightId::new(1))
+                req: Replicate::new_logs(
+                    LogIdRange::new(None, Some(log_id(1, 2, 6))),
+                    InflightId::new(1)
+                )
             }
         ],
         eng.output.take_commands()
@@ -156,10 +166,12 @@ fn test_startup_as_leader_with_proposed_logs() -> anyhow::Result<()> {
 fn test_startup_as_leader_not_voter_issue_920() -> anyhow::Result<()> {
     let mut eng = eng();
     // self.id==2 is a voter:
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m_empty(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m_empty(),
+        )));
     // Committed vote makes it a leader at startup.
     eng.state.vote = Leased::new(
         UTConfig::<()>::now(),
@@ -179,12 +191,18 @@ fn test_startup_as_leader_not_voter_issue_920() -> anyhow::Result<()> {
 fn test_startup_candidate_becomes_follower() -> anyhow::Result<()> {
     let mut eng = eng();
     // self.id==2 is a voter:
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m23(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )));
     // Non-committed vote makes it a candidate at startup.
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(1, 2));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(500),
+        Vote::new(1, 2),
+    );
 
     eng.startup();
 
@@ -197,10 +215,12 @@ fn test_startup_candidate_becomes_follower() -> anyhow::Result<()> {
 fn test_startup_as_follower() -> anyhow::Result<()> {
     let mut eng = eng();
     // self.id==2 is a voter:
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m23(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )));
 
     eng.startup();
 
@@ -214,10 +234,12 @@ fn test_startup_as_follower() -> anyhow::Result<()> {
 fn test_startup_as_learner() -> anyhow::Result<()> {
     let mut eng = eng();
     // self.id==2 is not a voter:
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m34(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m34(),
+        )));
 
     eng.startup();
 
@@ -233,10 +255,12 @@ fn test_startup_as_leader_leader_restore_disabled() -> anyhow::Result<()> {
     eng.config.enable_leader_restore = false;
 
     // self.id==2 is a voter:
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 3)),
-        m23(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 3)),
+            m23(),
+        )));
     eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 3)]);
     // Committed vote would normally make it a leader at startup.
     eng.state.vote = Leased::new(

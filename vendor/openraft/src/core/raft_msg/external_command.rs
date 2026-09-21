@@ -20,7 +20,8 @@ use crate::type_config::alias::VoteOf;
 /// An application can also disable these policy-based triggering and use these commands manually,
 /// for testing or administrative purposes.
 pub(crate) enum ExternalCommand<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Initiate an election immediately.
     ///
@@ -64,7 +65,9 @@ where C: RaftTypeConfig
     /// This allows applications to plug in their own metrics collection backends
     /// (e.g., OpenTelemetry, Prometheus, StatsD) at runtime.
     /// Pass `None` to disable metrics recording.
-    SetMetricsRecorder { recorder: Option<Arc<dyn MetricsRecorder>> },
+    SetMetricsRecorder {
+        recorder: Option<Arc<dyn MetricsRecorder>>,
+    },
 
     /// Recalculate the internal server state based on the vote and the membership config.
     ///
@@ -88,7 +91,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> ExternalCommand<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Returns the name of this command variant.
     pub fn name(&self) -> ExternalCommandName {
@@ -97,7 +101,9 @@ where C: RaftTypeConfig
             ExternalCommand::Heartbeat => ExternalCommandName::Heartbeat,
             ExternalCommand::Snapshot => ExternalCommandName::Snapshot,
             ExternalCommand::PurgeLog { .. } => ExternalCommandName::PurgeLog,
-            ExternalCommand::TriggerTransferLeader { .. } => ExternalCommandName::TriggerTransferLeader,
+            ExternalCommand::TriggerTransferLeader { .. } => {
+                ExternalCommandName::TriggerTransferLeader
+            }
             ExternalCommand::AllowNextRevert { .. } => ExternalCommandName::AllowNextRevert,
             ExternalCommand::SetMetricsRecorder { .. } => ExternalCommandName::SetMetricsRecorder,
             ExternalCommand::RefreshServerState { .. } => ExternalCommandName::RefreshServerState,
@@ -106,7 +112,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Debug for ExternalCommand<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
@@ -114,7 +121,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for ExternalCommand<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

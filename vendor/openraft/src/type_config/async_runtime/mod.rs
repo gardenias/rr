@@ -27,5 +27,8 @@ pub use openraft_rt::mutex;
 pub use openraft_rt::oneshot;
 pub use openraft_rt::watch;
 #[cfg(feature = "tokio-rt")]
-#[deprecated(since = "0.10.0", note = "use `openraft_rt_tokio::TokioInstant` directly")]
+#[deprecated(
+    since = "0.10.0",
+    note = "use `openraft_rt_tokio::TokioInstant` directly"
+)]
 pub use openraft_rt_tokio::TokioInstant;

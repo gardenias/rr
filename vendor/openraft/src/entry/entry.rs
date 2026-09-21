@@ -13,8 +13,15 @@ use crate::node::NodeId;
 use crate::vote::RaftCommittedLeaderId;
 
 /// A Raft log entry.
-#[since(version = "0.10.0", change = "from `Entry<C>` to `Entry<CLID, D, NID, N>`")]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[since(
+    version = "0.10.0",
+    change = "from `Entry<C>` to `Entry<CLID, D, NID, N>`"
+)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct Entry<CLID, D, NID, N>
 where
     CLID: RaftCommittedLeaderId,
@@ -52,7 +59,10 @@ where
     N: Node,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Entry").field("log_id", &self.log_id).field("payload", &self.payload).finish()
+        f.debug_struct("Entry")
+            .field("log_id", &self.log_id)
+            .field("payload", &self.payload)
+            .finish()
     }
 }
 

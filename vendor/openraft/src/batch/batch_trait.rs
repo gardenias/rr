@@ -7,7 +7,11 @@ use crate::OptionalSend;
 /// The default implementation is [`InlineBatch`](`super::InlineBatch`),
 /// backed by `SmallVec<[T; 1]>`.
 pub trait Batch<T>:
-    AsRef<[T]> + Extend<T> + IntoIterator<Item = T, IntoIter: OptionalSend> + FromIterator<T> + OptionalSend
+    AsRef<[T]>
+    + Extend<T>
+    + IntoIterator<Item = T, IntoIter: OptionalSend>
+    + FromIterator<T>
+    + OptionalSend
 {
     /// Creates a `Batch` from any iterable.
     fn of(items: impl IntoIterator<Item = T>) -> Self {
@@ -30,5 +34,11 @@ pub trait Batch<T>:
     }
 }
 
-impl<T, B> Batch<T> for B where B: AsRef<[T]> + Extend<T> + IntoIterator<Item = T, IntoIter: OptionalSend> + FromIterator<T> + OptionalSend
-{}
+impl<T, B> Batch<T> for B where
+    B: AsRef<[T]>
+        + Extend<T>
+        + IntoIterator<Item = T, IntoIter: OptionalSend>
+        + FromIterator<T>
+        + OptionalSend
+{
+}

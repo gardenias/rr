@@ -9,8 +9,7 @@ use crate::engine::time_state;
 use crate::type_config::alias::AsyncRuntimeOf;
 
 /// Config for Engine
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EngineConfig<C: RaftTypeConfig> {
     /// The id of this node.
     pub(crate) id: C::NodeId,
@@ -38,7 +37,8 @@ pub(crate) struct EngineConfig<C: RaftTypeConfig> {
 }
 
 impl<C> EngineConfig<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(id: C::NodeId, config: &Config) -> Self {
         let mut this = Self {
@@ -79,8 +79,8 @@ where C: RaftTypeConfig
 
     /// Sample the timeout that gates the next election campaign.
     pub(crate) fn resample_election_timeout(&mut self) {
-        let election_timeout =
-            AsyncRuntimeOf::<C>::thread_rng().random_range(self.election_timeout_min..self.election_timeout_max);
+        let election_timeout = AsyncRuntimeOf::<C>::thread_rng()
+            .random_range(self.election_timeout_min..self.election_timeout_max);
         self.timer_config.election_timeout = Duration::from_millis(election_timeout);
     }
 }

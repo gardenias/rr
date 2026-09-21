@@ -126,7 +126,10 @@ where
     ///
     /// The candidate `last_log_id` is initialized with the attributes of Acceptor part:
     /// [`RaftState`]
-    pub(crate) fn new_candidate(&mut self, vote: VoteOf<C>) -> &mut Candidate<C, LeaderQuorumSet<C>> {
+    pub(crate) fn new_candidate(
+        &mut self,
+        vote: VoteOf<C>,
+    ) -> &mut Candidate<C, LeaderQuorumSet<C>> {
         let now = C::now();
         let last_log_id = self.state.last_log_id().cloned();
 
@@ -149,7 +152,10 @@ where
     /// Like [`new_candidate`](Self::new_candidate), but for the Pre-Vote round: the resulting
     /// quorum tracker lives in [`pre_candidate`](Self::pre_candidate) and `vote` is only a
     /// hypothetical next-term vote that is never persisted.
-    pub(crate) fn new_pre_candidate(&mut self, vote: VoteOf<C>) -> &mut Candidate<C, LeaderQuorumSet<C>> {
+    pub(crate) fn new_pre_candidate(
+        &mut self,
+        vote: VoteOf<C>,
+    ) -> &mut Candidate<C, LeaderQuorumSet<C>> {
         let now = C::now();
         let last_log_id = self.state.last_log_id().cloned();
 
@@ -175,7 +181,10 @@ where
             "startup begin: state: {:?}, is_leader: {}, is_voter: {}",
             self.state,
             self.state.is_leader(&self.config.id),
-            self.state.membership_state.effective().is_voter(&self.config.id)
+            self.state
+                .membership_state
+                .effective()
+                .is_voter(&self.config.id)
         );
 
         // TODO: replace all the following codes with one update_internal_server_state;
@@ -196,12 +205,19 @@ where
                 // so any vote accepted later is also greater than the stored one and
                 // the next `SaveVote` automatically heals the divergence.
                 let uncommitted: VoteOf<C> = self.state.vote.to_non_committed().into_vote();
-                self.state.vote.update(C::now(), Duration::default(), uncommitted);
+                self.state
+                    .vote
+                    .update(C::now(), Duration::default(), uncommitted);
                 debug_assert!(!self.state.is_leader(&self.config.id))
             }
         }
 
-        let server_state = if self.state.membership_state.effective().is_voter(&self.config.id) {
+        let server_state = if self
+            .state
+            .membership_state
+            .effective()
+            .is_voter(&self.config.id)
+        {
             ServerState::Follower
         } else {
             ServerState::Learner
@@ -229,7 +245,10 @@ where
     ///
     /// [precondition]: crate::docs::cluster_control::cluster_formation#preconditions-for-initialization
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn initialize(&mut self, membership: Membership<C::NodeId, C::Node>) -> Result<(), InitializeError<C>> {
+    pub(crate) fn initialize(
+        &mut self,
+        membership: Membership<C::NodeId, C::Node>,
+    ) -> Result<(), InitializeError<C>> {
         self.check_initialize()?;
 
         self.check_members_contain_me(&membership)?;
@@ -386,7 +405,11 @@ where
                     local_leased_vote.display_lease_info(now)
                 );
 
-                return VoteResponse::new(self.state.vote_ref(), self.state.last_log_id().cloned(), false);
+                return VoteResponse::new(
+                    self.state.vote_ref(),
+                    self.state.last_log_id().cloned(),
+                    false,
+                );
             }
         }
 
@@ -419,18 +442,30 @@ where
 
             // Return the updated vote, this way the candidate knows which vote is granted, in case
             // the candidate's vote is changed after sending the vote request.
-            return VoteResponse::new(self.state.vote_ref(), self.state.last_log_id().cloned(), false);
+            return VoteResponse::new(
+                self.state.vote_ref(),
+                self.state.last_log_id().cloned(),
+                false,
+            );
         }
 
         // Then check vote just as it does for every incoming event.
 
         let res = self.vote_handler().update_vote(&req.vote);
 
-        tracing::info!("handle vote request result: req: {}, result: {:?}", req, res);
+        tracing::info!(
+            "handle vote request result: req: {}, result: {:?}",
+            req,
+            res
+        );
 
         // Return the updated vote, this way the candidate knows which vote is granted, in case
         // the candidate's vote is changed after sending the vote request.
-        VoteResponse::new(self.state.vote_ref(), self.state.last_log_id().cloned(), res.is_ok())
+        VoteResponse::new(
+            self.state.vote_ref(),
+            self.state.last_log_id().cloned(),
+            res.is_ok(),
+        )
     }
 
     /// Handle a Pre-Vote request.
@@ -455,9 +490,15 @@ where
 
         // Respect the leader lease: while an established Leader's lease has not expired, this node
         // would not grant a vote, so it would not grant a Pre-Vote either.
-        if local_leased_vote.is_committed() && !local_leased_vote.is_expired(now, Duration::from_millis(0)) {
+        if local_leased_vote.is_committed()
+            && !local_leased_vote.is_expired(now, Duration::from_millis(0))
+        {
             tracing::info!("reject pre-vote-request: leader lease has not yet expired");
-            return VoteResponse::new(self.state.vote_ref(), self.state.last_log_id().cloned(), false);
+            return VoteResponse::new(
+                self.state.vote_ref(),
+                self.state.last_log_id().cloned(),
+                false,
+            );
         }
 
         // Reject if the candidate's log is behind.
@@ -467,13 +508,21 @@ where
                 req.last_log_id.display(),
                 self.state.last_log_id().display(),
             );
-            return VoteResponse::new(self.state.vote_ref(), self.state.last_log_id().cloned(), false);
+            return VoteResponse::new(
+                self.state.vote_ref(),
+                self.state.last_log_id().cloned(),
+                false,
+            );
         }
 
         // Whether this node *would* grant the vote, compared the same way as a real vote — but
         // without persisting anything. The local vote and term are left untouched.
         let granted = req.vote.as_ref_vote() >= self.state.vote_ref().as_ref_vote();
-        VoteResponse::new(self.state.vote_ref(), self.state.last_log_id().cloned(), granted)
+        VoteResponse::new(
+            self.state.vote_ref(),
+            self.state.last_log_id().cloned(),
+            granted,
+        )
     }
 
     #[tracing::instrument(level = "debug", skip(self, resp))]
@@ -602,7 +651,12 @@ where
     ///
     /// Also clean conflicting entries and update membership state.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn handle_append_entries(&mut self, vote: &VoteOf<C>, segment: LogSegment<C>, tx: AppendEntriesTx<C>) {
+    pub(crate) fn handle_append_entries(
+        &mut self,
+        vote: &VoteOf<C>,
+        segment: LogSegment<C>,
+        tx: AppendEntriesTx<C>,
+    ) {
         tracing::debug!(
             "{}: vote: {}, segment: {}, my_vote: {}, my_last_log_id: {}",
             func_name!(),
@@ -612,7 +666,8 @@ where
             self.state.last_log_id().display()
         );
 
-        let stream_result: StreamAppendResult<C> = self.append_entries(vote, segment).map_err(Into::into);
+        let stream_result: StreamAppendResult<C> =
+            self.append_entries(vote, segment).map_err(Into::into);
 
         let condition = if stream_result.is_ok() {
             Some(Condition::IOFlushed {
@@ -656,9 +711,11 @@ where
     ) {
         tracing::info!("{}: vote: {}, snapshot: {}", func_name!(), vote, snapshot);
 
-        let vote_res = self.vote_handler().accept_vote(&vote, tx, |state, _rejected| {
-            SnapshotResponse::new(state.vote_ref().clone())
-        });
+        let vote_res = self
+            .vote_handler()
+            .accept_vote(&vote, tx, |state, _rejected| {
+                SnapshotResponse::new(state.vote_ref().clone())
+            });
 
         let Some(tx) = vote_res else {
             return;
@@ -740,7 +797,10 @@ where
         // a newer snapshot may have been installed from the leader,
         // advancing the snapshot progress. Only update if still behind.
         if let Some(last_log_id) = meta.last_log_id.clone() {
-            self.state.io_state_mut().snapshot.try_update_all(last_log_id);
+            self.state
+                .io_state_mut()
+                .snapshot
+                .try_update_all(last_log_id);
         }
 
         let mut h = self.snapshot_handler();
@@ -763,7 +823,11 @@ where
     /// other tasks are using the logs.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn try_purge_log(&mut self) {
-        tracing::debug!("{}: purge_upto: {}", func_name!(), self.state.purge_upto().display());
+        tracing::debug!(
+            "{}: purge_upto: {}",
+            func_name!(),
+            self.state.purge_upto().display()
+        );
 
         if self.leader.is_some() {
             // If it is leading, it must not delete a log that is in use by a replication task.
@@ -848,7 +912,9 @@ where
 
         // Generate Apply command
 
-        if log_progress.submitted().map(|x| x.as_ref_vote()) == log_progress.accepted().map(|x| x.as_ref_vote()) {
+        if log_progress.submitted().map(|x| x.as_ref_vote())
+            == log_progress.accepted().map(|x| x.as_ref_vote())
+        {
             // Only apply committed entries when submitted and accepted logs are from the same leader.
             //
             // This ensures submitted logs won't be overridden by pending commands in the queue.
@@ -866,7 +932,9 @@ where
             let apply_submitted = apply_progress.submitted();
             let apply_accepted = apply_progress.accepted();
 
-            let log_submitted = log_progress.submitted().and_then(|io_id| io_id.last_log_id());
+            let log_submitted = log_progress
+                .submitted()
+                .and_then(|io_id| io_id.last_log_id());
 
             let applicable_upto = log_submitted.min(apply_accepted);
 
@@ -916,12 +984,15 @@ where
         let _res = self.vote_handler().update_vote(&vote.clone().into_vote());
         debug_assert!(_res.is_ok(), "commit vote cannot fail but: {:?}", _res);
 
-        self.state.accept_log_io(IOId::new_log_io(vote, last_log_id));
+        self.state
+            .accept_log_io(IOId::new_log_io(vote, last_log_id));
 
         // No need to submit UpdateIOProgress command,
         // IO progress is updated by the new blank log
 
-        self.try_leader_handler().unwrap().leader_append_entries([EntryPayload::Blank]);
+        self.try_leader_handler()
+            .unwrap()
+            .leader_append_entries([EntryPayload::Blank]);
     }
 
     /// Check if a raft node is in a state that allows to initialize.
@@ -947,7 +1018,10 @@ where
 
     /// When initialized, the node that accept initialize request has to be a member of the initial
     /// config.
-    fn check_members_contain_me(&self, m: &Membership<C::NodeId, C::Node>) -> Result<(), NotInMembers<C>> {
+    fn check_members_contain_me(
+        &self,
+        m: &Membership<C::NodeId, C::Node>,
+    ) -> Result<(), NotInMembers<C>> {
         if !m.is_voter(&self.config.id) {
             let e = NotInMembers {
                 node_id: self.config.id.clone(),
@@ -1002,7 +1076,9 @@ where
         SnapshotHandler::new(&mut self.state, &mut self.output)
     }
 
-    pub(crate) fn try_leader_handler(&mut self) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
+    pub(crate) fn try_leader_handler(
+        &mut self,
+    ) -> Result<LeaderHandler<'_, C, SM>, ForwardToLeader<C>> {
         let leader = match self.leader.as_mut() {
             None => {
                 tracing::debug!("not a leader, server_state: {:?}", self.state.server_state);
@@ -1030,7 +1106,8 @@ where
     pub(crate) fn try_replication_handler(&mut self) -> Option<ReplicationHandler<'_, C, SM>> {
         let leader = self.leader.as_mut()?;
 
-        let rh = ReplicationHandler::new(&mut self.config, leader, &mut self.state, &mut self.output);
+        let rh =
+            ReplicationHandler::new(&mut self.config, leader, &mut self.state, &mut self.output);
 
         Some(rh)
     }
@@ -1092,7 +1169,9 @@ mod engine_testing {
         /// Create a Leader state just for testing purpose only,
         /// without initializing related resource,
         /// such as setting up replication, propose blank log.
-        pub(crate) fn testing_new_leader(&mut self) -> &mut crate::proposer::Leader<C, LeaderQuorumSet<C>> {
+        pub(crate) fn testing_new_leader(
+            &mut self,
+        ) -> &mut crate::proposer::Leader<C, LeaderQuorumSet<C>> {
             let leader = self.state.new_leader();
             self.leader = Some(Box::new(leader));
             self.leader.as_mut().unwrap()
@@ -1100,7 +1179,8 @@ mod engine_testing {
     }
 
     impl<C> Engine<C, ()>
-    where C: RaftTypeConfig
+    where
+        C: RaftTypeConfig,
     {
         /// Create a default Engine for testing, with SM pinned to ().
         pub(crate) fn testing_default(id: C::NodeId) -> Self {

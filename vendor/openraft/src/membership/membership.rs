@@ -23,7 +23,11 @@ use crate::quorum::FindCoherent;
     change = "replaced `C: RaftTypeConfig` with `NID: NodeId, N: Node`"
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct Membership<NID, N>
 where
     NID: NodeId,
@@ -121,7 +125,9 @@ where
     /// The `nodes` implements [`IntoNodes`] thus it can be `BTreeMap<NodeId, Node>` or
     /// `HashMap<NodeId,Node>` including all Voter and Learner nodes.
     pub fn new<T>(config: Vec<BTreeSet<NID>>, nodes: T) -> Result<Self, MembershipError<NID>>
-    where T: IntoNodes<NID, N> {
+    where
+        T: IntoNodes<NID, N>,
+    {
         let m = Membership {
             configs: config,
             nodes: nodes.into_nodes(),
@@ -145,11 +151,22 @@ where
         T: IntoIterator<Item = NID>,
         N: Default,
     {
-        let voter_nodes = config.iter().flatten().cloned().map(|x| (x, N::default())).collect::<BTreeMap<_, _>>();
+        let voter_nodes = config
+            .iter()
+            .flatten()
+            .cloned()
+            .map(|x| (x, N::default()))
+            .collect::<BTreeMap<_, _>>();
 
-        let nodes = Self::extend_nodes(nodes.into_iter().map(|x| (x, N::default())).collect(), &voter_nodes);
+        let nodes = Self::extend_nodes(
+            nodes.into_iter().map(|x| (x, N::default())).collect(),
+            &voter_nodes,
+        );
 
-        Membership { configs: config, nodes }
+        Membership {
+            configs: config,
+            nodes,
+        }
     }
 
     /// Returns reference to the joint config.
@@ -175,7 +192,12 @@ where
 
     /// Returns an Iterator of all voter node ids. Learners are not included.
     pub fn voter_ids(&self) -> impl Iterator<Item = NID> {
-        self.configs.iter().flatten().cloned().collect::<BTreeSet<_>>().into_iter()
+        self.configs
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
     }
 
     /// Returns an Iterator of all learner node ids. Voters are not included.
@@ -218,7 +240,9 @@ where
     /// value `Node::default()` if a voter id is not in `nodes`. Thus, it may create an invalid
     /// instance.
     pub(crate) fn new_unchecked<T>(configs: Vec<BTreeSet<NID>>, nodes: T) -> Self
-    where T: IntoNodes<NID, N> {
+    where
+        T: IntoNodes<NID, N>,
+    {
         let nodes = nodes.into_nodes();
         Membership { configs, nodes }
     }
@@ -245,7 +269,8 @@ where
     /// - Every voter has a corresponding Node.
     pub(crate) fn ensure_valid(&self) -> Result<(), MembershipError<NID>> {
         self.ensure_non_empty_config()?;
-        self.ensure_voter_nodes().map_err(|nid| NodeNotFound::new(nid, Operation::None))?;
+        self.ensure_voter_nodes()
+            .map_err(|nid| NodeNotFound::new(nid, Operation::None))?;
         Ok(())
     }
 
@@ -303,7 +328,12 @@ where
         let mut nodes = self.nodes.clone();
 
         if !retain {
-            let old_voter_ids = self.configs.iter().flatten().cloned().collect::<BTreeSet<_>>();
+            let old_voter_ids = self
+                .configs
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let new_voter_ids = config.iter().flatten().cloned().collect::<BTreeSet<_>>();
 
             for node_id in old_voter_ids.difference(&new_voter_ids) {
@@ -320,7 +350,11 @@ where
     ///
     /// `retain` specifies whether to retain the removed voters as learners, i.e., nodes that
     /// continue to receive log replication from the leader.
-    pub(crate) fn change(mut self, change: ChangeMembers<NID, N>, retain: bool) -> Result<Self, MembershipError<NID>> {
+    pub(crate) fn change(
+        mut self,
+        change: ChangeMembers<NID, N>,
+        retain: bool,
+    ) -> Result<Self, MembershipError<NID>> {
         tracing::debug!("{}: change: {:?}", func_name!(), change);
 
         let Membership { mut configs, nodes } = self.clone().compute_target_membership(change);
@@ -354,7 +388,9 @@ where
 
         // `None` means the change does not touch the voter set, only `nodes`.
         let new_voter_ids: Option<BTreeSet<NID>> = match change {
-            ChangeMembers::AddVoterIds(add_voter_ids) => Some(last.union(&add_voter_ids).cloned().collect()),
+            ChangeMembers::AddVoterIds(add_voter_ids) => {
+                Some(last.union(&add_voter_ids).cloned().collect())
+            }
             ChangeMembers::AddVoters(add_voters) => {
                 // Add nodes without overriding existent
                 self.nodes = Self::extend_nodes(self.nodes, &add_voters);
@@ -439,7 +475,8 @@ mod tests {
         // Add: no such learner
         {
             let res = m().change(ChangeMembers::AddVoterIds(btreeset! {4}), true);
-            let err: ChangeMembershipErrorOf<crate::engine::testing::UTConfig> = res.unwrap_err().into();
+            let err: ChangeMembershipErrorOf<crate::engine::testing::UTConfig> =
+                res.unwrap_err().into();
             assert_eq!(
                 ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: 4 }),
                 err
@@ -485,7 +522,10 @@ mod tests {
         // Remove: become empty
         {
             let res = m().change(ChangeMembers::RemoveVoters(btreeset! {1,2}), true);
-            assert_eq!(Err(MembershipError::EmptyMembership(EmptyMembership {})), res);
+            assert_eq!(
+                Err(MembershipError::EmptyMembership(EmptyMembership {})),
+                res
+            );
         }
 
         // Remove: OK retain
@@ -596,7 +636,8 @@ mod tests {
         // RemoveNodes: cannot remove node for voter
         {
             let res = m().change(ChangeMembers::RemoveNodes(btreeset! {2}), false);
-            let err: ChangeMembershipErrorOf<crate::engine::testing::UTConfig> = res.unwrap_err().into();
+            let err: ChangeMembershipErrorOf<crate::engine::testing::UTConfig> =
+                res.unwrap_err().into();
             assert_eq!(
                 ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: 2 }),
                 err
@@ -617,7 +658,10 @@ mod tests {
 
         // ReplaceAllNodes: Ok
         {
-            let res = m().change(ChangeMembers::ReplaceAllNodes(btreemap! {1=>(),2=>(),4=>()}), false);
+            let res = m().change(
+                ChangeMembers::ReplaceAllNodes(btreemap! {1=>(),2=>(),4=>()}),
+                false,
+            );
             assert_eq!(
                 Ok(Membership::<u64, ()> {
                     configs: vec![btreeset! {1,2}],
@@ -650,17 +694,23 @@ mod tests {
 
         let step1 = m().change(rm_2_add_5(), false)?;
 
-        assert_eq!(step1, Membership::<u64, ()> {
-            configs: vec![btreeset! {1,2}, btreeset! {1,5}],
-            nodes: btreemap! {1=>(),2=>(),3=>(),5=>()}
-        });
+        assert_eq!(
+            step1,
+            Membership::<u64, ()> {
+                configs: vec![btreeset! {1,2}, btreeset! {1,5}],
+                nodes: btreemap! {1=>(),2=>(),3=>(),5=>()}
+            }
+        );
 
         let step2 = step1.change(rm_2_add_5(), false)?;
 
-        assert_eq!(step2, Membership::<u64, ()> {
-            configs: vec![btreeset! {1,5}],
-            nodes: btreemap! {1=>(),3=>(), 5=>()}
-        });
+        assert_eq!(
+            step2,
+            Membership::<u64, ()> {
+                configs: vec![btreeset! {1,5}],
+                nodes: btreemap! {1=>(),3=>(), 5=>()}
+            }
+        );
 
         Ok(())
     }

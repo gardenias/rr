@@ -52,8 +52,7 @@ use crate::vote::RaftCommittedLeaderId;
     version = "0.10.0",
     change = "from `MembershipState<C>` to `MembershipState<CLID, NID, N>`"
 )]
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MembershipState<CLID, NID, N>
 where
     CLID: RaftCommittedLeaderId,
@@ -105,7 +104,10 @@ where
         committed: Arc<StoredMembership<CLID, NID, N>>,
         effective: Arc<StoredMembership<CLID, NID, N>>,
     ) -> Self {
-        Self { committed, effective }
+        Self {
+            committed,
+            effective,
+        }
     }
 
     /// Return true if the given node id is either a voter or a learner.
@@ -271,7 +273,10 @@ where
 {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         validit::less_equal!(self.committed.log_id(), self.effective.log_id());
-        validit::less_equal!(self.committed.log_id().index(), self.effective.log_id().index());
+        validit::less_equal!(
+            self.committed.log_id().index(),
+            self.effective.log_id().index()
+        );
         Ok(())
     }
 }

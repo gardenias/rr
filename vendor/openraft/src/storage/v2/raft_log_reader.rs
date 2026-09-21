@@ -27,7 +27,8 @@ use crate::vote::RaftVote;
 /// - An I/O error occurred during log reading
 #[derive(Debug, thiserror::Error)]
 pub enum LeaderBoundedStreamError<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The leader has changed, making the stream invalid.
     #[error(transparent)]
@@ -59,7 +60,8 @@ pub type EntriesStreamResult<C> = Result<EntryOf<C>, io::Error>;
 /// [`RaftLogStorage::save_vote`]: crate::storage::RaftLogStorage::save_vote
 #[add_async_trait]
 pub trait RaftLogReader<C>: OptionalSend + OptionalSync + 'static
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Read log entries as a stream, conditional on vote state.
     ///
@@ -118,13 +120,18 @@ where C: RaftTypeConfig
             let vote = self.read_vote().await?;
 
             let Some(vote) = vote else {
-                return Ok::<BoxStream<_>, _>(Box::pin(stream::iter([Err(changed_err(leader, None))])));
+                return Ok::<BoxStream<_>, _>(Box::pin(stream::iter([Err(changed_err(
+                    leader, None,
+                ))])));
             };
 
             if vote.leader_id() == &leader && vote.is_committed() {
                 // valid vote, continue
             } else {
-                return Ok::<BoxStream<_>, _>(Box::pin(stream::iter([Err(changed_err(leader, Some(vote)))])));
+                return Ok::<BoxStream<_>, _>(Box::pin(stream::iter([Err(changed_err(
+                    leader,
+                    Some(vote),
+                ))])));
             }
 
             let entries = self.try_get_log_entries(range).await?;
@@ -133,7 +140,10 @@ where C: RaftTypeConfig
 
             if current_vote.as_ref() != Some(&vote) {
                 // Vote has changed, return empty stream
-                return Ok::<BoxStream<_>, _>(Box::pin(stream::iter([Err(changed_err(leader, current_vote))])));
+                return Ok::<BoxStream<_>, _>(Box::pin(stream::iter([Err(changed_err(
+                    leader,
+                    current_vote,
+                ))])));
             }
 
             // Vote unchanged
@@ -143,7 +153,9 @@ where C: RaftTypeConfig
 
         match fu.await {
             Ok(strm) => strm,
-            Err(io_err) => Box::pin(stream::iter([Err(LeaderBoundedStreamError::IoError(io_err))])),
+            Err(io_err) => Box::pin(stream::iter([Err(LeaderBoundedStreamError::IoError(
+                io_err,
+            ))])),
         }
     }
 
@@ -172,8 +184,13 @@ where C: RaftTypeConfig
     /// converts them to a stream. Applications may implement this for better performance, such as
     /// streaming entries incrementally.
     #[since(version = "0.10.0")]
-    async fn entries_stream<RB>(&mut self, range: RB) -> impl Stream<Item = EntriesStreamResult<C>> + OptionalSend
-    where RB: RangeBounds<u64> + Clone + Debug + OptionalSend {
+    async fn entries_stream<RB>(
+        &mut self,
+        range: RB,
+    ) -> impl Stream<Item = EntriesStreamResult<C>> + OptionalSend
+    where
+        RB: RangeBounds<u64> + Clone + Debug + OptionalSend,
+    {
         use futures_util::stream;
 
         let fu = async move {
@@ -245,7 +262,11 @@ where C: RaftTypeConfig
     ///
     /// The default implementation just returns the full range of log entries.
     #[since(version = "0.10.0")]
-    async fn limited_get_log_entries(&mut self, start: u64, end: u64) -> Result<Vec<C::Entry>, io::Error> {
+    async fn limited_get_log_entries(
+        &mut self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<C::Entry>, io::Error> {
         self.try_get_log_entries(start..end).await
     }
 
@@ -287,7 +308,10 @@ where C: RaftTypeConfig
     ///
     /// [`RaftLogStorage`]: crate::storage::RaftLogStorage
     #[since(version = "0.10.0")]
-    async fn get_key_log_ids(&mut self, range: RangeInclusive<LogIdOf<C>>) -> Result<Vec<LogIdOf<C>>, io::Error> {
+    async fn get_key_log_ids(
+        &mut self,
+        range: RangeInclusive<LogIdOf<C>>,
+    ) -> Result<Vec<LogIdOf<C>>, io::Error> {
         LogIdList::<CommittedLeaderIdOf<C>>::get_key_log_ids(range, self)
             .await
             .map_err(|e| io::Error::other(e.to_string()))

@@ -27,7 +27,10 @@ fn test_config_defaults() {
 #[test]
 fn test_removed_leader_step_down_serde_default() -> anyhow::Result<()> {
     let mut value = serde_json::to_value(Config::default())?;
-    value.as_object_mut().unwrap().remove("removed_leader_step_down");
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("removed_leader_step_down");
 
     let cfg: Config = serde_json::from_value(value)?;
     assert_eq!(StepDownPolicy::After(150), cfg.removed_leader_step_down);
@@ -45,7 +48,13 @@ fn test_invalid_election_timeout_config_produces_expected_error() {
 
     let res = config.validate();
     let err = res.unwrap_err();
-    assert_eq!(err, ConfigError::ElectionTimeout { min: 1000, max: 700 });
+    assert_eq!(
+        err,
+        ConfigError::ElectionTimeout {
+            min: 1000,
+            max: 700
+        }
+    );
 
     let config = Config {
         election_timeout_min: 1000,
@@ -56,10 +65,13 @@ fn test_invalid_election_timeout_config_produces_expected_error() {
 
     let res = config.validate();
     let err = res.unwrap_err();
-    assert_eq!(err, ConfigError::ElectionTimeoutLTHeartBeat {
-        election_timeout_min: 1000,
-        heartbeat_interval: 1500
-    });
+    assert_eq!(
+        err,
+        ConfigError::ElectionTimeoutLTHeartBeat {
+            election_timeout_min: 1000,
+            heartbeat_interval: 1500
+        }
+    );
 }
 
 #[test]
@@ -77,11 +89,14 @@ fn test_invalid_heartbeat_min_interval_produces_expected_error() {
 
     let res = config.validate();
     let err = res.unwrap_err();
-    assert_eq!(err, ConfigError::HeartbeatMinIntervalTooLarge {
-        election_timeout_min: 1000,
-        heartbeat_interval: 500,
-        heartbeat_min_interval: 399,
-    });
+    assert_eq!(
+        err,
+        ConfigError::HeartbeatMinIntervalTooLarge {
+            election_timeout_min: 1000,
+            heartbeat_interval: 500,
+            heartbeat_min_interval: 399,
+        }
+    );
 
     let config = Config {
         election_timeout_min: 1000,

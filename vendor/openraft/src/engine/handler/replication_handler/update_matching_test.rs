@@ -36,8 +36,14 @@ fn eng() -> Engine<UTConfig> {
         Vote::new_committed(2, 1),
     );
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m123())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m123(),
+        )),
     );
 
     eng
@@ -49,7 +55,8 @@ fn test_update_matching_no_leader() -> anyhow::Result<()> {
 
     let res = std::panic::catch_unwind(move || {
         let mut eng = eng();
-        eng.replication_handler().update_matching(3, Some(log_id(1, 1, 2)), None);
+        eng.replication_handler()
+            .update_matching(3, Some(log_id(1, 1, 2)), None);
     });
     tracing::info!("res: {:?}", res);
     assert!(res.is_err());
@@ -68,7 +75,10 @@ fn test_update_matching() -> anyhow::Result<()> {
         let inflight = Inflight::logs(prev, Some(log_id(2, 1, 4)), InflightId::new(1));
         assert_eq!(
             Some(&inflight),
-            rh.leader.progress.update_data_with(&id, |data| data.inflight = inflight).map(|data| &data.inflight)
+            rh.leader
+                .progress
+                .update_data_with(&id, |data| data.inflight = inflight)
+                .map(|data| &data.inflight)
         );
     };
 
@@ -102,7 +112,10 @@ fn test_update_matching() -> anyhow::Result<()> {
             },],
             rh.output.take_commands()
         );
-        assert_eq!(Some(&log_id(2, 1, 1)), rh.state.io_state.apply_progress.accepted());
+        assert_eq!(
+            Some(&log_id(2, 1, 1)),
+            rh.state.io_state.apply_progress.accepted()
+        );
         assert_eq!(None, rh.state.io_state.apply_progress.submitted());
     }
 
@@ -117,7 +130,10 @@ fn test_update_matching() -> anyhow::Result<()> {
             },],
             rh.output.take_commands()
         );
-        assert_eq!(Some(&log_id(2, 1, 3)), rh.state.io_state.apply_progress.accepted());
+        assert_eq!(
+            Some(&log_id(2, 1, 3)),
+            rh.state.io_state.apply_progress.accepted()
+        );
         assert_eq!(None, rh.state.io_state.apply_progress.submitted());
     }
 

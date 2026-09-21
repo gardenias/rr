@@ -52,13 +52,17 @@ impl RaftLogReader<UTConfig> for MockLogReader {
         for i in start..end {
             if let Some(log_id) = self.logs.get(&i) {
                 // Create a blank entry with this log_id
-                entries.push(crate::type_config::alias::EntryOf::<UTConfig>::new_blank(*log_id));
+                entries.push(crate::type_config::alias::EntryOf::<UTConfig>::new_blank(
+                    *log_id,
+                ));
             }
         }
         Ok(entries)
     }
 
-    async fn read_vote(&mut self) -> Result<Option<<UTConfig as crate::RaftTypeConfig>::Vote>, std::io::Error> {
+    async fn read_vote(
+        &mut self,
+    ) -> Result<Option<<UTConfig as crate::RaftTypeConfig>::Vote>, std::io::Error> {
         Ok(None)
     }
 }
@@ -121,7 +125,11 @@ fn test_log_id_list_extend() -> anyhow::Result<()> {
         log_id(1, 1, 3), //
         log_id(1, 1, 4),
     ]);
-    assert_eq!(vec![log_id(1, 1, 4)], ids.key_log_ids(), "same leader as the last");
+    assert_eq!(
+        vec![log_id(1, 1, 4)],
+        ids.key_log_ids(),
+        "same leader as the last"
+    );
 
     // Extend 3 log id with different leader id.
     // First one (1,1,5) same leader -> replace: [log_id(1,1,5)]
@@ -199,12 +207,15 @@ fn test_log_id_list_truncate() -> anyhow::Result<()> {
     // - Leader 6: indices 6-8
     // - Leader 9: indices 9-11
     let make_ids = || {
-        LogIdList::<UtClid>::new(None, vec![
-            log_id(2, 1, 2),  // last of leader 2
-            log_id(3, 1, 5),  // last of leader 3
-            log_id(6, 1, 8),  // last of leader 6
-            log_id(9, 1, 11), // last of leader 9
-        ])
+        LogIdList::<UtClid>::new(
+            None,
+            vec![
+                log_id(2, 1, 2),  // last of leader 2
+                log_id(3, 1, 5),  // last of leader 3
+                log_id(6, 1, 8),  // last of leader 6
+                log_id(9, 1, 11), // last of leader 9
+            ],
+        )
     };
 
     // truncate(at) removes logs from index `at` onwards, keeps 0..(at-1)
@@ -219,30 +230,42 @@ fn test_log_id_list_truncate() -> anyhow::Result<()> {
         (7, vec![log_id(2, 1, 2), log_id(3, 1, 5), log_id(6, 1, 6)]), // keep 0-6
         (8, vec![log_id(2, 1, 2), log_id(3, 1, 5), log_id(6, 1, 7)]), // keep 0-7
         (9, vec![log_id(2, 1, 2), log_id(3, 1, 5), log_id(6, 1, 8)]), // keep 0-8
-        (10, vec![
-            log_id(2, 1, 2),
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 9),
-        ]), // keep 0-9
-        (11, vec![
-            log_id(2, 1, 2),
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 10),
-        ]), // keep 0-10
-        (12, vec![
-            log_id(2, 1, 2),
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]), // keep all
-        (13, vec![
-            log_id(2, 1, 2),
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]), // keep all
+        (
+            10,
+            vec![
+                log_id(2, 1, 2),
+                log_id(3, 1, 5),
+                log_id(6, 1, 8),
+                log_id(9, 1, 9),
+            ],
+        ), // keep 0-9
+        (
+            11,
+            vec![
+                log_id(2, 1, 2),
+                log_id(3, 1, 5),
+                log_id(6, 1, 8),
+                log_id(9, 1, 10),
+            ],
+        ), // keep 0-10
+        (
+            12,
+            vec![
+                log_id(2, 1, 2),
+                log_id(3, 1, 5),
+                log_id(6, 1, 8),
+                log_id(9, 1, 11),
+            ],
+        ), // keep all
+        (
+            13,
+            vec![
+                log_id(2, 1, 2),
+                log_id(3, 1, 5),
+                log_id(6, 1, 8),
+                log_id(9, 1, 11),
+            ],
+        ), // keep all
     ];
 
     for (at, want) in cases {
@@ -272,59 +295,81 @@ fn test_log_id_list_purge() -> anyhow::Result<()> {
     // - Leader 6: indices 6-8
     // - Leader 9: indices 9-11
     let make_ids = || {
-        LogIdList::<UtClid>::new(None, vec![
-            log_id(2, 1, 2),  // last of leader 2
-            log_id(3, 1, 5),  // last of leader 3
-            log_id(6, 1, 8),  // last of leader 6
-            log_id(9, 1, 11), // last of leader 9
-        ])
+        LogIdList::<UtClid>::new(
+            None,
+            vec![
+                log_id(2, 1, 2),  // last of leader 2
+                log_id(3, 1, 5),  // last of leader 3
+                log_id(6, 1, 8),  // last of leader 6
+                log_id(9, 1, 11), // last of leader 9
+            ],
+        )
     };
 
     // Test cases: (purge_upto, expected_purged, expected_key_log_ids)
     let cases: Vec<(_, Option<_>, Vec<_>)> = vec![
         // Purge before first log - still sets purged field
-        (log_id(2, 1, 1), Some(log_id(2, 1, 1)), vec![
-            log_id(2, 1, 2),
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]),
+        (
+            log_id(2, 1, 1),
+            Some(log_id(2, 1, 1)),
+            vec![
+                log_id(2, 1, 2),
+                log_id(3, 1, 5),
+                log_id(6, 1, 8),
+                log_id(9, 1, 11),
+            ],
+        ),
         // Purge exactly at first entry (index 2, leader 2's last)
-        (log_id(2, 1, 2), Some(log_id(2, 1, 2)), vec![
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]),
+        (
+            log_id(2, 1, 2),
+            Some(log_id(2, 1, 2)),
+            vec![log_id(3, 1, 5), log_id(6, 1, 8), log_id(9, 1, 11)],
+        ),
         // Purge within leader 3's range
-        (log_id(3, 1, 3), Some(log_id(3, 1, 3)), vec![
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]),
-        (log_id(3, 1, 4), Some(log_id(3, 1, 4)), vec![
-            log_id(3, 1, 5),
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]),
+        (
+            log_id(3, 1, 3),
+            Some(log_id(3, 1, 3)),
+            vec![log_id(3, 1, 5), log_id(6, 1, 8), log_id(9, 1, 11)],
+        ),
+        (
+            log_id(3, 1, 4),
+            Some(log_id(3, 1, 4)),
+            vec![log_id(3, 1, 5), log_id(6, 1, 8), log_id(9, 1, 11)],
+        ),
         // Purge at leader 3's last index
-        (log_id(3, 1, 5), Some(log_id(3, 1, 5)), vec![
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]),
+        (
+            log_id(3, 1, 5),
+            Some(log_id(3, 1, 5)),
+            vec![log_id(6, 1, 8), log_id(9, 1, 11)],
+        ),
         // Purge within leader 6's range
-        (log_id(6, 1, 6), Some(log_id(6, 1, 6)), vec![
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]),
-        (log_id(6, 1, 7), Some(log_id(6, 1, 7)), vec![
-            log_id(6, 1, 8),
-            log_id(9, 1, 11),
-        ]),
+        (
+            log_id(6, 1, 6),
+            Some(log_id(6, 1, 6)),
+            vec![log_id(6, 1, 8), log_id(9, 1, 11)],
+        ),
+        (
+            log_id(6, 1, 7),
+            Some(log_id(6, 1, 7)),
+            vec![log_id(6, 1, 8), log_id(9, 1, 11)],
+        ),
         // Purge at leader 6's last index
-        (log_id(6, 1, 8), Some(log_id(6, 1, 8)), vec![log_id(9, 1, 11)]),
+        (
+            log_id(6, 1, 8),
+            Some(log_id(6, 1, 8)),
+            vec![log_id(9, 1, 11)],
+        ),
         // Purge within leader 9's range
-        (log_id(9, 1, 9), Some(log_id(9, 1, 9)), vec![log_id(9, 1, 11)]),
-        (log_id(9, 1, 10), Some(log_id(9, 1, 10)), vec![log_id(9, 1, 11)]),
+        (
+            log_id(9, 1, 9),
+            Some(log_id(9, 1, 9)),
+            vec![log_id(9, 1, 11)],
+        ),
+        (
+            log_id(9, 1, 10),
+            Some(log_id(9, 1, 10)),
+            vec![log_id(9, 1, 11)],
+        ),
         // Purge at/beyond last log
         (log_id(9, 1, 11), Some(log_id(9, 1, 11)), vec![]),
         (log_id(9, 1, 12), Some(log_id(9, 1, 12)), vec![]),
@@ -369,12 +414,15 @@ fn test_log_id_list_get_log_id() -> anyhow::Result<()> {
     // - Leader 5: indices 6-7 (last at 7)
     // - Leader 7: indices 8-10 (last at 10)
 
-    let ids = LogIdList::<UtClid>::new(None, vec![
-        log_id(1, 1, 2),  // last of leader 1
-        log_id(3, 1, 5),  // last of leader 3
-        log_id(5, 1, 7),  // last of leader 5
-        log_id(7, 1, 10), // last of leader 7
-    ]);
+    let ids = LogIdList::<UtClid>::new(
+        None,
+        vec![
+            log_id(1, 1, 2),  // last of leader 1
+            log_id(3, 1, 5),  // last of leader 3
+            log_id(5, 1, 7),  // last of leader 5
+            log_id(7, 1, 10), // last of leader 7
+        ],
+    );
 
     assert_eq!(Some(log_id(1, 1, 0)), ids.get(0));
     assert_eq!(Some(log_id(1, 1, 1)), ids.get(1));
@@ -403,7 +451,11 @@ fn test_log_id_list_by_last_leader() -> anyhow::Result<()> {
     // First index is purged.index+1 = 0
     let ids = LogIdList::<UtClid>::new(None, [log_id(1, 1, 1)]);
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(1, 1, 0).committed_leader_id(), 0, 1)),
+        Some(LeaderLogIds::new(
+            *log_id(1, 1, 0).committed_leader_id(),
+            0,
+            1
+        )),
         ids.by_last_leader()
     );
 
@@ -414,7 +466,11 @@ fn test_log_id_list_by_last_leader() -> anyhow::Result<()> {
     // by_last_leader returns leader 3's range: first_index = 1+1 = 2, last_index = 3
     let ids = LogIdList::<UtClid>::new(None, [log_id(1, 1, 1), log_id(3, 1, 3)]);
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(3, 1, 0).committed_leader_id(), 2, 3)),
+        Some(LeaderLogIds::new(
+            *log_id(3, 1, 0).committed_leader_id(),
+            2,
+            3
+        )),
         ids.by_last_leader()
     );
 
@@ -423,7 +479,11 @@ fn test_log_id_list_by_last_leader() -> anyhow::Result<()> {
     // Leader 1's range: first_index = 2+1 = 3, last_index = 5
     let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), [log_id(1, 1, 5)]);
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(1, 1, 0).committed_leader_id(), 3, 5)),
+        Some(LeaderLogIds::new(
+            *log_id(1, 1, 0).committed_leader_id(),
+            3,
+            5
+        )),
         ids.by_last_leader()
     );
 
@@ -434,7 +494,11 @@ fn test_log_id_list_by_last_leader() -> anyhow::Result<()> {
     // by_last_leader returns leader 7's range: first_index = 2+1 = 3, last_index = 10
     let ids = LogIdList::<UtClid>::new(None, [log_id(1, 1, 2), log_id(7, 1, 10)]);
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(7, 1, 0).committed_leader_id(), 3, 10)),
+        Some(LeaderLogIds::new(
+            *log_id(7, 1, 0).committed_leader_id(),
+            3,
+            10
+        )),
         ids.by_last_leader()
     );
 
@@ -466,7 +530,10 @@ fn test_log_id_list_last() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 6)), ids.last());
 
     // 2 elements, with purged
-    let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), vec![log_id(1, 1, 5), log_id(2, 1, 8)]);
+    let ids = LogIdList::<UtClid>::new(
+        Some(log_id(1, 1, 2)),
+        vec![log_id(1, 1, 5), log_id(2, 1, 8)],
+    );
     assert_eq!(Some(&log_id(2, 1, 8)), ids.last());
 
     Ok(())
@@ -498,7 +565,10 @@ fn test_log_id_list_first() -> anyhow::Result<()> {
     assert_eq!(Some(log_id(1, 1, 0).to_ref()), ids.first());
 
     // 2 elements, with purged - first index is purged.index + 1 = 3
-    let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), vec![log_id(1, 1, 5), log_id(2, 1, 8)]);
+    let ids = LogIdList::<UtClid>::new(
+        Some(log_id(1, 1, 2)),
+        vec![log_id(1, 1, 5), log_id(2, 1, 8)],
+    );
     assert_eq!(Some(log_id(1, 1, 3).to_ref()), ids.first());
 
     Ok(())
@@ -545,7 +615,10 @@ fn test_log_id_list_get_with_purged() -> anyhow::Result<()> {
     // Setup: purged at 2 (leader 1), key_log_ids = [log_id(1,1,5), log_id(3,1,8)]
     // Logs: leader 1 at 3-5, leader 3 at 6-8
 
-    let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), vec![log_id(1, 1, 5), log_id(3, 1, 8)]);
+    let ids = LogIdList::<UtClid>::new(
+        Some(log_id(1, 1, 2)),
+        vec![log_id(1, 1, 5), log_id(3, 1, 8)],
+    );
 
     // Before purged - None
     assert_eq!(None, ids.get(0));
@@ -576,7 +649,12 @@ fn test_log_id_list_truncate_with_purged() -> anyhow::Result<()> {
     // Setup: purged at 2 (leader 1), key_log_ids = [log_id(1,1,5), log_id(2,1,8)]
     // Logs: purged at 2, leader 1: 3-5, leader 2: 6-8
 
-    let make_ids = || LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), vec![log_id(1, 1, 5), log_id(2, 1, 8)]);
+    let make_ids = || {
+        LogIdList::<UtClid>::new(
+            Some(log_id(1, 1, 2)),
+            vec![log_id(1, 1, 5), log_id(2, 1, 8)],
+        )
+    };
 
     // truncate(3) - keep nothing in key_log_ids (truncate from first available index)
     {
@@ -802,7 +880,11 @@ fn test_log_id_list_by_last_leader_edge_cases() -> anyhow::Result<()> {
     // purged at 5 means the last leader's range is just index 5
     let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 5)), vec![]);
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(1, 1, 0).committed_leader_id(), 5, 5)),
+        Some(LeaderLogIds::new(
+            *log_id(1, 1, 0).committed_leader_id(),
+            5,
+            5
+        )),
         ids.by_last_leader()
     );
 
@@ -810,7 +892,11 @@ fn test_log_id_list_by_last_leader_edge_cases() -> anyhow::Result<()> {
     // purged at 2, leader 1's last at 5 -> range 3-5
     let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), vec![log_id(1, 1, 5)]);
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(1, 1, 0).committed_leader_id(), 3, 5)),
+        Some(LeaderLogIds::new(
+            *log_id(1, 1, 0).committed_leader_id(),
+            3,
+            5
+        )),
         ids.by_last_leader()
     );
 
@@ -818,15 +904,26 @@ fn test_log_id_list_by_last_leader_edge_cases() -> anyhow::Result<()> {
     // purged at 2, leader 2's last at 5 -> range 3-5
     let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), vec![log_id(2, 1, 5)]);
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(2, 1, 0).committed_leader_id(), 3, 5)),
+        Some(LeaderLogIds::new(
+            *log_id(2, 1, 0).committed_leader_id(),
+            3,
+            5
+        )),
         ids.by_last_leader()
     );
 
     // 2 elements, with purged
     // purged at 2, leader 1 at 3-4, leader 2 at 5-7 -> last leader range 5-7
-    let ids = LogIdList::<UtClid>::new(Some(log_id(1, 1, 2)), vec![log_id(1, 1, 4), log_id(2, 1, 7)]);
+    let ids = LogIdList::<UtClid>::new(
+        Some(log_id(1, 1, 2)),
+        vec![log_id(1, 1, 4), log_id(2, 1, 7)],
+    );
     assert_eq!(
-        Some(LeaderLogIds::new(*log_id(2, 1, 0).committed_leader_id(), 5, 7)),
+        Some(LeaderLogIds::new(
+            *log_id(2, 1, 0).committed_leader_id(),
+            5,
+            7
+        )),
         ids.by_last_leader()
     );
 
@@ -840,7 +937,9 @@ fn test_get_key_log_ids_single_log() {
         let logs = vec![log_id(1, 1, 0)];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(1, 1, 0), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(1, 1, 0), &mut reader)
+            .await
+            .unwrap();
 
         assert_eq!(vec![log_id(1, 1, 0)], result);
     });
@@ -855,7 +954,9 @@ fn test_get_key_log_ids_all_same_leader() {
         let logs = vec![log_id(1, 1, 0), log_id(1, 1, 1), log_id(1, 1, 2)];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(1, 1, 2), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(1, 1, 2), &mut reader)
+            .await
+            .unwrap();
 
         assert_eq!(vec![log_id(1, 1, 2)], result);
     });
@@ -869,7 +970,9 @@ fn test_get_key_log_ids_two_adjacent_leaders() {
         let logs = vec![log_id(1, 1, 0), log_id(2, 1, 1)];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 1), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 1), &mut reader)
+            .await
+            .unwrap();
 
         assert_eq!(vec![log_id(1, 1, 0), log_id(2, 1, 1)], result);
     });
@@ -884,7 +987,9 @@ fn test_get_key_log_ids_case_aac() {
         let logs = vec![log_id(1, 1, 0), log_id(1, 1, 1), log_id(2, 1, 2)];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 2), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 2), &mut reader)
+            .await
+            .unwrap();
 
         assert_eq!(vec![log_id(1, 1, 1), log_id(2, 1, 2)], result);
     });
@@ -897,10 +1002,17 @@ fn test_get_key_log_ids_case_acc() {
         // This is the bug case! Must search both halves.
         // Logs: [(1,0), (2,1), (2,2), (2,3)]
         // Expected: [(1,0), (2,3)]
-        let logs = vec![log_id(1, 1, 0), log_id(2, 1, 1), log_id(2, 1, 2), log_id(2, 1, 3)];
+        let logs = vec![
+            log_id(1, 1, 0),
+            log_id(2, 1, 1),
+            log_id(2, 1, 2),
+            log_id(2, 1, 3),
+        ];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 3), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 3), &mut reader)
+            .await
+            .unwrap();
 
         assert_eq!(vec![log_id(1, 1, 0), log_id(2, 1, 3)], result);
     });
@@ -915,9 +1027,14 @@ fn test_get_key_log_ids_case_abc() {
         let logs = vec![log_id(1, 1, 0), log_id(2, 1, 1), log_id(3, 1, 2)];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(3, 1, 2), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(3, 1, 2), &mut reader)
+            .await
+            .unwrap();
 
-        assert_eq!(vec![log_id(1, 1, 0), log_id(2, 1, 1), log_id(3, 1, 2)], result);
+        assert_eq!(
+            vec![log_id(1, 1, 0), log_id(2, 1, 1), log_id(3, 1, 2)],
+            result
+        );
     });
 }
 
@@ -936,7 +1053,9 @@ fn test_get_key_log_ids_many_same_leader() {
         ];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 4), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(2, 1, 4), &mut reader)
+            .await
+            .unwrap();
 
         assert_eq!(vec![log_id(1, 1, 0), log_id(2, 1, 4)], result);
     });
@@ -957,9 +1076,14 @@ fn test_get_key_log_ids_three_leaders() {
         ];
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(3, 1, 5), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(3, 1, 5), &mut reader)
+            .await
+            .unwrap();
 
-        assert_eq!(vec![log_id(1, 1, 0), log_id(2, 1, 3), log_id(3, 1, 5)], result);
+        assert_eq!(
+            vec![log_id(1, 1, 0), log_id(2, 1, 3), log_id(3, 1, 5)],
+            result
+        );
     });
 }
 
@@ -972,7 +1096,9 @@ fn test_get_key_log_ids_long_same_leader() {
         let logs: Vec<_> = (0..10).map(|i| log_id(1, 1, i)).collect();
         let mut reader = MockLogReader::new(logs);
 
-        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(1, 1, 9), &mut reader).await.unwrap();
+        let result = LogIdList::get_key_log_ids(log_id(1, 1, 0)..=log_id(1, 1, 9), &mut reader)
+            .await
+            .unwrap();
 
         assert_eq!(vec![log_id(1, 1, 9)], result);
     });

@@ -55,7 +55,8 @@ pub(crate) type ClientReadTx<C> = ResultSender<C, Linearizer<C>, LinearizableRea
 ///
 /// [`RaftCore`]: crate::core::RaftCore
 pub(crate) enum RaftMsg<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     AppendEntries {
         rpc: AppendEntriesRequest<C>,
@@ -132,7 +133,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RaftMsg<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Returns the name of this message variant.
     pub fn name(&self) -> RaftMsgName {
@@ -154,7 +156,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for RaftMsg<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -174,11 +177,17 @@ where C: RaftTypeConfig
             RaftMsg::Initialize { members, .. } => {
                 write!(f, "Initialize: {}", members.display())
             }
-            RaftMsg::ChangeMembership { changes, retain, .. } => {
+            RaftMsg::ChangeMembership {
+                changes, retain, ..
+            } => {
                 write!(f, "ChangeMembership: {}, retain: {}", changes, retain)
             }
             RaftMsg::WithRaftState { .. } => write!(f, "WithRaftState"),
-            RaftMsg::HandleTransferLeader { from, to, last_log_id } => {
+            RaftMsg::HandleTransferLeader {
+                from,
+                to,
+                last_log_id,
+            } => {
                 write!(
                     f,
                     "TransferLeader: from_leader: vote={}, to: {}, last_log_id: {}",

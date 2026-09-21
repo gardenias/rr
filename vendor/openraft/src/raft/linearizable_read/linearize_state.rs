@@ -24,7 +24,8 @@ use crate::type_config::alias::LogIdOf;
 #[since(version = "0.10.0")]
 #[derive(Debug, Clone)]
 pub struct LinearizeState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The node from which this Linearizer collects the applied log ID.
     node_id: C::NodeId,
@@ -33,7 +34,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for LinearizeState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "LinearizeState[id={}]", self.node_id)?;
@@ -48,9 +50,14 @@ where C: RaftTypeConfig
 }
 
 impl<C> LinearizeState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
-    pub(crate) fn new(node_id: C::NodeId, read_log_id: ReadLogId<C>, applied: Option<LogIdOf<C>>) -> Self {
+    pub(crate) fn new(
+        node_id: C::NodeId,
+        read_log_id: ReadLogId<C>,
+        applied: Option<LogIdOf<C>>,
+    ) -> Self {
         Self {
             node_id,
             read_log_id,
@@ -109,7 +116,8 @@ mod tests {
     #[test]
     fn test_display() {
         let read_log_id = ReadLogId::new(log_id(1, 1, 1), None);
-        let state: LinearizeState<UTConfig> = LinearizeState::new(1, read_log_id, Some(log_id(1, 1, 0)));
+        let state: LinearizeState<UTConfig> =
+            LinearizeState::new(1, read_log_id, Some(log_id(1, 1, 0)));
         assert_eq!(
             format!("{}", state),
             "LinearizeState[id=1]{ read_log_id: T1-N1.1, applied: T1-N1.0 }"

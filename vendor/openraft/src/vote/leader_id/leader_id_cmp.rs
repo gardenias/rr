@@ -13,7 +13,9 @@ impl LeaderIdCompare {
     /// IDs with the same term incomparable (returning None), unless they refer to the same
     /// node.
     pub fn std<LID>(a: &LID, b: &LID) -> Option<Ordering>
-    where LID: RaftLeaderId {
+    where
+        LID: RaftLeaderId,
+    {
         match a.term().cmp(&b.term()) {
             Ordering::Equal => {
                 if a.node_id() == b.node_id() {
@@ -28,7 +30,9 @@ impl LeaderIdCompare {
 
     /// Implements [`PartialOrd`] for LeaderId to allow multiple leaders per term.
     pub fn adv<LID>(a: &LID, b: &LID) -> Option<Ordering>
-    where LID: RaftLeaderId {
+    where
+        LID: RaftLeaderId,
+    {
         let res = (a.term(), a.node_id()).cmp(&(b.term(), b.node_id()));
         Some(res)
     }

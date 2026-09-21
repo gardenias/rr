@@ -15,10 +15,10 @@ use validit::less_equal;
 /// [Log I/O Progress](crate::docs::data::log_io_progress).
 ///
 /// [`LogIOId`]: crate::raft_state::io_state::log_io_id::LogIOId
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IOProgress<T>
-where T: PartialOrd + fmt::Debug
+where
+    T: PartialOrd + fmt::Debug,
 {
     /// The highest I/O operation accepted by RaftCore for execution.
     ///
@@ -40,7 +40,8 @@ where T: PartialOrd + fmt::Debug
 }
 
 impl<T> Validate for IOProgress<T>
-where T: PartialOrd + fmt::Debug
+where
+    T: PartialOrd + fmt::Debug,
 {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         less_equal!(&self.flushed, &self.submitted);
@@ -76,7 +77,9 @@ where
     ///
     /// Used for initialization or snapshot installation to align all IO tracking.
     pub(crate) fn new_synchronized(v: Option<T>, id: impl ToString, name: &'static str) -> Self
-    where T: Clone {
+    where
+        T: Clone,
+    {
         Self {
             accepted: v.clone(),
             submitted: v.clone(),
@@ -143,7 +146,9 @@ where
     /// progress may have already advanced through normal operations while the snapshot was being
     /// built, so we only update cursors that are actually behind.
     pub(crate) fn try_update_all(&mut self, value: T)
-    where T: Clone {
+    where
+        T: Clone,
+    {
         if self.accepted.as_ref() < Some(&value) {
             self.accept(value.clone());
         }

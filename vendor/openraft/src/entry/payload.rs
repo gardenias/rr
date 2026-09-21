@@ -16,7 +16,11 @@ use crate::node::NodeId;
     change = "from `EntryPayload<C: RaftTypeConfig>` to `EntryPayload<D, NID, N>`"
 )]
 #[derive(PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum EntryPayload<D, NID, N>
 where
     D: AppData,
@@ -130,10 +134,9 @@ mod tests {
         let normal = EntryPayload::<u64, u64, ()>::Normal(3);
         assert_eq!(format!("{:?}", normal), "normal:3");
 
-        let membership = EntryPayload::<u64, u64, ()>::Membership(crate::Membership::new_with_defaults(
-            vec![BTreeSet::from([1, 2])],
-            [],
-        ));
+        let membership = EntryPayload::<u64, u64, ()>::Membership(
+            crate::Membership::new_with_defaults(vec![BTreeSet::from([1, 2])], []),
+        );
         assert_eq!(
             format!("{:?}", membership),
             "membership:Membership { configs: [{1, 2}], nodes: {1: (), 2: ()} }"
@@ -148,10 +151,9 @@ mod tests {
         let normal = EntryPayload::<u64, u64, ()>::Normal(3);
         assert_eq!(format!("{}", normal), "normal:3");
 
-        let membership = EntryPayload::<u64, u64, ()>::Membership(crate::Membership::new_with_defaults(
-            vec![BTreeSet::from([1, 2])],
-            [],
-        ));
+        let membership = EntryPayload::<u64, u64, ()>::Membership(
+            crate::Membership::new_with_defaults(vec![BTreeSet::from([1, 2])], []),
+        );
         assert_eq!(
             format!("{}", membership),
             "membership:{voters:[{1:(),2:()}], learners:[]}"

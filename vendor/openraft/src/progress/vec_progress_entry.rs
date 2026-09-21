@@ -24,7 +24,9 @@ pub(crate) trait VecProgressEntry {
 
     /// Return cloned ID and progress value.
     fn id_progress_owned(&self) -> (Self::Id, Self::Progress)
-    where Self::Id: Clone {
+    where
+        Self::Id: Clone,
+    {
         let (id, progress) = self.id_progress();
         (id.clone(), progress.clone())
     }

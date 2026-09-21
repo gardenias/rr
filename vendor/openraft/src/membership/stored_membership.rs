@@ -26,9 +26,12 @@ use crate::vote::RaftCommittedLeaderId;
     change = "from `StoredMembership<C>` to `StoredMembership<CLID, NID, N>`"
 )]
 #[since(version = "0.8.0")]
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct StoredMembership<CLID, NID, N>
 where
     CLID: RaftCommittedLeaderId,
@@ -67,7 +70,10 @@ where
         Self { log_id, membership }
     }
 
-    pub(crate) fn new_arc(log_id: Option<LogId<CLID>>, membership: Membership<NID, N>) -> Arc<Self> {
+    pub(crate) fn new_arc(
+        log_id: Option<LogId<CLID>>,
+        membership: Membership<NID, N>,
+    ) -> Arc<Self> {
         Arc::new(Self::new(log_id, membership))
     }
 
@@ -124,7 +130,12 @@ where
     N: Node,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{{log_id:{}, {}}}", self.log_id.display(), self.membership)
+        write!(
+            f,
+            "{{log_id:{}, {}}}",
+            self.log_id.display(),
+            self.membership
+        )
     }
 }
 

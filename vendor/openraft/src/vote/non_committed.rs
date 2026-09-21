@@ -9,12 +9,15 @@ use crate::vote::ref_vote::RefVote;
 /// Represents a non-committed Vote that has **NOT** been granted by a quorum.
 ///
 /// The inner `Vote`'s attribute `committed` is always set to `false`
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
-#[derive(PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub(crate) struct UncommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     leader_id: LID,
 }
@@ -32,7 +35,8 @@ where
 }
 
 impl<LID> UncommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     pub(crate) fn new(leader_id: LID) -> Self {
         Self { leader_id }
@@ -49,7 +53,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> RaftVote for UncommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     type LeaderId = LID;
 
@@ -67,7 +72,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> fmt::Display for UncommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ref_vote = RefVote::new(&self.leader_id, false);

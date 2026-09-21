@@ -62,7 +62,9 @@ where
                 Command::AppendEntries {
                     committed_vote: next_vote,
                     entries: next_entries,
-                } if next_vote == committed_vote && entries.len() as u64 + next_entries.len() as u64 <= max_entries => {
+                } if next_vote == committed_vote
+                    && entries.len() as u64 + next_entries.len() as u64 <= max_entries =>
+                {
                     n += 1;
                     entries.extend(next_entries);
                 }
@@ -101,7 +103,10 @@ mod tests {
 
     type C = UTConfig;
 
-    fn committed_vote(term: u64, node_id: u64) -> crate::vote::committed::CommittedVote<UTLeaderId> {
+    fn committed_vote(
+        term: u64,
+        node_id: u64,
+    ) -> crate::vote::committed::CommittedVote<UTLeaderId> {
         Vote::<UTLeaderId>::new(term, node_id).to_committed()
     }
 
@@ -138,7 +143,9 @@ mod tests {
     fn test_merge_front_not_append_entries() {
         let config = Config::default();
         let mut output: EngineOutput<C> = EngineOutput::new(8);
-        output.push_command(Command::SaveVote { vote: Vote::new(1, 0) });
+        output.push_command(Command::SaveVote {
+            vote: Vote::new(1, 0),
+        });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1)]),
@@ -207,7 +214,9 @@ mod tests {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 2)]),
         });
-        output.push_command(Command::SaveVote { vote: Vote::new(1, 0) });
+        output.push_command(Command::SaveVote {
+            vote: Vote::new(1, 0),
+        });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
             entries: Batch::of([blank_ent::<UTConfig>(1, 0, 3)]),
@@ -232,7 +241,10 @@ mod tests {
         let mut output: EngineOutput<C> = EngineOutput::new(8);
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),
-            entries: Batch::of([blank_ent::<UTConfig>(1, 0, 1), blank_ent::<UTConfig>(1, 0, 2)]),
+            entries: Batch::of([
+                blank_ent::<UTConfig>(1, 0, 1),
+                blank_ent::<UTConfig>(1, 0, 2),
+            ]),
         });
         output.push_command(Command::AppendEntries {
             committed_vote: committed_vote(1, 0),

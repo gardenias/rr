@@ -17,13 +17,15 @@ use crate::type_config::alias::LogIdOf;
 /// for RTT calculation.
 #[derive(Clone)]
 pub(crate) struct InflightAppendQueue<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     queue: Arc<Mutex<VecDeque<InflightAppend<C>>>>,
 }
 
 impl<C> InflightAppendQueue<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new() -> Self {
         Self {

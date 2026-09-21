@@ -43,7 +43,12 @@ where
     ) -> Result<Membership<NID, N>, ChangeMembershipError<CLID, NID>> {
         self.ensure_committed()?;
 
-        let new_membership = self.state.effective().membership().clone().change(change, retain)?;
+        let new_membership = self
+            .state
+            .effective()
+            .membership()
+            .clone()
+            .change(change, retain)?;
         Ok(new_membership)
     }
 

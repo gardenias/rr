@@ -17,10 +17,10 @@ use crate::type_config::alias::LogIdOf;
 /// If inflight data is non-None, it's waiting for responses from a follower/learner.
 /// The follower/learner responds with either `ack()` or `conflict()` to update the state of
 /// inflight data.
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Inflight<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     None,
 
@@ -54,12 +54,15 @@ where
 }
 
 impl<C> Validate for Inflight<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         match self {
             Inflight::None => Ok(()),
-            Inflight::Logs { log_id_range: r, .. } => r.validate(),
+            Inflight::Logs {
+                log_id_range: r, ..
+            } => r.validate(),
             Inflight::LogsSince { .. } => Ok(()),
             Inflight::Snapshot { .. } => Ok(()),
         }
@@ -67,7 +70,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Display for Inflight<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -79,16 +83,23 @@ where C: RaftTypeConfig
             Inflight::LogsSince { prev, inflight_id } => {
                 write!(f, "LogsSince:{:?}, inflight_id:{}", prev, inflight_id)
             }
-            Inflight::Snapshot { inflight_id } => write!(f, "Snapshot, inflight_id:{}", inflight_id),
+            Inflight::Snapshot { inflight_id } => {
+                write!(f, "Snapshot, inflight_id:{}", inflight_id)
+            }
         }
     }
 }
 
 impl<C> Inflight<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create inflight state for sending logs.
-    pub(crate) fn logs(prev: Option<LogIdOf<C>>, last: Option<LogIdOf<C>>, inflight_id: InflightId) -> Self {
+    pub(crate) fn logs(
+        prev: Option<LogIdOf<C>>,
+        last: Option<LogIdOf<C>>,
+        inflight_id: InflightId,
+    ) -> Self {
         #![allow(clippy::nonminimal_bool)]
         if !(prev < last) {
             Self::None
@@ -125,7 +136,10 @@ where C: RaftTypeConfig
             Inflight::Snapshot { inflight_id: _ } => Inflight::Snapshot {
                 inflight_id: InflightId::new(id),
             },
-            Inflight::LogsSince { prev, inflight_id: _ } => Inflight::LogsSince {
+            Inflight::LogsSince {
+                prev,
+                inflight_id: _,
+            } => Inflight::LogsSince {
                 prev,
                 inflight_id: InflightId::new(id),
             },
@@ -229,7 +243,10 @@ where C: RaftTypeConfig
 
                 unreachable!("sending snapshot should not conflict");
             }
-            Inflight::LogsSince { prev: _, inflight_id } => {
+            Inflight::LogsSince {
+                prev: _,
+                inflight_id,
+            } => {
                 if *inflight_id != from_inflight_id {
                     return;
                 }

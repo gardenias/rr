@@ -41,8 +41,14 @@ fn eng() -> Engine<UTConfig> {
     eng.state.log_ids.append(log_id(1, 1, 1));
     eng.state.log_ids.append(log_id(2, 1, 3));
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )),
     );
     eng.state.server_state = eng.calc_server_state();
     eng
@@ -54,11 +60,14 @@ fn test_follower_append_entries_update_accepted() -> anyhow::Result<()> {
 
     eng.output.clear_commands();
 
-    eng.following_handler().append_entries(Some(log_id(2, 1, 3)), vec![
-        //
-        blank_ent::<UTConfig>(3, 1, 4),
-        blank_ent::<UTConfig>(3, 1, 5),
-    ]);
+    eng.following_handler().append_entries(
+        Some(log_id(2, 1, 3)),
+        vec![
+            //
+            blank_ent::<UTConfig>(3, 1, 4),
+            blank_ent::<UTConfig>(3, 1, 5),
+        ],
+    );
 
     assert_eq!(None, eng.state.log_ids.purged());
     assert_eq!(
@@ -70,16 +79,25 @@ fn test_follower_append_entries_update_accepted() -> anyhow::Result<()> {
         eng.state.log_ids.key_log_ids()
     );
     assert_eq!(
-        Some(&IOId::new_log_io(Vote::new(2, 1).to_committed(), Some(log_id(3, 1, 5)))),
+        Some(&IOId::new_log_io(
+            Vote::new(2, 1).to_committed(),
+            Some(log_id(3, 1, 5))
+        )),
         eng.state.accepted_log_io()
     );
-    assert_eq!(eng.output.take_commands(), vec![
-        //
-        Command::AppendEntries {
-            committed_vote: Vote::new(2, 1).to_committed(),
-            entries: Batch::of([blank_ent::<UTConfig>(3, 1, 4), blank_ent::<UTConfig>(3, 1, 5)]),
-        }
-    ]);
+    assert_eq!(
+        eng.output.take_commands(),
+        vec![
+            //
+            Command::AppendEntries {
+                committed_vote: Vote::new(2, 1).to_committed(),
+                entries: Batch::of([
+                    blank_ent::<UTConfig>(3, 1, 4),
+                    blank_ent::<UTConfig>(3, 1, 5)
+                ]),
+            }
+        ]
+    );
 
     // Update to a new Leader and smaller log id
     {
@@ -89,38 +107,57 @@ fn test_follower_append_entries_update_accepted() -> anyhow::Result<()> {
             Duration::from_millis(500),
             Vote::new_committed(3, 1),
         );
-        eng.following_handler().append_entries(Some(log_id(2, 1, 3)), vec![
-            //
-            blank_ent::<UTConfig>(3, 1, 4),
-        ]);
+        eng.following_handler().append_entries(
+            Some(log_id(2, 1, 3)),
+            vec![
+                //
+                blank_ent::<UTConfig>(3, 1, 4),
+            ],
+        );
         assert_eq!(Some(&log_id(3, 1, 5)), eng.state.last_log_id());
         assert_eq!(
-            Some(&IOId::new_log_io(Vote::new(3, 1).to_committed(), Some(log_id(3, 1, 4)))),
+            Some(&IOId::new_log_io(
+                Vote::new(3, 1).to_committed(),
+                Some(log_id(3, 1, 4))
+            )),
             eng.state.accepted_log_io()
         );
-        assert_eq!(eng.output.take_commands(), vec![
-            //
-            Command::UpdateIOProgress {
-                when: Some(Condition::IOFlushed {
-                    io_id: IOId::new_log_io(Vote::new(2, 1).to_committed(), Some(log_id(3, 1, 5)))
-                }),
-                io_id: IOId::new_log_io(Vote::new(3, 1).to_committed(), Some(log_id(3, 1, 4))),
-            }
-        ]);
+        assert_eq!(
+            eng.output.take_commands(),
+            vec![
+                //
+                Command::UpdateIOProgress {
+                    when: Some(Condition::IOFlushed {
+                        io_id: IOId::new_log_io(
+                            Vote::new(2, 1).to_committed(),
+                            Some(log_id(3, 1, 5))
+                        )
+                    }),
+                    io_id: IOId::new_log_io(Vote::new(3, 1).to_committed(), Some(log_id(3, 1, 4))),
+                }
+            ]
+        );
     }
 
     // Update to a smaller value is ignored.
     {
-        eng.following_handler().append_entries(Some(log_id(2, 1, 3)), vec![]);
+        eng.following_handler()
+            .append_entries(Some(log_id(2, 1, 3)), vec![]);
         assert_eq!(Some(&log_id(3, 1, 5)), eng.state.last_log_id());
         assert_eq!(
-            Some(&IOId::new_log_io(Vote::new(3, 1).to_committed(), Some(log_id(3, 1, 4)))),
+            Some(&IOId::new_log_io(
+                Vote::new(3, 1).to_committed(),
+                Some(log_id(3, 1, 4))
+            )),
             eng.state.accepted_log_io()
         );
 
-        assert_eq!(eng.output.take_commands(), vec![
-            //
-        ]);
+        assert_eq!(
+            eng.output.take_commands(),
+            vec![
+                //
+            ]
+        );
     }
 
     Ok(())

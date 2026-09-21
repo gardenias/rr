@@ -14,7 +14,8 @@ use crate::type_config::alias::LogIdOf;
 /// to correlate responses with requests and measure round-trip time.
 #[derive(Debug, Clone)]
 pub(crate) struct InflightAppend<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The time when the AppendEntries request was created.
     pub(crate) sending_time: InstantOf<C>,
@@ -24,7 +25,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for InflightAppend<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -37,7 +39,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> InflightAppend<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(last_log_id: Option<LogIdOf<C>>) -> Self {
         Self {

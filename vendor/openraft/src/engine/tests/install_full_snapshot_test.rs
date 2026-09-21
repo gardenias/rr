@@ -39,12 +39,15 @@ fn eng() -> Engine<UTConfig> {
         Vote::new_committed(4, 1),
     );
     eng.state.apply_progress_mut().accept(log_id(4, 1, 5));
-    eng.state.log_ids = LogIdList::new(None, vec![
-        //
-        log_id(2, 1, 4),
-        log_id(3, 1, 5),
-        log_id(4, 1, 8),
-    ]);
+    eng.state.log_ids = LogIdList::new(
+        None,
+        vec![
+            //
+            log_id(2, 1, 4),
+            log_id(3, 1, 5),
+            log_id(4, 1, 8),
+        ],
+    );
     eng.state.snapshot_meta = SnapshotMetaOf::<UTConfig> {
         last_log_id: Some(log_id(2, 1, 2)),
         last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m12()),
@@ -72,7 +75,10 @@ fn test_handle_install_full_snapshot_lt_last_snapshot() -> anyhow::Result<()> {
         SnapshotOf::<UTConfig, ()> {
             meta: SnapshotMetaOf::<UTConfig> {
                 last_log_id: Some(log_id(1, 1, 2)),
-                last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
+                last_membership: StoredMembershipOf::<UTConfig>::new(
+                    Some(log_id(1, 1, 1)),
+                    m1234(),
+                ),
             },
             snapshot: (),
         },
@@ -89,10 +95,13 @@ fn test_handle_install_full_snapshot_lt_last_snapshot() -> anyhow::Result<()> {
 
     let (dummy_tx, _rx) = UTConfig::<()>::oneshot();
     assert_eq!(
-        vec![Command::CloseReplicationStreams, Command::Respond {
-            when: None,
-            resp: Respond::new(SnapshotResponse::new(curr_vote), dummy_tx),
-        },],
+        vec![
+            Command::CloseReplicationStreams,
+            Command::Respond {
+                when: None,
+                resp: Respond::new(SnapshotResponse::new(curr_vote), dummy_tx),
+            },
+        ],
         eng.output.take_commands()
     );
 
@@ -115,7 +124,10 @@ fn test_handle_install_full_snapshot_no_conflict() -> anyhow::Result<()> {
         SnapshotOf::<UTConfig, ()> {
             meta: SnapshotMetaOf::<UTConfig> {
                 last_log_id: Some(log_id(4, 1, 6)),
-                last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
+                last_membership: StoredMembershipOf::<UTConfig>::new(
+                    Some(log_id(1, 1, 1)),
+                    m1234(),
+                ),
             },
             snapshot: (),
         },
@@ -138,13 +150,18 @@ fn test_handle_install_full_snapshot_no_conflict() -> anyhow::Result<()> {
                 SnapshotOf::<UTConfig, ()> {
                     meta: SnapshotMetaOf::<UTConfig> {
                         last_log_id: Some(log_id(4, 1, 6)),
-                        last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
+                        last_membership: StoredMembershipOf::<UTConfig>::new(
+                            Some(log_id(1, 1, 1)),
+                            m1234()
+                        ),
                     },
                     snapshot: (),
                 },
                 LogIOId::new(Vote::new(4, 1).to_committed(), Some(log_id(4, 1, 6)))
             )),
-            Command::PurgeLog { upto: log_id(4, 1, 6) },
+            Command::PurgeLog {
+                upto: log_id(4, 1, 6)
+            },
             Command::Respond {
                 when: Some(Condition::Snapshot::<UTConfig> {
                     log_id: log_id(4, 1, 6)

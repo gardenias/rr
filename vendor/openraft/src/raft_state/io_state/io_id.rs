@@ -30,10 +30,10 @@ use crate::vote::ref_vote::RefVote;
 /// [`truncate_after()`]: `crate::storage::RaftLogStorage::truncate_after()`
 /// [`purge()`]: `crate::storage::RaftLogStorage::purge()`
 /// [`LogIOId`]: crate::raft_state::io_state::log_io_id::LogIOId
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IOId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Saving a non-committed vote, this kind of IO is not related to any log entries.
     Vote(UncommittedVoteOf<C>),
@@ -43,7 +43,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for IOId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -57,7 +58,8 @@ where C: RaftTypeConfig
 ///
 /// Compare the `vote` first, if votes are equal, compare the `last_log_id`.
 impl<C> PartialOrd for IOId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let res = self.as_ref_vote().partial_cmp(&other.as_ref_vote())?;
@@ -70,7 +72,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> IOId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(vote: &VoteOf<C>) -> Self {
         if vote.is_committed() {
@@ -84,7 +87,10 @@ where C: RaftTypeConfig
         Self::Vote(vote)
     }
 
-    pub(crate) fn new_log_io(committed_vote: CommittedVoteOf<C>, last_log_id: Option<LogIdOf<C>>) -> Self {
+    pub(crate) fn new_log_io(
+        committed_vote: CommittedVoteOf<C>,
+        last_log_id: Option<LogIdOf<C>>,
+    ) -> Self {
         Self::Log(LogIOId::new(committed_vote, last_log_id))
     }
 
@@ -108,7 +114,9 @@ where C: RaftTypeConfig
     /// may not implement.
     pub(crate) fn to_vote_and_log_id(&self) -> (Vote<C::LeaderId>, Option<LogIdOf<C>>) {
         match self {
-            Self::Vote(non_committed_vote) => (non_committed_vote.clone().into_internal_vote(), None),
+            Self::Vote(non_committed_vote) => {
+                (non_committed_vote.clone().into_internal_vote(), None)
+            }
             Self::Log(log_io_id) => (
                 log_io_id.committed_vote.clone().into_internal_vote(),
                 log_io_id.log_id.clone(),

@@ -22,9 +22,12 @@ use crate::node::NodeId;
     change = "replaced `C: RaftTypeConfig` with `NID: NodeId, N: Node`"
 )]
 #[since(version = "0.8.0")]
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum ChangeMembers<NID, N>
 where
     NID: NodeId,

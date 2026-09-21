@@ -2,10 +2,10 @@ use crate::RaftTypeConfig;
 use crate::type_config::alias::LogIdOf;
 
 /// Tracks the log replication state for a follower from the leader's perspective.
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReplicationProgress<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The leader's committed log id to replicate to the follower.
     pub(crate) local_committed: Option<LogIdOf<C>>,

@@ -32,13 +32,15 @@ use crate::type_config::alias::WriteResponderOf;
 /// and writes.
 #[since(version = "0.10.0")]
 pub(crate) struct AppApi<'a, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     inner: &'a Arc<RaftInner<C>>,
 }
 
 impl<'a, C> AppApi<'a, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(in crate::raft) fn new(inner: &'a Arc<RaftInner<C>>) -> Self {
         Self { inner }
@@ -50,7 +52,9 @@ where C: RaftTypeConfig
         &self,
         read_policy: ReadPolicy,
     ) -> Result<Result<Linearizer<C>, LinearizableReadError<C>>, Fatal<C>> {
-        self.inner.call_core_oneshot(|tx| RaftMsg::GetLinearizer { read_policy, tx }).await
+        self.inner
+            .call_core_oneshot(|tx| RaftMsg::GetLinearizer { read_policy, tx })
+            .await
     }
 
     #[since(version = "0.10.0")]
@@ -126,21 +130,24 @@ where C: RaftTypeConfig
         let mut receivers = Vec::with_capacity(payloads.len());
 
         for _ in 0..payloads.len() {
-            let (responder, complete_rx) = ProgressResponder::<C, ClientWriteResult<C>>::complete_only();
+            let (responder, complete_rx) =
+                ProgressResponder::<C, ClientWriteResult<C>>::complete_only();
             responders.push(Some(CoreResponder::Progress(responder)));
             receivers.push(complete_rx);
         }
 
-        self.do_client_write_ff(Batch::of(payloads), Batch::of(responders)).await?;
+        self.do_client_write_ff(Batch::of(payloads), Batch::of(responders))
+            .await?;
 
-        let stream = futures_util::stream::unfold(Some(receivers.into_iter()), |opt_iter| async move {
-            let mut iter = opt_iter?;
-            let rx = iter.next()?;
-            match rx.await {
-                Ok(result) => Some((Ok(into_write_result(result)), Some(iter))),
-                Err(_) => Some((Err(Fatal::Stopped), None)),
-            }
-        });
+        let stream =
+            futures_util::stream::unfold(Some(receivers.into_iter()), |opt_iter| async move {
+                let mut iter = opt_iter?;
+                let rx = iter.next()?;
+                match rx.await {
+                    Ok(result) => Some((Ok(into_write_result(result)), Some(iter))),
+                    Err(_) => Some((Err(Fatal::Stopped), None)),
+                }
+            });
 
         Ok(Box::pin(stream))
     }

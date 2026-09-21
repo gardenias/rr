@@ -79,7 +79,10 @@ where
 
         let join_handle = worker.do_spawn(span);
 
-        Handle { cmd_tx, join_handle }
+        Handle {
+            cmd_tx,
+            join_handle,
+        }
     }
 
     fn do_spawn(mut self, span: tracing::Span) -> JoinHandleOf<C, ()> {
@@ -141,7 +144,8 @@ where
 
                     tracing::info!("Done install complete snapshot, meta: {}", meta);
 
-                    let res = CommandResult::new(Ok(Response::InstallSnapshot((io_id, Some(meta)))));
+                    let res =
+                        CommandResult::new(Ok(Response::InstallSnapshot((io_id, Some(meta)))));
                     self.resp_tx.send(Notification::sm(res)).await.ok();
                 }
                 Command::Apply {
@@ -204,11 +208,17 @@ where
             (ent, responder)
         });
 
-        self.state_machine.apply(Box::pin(strm)).await.sto_apply(last.clone())?;
+        self.state_machine
+            .apply(Box::pin(strm))
+            .await
+            .sto_apply(last.clone())?;
 
         #[cfg(debug_assertions)]
         {
-            assert_eq!(end - 1, got_last_index.load(std::sync::atomic::Ordering::Relaxed));
+            assert_eq!(
+                end - 1,
+                got_last_index.load(std::sync::atomic::Ordering::Relaxed)
+            );
         }
 
         let resp = ApplyResult {
@@ -241,7 +251,10 @@ where
         let builder = self.state_machine.try_create_snapshot_builder(false).await;
 
         let Some(mut builder) = builder else {
-            tracing::info!("{}: snapshot building is refused by state machine", func_name!());
+            tracing::info!(
+                "{}: snapshot building is refused by state machine",
+                func_name!()
+            );
             let res = CommandResult::new(Ok(Response::BuildSnapshotDone(None)));
             resp_tx.send(Notification::sm(res)).await.ok();
             return;
@@ -253,7 +266,10 @@ where
             let cmd_res = CommandResult::new(res);
             resp_tx.send(Notification::sm(cmd_res)).await.ok();
         });
-        tracing::info!("{}: returning; spawned building snapshot task", func_name!());
+        tracing::info!(
+            "{}: returning; spawned building snapshot task",
+            func_name!()
+        );
     }
 
     #[tracing::instrument(level = "info", skip_all)]
@@ -263,7 +279,11 @@ where
     ) -> Result<(), StorageError<C>> {
         tracing::info!("{}", func_name!());
 
-        let snapshot = self.state_machine.get_current_snapshot().await.sto_read_snapshot(None)?;
+        let snapshot = self
+            .state_machine
+            .get_current_snapshot()
+            .await
+            .sto_read_snapshot(None)?;
 
         tracing::info!(
             "sending back snapshot: meta: {}",

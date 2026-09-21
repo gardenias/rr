@@ -39,7 +39,8 @@ use crate::vote::RaftCommittedLeaderId;
     serde(bound = "", from = "SnapshotSignatureWire<CLID>")
 )]
 pub struct SnapshotSignature<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// Log entries up to which this snapshot includes, inclusive.
     pub last_log_id: Option<LogId<CLID>>,
@@ -57,7 +58,8 @@ where CLID: RaftCommittedLeaderId
 #[derive(serde::Deserialize)]
 #[serde(bound = "")]
 struct SnapshotSignatureWire<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     last_log_id: Option<LogId<CLID>>,
 
@@ -72,7 +74,8 @@ where CLID: RaftCommittedLeaderId
 
 #[cfg(feature = "serde")]
 impl<CLID> From<SnapshotSignatureWire<CLID>> for SnapshotSignature<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn from(wire: SnapshotSignatureWire<CLID>) -> Self {
         SnapshotSignature {
@@ -86,10 +89,13 @@ where CLID: RaftCommittedLeaderId
 /// require `Self: Clone` and thus narrow this impl to `CLID: Clone`.
 #[cfg(feature = "serde")]
 impl<CLID> serde::Serialize for SnapshotSignature<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         use serde::ser::SerializeStruct;
 
         // The field count is the compatibility contract: it must stay 3.
@@ -122,12 +128,18 @@ mod tests {
         let want = r#"{"last_log_id":{"leader_id":{"term":1,"node_id":2},"index":3},"last_membership_log_id":{"leader_id":{"term":4,"node_id":5},"index":6},"snapshot_id":""}"#;
 
         assert_eq!(want, serde_json::to_string(&sig).unwrap());
-        assert_eq!(sig, serde_json::from_str::<SnapshotSignature<UtClid>>(want).unwrap());
+        assert_eq!(
+            sig,
+            serde_json::from_str::<SnapshotSignature<UtClid>>(want).unwrap()
+        );
 
         // Data written by openraft 0.9, when `snapshot_id` was still a field, deserializes to
         // the same value; the id is ignored.
         let v09 = r#"{"last_log_id":{"leader_id":{"term":1,"node_id":2},"index":3},"last_membership_log_id":{"leader_id":{"term":4,"node_id":5},"index":6},"snapshot_id":"1-2-3-4"}"#;
 
-        assert_eq!(sig, serde_json::from_str::<SnapshotSignature<UtClid>>(v09).unwrap());
+        assert_eq!(
+            sig,
+            serde_json::from_str::<SnapshotSignature<UtClid>>(v09).unwrap()
+        );
     }
 }

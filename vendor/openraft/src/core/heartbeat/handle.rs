@@ -23,7 +23,8 @@ use crate::type_config::alias::WatchSenderOf;
 
 /// Handle for a single heartbeat worker task.
 pub(crate) struct WorkerHandle<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Channel to send heartbeat events to the worker.
     event_tx: WatchSenderOf<C, Option<HeartbeatEvent<C>>>,
@@ -41,7 +42,8 @@ where C: RaftTypeConfig
 }
 
 pub(crate) struct HeartbeatWorkersHandle<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) id: C::NodeId,
 
@@ -51,7 +53,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> HeartbeatWorkersHandle<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(id: C::NodeId, config: Arc<Config>) -> Self {
         Self {
@@ -61,10 +64,18 @@ where C: RaftTypeConfig
         }
     }
 
-    pub(crate) fn broadcast(&self, events: impl IntoIterator<Item = (C::NodeId, HeartbeatEvent<C>)>) {
+    pub(crate) fn broadcast(
+        &self,
+        events: impl IntoIterator<Item = (C::NodeId, HeartbeatEvent<C>)>,
+    ) {
         for (target, event) in events {
             tracing::debug!("id={} target={} send_heartbeat {}", self.id, target, event);
-            self.workers.get(&target).unwrap().event_tx.send(Some(event)).ok();
+            self.workers
+                .get(&target)
+                .unwrap()
+                .event_tx
+                .send(Some(event))
+                .ok();
         }
     }
 
@@ -85,7 +96,11 @@ where C: RaftTypeConfig
         let mut new_workers = BTreeMap::new();
 
         for prog in progresses {
-            tracing::debug!("id={} spawn HeartbeatWorker target={}", self.id, prog.target);
+            tracing::debug!(
+                "id={} spawn HeartbeatWorker target={}",
+                self.id,
+                prog.target
+            );
 
             let removed = self.workers.remove(&prog.target);
 
@@ -94,7 +109,9 @@ where C: RaftTypeConfig
             let handle = if let Some(handle) = handle {
                 handle
             } else {
-                let network = network_factory.new_heartbeat_client(prog.target.clone(), &prog.target_node).await;
+                let network = network_factory
+                    .new_heartbeat_client(prog.target.clone(), &prog.target_node)
+                    .await;
 
                 let (tx, rx) = C::watch_channel(None);
 

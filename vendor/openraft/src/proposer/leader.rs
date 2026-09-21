@@ -33,7 +33,8 @@ use crate::vote::raft_vote::RaftVoteExt;
 /// But instead it will be able to upgrade its `leader_id` without losing leadership.
 #[derive(Clone, Debug)]
 pub(crate) struct Leader<C, QS: QuorumSet<Id = C::NodeId>>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Whether this Leader is marked as transferring to another node.
     ///
@@ -184,8 +185,14 @@ where
     /// Updates `self.last_log_id` to the last allocated log ID.
     ///
     /// The caller is responsible for assigning the log IDs to entries.
-    pub(crate) fn assign_log_ids(&mut self, count: usize) -> Option<LeaderLogIds<CommittedLeaderIdOf<C>>> {
-        debug_assert!(self.transfer_to.is_none(), "leader is disabled to propose new log");
+    pub(crate) fn assign_log_ids(
+        &mut self,
+        count: usize,
+    ) -> Option<LeaderLogIds<CommittedLeaderIdOf<C>>> {
+        debug_assert!(
+            self.transfer_to.is_none(),
+            "leader is disabled to propose new log"
+        );
 
         if count == 0 {
             return None;
@@ -201,9 +208,15 @@ where
     }
 
     /// Update the clock acknowledged by `target` and return the time acknowledged by a quorum.
-    pub(crate) fn update_clock(&mut self, target: &C::NodeId, sending_time: InstantOf<C>) -> Option<InstantOf<C>> {
+    pub(crate) fn update_clock(
+        &mut self,
+        target: &C::NodeId,
+        sending_time: InstantOf<C>,
+    ) -> Option<InstantOf<C>> {
         let leader_node_id = self.committed_vote.to_leader_node_id();
-        self.clock_progress.increase_to(&leader_node_id, Some(sending_time)).ok();
+        self.clock_progress
+            .increase_to(&leader_node_id, Some(sending_time))
+            .ok();
 
         *self
             .clock_progress
@@ -223,7 +236,8 @@ where
         }
 
         let now = C::now();
-        self.last_quorum_acked_time().is_some_and(|acked| now < acked + leader_lease)
+        self.last_quorum_acked_time()
+            .is_some_and(|acked| now < acked + leader_lease)
     }
 
     /// Return whether this leader alone constitutes a quorum.
@@ -247,12 +261,24 @@ where
     /// a heartbeat is always sent.
     ///
     /// [`Config::heartbeat_min_interval`]: `crate::Config::heartbeat_min_interval`
-    pub(crate) fn need_heartbeat(&self, target: &C::NodeId, now: InstantOf<C>, min_interval: Duration) -> bool {
-        let acked = self.clock_progress.try_get(target).and_then(|entry| entry.val);
+    pub(crate) fn need_heartbeat(
+        &self,
+        target: &C::NodeId,
+        now: InstantOf<C>,
+        min_interval: Duration,
+    ) -> bool {
+        let acked = self
+            .clock_progress
+            .try_get(target)
+            .and_then(|entry| entry.val);
         acked.is_none_or(|sending_time| now >= sending_time + min_interval)
     }
 
-    pub(crate) fn is_replication_stream_valid(&self, target: &C::NodeId, stream_id: StreamId) -> bool {
+    pub(crate) fn is_replication_stream_valid(
+        &self,
+        target: &C::NodeId,
+        stream_id: StreamId,
+    ) -> bool {
         if let Some(entry) = self.progress.try_get(target)
             && entry.data.stream_id == stream_id
         {
@@ -295,7 +321,11 @@ mod tests {
                 vote,
                 vec![btreeset! {1, 2, 3}],
                 vec![],
-                Some(LeaderLogIds::new(*log_id(1, 2, 0).committed_leader_id(), 1, 3)),
+                Some(LeaderLogIds::new(
+                    *log_id(1, 2, 0).committed_leader_id(),
+                    1,
+                    3,
+                )),
                 SharedIdGenerator::new(),
             );
 
@@ -310,7 +340,11 @@ mod tests {
                 vote,
                 vec![btreeset! {1, 2, 3}],
                 vec![],
-                Some(LeaderLogIds::new(*log_id(1, 2, 0).committed_leader_id(), 1, 3)),
+                Some(LeaderLogIds::new(
+                    *log_id(1, 2, 0).committed_leader_id(),
+                    1,
+                    3,
+                )),
                 SharedIdGenerator::new(),
             );
 
@@ -318,7 +352,9 @@ mod tests {
             assert_eq!(leader.last_log_id(), Some(&log_id(1, 2, 3)));
         }
 
-        tracing::info!("--- vote equals last log id, reuse noop_log_id, last_leader_log_id.len()==1");
+        tracing::info!(
+            "--- vote equals last log id, reuse noop_log_id, last_leader_log_id.len()==1"
+        );
         {
             let vote = Vote::new(1, 2).to_committed();
             let leader = Leader::<UTConfig, _>::new(
@@ -336,8 +372,13 @@ mod tests {
         tracing::info!("--- no last log ids, create new noop_log_id, last_leader_log_id.len()==0");
         {
             let vote = Vote::new(1, 2).to_committed();
-            let leader =
-                Leader::<UTConfig, _>::new(vote, vec![btreeset! {1, 2, 3}], vec![], None, SharedIdGenerator::new());
+            let leader = Leader::<UTConfig, _>::new(
+                vote,
+                vec![btreeset! {1, 2, 3}],
+                vec![],
+                None,
+                SharedIdGenerator::new(),
+            );
 
             assert_eq!(leader.noop_log_id(), &log_id(1, 2, 0));
             assert_eq!(leader.last_log_id(), None);
@@ -368,8 +409,13 @@ mod tests {
     #[test]
     fn test_1_entry_none_last_log_id() {
         let vote = Vote::new(0, 0).to_committed();
-        let mut leading =
-            Leader::<UTConfig, _>::new(vote, vec![btreeset! {1, 2, 3}], vec![], None, SharedIdGenerator::new());
+        let mut leading = Leader::<UTConfig, _>::new(
+            vote,
+            vec![btreeset! {1, 2, 3}],
+            vec![],
+            None,
+            SharedIdGenerator::new(),
+        );
 
         let log_ids: Vec<_> = leading.assign_log_ids(1).unwrap().into_iter().collect();
 
@@ -405,7 +451,10 @@ mod tests {
         );
 
         let log_ids: Vec<_> = leading.assign_log_ids(3).unwrap().into_iter().collect();
-        assert_eq!(log_ids, vec![log_id(2, 2, 9), log_id(2, 2, 10), log_id(2, 2, 11)]);
+        assert_eq!(
+            log_ids,
+            vec![log_id(2, 2, 9), log_id(2, 2, 10), log_id(2, 2, 11)]
+        );
         assert_eq!(Some(log_id(2, 2, 11)), leading.last_log_id);
     }
 

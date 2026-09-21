@@ -16,7 +16,8 @@ use crate::vote::RaftCommittedLeaderId;
 /// when an empty range is needed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LeaderLogIds<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     committed_leader_id: CLID,
 
@@ -28,15 +29,21 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> fmt::Display for LeaderLogIds<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:[{}, {}]", self.committed_leader_id, self.first, self.last)
+        write!(
+            f,
+            "{}:[{}, {}]",
+            self.committed_leader_id, self.first, self.last
+        )
     }
 }
 
 impl<CLID> LeaderLogIds<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// Create a new log ID range `[first, last]`.
     pub(crate) fn new(committed_leader_id: CLID, first: u64, last: u64) -> Self {
@@ -123,7 +130,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> IntoIterator for LeaderLogIds<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     type Item = LogId<CLID>;
     type IntoIter = LeaderLogIdsIter<CLID>;
@@ -194,7 +202,10 @@ mod tests {
 
         let ids1: Vec<_> = iter1.collect();
         let ids2: Vec<_> = iter2.collect();
-        assert_eq!(ids1, vec![log_id(1, 2, 5), log_id(1, 2, 6), log_id(1, 2, 7)]);
+        assert_eq!(
+            ids1,
+            vec![log_id(1, 2, 5), log_id(1, 2, 6), log_id(1, 2, 7)]
+        );
         assert_eq!(ids1, ids2);
     }
 

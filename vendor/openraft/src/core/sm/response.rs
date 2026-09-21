@@ -13,7 +13,8 @@ use crate::type_config::alias::SnapshotMetaOf;
 /// The Ok part of a state machine command result.
 #[derive(Debug)]
 pub(crate) enum Response<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Snapshot building completed or was deferred.
     ///
@@ -31,7 +32,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for Response<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
@@ -39,7 +41,12 @@ where C: RaftTypeConfig
                 write!(f, "BuildSnapshotDone({})", meta.display())
             }
             Self::InstallSnapshot((io_id, meta)) => {
-                write!(f, "InstallSnapshot(io_id:{}, meta:{})", io_id, meta.display())
+                write!(
+                    f,
+                    "InstallSnapshot(io_id:{}, meta:{})",
+                    io_id,
+                    meta.display()
+                )
             }
             Self::Apply(result) => {
                 write!(f, "{}", result)
@@ -51,13 +58,15 @@ where C: RaftTypeConfig
 /// Container of result of a command.
 #[derive(Debug)]
 pub(crate) struct CommandResult<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) result: Result<Response<C>, StorageError<C>>,
 }
 
 impl<C> fmt::Display for CommandResult<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "sm::Result({})", self.result.display())
@@ -65,7 +74,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> CommandResult<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(result: Result<Response<C>, StorageError<C>>) -> Self {
         Self { result }

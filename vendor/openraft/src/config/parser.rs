@@ -39,10 +39,12 @@ pub(super) fn parse_snapshot_policy(src: &str) -> Result<SnapshotPolicy, ConfigE
         });
     }
 
-    let n_logs = elts[1].parse::<u64>().map_err(|e| ConfigError::InvalidNumber {
-        invalid: src.to_string(),
-        reason: e.to_string(),
-    })?;
+    let n_logs = elts[1]
+        .parse::<u64>()
+        .map_err(|e| ConfigError::InvalidNumber {
+            invalid: src.to_string(),
+            reason: e.to_string(),
+        })?;
     Ok(SnapshotPolicy::LogsSinceLast(n_logs))
 }
 
@@ -82,10 +84,11 @@ impl Config {
     /// # Ok::<(), openraft::ConfigError>(())
     /// ```
     pub fn build(args: &[&str]) -> Result<Config, ConfigError> {
-        let config = <Self as Parser>::try_parse_from(args).map_err(|e| ConfigError::ParseError {
-            source: AnyError::from(&e),
-            args: args.iter().map(|x| x.to_string()).collect(),
-        })?;
+        let config =
+            <Self as Parser>::try_parse_from(args).map_err(|e| ConfigError::ParseError {
+                source: AnyError::from(&e),
+                args: args.iter().map(|x| x.to_string()).collect(),
+            })?;
         config.validate()
     }
 }

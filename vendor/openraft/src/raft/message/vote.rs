@@ -11,7 +11,11 @@ use crate::type_config::alias::VoteOf;
 /// An RPC sent by candidates to gather votes (§5.2).
 #[since]
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct VoteRequest<C: RaftTypeConfig> {
     /// The candidate's vote requesting support.
     pub vote: VoteOf<C>,
@@ -30,7 +34,8 @@ pub struct VoteRequest<C: RaftTypeConfig> {
 }
 
 impl<C> fmt::Display for VoteRequest<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -44,7 +49,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> VoteRequest<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create a new vote request.
     pub fn new(vote: VoteOf<C>, last_log_id: Option<LogIdOf<C>>) -> Self {
@@ -58,7 +64,11 @@ where C: RaftTypeConfig
 
 /// The response to a `VoteRequest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct VoteResponse<C: RaftTypeConfig> {
     /// vote after a node handling vote-request.
     /// Thus, `resp.vote >= req.vote` always holds.
@@ -75,10 +85,15 @@ pub struct VoteResponse<C: RaftTypeConfig> {
 }
 
 impl<C> VoteResponse<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create a new vote response.
-    pub fn new(vote: impl Borrow<VoteOf<C>>, last_log_id: Option<LogIdOf<C>>, granted: bool) -> Self {
+    pub fn new(
+        vote: impl Borrow<VoteOf<C>>,
+        last_log_id: Option<LogIdOf<C>>,
+        granted: bool,
+    ) -> Self {
         Self {
             vote: vote.borrow().clone(),
             vote_granted: granted,
@@ -94,7 +109,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for VoteResponse<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

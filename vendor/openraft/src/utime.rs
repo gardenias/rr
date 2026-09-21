@@ -8,8 +8,7 @@ use crate::display_ext::DisplayInstantExt;
 
 /// Stores an object along with its last update time and lease duration.
 /// The lease duration specifies how long the object remains valid.
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Leased<T, I: Instant> {
     data: T,
     last_update: Option<I>,
@@ -19,10 +18,21 @@ pub(crate) struct Leased<T, I: Instant> {
 
 impl<T: fmt::Display, I: Instant> fmt::Display for Leased<T, I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let enabled = if self.lease_enabled { "enabled" } else { "disabled" };
+        let enabled = if self.lease_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
 
         match self.last_update {
-            Some(utime) => write!(f, "{}@{}+{:?}({})", self.data, utime.display(), self.lease, enabled),
+            Some(utime) => write!(
+                f,
+                "{}@{}+{:?}({})",
+                self.data,
+                utime.display(),
+                self.lease,
+                enabled
+            ),
             None => write!(f, "{}({})", self.data, enabled),
         }
     }
@@ -95,7 +105,8 @@ impl<T, I: Instant> Leased<T, I> {
         }
 
         impl<T, I> fmt::Display for DisplayLeaseInfo<'_, T, I>
-        where I: Instant
+        where
+            I: Instant,
         {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 match &self.leased.last_update {

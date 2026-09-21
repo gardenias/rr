@@ -68,7 +68,9 @@ where
     ///
     /// Returns `Ok(None)` when there are no more entries to send.
     /// After each call, `log_id_range` is updated to exclude the sent entries.
-    pub(crate) async fn next_request(&mut self) -> Result<Option<AppendEntriesRequest<C>>, ReplicationClosed> {
+    pub(crate) async fn next_request(
+        &mut self,
+    ) -> Result<Option<AppendEntriesRequest<C>>, ReplicationClosed> {
         // An empty range still sends one RPC and is then cleared by `update_log_id_range()`.
         let Some(log_id_range) = self.get_log_id_range().await else {
             return Ok(None);
@@ -80,7 +82,11 @@ where
         let (entries, sending_range) = match res {
             Ok(x) => x,
             Err(sto_err) => {
-                tracing::error!("{} replication to target={}", sto_err, self.replication_context.target);
+                tracing::error!(
+                    "{} replication to target={}",
+                    sto_err,
+                    self.replication_context.target
+                );
 
                 self.replication_context.notify_storage_error(sto_err).await;
                 return Err(ReplicationClosed::new("storage error"));
@@ -138,7 +144,8 @@ where
             let current: IOId<C> = self.event_watcher.io_submitted_rx.borrow_watched().clone();
             let last_log_id = current.last_log_id().cloned();
 
-            let committed: Option<LogIdOf<C>> = self.event_watcher.committed_rx.borrow_watched().clone();
+            let committed: Option<LogIdOf<C>> =
+                self.event_watcher.committed_rx.borrow_watched().clone();
 
             tracing::debug!(
                 "building next entries range to replicate: current last_log_id: {}, current committed: {}",
@@ -254,7 +261,11 @@ where
             let end = std::cmp::min(end, start + max_entries);
 
             // limited_get_log_entries will return logs smaller than the range [start, end).
-            let logs = self.log_reader.limited_get_log_entries(start, end).await.sto_read_logs()?;
+            let logs = self
+                .log_reader
+                .limited_get_log_entries(start, end)
+                .await
+                .sto_read_logs()?;
 
             // Handle empty result gracefully: treat as heartbeat.
             // This violates the API contract but we don't panic.
@@ -294,7 +305,9 @@ where
 }
 
 fn non_reversed_log_id_range<C>(prev: Option<LogIdOf<C>>, last: Option<LogIdOf<C>>) -> LogIdRange<C>
-where C: RaftTypeConfig {
+where
+    C: RaftTypeConfig,
+{
     // `prev` is delivered through ReplicationCore's replication command channel, while `last` is
     // observed through the io_submitted watch channel. The watch channel may not have caught up yet.
     let last = std::cmp::max(last, prev.clone());

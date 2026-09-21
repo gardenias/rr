@@ -27,7 +27,10 @@ fn measure_storage_error_size() {
         "ErrorSubject<TestConfig>:         {} bytes",
         size_of::<ErrorSubject<TestConfig>>()
     );
-    println!("ErrorVerb:                        {} bytes", size_of::<ErrorVerb>());
+    println!(
+        "ErrorVerb:                        {} bytes",
+        size_of::<ErrorVerb>()
+    );
     println!(
         "Box<anyerror::AnyError>:          {} bytes",
         size_of::<Box<anyerror::AnyError>>()
@@ -68,7 +71,10 @@ fn measure_storage_error_size() {
         "Option<Box<LogIdOf<TestConfig>>>: {} bytes",
         size_of::<Option<Box<LogIdOf<TestConfig>>>>()
     );
-    println!("SnapshotId (String):              {} bytes", size_of::<SnapshotId>());
+    println!(
+        "SnapshotId (String):              {} bytes",
+        size_of::<SnapshotId>()
+    );
 
     println!("\n--- Related Types ---");
     use openraft::errors::Fatal;
@@ -93,6 +99,8 @@ fn measure_storage_error_size() {
 
     // Fail the test if size is too large (for tracking)
     if storage_error_size > 136 {
-        panic!("StorageError size increased from 136 to {storage_error_size} bytes! This is a regression.");
+        panic!(
+            "StorageError size increased from 136 to {storage_error_size} bytes! This is a regression."
+        );
     }
 }

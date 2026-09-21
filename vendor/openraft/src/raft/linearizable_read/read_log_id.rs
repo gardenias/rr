@@ -21,7 +21,8 @@ use crate::type_config::alias::LogIdOf;
     serde(bound = "", transparent)
 )]
 pub struct ReadLogId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     log_id: LogIdOf<C>,
 }
@@ -34,7 +35,8 @@ where
 }
 
 impl<C> fmt::Display for ReadLogId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.log_id.fmt(f)
@@ -42,7 +44,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> ReadLogId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(noop_log_id: LogIdOf<C>, committed: Option<LogIdOf<C>>) -> Self {
         let log_id = match committed {
@@ -125,7 +128,10 @@ mod tests {
         let read_log_id = ReadLogId::<UTConfig>::new(log_id, None);
 
         assert_eq!(&log_id, read_log_id.log_id());
-        assert_eq!(log_id.committed_leader_id(), read_log_id.committed_leader_id());
+        assert_eq!(
+            log_id.committed_leader_id(),
+            read_log_id.committed_leader_id()
+        );
         assert_eq!(log_id.index(), read_log_id.index());
     }
 }

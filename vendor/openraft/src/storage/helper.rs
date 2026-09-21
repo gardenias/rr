@@ -181,7 +181,10 @@ where
                 last_applied.display(),
             );
 
-            self.log_store.purge(last_applied.clone().unwrap()).await.sto_write_logs()?;
+            self.log_store
+                .purge(last_applied.clone().unwrap())
+                .await
+                .sto_write_logs()?;
             last_log_id = last_applied.clone();
             last_purged_log_id = last_applied.clone();
         }
@@ -192,16 +195,26 @@ where
             last_log_id.display()
         );
 
-        let log_id_list = self.get_key_log_ids(last_purged_log_id.clone(), last_log_id.clone()).await?;
+        let log_id_list = self
+            .get_key_log_ids(last_purged_log_id.clone(), last_log_id.clone())
+            .await?;
 
-        let snapshot = self.state_machine.get_current_snapshot().await.sto_read_snapshot(None)?;
+        let snapshot = self
+            .state_machine
+            .get_current_snapshot()
+            .await
+            .sto_read_snapshot(None)?;
 
         // If there is not a snapshot and there are logs purged, which means the snapshot is not persisted,
         // we just rebuild it so that replication can use it.
         let snapshot = match snapshot {
             None => {
                 if last_purged_log_id.is_some() {
-                    let mut b = self.state_machine.try_create_snapshot_builder(true).await.unwrap();
+                    let mut b = self
+                        .state_machine
+                        .try_create_snapshot_builder(true)
+                        .await
+                        .unwrap();
                     let s = b.build_snapshot().await.sto_write_snapshot(None)?;
                     Some(s)
                 } else {
@@ -252,7 +265,11 @@ where
     /// restore the state machine to a recent position.
     async fn restore_from_snapshot(&mut self) -> Result<(), StorageError<C>> {
         let (last_applied, _) = self.state_machine.applied_state().await.sto_read_sm()?;
-        let snapshot = self.state_machine.get_current_snapshot().await.sto_read_snapshot(None)?;
+        let snapshot = self
+            .state_machine
+            .get_current_snapshot()
+            .await
+            .sto_read_snapshot(None)?;
 
         let Some(snap) = snapshot else {
             return Ok(());
@@ -280,7 +297,11 @@ where
     }
 
     /// Read log entries from [`RaftLogReader`] in chunks and apply them to the state machine.
-    pub(crate) async fn reapply_committed(&mut self, mut start: u64, end: u64) -> Result<(), StorageError<C>> {
+    pub(crate) async fn reapply_committed(
+        &mut self,
+        mut start: u64,
+        end: u64,
+    ) -> Result<(), StorageError<C>> {
         let chunk_size = 64;
 
         tracing::info!(
@@ -294,7 +315,10 @@ where
 
         while start < end {
             let chunk_end = std::cmp::min(end, start + chunk_size);
-            let entries = log_reader.try_get_log_entries(start..chunk_end).await.sto_read_logs()?;
+            let entries = log_reader
+                .try_get_log_entries(start..chunk_end)
+                .await
+                .sto_read_logs()?;
 
             let first = entries.first().map(|ent| ent.index());
             let last = entries.last().map(|ent| ent.index());
@@ -325,7 +349,10 @@ where
             let last_applied = entries.last().map(|e| e.log_id()).unwrap();
             let apply_items = entries.into_iter().map(|entry| Ok((entry, None)));
             let apply_stream = futures_util::stream::iter(apply_items);
-            self.state_machine.apply(apply_stream).await.sto_apply(last_applied)?;
+            self.state_machine
+                .apply(apply_stream)
+                .await
+                .sto_apply(last_applied)?;
 
             start = chunk_end;
         }
@@ -352,7 +379,9 @@ where
     pub async fn get_membership(&mut self) -> Result<MembershipStateOf<C>, StorageError<C>> {
         let (last_applied, sm_mem) = self.state_machine.applied_state().await.sto_read_sm()?;
 
-        let log_mem = self.last_membership_in_log(last_applied.next_index()).await?;
+        let log_mem = self
+            .last_membership_in_log(last_applied.next_index())
+            .await?;
         tracing::debug!(
             "{}: membership_in_sm={:?}, membership_in_log={:?}",
             func_name!(),
@@ -403,7 +432,10 @@ where
 
         while start < end {
             let step_start = std::cmp::max(start, end.saturating_sub(step));
-            let entries = log_reader.try_get_log_entries(step_start..end).await.sto_read_logs()?;
+            let entries = log_reader
+                .try_get_log_entries(step_start..end)
+                .await
+                .sto_read_logs()?;
 
             for ent in entries.iter().rev() {
                 if let Some(mem) = ent.get_membership() {
@@ -444,7 +476,10 @@ where
 
         let first = log_reader.get_log_id(purged.next_index()).await?;
 
-        let log_ids = log_reader.get_key_log_ids(first..=last).await.sto_read_logs()?;
+        let log_ids = log_reader
+            .get_key_log_ids(first..=last)
+            .await
+            .sto_read_logs()?;
 
         Ok(LogIdList::new(purged, log_ids))
     }

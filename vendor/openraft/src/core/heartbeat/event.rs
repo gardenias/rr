@@ -8,10 +8,10 @@ use crate::type_config::alias::InstantOf;
 use crate::type_config::alias::LogIdOf;
 
 /// The information for broadcasting a heartbeat.
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HeartbeatEvent<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The timestamp when this heartbeat is sent.
     ///
@@ -33,7 +33,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for HeartbeatEvent<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

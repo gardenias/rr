@@ -97,7 +97,10 @@ where
     },
 
     /// Replicate log entries to a target.
-    Replicate { target: C::NodeId, req: Replicate<C> },
+    Replicate {
+        target: C::NodeId,
+        req: Replicate<C>,
+    },
 
     /// Replicate snapshot to a target.
     ReplicateSnapshot {
@@ -180,7 +183,12 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Command::UpdateIOProgress { when, io_id } => {
-                write!(f, "UpdateIOProgress: when: {}, io_id: {}", when.display(), io_id)
+                write!(
+                    f,
+                    "UpdateIOProgress: when: {}, io_id: {}",
+                    when.display(),
+                    io_id
+                )
             }
             Command::AppendEntries {
                 committed_vote: vote,
@@ -202,7 +210,12 @@ where
             Command::SaveCommittedAndApply {
                 already_applied: already_committed,
                 upto,
-            } => write!(f, "SaveCommittedAndApply: ({}, {}]", already_committed.display(), upto),
+            } => write!(
+                f,
+                "SaveCommittedAndApply: ({}, {}]",
+                already_committed.display(),
+                upto
+            ),
             Command::Replicate { target, req } => {
                 write!(f, "Replicate: target={}, req: {}", target, req)
             }
@@ -238,7 +251,9 @@ where
             Command::PurgeLog { upto } => write!(f, "PurgeLog: upto: {}", upto),
             Command::TruncateLog { after } => write!(f, "TruncateLog: since: {}", after.display()),
             Command::StateMachine { command } => write!(f, "StateMachine: command: {}", command),
-            Command::Respond { when, resp } => write!(f, "Respond: when: {}, resp: {}", when.display(), resp),
+            Command::Respond { when, resp } => {
+                write!(f, "Respond: when: {}, resp: {}", when.display(), resp)
+            }
         }
     }
 }
@@ -396,10 +411,10 @@ where
 }
 
 /// A condition to wait for before executing a command or sending a respond.
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Condition<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Wait for log IO to be flushed to storage.
     ///
@@ -420,7 +435,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for Condition<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -437,24 +453,36 @@ where C: RaftTypeConfig
 }
 
 impl<C> Condition<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Check if the condition is satisfied by the current IO state.
     pub(crate) fn is_met(&self, io_state: &IOState<C>) -> bool {
         match self {
-            Condition::IOFlushed { io_id } => self.is_satisfied_by(io_id, io_state.log_progress.flushed()),
+            Condition::IOFlushed { io_id } => {
+                self.is_satisfied_by(io_id, io_state.log_progress.flushed())
+            }
             Condition::LogFlushed { log_id } => self.is_satisfied_by(
                 log_id,
-                io_state.log_progress.flushed().and_then(|io_id| io_id.last_log_id()),
+                io_state
+                    .log_progress
+                    .flushed()
+                    .and_then(|io_id| io_id.last_log_id()),
             ),
-            Condition::Applied { log_id } => self.is_satisfied_by(log_id, io_state.apply_progress.flushed()),
-            Condition::Snapshot { log_id } => self.is_satisfied_by(log_id, io_state.snapshot.flushed()),
+            Condition::Applied { log_id } => {
+                self.is_satisfied_by(log_id, io_state.apply_progress.flushed())
+            }
+            Condition::Snapshot { log_id } => {
+                self.is_satisfied_by(log_id, io_state.snapshot.flushed())
+            }
         }
     }
 
     /// Check if actual value satisfies the expected threshold.
     fn is_satisfied_by<T>(&self, expected: &T, actual: Option<&T>) -> bool
-    where T: PartialOrd + fmt::Display {
+    where
+        T: PartialOrd + fmt::Display,
+    {
         let Some(actual) = actual else {
             tracing::debug!("{} is not met: actual: None", self);
             return false;
@@ -471,10 +499,10 @@ where C: RaftTypeConfig
 }
 
 /// A command to send return value to the caller via a `oneshot::Sender`.
-#[derive(Debug, PartialEq, Eq)]
-#[derive(derive_more::From)]
+#[derive(Debug, PartialEq, Eq, derive_more::From)]
 pub(crate) enum Respond<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     Vote(ValueSender<C, VoteResponse<C>>),
     AppendEntries(ValueSender<C, StreamAppendResult<C>>),
@@ -483,7 +511,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for Respond<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -493,13 +522,18 @@ where C: RaftTypeConfig
                 Err(e) => write!(f, "AppendEntries Err({})", e),
             },
             Respond::InstallFullSnapshot(vs) => write!(f, "InstallFullSnapshot {}", vs.value()),
-            Respond::Initialize(vs) => write!(f, "Initialize {}", vs.value().as_ref().map(|_x| "()").display()),
+            Respond::Initialize(vs) => write!(
+                f,
+                "Initialize {}",
+                vs.value().as_ref().map(|_x| "()").display()
+            ),
         }
     }
 }
 
 impl<C> Respond<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new<T>(res: T, tx: OneshotSenderOf<C, T>) -> Self
     where
@@ -534,7 +568,9 @@ where
     C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ValueSender").field("value", &self.value).finish()
+        f.debug_struct("ValueSender")
+            .field("value", &self.value)
+            .finish()
     }
 }
 

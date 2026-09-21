@@ -6,7 +6,11 @@ use std::fmt;
 /// primarily used in error reporting to provide context about what operation was attempted when an
 /// error occurred.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum Operation {
     /// An unknown operation.
     None,
@@ -40,7 +44,9 @@ impl fmt::Display for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Operation::None => write!(f, "(unknown operation)"),
-            Operation::AllowNextRevert => write!(f, "set flag to allow replication revert for once"),
+            Operation::AllowNextRevert => {
+                write!(f, "set flag to allow replication revert for once")
+            }
             Operation::TransferLeader => write!(f, "transfer leadership"),
             Operation::SendHeartbeat => write!(f, "send heartbeat"),
             Operation::ReceiveSnapshot => write!(f, "receive snapshot"),

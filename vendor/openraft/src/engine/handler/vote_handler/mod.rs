@@ -115,7 +115,11 @@ where
         if vote.as_ref_vote() >= self.state.vote_ref().as_ref_vote() {
             // Ok
         } else {
-            tracing::info!("vote {} is rejected by local vote: {}", vote, self.state.vote_ref());
+            tracing::info!(
+                "vote {} is rejected by local vote: {}",
+                vote,
+                self.state.vote_ref()
+            );
             return Err(RejectVote {
                 higher: self.state.vote_ref().clone(),
             });
@@ -135,11 +139,16 @@ where
         };
 
         if vote.as_ref_vote() > self.state.vote_ref().as_ref_vote() {
-            tracing::info!("vote is changing from {} to {}", self.state.vote_ref(), vote);
+            tracing::info!(
+                "vote is changing from {} to {}",
+                self.state.vote_ref(),
+                vote
+            );
 
             self.state.vote.update(C::now(), leader_lease, vote.clone());
             self.state.accept_log_io(IOId::new(vote));
-            self.output.push_command(Command::SaveVote { vote: vote.clone() });
+            self.output
+                .push_command(Command::SaveVote { vote: vote.clone() });
         } else {
             let now = C::now();
             self.state.vote.touch(now, leader_lease);
@@ -242,7 +251,8 @@ where
         // If the leader has not yet proposed any log, propose a blank log and initiate replication;
         // Otherwise, just initiate replication.
         if last_log_id.as_ref() < Some(&noop_log_id) {
-            self.leader_handler().leader_append_entries([EntryPayload::Blank]);
+            self.leader_handler()
+                .leader_append_entries([EntryPayload::Blank]);
         } else {
             self.replication_handler().initiate_replication();
         }
@@ -255,7 +265,12 @@ where
         // TODO: if it is already in following state, nothing to do.
         debug_assert!(
             self.state.vote_ref().to_leader_id().node_id() != &self.config.id
-                || !self.state.membership_state.effective().membership().is_voter(&self.config.id),
+                || !self
+                    .state
+                    .membership_state
+                    .effective()
+                    .membership()
+                    .is_voter(&self.config.id),
             "It must hold: vote is not mine, or I am not a voter(leader just left the cluster)"
         );
 

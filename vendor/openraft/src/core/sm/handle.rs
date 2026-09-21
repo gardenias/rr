@@ -29,7 +29,10 @@ where
     C: RaftTypeConfig,
     SM: RaftStateMachine<C>,
 {
-    pub(crate) async fn send(&mut self, cmd: sm::Command<C, SM>) -> Result<(), SendError<sm::Command<C, SM>>> {
+    pub(crate) async fn send(
+        &mut self,
+        cmd: sm::Command<C, SM>,
+    ) -> Result<(), SendError<sm::Command<C, SM>>> {
         tracing::debug!("sending command to state machine worker: {:?}", cmd);
         self.cmd_tx.send(cmd).await
     }

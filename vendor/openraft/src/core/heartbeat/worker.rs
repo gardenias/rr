@@ -79,7 +79,10 @@ where
         tracing::info!("HeartbeatWorker finished with result: {:?}", res);
     }
 
-    pub(crate) async fn do_run(mut self, mut rx_shutdown: OneshotReceiverOf<C, ()>) -> Result<(), Stopped> {
+    pub(crate) async fn do_run(
+        mut self,
+        mut rx_shutdown: OneshotReceiverOf<C, ()>,
+    ) -> Result<(), Stopped> {
         loop {
             tracing::debug!("{} is waiting for a new heartbeat event.", self);
 
@@ -121,7 +124,12 @@ where
             })
             .await;
 
-            tracing::debug!("{} sent a heartbeat: {}, result: {:?}", self, heartbeat, res);
+            tracing::debug!(
+                "{} sent a heartbeat: {}, result: {:?}",
+                self,
+                heartbeat,
+                res
+            );
 
             match res {
                 Ok(Ok(Some(stream_result))) => {
@@ -186,7 +194,10 @@ where
         Ok(())
     }
 
-    async fn send_heartbeat_progress(&self, heartbeat: &HeartbeatEvent<C>) -> Result<(), RaftCoreClosed> {
+    async fn send_heartbeat_progress(
+        &self,
+        heartbeat: &HeartbeatEvent<C>,
+    ) -> Result<(), RaftCoreClosed> {
         let noti = Notification::HeartbeatProgress {
             stream_id: self.stream_id,
             sending_time: heartbeat.time,

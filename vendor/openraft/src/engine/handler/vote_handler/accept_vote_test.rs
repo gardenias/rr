@@ -33,12 +33,18 @@ fn eng() -> Engine<UTConfig> {
     eng.state.enable_validation(false); // Disable validation for incomplete state
 
     eng.config.id = 0;
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(500),
+        Vote::new(2, 1),
+    );
     eng.state.server_state = ServerState::Candidate;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 1)),
-        m01(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )));
 
     eng
 }
@@ -50,7 +56,9 @@ fn test_accept_vote_reject_smaller_vote() -> anyhow::Result<()> {
     eng.output.take_commands();
 
     let (tx, _rx) = UTConfig::<()>::oneshot();
-    let resp = eng.vote_handler().accept_vote(&Vote::new(1, 2), tx, |_state, _err| mk_res(false));
+    let resp = eng
+        .vote_handler()
+        .accept_vote(&Vote::new(1, 2), tx, |_state, _err| mk_res(false));
 
     assert!(resp.is_none());
 
@@ -78,13 +86,17 @@ fn test_accept_vote_granted_greater_vote() -> anyhow::Result<()> {
     eng.output.take_commands();
 
     let (tx, _rx) = UTConfig::<()>::oneshot();
-    let resp = eng.vote_handler().accept_vote(&Vote::new(3, 3), tx, |_state, _err| mk_res(true));
+    let resp = eng
+        .vote_handler()
+        .accept_vote(&Vote::new(3, 3), tx, |_state, _err| mk_res(true));
 
     assert!(resp.is_some());
 
     assert_eq!(
         vec![
-            Command::SaveVote { vote: Vote::new(3, 3) },
+            Command::SaveVote {
+                vote: Vote::new(3, 3)
+            },
             Command::CloseReplicationStreams,
         ],
         eng.output.take_commands()

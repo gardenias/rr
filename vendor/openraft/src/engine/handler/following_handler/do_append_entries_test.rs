@@ -52,8 +52,14 @@ fn eng() -> Engine<UTConfig> {
     eng.state.log_ids.append(log_id(1, 1, 2));
     eng.state.log_ids.append(log_id(2, 1, 3));
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )),
     );
     eng.state.server_state = eng.calc_server_state();
     eng
@@ -64,7 +70,8 @@ fn test_follower_do_append_entries_no_membership_entries() -> anyhow::Result<()>
     let mut eng = eng();
     eng.state.vote = Leased::without_last_update(Vote::new_committed(1, 1));
 
-    eng.following_handler().do_append_entries(vec![blank_ent::<UTConfig>(3, 1, 4)]);
+    eng.following_handler()
+        .do_append_entries(vec![blank_ent::<UTConfig>(3, 1, 4)]);
 
     assert_eq!(None, eng.state.log_ids.purged());
     assert_eq!(
@@ -78,8 +85,14 @@ fn test_follower_do_append_entries_no_membership_entries() -> anyhow::Result<()>
     assert_eq!(Some(&log_id(3, 1, 4)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
         ),
         eng.state.membership_state
     );
@@ -107,10 +120,13 @@ fn test_follower_do_append_entries_one_membership_entry() -> anyhow::Result<()> 
     eng.config.id = 2; // make it a member, the become learner
     eng.state.vote = Leased::without_last_update(Vote::new_committed(1, 1));
 
-    eng.following_handler().do_append_entries(vec![blank_ent::<UTConfig>(3, 1, 4), EntryOf::<UTConfig> {
-        log_id: log_id(3, 1, 5),
-        payload: EntryPayload::<u64, u64, ()>::Membership(m34()),
-    }]);
+    eng.following_handler().do_append_entries(vec![
+        blank_ent::<UTConfig>(3, 1, 4),
+        EntryOf::<UTConfig> {
+            log_id: log_id(3, 1, 5),
+            payload: EntryPayload::<u64, u64, ()>::Membership(m34()),
+        },
+    ]);
 
     assert_eq!(None, eng.state.log_ids.purged());
     assert_eq!(
@@ -124,8 +140,14 @@ fn test_follower_do_append_entries_one_membership_entry() -> anyhow::Result<()> 
     assert_eq!(Some(&log_id(3, 1, 5)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 5)), m34())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(3, 1, 5)),
+                m34()
+            )),
         ),
         eng.state.membership_state,
         "previous effective become committed"
@@ -183,8 +205,14 @@ fn test_follower_do_append_entries_three_membership_entries() -> anyhow::Result<
     assert_eq!(Some(&log_id(4, 1, 7)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 6)), m34())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(4, 1, 7)), m45())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(4, 1, 6)),
+                m34()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(4, 1, 7)),
+                m45()
+            )),
         ),
         eng.state.membership_state,
         "seen 3 membership, the last 2 become committed and effective"

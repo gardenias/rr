@@ -34,7 +34,9 @@ fn m123_345() -> Membership<u64, ()> {
 #[test]
 fn test_apply_not_committed() -> anyhow::Result<()> {
     let new = || MembershipStateOf::<UTConfig>::new(effmem(2, 2, m1()), effmem(3, 4, m123_345()));
-    let res = new().change_handler().apply(ChangeMembers::AddVoterIds(btreeset! {1}), false);
+    let res = new()
+        .change_handler()
+        .apply(ChangeMembers::AddVoterIds(btreeset! {1}), false);
 
     assert_eq!(
         Err(ChangeMembershipError::InProgress(InProgress {
@@ -50,9 +52,14 @@ fn test_apply_not_committed() -> anyhow::Result<()> {
 #[test]
 fn test_apply_empty_voters() -> anyhow::Result<()> {
     let new = || MembershipStateOf::<UTConfig>::new(effmem(3, 4, m1()), effmem(3, 4, m1()));
-    let res = new().change_handler().apply(ChangeMembers::RemoveVoters(btreeset! {1}), false);
+    let res = new()
+        .change_handler()
+        .apply(ChangeMembers::RemoveVoters(btreeset! {1}), false);
 
-    assert_eq!(Err(ChangeMembershipError::EmptyMembership(EmptyMembership {})), res);
+    assert_eq!(
+        Err(ChangeMembershipError::EmptyMembership(EmptyMembership {})),
+        res
+    );
 
     Ok(())
 }
@@ -60,10 +67,14 @@ fn test_apply_empty_voters() -> anyhow::Result<()> {
 #[test]
 fn test_apply_learner_not_found() -> anyhow::Result<()> {
     let new = || MembershipStateOf::<UTConfig>::new(effmem(3, 4, m1()), effmem(3, 4, m1()));
-    let res = new().change_handler().apply(ChangeMembers::AddVoterIds(btreeset! {2}), false);
+    let res = new()
+        .change_handler()
+        .apply(ChangeMembers::AddVoterIds(btreeset! {2}), false);
 
     assert_eq!(
-        Err(ChangeMembershipError::LearnerNotFound(LearnerNotFound { node_id: 2 })),
+        Err(ChangeMembershipError::LearnerNotFound(LearnerNotFound {
+            node_id: 2
+        })),
         res
     );
 
@@ -75,16 +86,26 @@ fn test_apply_retain_learner() -> anyhow::Result<()> {
     let new = || MembershipStateOf::<UTConfig>::new(effmem(3, 4, m12()), effmem(3, 4, m123_345()));
 
     // Do not leave removed voters as learner
-    let res = new().change_handler().apply(ChangeMembers::RemoveVoters(btreeset! {1,2}), false);
+    let res = new()
+        .change_handler()
+        .apply(ChangeMembers::RemoveVoters(btreeset! {1,2}), false);
     assert_eq!(
-        Ok(Membership::new_with_defaults(vec![btreeset! {3,4,5}], [3, 4, 5])),
+        Ok(Membership::new_with_defaults(
+            vec![btreeset! {3,4,5}],
+            [3, 4, 5]
+        )),
         res
     );
 
     // Leave removed voters as learner
-    let res = new().change_handler().apply(ChangeMembers::RemoveVoters(btreeset! {1,2}), true);
+    let res = new()
+        .change_handler()
+        .apply(ChangeMembers::RemoveVoters(btreeset! {1,2}), true);
     assert_eq!(
-        Ok(Membership::new_with_defaults(vec![btreeset! {3,4,5}], [1, 2, 3, 4, 5])),
+        Ok(Membership::new_with_defaults(
+            vec![btreeset! {3,4,5}],
+            [1, 2, 3, 4, 5]
+        )),
         res
     );
 

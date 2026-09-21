@@ -19,7 +19,8 @@ use crate::type_config::alias::VoteOf;
 
 /// A message coming from the internal components.
 pub(crate) enum Notification<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     VoteResponse {
         target: C::NodeId,
@@ -88,7 +89,9 @@ where C: RaftTypeConfig
     },
 
     /// Result of executing a command sent from a state machine worker.
-    StateMachine { command_result: sm::CommandResult<C> },
+    StateMachine {
+        command_result: sm::CommandResult<C>,
+    },
 
     /// A tick event to wake up RaftCore to check timeout etc.
     Tick {
@@ -98,7 +101,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Notification<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn sm(command_result: sm::CommandResult<C>) -> Self {
         Self::StateMachine { command_result }
@@ -121,7 +125,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for Notification<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -19,17 +19,24 @@ pub struct LogSegment<C: RaftTypeConfig> {
 
 impl<C: RaftTypeConfig> LogSegment<C> {
     pub fn new(prev_log_id: Option<LogIdOf<C>>, entries: Vec<C::Entry>) -> Self {
-        Self { prev_log_id, entries }
+        Self {
+            prev_log_id,
+            entries,
+        }
     }
 
     /// Returns the log id of the last entry in this segment, or `prev_log_id` if empty.
     pub fn last(&self) -> Option<LogIdOf<C>> {
-        self.entries.last().map(|e| e.log_id()).or_else(|| self.prev_log_id.clone())
+        self.entries
+            .last()
+            .map(|e| e.log_id())
+            .or_else(|| self.prev_log_id.clone())
     }
 }
 
 impl<C: RaftTypeConfig> fmt::Display for LogSegment<C>
-where C::Entry: fmt::Display
+where
+    C::Entry: fmt::Display,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -64,10 +71,13 @@ mod tests {
 
     #[test]
     fn test_last_with_entries() {
-        let seg = Seg::new(Some(log_id(1, 1, 5)), vec![
-            blank_ent::<UTConfig>(2, 1, 6),
-            blank_ent::<UTConfig>(2, 1, 7),
-        ]);
+        let seg = Seg::new(
+            Some(log_id(1, 1, 5)),
+            vec![
+                blank_ent::<UTConfig>(2, 1, 6),
+                blank_ent::<UTConfig>(2, 1, 7),
+            ],
+        );
         assert_eq!(Some(log_id(2, 1, 7)), seg.last());
     }
 

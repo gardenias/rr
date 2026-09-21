@@ -7,7 +7,9 @@ use chrono::Utc;
 use crate::Instant;
 
 /// Display `Instant` in human readable format.
-pub(crate) struct DisplayInstant<'a, T, const SIMPLE: bool = true, const LOCAL: bool = true>(pub &'a T);
+pub(crate) struct DisplayInstant<'a, T, const SIMPLE: bool = true, const LOCAL: bool = true>(
+    pub &'a T,
+);
 
 impl<'a, T, const SIMPLE: bool, const LOCAL: bool> DisplayInstant<'a, T, SIMPLE, LOCAL> {
     /// Display `Instant` in full format: with date and timezone: the format is
@@ -37,7 +39,8 @@ impl<'a, T, const SIMPLE: bool, const LOCAL: bool> DisplayInstant<'a, T, SIMPLE,
 }
 
 impl<T, const SIMPLE: bool, const LOCAL: bool> fmt::Display for DisplayInstant<'_, T, SIMPLE, LOCAL>
-where T: Instant
+where
+    T: Instant,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert Instant to SystemTime
@@ -79,7 +82,8 @@ pub(crate) trait DisplayInstantExt<'a, T> {
 }
 
 impl<T> DisplayInstantExt<'_, T> for T
-where T: Instant
+where
+    T: Instant,
 {
     fn display(&self) -> DisplayInstant<'_, T, true> {
         DisplayInstant(self)

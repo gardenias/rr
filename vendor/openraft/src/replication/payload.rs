@@ -9,7 +9,8 @@ use crate::type_config::alias::LogIdOf;
 /// The payload specifying which logs to replicate.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub(crate) enum Payload<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Replicate logs in a fixed range `(prev, last]`.
     ///
@@ -24,7 +25,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for Payload<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self {
@@ -39,7 +41,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Payload<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn update_matching(&mut self, matching: Option<LogIdOf<C>>) {
         match self {

@@ -28,12 +28,18 @@ fn eng() -> Engine<UTConfig> {
     eng.state.enable_validation(false); // Disable validation for incomplete state
 
     eng.config.id = 0;
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(500),
+        Vote::new(2, 1),
+    );
     eng.state.server_state = ServerState::Candidate;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 1)),
-        m01(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )));
 
     eng.output.take_commands();
     eng
@@ -118,7 +124,10 @@ fn test_handle_message_vote_granted_equal_vote() -> anyhow::Result<()> {
     assert!(Some(now) <= eng.state.vote_last_modified());
     assert!(eng.state.vote_last_modified() <= Some(now + Duration::from_millis(20)));
 
-    assert_eq!(vec![Command::CloseReplicationStreams], eng.output.take_commands());
+    assert_eq!(
+        vec![Command::CloseReplicationStreams],
+        eng.output.take_commands()
+    );
     Ok(())
 }
 
@@ -139,7 +148,9 @@ fn test_handle_message_vote_granted_greater_vote() -> anyhow::Result<()> {
     assert_eq!(ServerState::Follower, eng.state.server_state);
     assert_eq!(
         vec![
-            Command::SaveVote { vote: Vote::new(3, 1) },
+            Command::SaveVote {
+                vote: Vote::new(3, 1)
+            },
             Command::CloseReplicationStreams,
         ],
         eng.output.take_commands()
@@ -148,7 +159,8 @@ fn test_handle_message_vote_granted_greater_vote() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_handle_message_vote_granted_follower_learner_does_not_emit_update_server_state_cmd() -> anyhow::Result<()> {
+fn test_handle_message_vote_granted_follower_learner_does_not_emit_update_server_state_cmd()
+-> anyhow::Result<()> {
     // A greater vote should emit a SaveVote command.
 
     // Learner
@@ -168,7 +180,9 @@ fn test_handle_message_vote_granted_follower_learner_does_not_emit_update_server
         assert_eq!(st, eng.state.server_state);
         assert_eq!(
             vec![
-                Command::SaveVote { vote: Vote::new(3, 1) },
+                Command::SaveVote {
+                    vote: Vote::new(3, 1)
+                },
                 Command::CloseReplicationStreams,
             ],
             eng.output.take_commands()
@@ -191,7 +205,9 @@ fn test_handle_message_vote_granted_follower_learner_does_not_emit_update_server
         assert_eq!(st, eng.state.server_state);
         assert_eq!(
             vec![
-                Command::SaveVote { vote: Vote::new(3, 1) },
+                Command::SaveVote {
+                    vote: Vote::new(3, 1)
+                },
                 Command::CloseReplicationStreams,
             ],
             eng.output.take_commands()

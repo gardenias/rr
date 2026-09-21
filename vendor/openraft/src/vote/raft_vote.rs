@@ -28,7 +28,8 @@ use crate::vote::vote_status::VoteStatus;
 )]
 #[since(version = "0.10.0")]
 pub trait RaftVote
-where Self: OptionalFeatures + Eq + Clone + Debug + Display + 'static
+where
+    Self: OptionalFeatures + Eq + Clone + Debug + Display + 'static,
 {
     /// The leader ID type that this vote wraps.
     #[since(version = "0.10.0")]
@@ -65,9 +66,13 @@ where Self: OptionalFeatures + Eq + Clone + Debug + Display + 'static
     /// than uncommitted ones to minimize election conflicts.
     #[since(version = "0.10.0")]
     fn partial_cmp<V>(&self, other: &V) -> Option<Ordering>
-    where V: RaftVote<LeaderId = Self::LeaderId> {
-        let self_ref: RefVote<'_, Self::LeaderId> = RefVote::new(self.leader_id(), self.is_committed());
-        let other_ref: RefVote<'_, Self::LeaderId> = RefVote::new(other.leader_id(), other.is_committed());
+    where
+        V: RaftVote<LeaderId = Self::LeaderId>,
+    {
+        let self_ref: RefVote<'_, Self::LeaderId> =
+            RefVote::new(self.leader_id(), self.is_committed());
+        let other_ref: RefVote<'_, Self::LeaderId> =
+            RefVote::new(other.leader_id(), other.is_committed());
         PartialOrd::partial_cmp(&self_ref, &other_ref)
     }
 }
@@ -79,7 +84,10 @@ pub(crate) trait RaftVoteExt: RaftVote {
     }
 
     /// Creates a new vote for a node in a specific term, with uncommitted status.
-    fn from_term_node_id(term: LeaderTerm<Self::LeaderId>, node_id: LeaderNodeId<Self::LeaderId>) -> Self {
+    fn from_term_node_id(
+        term: LeaderTerm<Self::LeaderId>,
+        node_id: LeaderNodeId<Self::LeaderId>,
+    ) -> Self {
         let leader_id = Self::LeaderId::new(term, node_id);
         Self::from_leader_id(leader_id, false)
     }
@@ -188,7 +196,12 @@ mod tests {
 
     impl fmt::Display for UserVote {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "<{}:{}>", self.leader_id, if self.committed { "Q" } else { "-" })
+            write!(
+                f,
+                "<{}:{}>",
+                self.leader_id,
+                if self.committed { "Q" } else { "-" }
+            )
         }
     }
 
@@ -196,7 +209,10 @@ mod tests {
         type LeaderId = UTLeaderId;
 
         fn from_leader_id(leader_id: Self::LeaderId, committed: bool) -> Self {
-            Self { leader_id, committed }
+            Self {
+                leader_id,
+                committed,
+            }
         }
 
         fn leader_id(&self) -> &Self::LeaderId {
@@ -218,26 +234,50 @@ mod tests {
         // Different terms: comparable
         let v_lower = Vote::<UTLeaderId>::new(1, 2);
         let v_higher = Vote::<UTLeaderId>::new(2, 2);
-        assert_eq!(RaftVote::partial_cmp(&v_lower, &v_higher), Some(Ordering::Less));
-        assert_eq!(RaftVote::partial_cmp(&v_higher, &v_lower), Some(Ordering::Greater));
+        assert_eq!(
+            RaftVote::partial_cmp(&v_lower, &v_higher),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            RaftVote::partial_cmp(&v_higher, &v_lower),
+            Some(Ordering::Greater)
+        );
 
         // Same leader_id, committed > uncommitted
         let uncommitted = Vote::<UTLeaderId>::new(1, 2);
         let committed = Vote::<UTLeaderId>::new_committed(1, 2);
-        assert_eq!(RaftVote::partial_cmp(&uncommitted, &committed), Some(Ordering::Less));
-        assert_eq!(RaftVote::partial_cmp(&committed, &uncommitted), Some(Ordering::Greater));
+        assert_eq!(
+            RaftVote::partial_cmp(&uncommitted, &committed),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            RaftVote::partial_cmp(&committed, &uncommitted),
+            Some(Ordering::Greater)
+        );
 
         // Compare Vote with CommittedVote type
         let vote = Vote::<UTLeaderId>::new(1, 2);
         let committed_vote = vote.to_committed();
-        assert_eq!(RaftVote::partial_cmp(&vote, &committed_vote), Some(Ordering::Less));
-        assert_eq!(RaftVote::partial_cmp(&committed_vote, &vote), Some(Ordering::Greater));
+        assert_eq!(
+            RaftVote::partial_cmp(&vote, &committed_vote),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            RaftVote::partial_cmp(&committed_vote, &vote),
+            Some(Ordering::Greater)
+        );
 
         // Compare Vote with UncommittedVote type
         let vote = Vote::<UTLeaderId>::new(1, 2);
         let uncommitted_vote = vote.to_non_committed();
-        assert_eq!(RaftVote::partial_cmp(&vote, &uncommitted_vote), Some(Ordering::Equal));
-        assert_eq!(RaftVote::partial_cmp(&uncommitted_vote, &vote), Some(Ordering::Equal));
+        assert_eq!(
+            RaftVote::partial_cmp(&vote, &uncommitted_vote),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            RaftVote::partial_cmp(&uncommitted_vote, &vote),
+            Some(Ordering::Equal)
+        );
     }
 
     #[test]
@@ -269,11 +309,17 @@ mod tests {
         let committed = Vote::<UTLeaderId>::new_committed(7, 9).to_committed();
         let committed_user: UserVote = committed.into_vote();
         assert!(committed_user.committed);
-        assert_eq!(committed_user.leader_id, Vote::<UTLeaderId>::new(7, 9).leader_id);
+        assert_eq!(
+            committed_user.leader_id,
+            Vote::<UTLeaderId>::new(7, 9).leader_id
+        );
 
         let uncommitted = Vote::<UTLeaderId>::new(8, 10).to_non_committed();
         let uncommitted_user: UserVote = uncommitted.into_vote();
         assert!(!uncommitted_user.committed);
-        assert_eq!(uncommitted_user.leader_id, Vote::<UTLeaderId>::new(8, 10).leader_id);
+        assert_eq!(
+            uncommitted_user.leader_id,
+            Vote::<UTLeaderId>::new(8, 10).leader_id
+        );
     }
 }

@@ -4,7 +4,8 @@ use crate::quorum::quorum_set::QuorumSet;
 
 /// Impl a simple majority quorum set
 impl<ID> QuorumSet for BTreeSet<ID>
-where ID: PartialOrd + Ord + Clone + 'static
+where
+    ID: PartialOrd + Ord + Clone + 'static,
 {
     type Id = ID;
     type Iter = std::collections::btree_set::IntoIter<ID>;
@@ -30,7 +31,8 @@ where ID: PartialOrd + Ord + Clone + 'static
 
 /// Impl a joint quorum set: a node set is a quorum iff it is a majority in every config.
 impl<NID> QuorumSet for Vec<BTreeSet<NID>>
-where NID: PartialOrd + Ord + Clone + 'static
+where
+    NID: PartialOrd + Ord + Clone + 'static,
 {
     type Id = NID;
     type Iter = std::collections::btree_set::IntoIter<NID>;
@@ -55,7 +57,8 @@ where NID: PartialOrd + Ord + Clone + 'static
 
 /// Impl a simple majority quorum set
 impl<ID> QuorumSet for &[ID]
-where ID: PartialOrd + Ord + Copy + 'static
+where
+    ID: PartialOrd + Ord + Copy + 'static,
 {
     type Id = ID;
     type Iter = std::collections::btree_set::IntoIter<ID>;

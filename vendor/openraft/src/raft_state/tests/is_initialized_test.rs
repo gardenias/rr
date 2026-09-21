@@ -12,7 +12,9 @@ use crate::utime::Leased;
 fn test_is_initialized() {
     // empty
     {
-        let rs = RaftState::<UTConfig> { ..Default::default() };
+        let rs = RaftState::<UTConfig> {
+            ..Default::default()
+        };
 
         assert_eq!(false, rs.is_initialized());
     }
@@ -20,7 +22,11 @@ fn test_is_initialized() {
     // Vote is set but is default
     {
         let rs = RaftState::<UTConfig> {
-            vote: Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(0, 0)),
+            vote: Leased::new(
+                UTConfig::<()>::now(),
+                Duration::from_millis(500),
+                Vote::new(0, 0),
+            ),
             ..Default::default()
         };
 
@@ -30,7 +36,11 @@ fn test_is_initialized() {
     // Vote is non-default value
     {
         let rs = RaftState::<UTConfig> {
-            vote: Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(1, 2)),
+            vote: Leased::new(
+                UTConfig::<()>::now(),
+                Duration::from_millis(500),
+                Vote::new(1, 2),
+            ),
             ..Default::default()
         };
 

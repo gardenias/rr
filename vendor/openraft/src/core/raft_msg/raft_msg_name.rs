@@ -1,8 +1,7 @@
 use openraft_macros::VariantName;
 
 /// Enum representing the name of each `ExternalCommand` variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(VariantName)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, VariantName)]
 #[variant_name(prefix = "Ext::")]
 pub enum ExternalCommandName {
     Elect,
@@ -22,8 +21,7 @@ pub enum ExternalCommandName {
 /// than as a `RaftMsg` variant, but is still recorded here for runtime stats.
 ///
 /// This provides an efficient way to identify message types without string comparisons.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(VariantName)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, VariantName)]
 pub enum RaftMsgName {
     AppendEntries,
     RequestVote,

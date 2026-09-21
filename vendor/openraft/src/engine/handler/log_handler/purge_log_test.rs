@@ -10,7 +10,10 @@ fn eng() -> Engine<UTConfig> {
     eng.state.enable_validation(false); // Disable validation for incomplete state
 
     // Setup: purged at 2 (leader 2), leader 2's logs at 3-4, leader 4's logs at 5-6
-    eng.state.log_ids = LogIdList::new(Some(log_id(2, 1, 2)), vec![log_id(2, 1, 4), log_id(4, 1, 6)]);
+    eng.state.log_ids = LogIdList::new(
+        Some(log_id(2, 1, 2)),
+        vec![log_id(2, 1, 4), log_id(4, 1, 6)],
+    );
     eng
 }
 
@@ -69,7 +72,9 @@ fn test_purge_log_same_leader_as_prev_last_purged() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(4, 1, 6)), lh.state.last_log_id());
 
     assert_eq!(
-        vec![Command::PurgeLog { upto: log_id(2, 1, 3) }],
+        vec![Command::PurgeLog {
+            upto: log_id(2, 1, 3)
+        }],
         lh.output.take_commands()
     );
 
@@ -93,7 +98,9 @@ fn test_purge_log_to_last_key_log() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(4, 1, 6)), lh.state.last_log_id());
 
     assert_eq!(
-        vec![Command::PurgeLog { upto: log_id(2, 1, 4) }],
+        vec![Command::PurgeLog {
+            upto: log_id(2, 1, 4)
+        }],
         lh.output.take_commands()
     );
 
@@ -117,7 +124,9 @@ fn test_purge_log_go_pass_last_key_log() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(4, 1, 6)), lh.state.last_log_id());
 
     assert_eq!(
-        vec![Command::PurgeLog { upto: log_id(4, 1, 5) }],
+        vec![Command::PurgeLog {
+            upto: log_id(4, 1, 5)
+        }],
         lh.output.take_commands()
     );
 
@@ -142,7 +151,9 @@ fn test_purge_log_to_last_log_id() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(4, 1, 6)), lh.state.last_log_id());
 
     assert_eq!(
-        vec![Command::PurgeLog { upto: log_id(4, 1, 6) }],
+        vec![Command::PurgeLog {
+            upto: log_id(4, 1, 6)
+        }],
         lh.output.take_commands()
     );
 
@@ -167,7 +178,9 @@ fn test_purge_log_go_pass_last_log_id() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(4, 1, 7)), lh.state.last_log_id());
 
     assert_eq!(
-        vec![Command::PurgeLog { upto: log_id(4, 1, 7) }],
+        vec![Command::PurgeLog {
+            upto: log_id(4, 1, 7)
+        }],
         lh.output.take_commands()
     );
 
@@ -192,7 +205,9 @@ fn test_purge_log_to_higher_leader_lgo() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(5, 1, 7)), lh.state.last_log_id());
 
     assert_eq!(
-        vec![Command::PurgeLog { upto: log_id(5, 1, 7) }],
+        vec![Command::PurgeLog {
+            upto: log_id(5, 1, 7)
+        }],
         lh.output.take_commands()
     );
 

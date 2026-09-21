@@ -27,7 +27,8 @@ use crate::type_config::alias::LogIdOf;
 ///   yet become leader (no AppendEntries received).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd)]
 pub struct FlushPoint<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The vote(leader) under which this I/O operation was submitted.
     pub vote: Vote<C::LeaderId>,
@@ -38,15 +39,22 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for FlushPoint<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "FlushPoint({}, {})", self.vote, self.last_log_id.display(),)
+        write!(
+            f,
+            "FlushPoint({}, {})",
+            self.vote,
+            self.last_log_id.display(),
+        )
     }
 }
 
 impl<C> FlushPoint<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub fn new(vote: Vote<C::LeaderId>, last_log_id: Option<LogIdOf<C>>) -> Self {
         Self { vote, last_log_id }

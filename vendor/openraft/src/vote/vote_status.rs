@@ -4,7 +4,8 @@ use crate::vote::non_committed::UncommittedVote;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VoteStatus<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     Committed(CommittedVote<LID>),
     Pending(UncommittedVote<LID>),

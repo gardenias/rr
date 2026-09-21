@@ -49,7 +49,8 @@ where
 
         self.state.io_state.set_building_snapshot(true);
 
-        self.output.push_command(Command::from(sm::Command::build_snapshot()));
+        self.output
+            .push_command(Command::from(sm::Command::build_snapshot()));
         true
     }
 

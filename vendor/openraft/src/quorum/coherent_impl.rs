@@ -6,7 +6,8 @@ use crate::quorum::coherent::FindCoherent;
 /// Two joint configs are coherent iff they share at least one config: then every quorum of one
 /// intersects every quorum of the other.
 impl<NID> Coherent<NID, Vec<BTreeSet<NID>>> for Vec<BTreeSet<NID>>
-where NID: PartialOrd + Ord + Clone + 'static
+where
+    NID: PartialOrd + Ord + Clone + 'static,
 {
     /// Check if two `joint` are coherent.
     ///
@@ -26,7 +27,8 @@ where NID: PartialOrd + Ord + Clone + 'static
 
 /// Impl to build an intermediate quorum set that is coherent with a joint and a uniform quorum set.
 impl<NID> FindCoherent<NID, BTreeSet<NID>> for Vec<BTreeSet<NID>>
-where NID: PartialOrd + Ord + Clone + 'static
+where
+    NID: PartialOrd + Ord + Clone + 'static,
 {
     fn find_coherent(&self, other: BTreeSet<NID>) -> Self {
         if self.is_coherent_with(&vec![other.clone()]) {

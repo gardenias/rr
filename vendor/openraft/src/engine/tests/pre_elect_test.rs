@@ -34,10 +34,12 @@ fn eng() -> Engine<UTConfig> {
 fn test_pre_elect_multi_node_no_mutation() -> anyhow::Result<()> {
     let mut eng = eng();
     eng.config.id = 1;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(0, 1, 1)),
-        m12(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(0, 1, 1)),
+            m12(),
+        )));
     eng.state.log_ids = LogIdList::new(None, vec![log_id(1, 1, 1)]);
 
     let vote_before = *eng.state.vote_ref();
@@ -48,13 +50,22 @@ fn test_pre_elect_multi_node_no_mutation() -> anyhow::Result<()> {
     // A pre-vote must NOT bump the term, persist a vote, or change server state.
     assert_eq!(vote_before, *eng.state.vote_ref());
     assert_eq!(server_state_before, eng.state.server_state);
-    assert!(eng.candidate_ref().is_none(), "no real candidate during pre-vote");
+    assert!(
+        eng.candidate_ref().is_none(),
+        "no real candidate during pre-vote"
+    );
 
     // A pre-candidate at the hypothetical next term, having granted itself.
-    assert_eq!(Vote::new(1, 1), *eng.pre_candidate_ref().unwrap().vote_ref());
+    assert_eq!(
+        Vote::new(1, 1),
+        *eng.pre_candidate_ref().unwrap().vote_ref()
+    );
     assert_eq!(
         btreeset! {1},
-        eng.pre_candidate_ref().unwrap().granters().collect::<BTreeSet<_>>()
+        eng.pre_candidate_ref()
+            .unwrap()
+            .granters()
+            .collect::<BTreeSet<_>>()
     );
 
     // Only SendPreVote is emitted — crucially, NO SaveVote and NO SendVote.
@@ -72,10 +83,12 @@ fn test_pre_elect_multi_node_no_mutation() -> anyhow::Result<()> {
 fn test_pre_elect_single_node_starts_real_election() -> anyhow::Result<()> {
     let mut eng = eng();
     eng.config.id = 1;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(0, 1, 1)),
-        m1(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(0, 1, 1)),
+            m1(),
+        )));
 
     eng.pre_elect();
 
@@ -89,9 +102,14 @@ fn test_pre_elect_single_node_starts_real_election() -> anyhow::Result<()> {
     assert_eq!(ServerState::Candidate, eng.state.server_state);
 
     assert_eq!(
-        vec![Command::SaveVote { vote: Vote::new(1, 1) }, Command::SendVote {
-            vote_req: VoteRequest::new(Vote::new(1, 1), Some(log_id(0, 0, 0))),
-        },],
+        vec![
+            Command::SaveVote {
+                vote: Vote::new(1, 1)
+            },
+            Command::SendVote {
+                vote_req: VoteRequest::new(Vote::new(1, 1), Some(log_id(0, 0, 0))),
+            },
+        ],
         eng.output.take_commands()
     );
 

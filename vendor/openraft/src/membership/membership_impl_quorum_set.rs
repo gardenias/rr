@@ -14,7 +14,9 @@ where
     type Iter = std::collections::btree_set::IntoIter<NID>;
 
     fn is_quorum<'a, I>(&self, ids: I) -> bool
-    where I: Iterator<Item = &'a NID> + Clone {
+    where
+        I: Iterator<Item = &'a NID> + Clone,
+    {
         for config in &self.configs {
             if !config.is_quorum(ids.clone()) {
                 return false;

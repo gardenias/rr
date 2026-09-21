@@ -26,7 +26,8 @@ impl<ID, Val> IdVal<ID, Val> {
 }
 
 impl<ID, Val> IdVal<ID, Val>
-where Val: Default
+where
+    Val: Default,
 {
     /// Create an [`IdVal`] with the provided ID and `Val::default()`.
     pub(crate) fn new_default(id: ID) -> Self {

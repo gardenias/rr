@@ -37,7 +37,11 @@ where
         state: &'x mut RaftState<C>,
         output: &'x mut EngineOutput<C, SM>,
     ) -> Self {
-        Self { config, state, output }
+        Self {
+            config,
+            state,
+            output,
+        }
     }
 
     /// Purge log entries up to `RaftState.purge_upto()`, inclusive.
@@ -94,7 +98,12 @@ where
         let max_keep = self.config.max_in_snapshot_log_to_keep;
         let batch_size = self.config.purge_batch_size;
 
-        let purge_end = self.state.snapshot_meta.last_log_id.next_index().saturating_sub(max_keep);
+        let purge_end = self
+            .state
+            .snapshot_meta
+            .last_log_id
+            .next_index()
+            .saturating_sub(max_keep);
 
         tracing::debug!(
             "calculate purge range: up to index {}, snapshot_last_log_id: {:?}, max_keep: {}",

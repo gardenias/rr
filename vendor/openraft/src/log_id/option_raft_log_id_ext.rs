@@ -4,7 +4,8 @@ use crate::log_id::ref_log_id::RefLogId;
 
 /// This helper trait extracts information from an `Option<T>` where T impls [`RaftLogId`].
 pub(crate) trait OptionRaftLogIdExt<T>
-where T: RaftLogId
+where
+    T: RaftLogId,
 {
     /// Returns the log index if it is not a `None`.
     fn index(&self) -> Option<u64>;
@@ -27,7 +28,8 @@ where T: RaftLogId
 }
 
 impl<T> OptionRaftLogIdExt<T> for Option<T>
-where T: RaftLogId
+where
+    T: RaftLogId,
 {
     fn index(&self) -> Option<u64> {
         self.as_ref().map(|x| x.index())

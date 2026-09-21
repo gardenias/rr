@@ -8,7 +8,8 @@ use crate::vote::RaftCommittedLeaderId;
 /// Implements `DoubleEndedIterator` and `ExactSizeIterator`.
 #[derive(Debug, Clone)]
 pub(crate) struct LeaderLogIdsIter<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     committed_leader_id: CLID,
 
@@ -20,7 +21,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> LeaderLogIdsIter<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     pub(crate) fn new(committed_leader_id: CLID, start: u64, end: u64) -> Self {
         Self {
@@ -40,7 +42,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> Iterator for LeaderLogIdsIter<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     type Item = LogId<CLID>;
 
@@ -61,7 +64,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> DoubleEndedIterator for LeaderLogIdsIter<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.start >= self.end {
@@ -69,7 +73,10 @@ where CLID: RaftCommittedLeaderId
         }
 
         self.end -= 1;
-        Some(LogId::<CLID>::new(self.committed_leader_id.clone(), self.end))
+        Some(LogId::<CLID>::new(
+            self.committed_leader_id.clone(),
+            self.end,
+        ))
     }
 }
 

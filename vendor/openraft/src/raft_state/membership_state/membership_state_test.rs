@@ -45,11 +45,22 @@ fn test_membership_state_is_member() -> anyhow::Result<()> {
 fn test_membership_state_update_committed() -> anyhow::Result<()> {
     let new = || {
         MembershipStateOf::<UTConfig>::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 2)), m1())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m123_345())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 2)),
+                m1(),
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(3, 1, 4)),
+                m123_345(),
+            )),
         )
     };
-    let stored = |log_id, membership| Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id), membership));
+    let stored = |log_id, membership| {
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id),
+            membership,
+        ))
+    };
 
     // Smaller new committed won't take effect.
     {
@@ -123,7 +134,8 @@ fn test_install_membership_snapshot_resets_effective_at_purge_boundary() -> anyh
 fn test_install_membership_snapshot_keeps_uncovered_effective() -> anyhow::Result<()> {
     let snapshot_membership = effmem(2, 4, m12());
     let local_effective = effmem(4, 8, m123_345());
-    let mut ms = MembershipStateOf::<UTConfig>::new(snapshot_membership.clone(), local_effective.clone());
+    let mut ms =
+        MembershipStateOf::<UTConfig>::new(snapshot_membership.clone(), local_effective.clone());
 
     ms.install_membership_snapshot(snapshot_membership.clone(), 7);
 

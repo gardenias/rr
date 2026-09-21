@@ -25,7 +25,8 @@ use crate::vote::raft_vote::RaftVote;
 /// session information, configuration, and the notification channel back to `RaftCore`.
 #[derive(Clone)]
 pub(crate) struct ReplicationContext<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// This node id
     #[allow(dead_code)]
@@ -57,7 +58,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> ReplicationContext<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Whether the leader this replication works for has been superseded.
     ///
@@ -85,7 +87,10 @@ where C: RaftTypeConfig
     ///
     /// [`RaftCore`]: crate::core::RaftCore
     pub(crate) async fn notify_storage_error(&self, error: StorageError<C>) {
-        self.tx_notify.send(Notification::StorageError { error }).await.ok();
+        self.tx_notify
+            .send(Notification::StorageError { error })
+            .await
+            .ok();
     }
 
     /// Report that the target answered a request sent at `sending_time`.
@@ -129,15 +134,21 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for ReplicationContext<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{{id: {}, target: {}, {}}}", self.id, self.target, self.stream_id)
+        write!(
+            f,
+            "{{id: {}, target: {}, {}}}",
+            self.id, self.target, self.stream_id
+        )
     }
 }
 
 impl<C> fmt::Debug for ReplicationContext<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReplicationContext")

@@ -71,7 +71,9 @@ impl<T> ClientResponderQueue<T> {
     /// Returns matching responders and removes them from the queue.
     /// Not all indices in the range may have responders.
     pub(crate) fn drain_upto(&mut self, last_index: u64) -> Vec<(u64, T)> {
-        let end_pos = self.responders.partition_point(|(index, _)| *index <= last_index);
+        let end_pos = self
+            .responders
+            .partition_point(|(index, _)| *index <= last_index);
         self.responders.drain(0..end_pos).collect()
     }
 
@@ -80,8 +82,10 @@ impl<T> ClientResponderQueue<T> {
     /// Returns an iterator over responders with `log_index >= from_index` and removes them.
     /// Used when truncating logs to notify affected responders.
     pub(crate) fn drain_from(&mut self, from_index: u64) -> impl Iterator<Item = (u64, T)> + '_ {
-        let start_pos =
-            self.responders.binary_search_by_key(&from_index, |(index, _)| *index).unwrap_or_else(|pos| pos);
+        let start_pos = self
+            .responders
+            .binary_search_by_key(&from_index, |(index, _)| *index)
+            .unwrap_or_else(|pos| pos);
 
         self.responders.drain(start_pos..)
     }

@@ -10,12 +10,15 @@ use crate::vote::ref_vote::RefVote;
 /// Represents a committed Vote that has been accepted by a quorum.
 ///
 /// The inner `Vote`'s attribute `committed` is always set to `true`
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
-#[derive(PartialOrd)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub(crate) struct CommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     leader_id: LID,
 }
@@ -40,7 +43,8 @@ where
 /// - and a `Vote` is granted if it is greater than the old one.
 #[allow(clippy::derive_ord_xor_partial_ord)]
 impl<LID> Ord for CommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     fn cmp(&self, other: &Self) -> Ordering {
         let self_ref = RefVote::new(&self.leader_id, true);
@@ -50,7 +54,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> CommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     pub(crate) fn new(leader_id: LID) -> Self {
         Self { leader_id }
@@ -76,7 +81,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> fmt::Display for CommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ref_vote = RefVote::new(&self.leader_id, true);
@@ -85,7 +91,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> RaftVote for CommittedVote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     type LeaderId = LID;
 

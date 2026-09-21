@@ -43,7 +43,8 @@ const RECV_CORE_STOP_TIMEOUT: Duration = Duration::from_secs(1);
 /// RaftInner is the internal handle and provides internally used APIs to communicate with
 /// `RaftCore`.
 pub(in crate::raft) struct RaftInner<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(in crate::raft) id: C::NodeId,
     pub(in crate::raft) config: Arc<Config>,
@@ -65,7 +66,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RaftInner<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn id(&self) -> &C::NodeId {
         &self.id
@@ -90,8 +92,14 @@ where C: RaftTypeConfig
 
     /// Invoke RaftCore by sending a RaftMsg and blocks waiting for response.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) async fn call_core<T>(&self, mes: RaftMsg<C>, rx: OneshotReceiverOf<C, T>) -> Result<T, Fatal<C>>
-    where T: OptionalSend {
+    pub(crate) async fn call_core<T>(
+        &self,
+        mes: RaftMsg<C>,
+        rx: OneshotReceiverOf<C, T>,
+    ) -> Result<T, Fatal<C>>
+    where
+        T: OptionalSend,
+    {
         let sum = if tracing::enabled!(Level::DEBUG) {
             Some(mes.to_string())
         } else {
@@ -121,13 +129,20 @@ where C: RaftTypeConfig
     }
 
     /// Receive a message from RaftCore, return an error if the response is not delivered.
-    pub(crate) async fn recv_msg<T, E>(&self, rx: impl Future<Output = Result<T, E>>) -> Result<T, Fatal<C>>
+    pub(crate) async fn recv_msg<T, E>(
+        &self,
+        rx: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, Fatal<C>>
     where
         T: OptionalSend,
         E: OptionalSend,
     {
         let recv_res = rx.await;
-        tracing::debug!("{}: receives result is error: {:?}", func_name!(), recv_res.is_err());
+        tracing::debug!(
+            "{}: receives result is error: {:?}",
+            func_name!(),
+            recv_res.is_err()
+        );
 
         match recv_res {
             Ok(x) => Ok(x),
@@ -184,7 +199,10 @@ where C: RaftTypeConfig
     /// Send an [`ExternalCommand`] to RaftCore to execute in the `RaftCore` thread.
     ///
     /// It returns at once.
-    pub(in crate::raft) async fn send_external_command(&self, cmd: ExternalCommand<C>) -> Result<(), Fatal<C>> {
+    pub(in crate::raft) async fn send_external_command(
+        &self,
+        cmd: ExternalCommand<C>,
+    ) -> Result<(), Fatal<C>> {
         let send_res = self.tx_api.send(RaftMsg::ExternalCommand { cmd }).await;
 
         if send_res.is_err() {

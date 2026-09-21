@@ -80,7 +80,9 @@ where
                 break;
             }
             #[cfg(debug_assertions)]
-            tracing::debug!("RangeMap::record: drop tail {prev}, new right_boundary {right_boundary} <= it");
+            tracing::debug!(
+                "RangeMap::record: drop tail {prev}, new right_boundary {right_boundary} <= it"
+            );
             self.entries.pop_back();
         }
 

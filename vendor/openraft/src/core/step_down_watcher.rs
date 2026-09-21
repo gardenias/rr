@@ -40,7 +40,8 @@ use crate::type_config::alias::WatchReceiverOf;
 /// [`TriggerTransferLeader`]: ExternalCommand::TriggerTransferLeader
 /// [`RefreshServerState`]: ExternalCommand::RefreshServerState
 pub(crate) struct StepDownWatcher<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     rx_server_metrics: WatchReceiverOf<C, RaftServerMetrics<C>>,
 
@@ -58,7 +59,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> StepDownWatcher<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Spawn the watcher task.
     ///
@@ -131,7 +133,8 @@ where C: RaftTypeConfig
 
         if let Some(to) = target {
             tracing::info!("removed Leader steps down: transfer leadership to {}", to);
-            self.send(ExternalCommand::TriggerTransferLeader { to }).await;
+            self.send(ExternalCommand::TriggerTransferLeader { to })
+                .await;
         }
 
         C::sleep(self.transfer_wait).await;
@@ -169,7 +172,9 @@ where C: RaftTypeConfig
 /// The decision is level-based: it is derived from a single metrics snapshot, so skipped or
 /// stale snapshots do not affect correctness.
 fn is_removed_leader<C>(metrics: &RaftServerMetrics<C>) -> bool
-where C: RaftTypeConfig {
+where
+    C: RaftTypeConfig,
+{
     if metrics.state != ServerState::Leader {
         return false;
     }
@@ -188,7 +193,9 @@ where C: RaftTypeConfig {
 /// Choose the transfer-leader target: the voter with the greatest matching log id, which needs
 /// the least catching up.
 fn transfer_target<C>(metrics: &RaftMetrics<C>) -> Option<C::NodeId>
-where C: RaftTypeConfig {
+where
+    C: RaftTypeConfig,
+{
     // Only a Leader publishes replication metrics.
     let replication = metrics.replication.as_ref()?;
 
@@ -221,7 +228,10 @@ mod tests {
     }
 
     fn stored(log_index: u64, mem: Membership<u64, ()>) -> Arc<StoredMembershipOf<UTConfig>> {
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, log_index)), mem))
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, log_index)),
+            mem,
+        ))
     }
 
     /// Build server metrics of a Leader node 1, with the same effective and committed
@@ -251,7 +261,10 @@ mod tests {
 
     #[test]
     fn test_is_removed_leader_learner_leader() {
-        let m = server_metrics(Membership::new_with_defaults(vec![btreeset! {2,3}], btreeset! {1}));
+        let m = server_metrics(Membership::new_with_defaults(
+            vec![btreeset! {2,3}],
+            btreeset! {1},
+        ));
 
         assert!(!is_removed_leader(&m));
     }
@@ -259,7 +272,8 @@ mod tests {
     #[test]
     fn test_is_removed_leader_uncommitted_membership() {
         let mut m = server_metrics(m23());
-        m.committed_membership_config = stored(1, Membership::new_with_defaults(vec![btreeset! {1,2}], []));
+        m.committed_membership_config =
+            stored(1, Membership::new_with_defaults(vec![btreeset! {1,2}], []));
 
         assert!(!is_removed_leader(&m));
     }

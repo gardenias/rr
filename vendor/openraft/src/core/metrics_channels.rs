@@ -13,7 +13,8 @@ use crate::type_config::alias::WatchSenderOf;
 /// [`RaftCore`]: crate::core::RaftCore
 /// [`RaftCore::flush_metrics()`]: crate::core::RaftCore::flush_metrics
 pub(crate) struct MetricsChannels<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The complete metrics, backing [`Raft::metrics()`].
     ///

@@ -21,7 +21,8 @@ use crate::raft::message::TransferLeaderResponse;
 /// [`RaftNetworkV2`]: crate::network::RaftNetworkV2
 #[add_async_trait]
 pub trait NetTransferLeader<C>: OptionalSend + OptionalSync + 'static
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Send TransferLeader message to the target node.
     ///

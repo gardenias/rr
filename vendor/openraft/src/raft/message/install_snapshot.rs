@@ -26,7 +26,8 @@ use crate::type_config::alias::VoteOf;
             `openraft_legacy::network_v1::InstallSnapshotRequest` instead."
 )]
 pub struct InstallSnapshotRequest<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     _p: PhantomData<C>,
 }
@@ -54,17 +55,20 @@ where C: RaftTypeConfig
             `openraft_legacy::network_v1::InstallSnapshotResponse` instead."
 )]
 pub struct InstallSnapshotResponse<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     _p: PhantomData<C>,
 }
 
 /// The response to `Raft::install_full_snapshot` API.
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
-#[derive(derive_more::Display)]
+#[derive(Debug, Clone, PartialEq, Eq, derive_more::Display)]
 #[display("SnapshotResponse{{vote:{}}}", vote)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct SnapshotResponse<C: RaftTypeConfig> {
     /// The responder's current vote.
     pub vote: VoteOf<C>,

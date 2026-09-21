@@ -69,7 +69,10 @@ pub trait TypeConfigExt: RaftTypeConfig {
 
     /// Require a [`Future`] to complete before the specified duration has elapsed.
     #[track_caller]
-    fn timeout<R, F: Future<Output = R> + OptionalSend>(duration: Duration, future: F) -> TimeoutOf<Self, R, F> {
+    fn timeout<R, F: Future<Output = R> + OptionalSend>(
+        duration: Duration,
+        future: F,
+    ) -> TimeoutOf<Self, R, F> {
         AsyncRuntimeOf::<Self>::timeout(duration, future)
     }
 
@@ -90,7 +93,9 @@ pub trait TypeConfigExt: RaftTypeConfig {
     /// [`AsyncRuntime::Oneshot::channel()`](`crate::async_runtime::Oneshot::channel`).
     #[track_caller]
     fn oneshot<T>() -> (OneshotSenderOf<Self, T>, OneshotReceiverOf<Self, T>)
-    where T: OptionalSend {
+    where
+        T: OptionalSend,
+    {
         OneshotOf::<Self>::channel()
     }
 
@@ -101,7 +106,9 @@ pub trait TypeConfigExt: RaftTypeConfig {
     /// [`AsyncRuntime::Mpsc::channel()`](`crate::async_runtime::Mpsc::channel`).
     #[track_caller]
     fn mpsc<T>(buffer: usize) -> (MpscSenderOf<Self, T>, MpscReceiverOf<Self, T>)
-    where T: OptionalSend {
+    where
+        T: OptionalSend,
+    {
         MpscOf::<Self>::channel(buffer)
     }
 
@@ -110,7 +117,9 @@ pub trait TypeConfigExt: RaftTypeConfig {
     /// This is useful for passing receiver data to streaming APIs
     /// in a runtime-agnostic way.
     fn mpsc_to_stream<T>(rx: MpscReceiverOf<Self, T>) -> impl Stream<Item = T>
-    where T: OptionalSend {
+    where
+        T: OptionalSend,
+    {
         futures_util::stream::unfold(rx, |mut rx| async move {
             let item = MpscReceiver::recv(&mut rx).await?;
             Some((item, rx))
@@ -124,7 +133,9 @@ pub trait TypeConfigExt: RaftTypeConfig {
     /// [`AsyncRuntime::Watch::channel()`](`crate::async_runtime::Watch::channel`).
     #[track_caller]
     fn watch_channel<T>(init: T) -> (WatchSenderOf<Self, T>, WatchReceiverOf<Self, T>)
-    where T: OptionalSend + OptionalSync {
+    where
+        T: OptionalSend + OptionalSync,
+    {
         WatchOf::<Self>::channel(init)
     }
 
@@ -134,7 +145,9 @@ pub trait TypeConfigExt: RaftTypeConfig {
     /// [`AsyncRuntime::Mutex::new()`](`crate::async_runtime::Mutex::new`).
     #[track_caller]
     fn mutex<T>(value: T) -> MutexOf<Self, T>
-    where T: OptionalSend {
+    where
+        T: OptionalSend,
+    {
         MutexOf::<Self, T>::new(value)
     }
 
@@ -219,15 +232,21 @@ mod tests {
         type Term = u64;
         type LeaderId = crate::impls::leader_id_adv::LeaderId<u64, u64>;
         type Vote = crate::impls::Vote<Self::LeaderId>;
-        type Entry =
-            crate::Entry<<Self::LeaderId as crate::vote::RaftLeaderId>::Committed, Self::D, Self::NodeId, Self::Node>;
+        type Entry = crate::Entry<
+            <Self::LeaderId as crate::vote::RaftLeaderId>::Committed,
+            Self::D,
+            Self::NodeId,
+            Self::Node,
+        >;
         type AsyncRuntime = TokioRuntime;
         type Responder<T>
             = crate::impls::OneshotResponder<Self, T>
-        where T: OptionalSend + 'static;
+        where
+            T: OptionalSend + 'static;
         type Batch<T>
             = crate::impls::InlineBatch<T>
-        where T: OptionalSend + 'static;
+        where
+            T: OptionalSend + 'static;
         type ErrorSource = anyerror::AnyError;
     }
 

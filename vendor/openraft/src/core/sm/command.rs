@@ -79,8 +79,14 @@ where
         Command::GetSnapshot { tx }
     }
 
-    pub(crate) fn install_full_snapshot(snapshot: SmSnapshotOf<C, SM>, log_io_id: LogIOId<C>) -> Self {
-        Command::InstallFullSnapshot { log_io_id, snapshot }
+    pub(crate) fn install_full_snapshot(
+        snapshot: SmSnapshotOf<C, SM>,
+        log_io_id: LogIOId<C>,
+    ) -> Self {
+        Command::InstallFullSnapshot {
+            log_io_id,
+            snapshot,
+        }
     }
 
     /// Applies log ids within the inclusive range `[first, last]`.
@@ -156,7 +162,11 @@ where
                 log_io_id: io_id,
                 snapshot,
             } => {
-                write!(f, "InstallFullSnapshot: meta: {:?}, io_id: {:?}", snapshot.meta, io_id)
+                write!(
+                    f,
+                    "InstallFullSnapshot: meta: {:?}, io_id: {:?}",
+                    snapshot.meta, io_id
+                )
             }
             Command::Apply { first, last, .. } => write!(f, "Apply: [{},{}]", first, last),
             Command::ExternalFunc { .. } => write!(f, "ExternalFunc"),
@@ -177,7 +187,11 @@ where
                 log_io_id: io_id,
                 snapshot,
             } => {
-                write!(f, "InstallFullSnapshot: meta: {}, io_id: {}", snapshot.meta, io_id)
+                write!(
+                    f,
+                    "InstallFullSnapshot: meta: {}, io_id: {}",
+                    snapshot.meta, io_id
+                )
             }
             Command::Apply { first, last, .. } => write!(f, "Apply: [{},{}]", first, last),
             Command::ExternalFunc { .. } => write!(f, "ExternalFunc"),

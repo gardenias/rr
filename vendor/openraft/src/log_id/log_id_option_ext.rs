@@ -3,7 +3,10 @@ use openraft_macros::since;
 use crate::log_id::raft_log_id::RaftLogId;
 
 /// This helper trait extracts information from an `Option<LogId>`.
-#[since(version = "0.10.0", change = "removed `C: RaftTypeConfig` generic parameter")]
+#[since(
+    version = "0.10.0",
+    change = "removed `C: RaftTypeConfig` generic parameter"
+)]
 pub trait LogIdOptionExt {
     /// Returns the log index if it is not a `None`.
     fn index(&self) -> Option<u64>;
@@ -15,7 +18,8 @@ pub trait LogIdOptionExt {
 }
 
 impl<T> LogIdOptionExt for Option<T>
-where T: RaftLogId
+where
+    T: RaftLogId,
 {
     fn index(&self) -> Option<u64> {
         self.as_ref().map(|x| x.index())

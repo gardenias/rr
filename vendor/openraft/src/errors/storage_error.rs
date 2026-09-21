@@ -7,20 +7,25 @@ use crate::type_config::alias::SnapshotSignatureOf;
 
 /// Convert error to StorageError::IO();
 pub trait ToStorageResult<C, T>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Convert `Result<T, E>` to `Result<T, StorageError>`
     ///
     /// `f` provides error context for building the StorageError.
     fn sto_res<F>(self, f: F) -> Result<T, StorageError<C>>
-    where F: FnOnce() -> (ErrorSubject<C>, ErrorVerb);
+    where
+        F: FnOnce() -> (ErrorSubject<C>, ErrorVerb);
 }
 
 impl<C, T> ToStorageResult<C, T> for Result<T, std::io::Error>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn sto_res<F>(self, f: F) -> Result<T, StorageError<C>>
-    where F: FnOnce() -> (ErrorSubject<C>, ErrorVerb) {
+    where
+        F: FnOnce() -> (ErrorSubject<C>, ErrorVerb),
+    {
         match self {
             Ok(x) => Ok(x),
             Err(e) => {
@@ -34,9 +39,14 @@ where C: RaftTypeConfig
 
 /// The subject of a storage error, indicating what operation or component failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum ErrorSubject<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// A general storage error
     Store,
@@ -67,9 +77,7 @@ where C: RaftTypeConfig
 }
 
 /// What it is doing when an error occurs.
-#[derive(Debug)]
-#[derive(Clone, Copy)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum ErrorVerb {
     /// Reading data.
@@ -93,7 +101,8 @@ impl fmt::Display for ErrorVerb {
 pub type StorageIOError<C> = StorageError<C>;
 
 impl<C> StorageError<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Backward compatible with old form `StorageError::IO{ source: StorageError }`
     #[deprecated(note = "no need to call this method", since = "0.10.0")]
@@ -102,13 +111,18 @@ where C: RaftTypeConfig
     }
 
     /// Create a StorageError from a std::io::Error.
-    pub fn from_io_error(subject: ErrorSubject<C>, verb: ErrorVerb, io_error: std::io::Error) -> Self {
+    pub fn from_io_error(
+        subject: ErrorSubject<C>,
+        verb: ErrorVerb,
+        io_error: std::io::Error,
+    ) -> Self {
         StorageError::new(subject, verb, C::err_from_error(&io_error))
     }
 }
 
 impl<C> From<StorageError<C>> for std::io::Error
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn from(e: StorageError<C>) -> Self {
         std::io::Error::other(e.to_string())
@@ -121,9 +135,14 @@ where C: RaftTypeConfig
 /// An application returning this error will shut down the Openraft node immediately to prevent
 /// further damage.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct StorageError<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     subject: ErrorSubject<C>,
     verb: ErrorVerb,
@@ -131,19 +150,29 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for StorageError<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "when {:?} {:?}: {}", self.verb, self.subject, self.source)
+        write!(
+            f,
+            "when {:?} {:?}: {}",
+            self.verb, self.subject, self.source
+        )
     }
 }
 
 impl<C> StorageError<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create a new StorageError.
     pub fn new(subject: ErrorSubject<C>, verb: ErrorVerb, source: C::ErrorSource) -> Self {
-        Self { subject, verb, source }
+        Self {
+            subject,
+            verb,
+            source,
+        }
     }
 
     /// Create an error for writing a log entry.
@@ -197,12 +226,18 @@ where C: RaftTypeConfig
     }
 
     /// Create an error for writing a snapshot.
-    pub fn write_snapshot(signature: Option<SnapshotSignatureOf<C>>, source: C::ErrorSource) -> Self {
+    pub fn write_snapshot(
+        signature: Option<SnapshotSignatureOf<C>>,
+        source: C::ErrorSource,
+    ) -> Self {
         Self::new(ErrorSubject::Snapshot(signature), ErrorVerb::Write, source)
     }
 
     /// Create an error for reading a snapshot.
-    pub fn read_snapshot(signature: Option<SnapshotSignatureOf<C>>, source: C::ErrorSource) -> Self {
+    pub fn read_snapshot(
+        signature: Option<SnapshotSignatureOf<C>>,
+        source: C::ErrorSource,
+    ) -> Self {
         Self::new(ErrorSubject::Snapshot(signature), ErrorVerb::Read, source)
     }
 
@@ -273,7 +308,8 @@ mod tests {
         assert!(io_err.to_string().contains("Write"));
         assert!(io_err.to_string().contains("disk full"));
 
-        let storage_err: StorageError<UTConfig> = StorageError::read_vote(AnyError::error("permission denied"));
+        let storage_err: StorageError<UTConfig> =
+            StorageError::read_vote(AnyError::error("permission denied"));
         let io_err: std::io::Error = storage_err.into();
 
         assert_eq!(io_err.kind(), std::io::ErrorKind::Other);

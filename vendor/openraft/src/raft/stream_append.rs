@@ -54,11 +54,20 @@ where
         while let Some(req) = input.next().await {
             let (resp_tx, resp_rx) = C::oneshot();
 
-            if inner.send_msg(RaftMsg::AppendEntries { rpc: req, tx: resp_tx }).await.is_err() {
+            if inner
+                .send_msg(RaftMsg::AppendEntries {
+                    rpc: req,
+                    tx: resp_tx,
+                })
+                .await
+                .is_err()
+            {
                 break;
             }
 
-            let pending = Pending { response_rx: resp_rx };
+            let pending = Pending {
+                response_rx: resp_rx,
+            };
 
             if MpscSender::send(&tx, pending).await.is_err() {
                 break;

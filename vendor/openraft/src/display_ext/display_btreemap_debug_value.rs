@@ -5,7 +5,9 @@ use std::fmt;
 ///
 /// It formats a key-value pair in a string like "{key}:{value:?}" and
 /// concatenates the key-value pairs with comma.
-pub(crate) struct DisplayBTreeMapDebugValue<'a, K: fmt::Display, V: fmt::Debug>(pub &'a BTreeMap<K, V>);
+pub(crate) struct DisplayBTreeMapDebugValue<'a, K: fmt::Display, V: fmt::Debug>(
+    pub &'a BTreeMap<K, V>,
+);
 
 impl<K: fmt::Display, V: fmt::Debug> fmt::Display for DisplayBTreeMapDebugValue<'_, K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -34,7 +34,8 @@ impl<N> Clone for UTConfig<N> {
 impl<N> Copy for UTConfig<N> {}
 
 impl<N> RaftTypeConfig for UTConfig<N>
-where N: Node + Ord
+where
+    N: Node + Ord,
 {
     type D = u64;
     type R = ();
@@ -47,10 +48,12 @@ where N: Node + Ord
     type AsyncRuntime = TokioRuntime;
     type Responder<T>
         = crate::impls::OneshotResponder<Self, T>
-    where T: OptionalSend + 'static;
+    where
+        T: OptionalSend + 'static;
     type Batch<T>
         = crate::impls::InlineBatch<T>
-    where T: OptionalSend + 'static;
+    where
+        T: OptionalSend + 'static;
     type ErrorSource = anyerror::AnyError;
 }
 

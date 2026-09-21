@@ -17,11 +17,10 @@ use crate::vote::RaftVote;
 /// For a comprehensive explanation, see: [`LogIOId` documentation](crate::docs::data::log_io_id).
 ///
 /// [`LogId`]: crate::log_id::LogId
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
-#[derive(PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct LogIOId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The id of the leader that performs the log io operation.
     pub(crate) committed_vote: CommittedVoteOf<C>,
@@ -31,7 +30,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for LogIOId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "by:{}, {}", self.committed_vote, self.log_id.display())
@@ -39,10 +39,14 @@ where C: RaftTypeConfig
 }
 
 impl<C> LogIOId<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(committed_vote: CommittedVoteOf<C>, log_id: Option<LogIdOf<C>>) -> Self {
-        Self { committed_vote, log_id }
+        Self {
+            committed_vote,
+            log_id,
+        }
     }
 
     #[allow(dead_code)]

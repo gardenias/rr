@@ -78,16 +78,24 @@ where
                         unreachable!("Respond command to postpone must have a condition");
                     }
                     Some(Condition::IOFlushed { io_id }) => {
-                        pending_responds.on_log_io.push_back(PendingRespond::new(io_id, resp));
+                        pending_responds
+                            .on_log_io
+                            .push_back(PendingRespond::new(io_id, resp));
                     }
                     Some(Condition::LogFlushed { log_id }) => {
-                        pending_responds.on_log_flush.push_back(PendingRespond::new(log_id, resp));
+                        pending_responds
+                            .on_log_flush
+                            .push_back(PendingRespond::new(log_id, resp));
                     }
                     Some(Condition::Applied { log_id }) => {
-                        pending_responds.on_apply.push_back(PendingRespond::new(log_id, resp));
+                        pending_responds
+                            .on_apply
+                            .push_back(PendingRespond::new(log_id, resp));
                     }
                     Some(Condition::Snapshot { log_id }) => {
-                        pending_responds.on_snapshot.push_back(PendingRespond::new(log_id, resp));
+                        pending_responds
+                            .on_snapshot
+                            .push_back(PendingRespond::new(log_id, resp));
                     }
                 }
                 Ok(())

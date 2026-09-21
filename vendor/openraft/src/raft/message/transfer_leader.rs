@@ -9,11 +9,15 @@ use crate::type_config::alias::VoteOf;
 
 /// A request to transfer leadership from the current leader to another node.
 #[since(version = "0.10.0", change = "added last_log_id")]
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct TransferLeaderRequest<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The vote of the Leader that is transferring the leadership.
     pub(crate) from_leader: VoteOf<C>,
@@ -26,7 +30,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> TransferLeaderRequest<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create a new transfer leader request.
     #[since(version = "0.10.0", change = "added last_log_id arg")]
@@ -63,15 +68,20 @@ pub type TransferLeaderResponse<C> = Result<(), TransferLeaderError<C>>;
 
 /// Non-fatal reason a transfer-leader request was rejected by the target node.
 #[since(version = "0.10.0")]
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
-#[derive(thiserror::Error)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum TransferLeaderError<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The target observed a different vote before it could accept the transfer.
-    #[error("transfer leader rejected because vote changed; expected: {expected:?}, actual: {actual:?}")]
+    #[error(
+        "transfer leader rejected because vote changed; expected: {expected:?}, actual: {actual:?}"
+    )]
     VoteChanged {
         /// The leader vote carried by the transfer request.
         expected: VoteOf<C>,
@@ -80,7 +90,9 @@ where C: RaftTypeConfig
     },
 
     /// The target has not flushed the leader's expected log yet.
-    #[error("transfer leader rejected because log is not flushed; expected: {expected:?}, actual: {actual:?}")]
+    #[error(
+        "transfer leader rejected because log is not flushed; expected: {expected:?}, actual: {actual:?}"
+    )]
     LogNotFlushed {
         /// The last log id from the transferring leader.
         expected: Option<LogIdOf<C>>,
@@ -90,7 +102,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> fmt::Display for TransferLeaderRequest<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

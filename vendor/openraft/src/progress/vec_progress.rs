@@ -121,7 +121,9 @@ where
     fn move_down(&mut self, index: usize) -> usize {
         self.stat.move_count += 1;
         let mut i = index;
-        while i + 1 < self.voter_count && self.entries[i].progress() < self.entries[i + 1].progress() {
+        while i + 1 < self.voter_count
+            && self.entries[i].progress() < self.entries[i + 1].progress()
+        {
             self.entries.swap(i, i + 1);
             i += 1;
         }
@@ -149,7 +151,9 @@ where
     }
 
     pub(crate) fn display_with<Fmt>(&self, f: Fmt) -> DisplayVecProgress<'_, Entry, QS, Fmt>
-    where Fmt: Fn(&mut Formatter<'_>, &Entry) -> std::fmt::Result {
+    where
+        Fmt: Fn(&mut Formatter<'_>, &Entry) -> std::fmt::Result,
+    {
         DisplayVecProgress { inner: self, f }
     }
 
@@ -187,8 +191,14 @@ where
     /// - update(c, 3): nothing to do: quorum-accepted is still 3;
     /// - update(c, 4): re-calc:       quorum-accepted becomes 4;
     /// - update(c, 6): re-calc:       quorum-accepted becomes 5;
-    pub(crate) fn update_with<F>(&mut self, id: &Entry::Id, f: F) -> Result<&Entry::Progress, &Entry::Progress>
-    where F: FnOnce(&mut Entry::Progress) {
+    pub(crate) fn update_with<F>(
+        &mut self,
+        id: &Entry::Id,
+        f: F,
+    ) -> Result<&Entry::Progress, &Entry::Progress>
+    where
+        F: FnOnce(&mut Entry::Progress),
+    {
         self.update_entry_with(id, |entry| f(entry.progress_mut()))
     }
 
@@ -197,8 +207,14 @@ where
     /// This is for application-owned fields that have to be mutated together
     /// with the progress value. The progress update must still be monotonic.
     /// The entry ID must not be changed.
-    pub(crate) fn update_entry_with<F>(&mut self, id: &Entry::Id, f: F) -> Result<&Entry::Progress, &Entry::Progress>
-    where F: FnOnce(&mut Entry) {
+    pub(crate) fn update_entry_with<F>(
+        &mut self,
+        id: &Entry::Id,
+        f: F,
+    ) -> Result<&Entry::Progress, &Entry::Progress>
+    where
+        F: FnOnce(&mut Entry),
+    {
         self.stat.update_count += 1;
 
         let index = match self.index(id) {
@@ -245,7 +261,9 @@ where
     ///
     /// It returns the updated entry if the `id` is found, otherwise returns `None`.
     pub(crate) fn reset_entry_with<F>(&mut self, id: &Entry::Id, f: F) -> Option<&Entry>
-    where F: FnOnce(&mut Entry) {
+    where
+        F: FnOnce(&mut Entry),
+    {
         let index = self.index(id)?;
 
         let prev_progress = self.entries[index].progress().clone();
@@ -256,11 +274,12 @@ where
         debug_assert!(self.entries[index].progress() <= &prev_progress);
 
         // Learners are never reordered.
-        let new_index = if index < self.voter_count && self.entries[index].progress() < &prev_progress {
-            self.move_down(index)
-        } else {
-            index
-        };
+        let new_index =
+            if index < self.voter_count && self.entries[index].progress() < &prev_progress {
+                self.move_down(index)
+            } else {
+                index
+            };
 
         Some(&self.entries[new_index])
     }

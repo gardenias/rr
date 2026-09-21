@@ -22,7 +22,10 @@ fn eng() -> Engine<UTConfig> {
     // - leader 1: indices 1-2
     // - leader 3: indices 3-4
     // - leader 5: index 5
-    eng.state.log_ids = LogIdList::new(None, vec![log_id(0, 0), log_id(1, 2), log_id(3, 4), log_id(5, 5)]);
+    eng.state.log_ids = LogIdList::new(
+        None,
+        vec![log_id(0, 0), log_id(1, 2), log_id(3, 4), log_id(5, 5)],
+    );
     eng
 }
 
@@ -39,7 +42,12 @@ fn test_calc_purge_upto() -> anyhow::Result<()> {
         (None, Some(log_id(1, 1)), 1, Some(log_id(0, 0))),
         (None, Some(log_id(1, 1)), 2, None),
         //
-        (Some(log_id(0, 0)), Some(log_id(1, 1)), 0, Some(log_id(1, 1))),
+        (
+            Some(log_id(0, 0)),
+            Some(log_id(1, 1)),
+            0,
+            Some(log_id(1, 1)),
+        ),
         (Some(log_id(0, 0)), Some(log_id(1, 1)), 1, None),
         (Some(log_id(0, 0)), Some(log_id(1, 1)), 2, None),
         //
@@ -50,8 +58,18 @@ fn test_calc_purge_upto() -> anyhow::Result<()> {
         (None, Some(log_id(3, 4)), 4, Some(log_id(0, 0))),
         (None, Some(log_id(3, 4)), 5, None),
         //
-        (Some(log_id(1, 2)), Some(log_id(3, 4)), 0, Some(log_id(3, 4))),
-        (Some(log_id(1, 2)), Some(log_id(3, 4)), 1, Some(log_id(3, 3))),
+        (
+            Some(log_id(1, 2)),
+            Some(log_id(3, 4)),
+            0,
+            Some(log_id(3, 4)),
+        ),
+        (
+            Some(log_id(1, 2)),
+            Some(log_id(3, 4)),
+            1,
+            Some(log_id(3, 3)),
+        ),
         (Some(log_id(1, 2)), Some(log_id(3, 4)), 2, None),
         (Some(log_id(1, 2)), Some(log_id(3, 4)), 3, None),
         (Some(log_id(1, 2)), Some(log_id(3, 4)), 4, None),

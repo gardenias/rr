@@ -42,7 +42,10 @@ where
 
     /// Create a new log entry with log id and payload of application data or membership config.
     #[since(version = "0.10.0")]
-    fn new(log_id: LogId<Self::CommittedLeaderId>, payload: EntryPayload<Self::D, Self::NodeId, Self::Node>) -> Self;
+    fn new(
+        log_id: LogId<Self::CommittedLeaderId>,
+        payload: EntryPayload<Self::D, Self::NodeId, Self::Node>,
+    ) -> Self;
 
     /// Returns references to the components of this entry's log ID: the committed leader ID and
     /// index.
@@ -64,14 +67,18 @@ where
     /// Create a new blank log entry.
     #[since(version = "0.10.0", change = "become a default method")]
     fn new_blank(log_id: LogId<Self::CommittedLeaderId>) -> Self
-    where Self: Final + Sized {
+    where
+        Self: Final + Sized,
+    {
         Self::new(log_id, EntryPayload::Blank)
     }
 
     /// Create a new normal log entry that contains application data.
     #[since(version = "0.10.0", change = "become a default method")]
     fn new_normal(log_id: LogId<Self::CommittedLeaderId>, data: Self::D) -> Self
-    where Self: Final + Sized {
+    where
+        Self: Final + Sized,
+    {
         Self::new(log_id, EntryPayload::Normal(data))
     }
 
@@ -79,15 +86,22 @@ where
     ///
     /// The returned instance must return `Some()` for `Self::get_membership()`.
     #[since(version = "0.10.0", change = "become a default method")]
-    fn new_membership(log_id: LogId<Self::CommittedLeaderId>, m: Membership<Self::NodeId, Self::Node>) -> Self
-    where Self: Final + Sized {
+    fn new_membership(
+        log_id: LogId<Self::CommittedLeaderId>,
+        m: Membership<Self::NodeId, Self::Node>,
+    ) -> Self
+    where
+        Self: Final + Sized,
+    {
         Self::new(log_id, EntryPayload::Membership(m))
     }
 
     /// Returns the `LogId` of this entry.
     #[since(version = "0.10.0")]
     fn log_id(&self) -> LogId<Self::CommittedLeaderId>
-    where Self: Final {
+    where
+        Self: Final,
+    {
         let (leader_id, index) = self.log_id_parts();
         LogId::new(leader_id.clone(), index)
     }
@@ -95,7 +109,9 @@ where
     /// Returns the index of this log entry.
     #[since(version = "0.10.0")]
     fn index(&self) -> u64
-    where Self: Final {
+    where
+        Self: Final,
+    {
         self.log_id_parts().1
     }
 }

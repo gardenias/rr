@@ -7,8 +7,7 @@ use openraft_macros::since;
 /// It is the value of
 /// [`Config::removed_leader_step_down`](crate::Config::removed_leader_step_down).
 #[since(version = "0.10.0")]
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum StepDownPolicy {
     /// Never step down automatically.

@@ -47,7 +47,9 @@ use crate::base::OptionalSerde;
 ///     }
 /// }
 /// ```
-pub trait ErrorSource: Error + Clone + PartialEq + Eq + OptionalSend + OptionalSync + OptionalSerde + 'static {
+pub trait ErrorSource:
+    Error + Clone + PartialEq + Eq + OptionalSend + OptionalSync + OptionalSerde + 'static
+{
     /// Create an error from any error type implementing [`Error`].
     fn from_error<E: Error + 'static>(error: &E) -> Self;
 

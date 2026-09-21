@@ -73,7 +73,11 @@ use crate::vote::raft_vote::RaftVoteExt;
 /// [`Raft::metrics`]: crate::Raft::metrics
 #[since]
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct RaftMetrics<C: RaftTypeConfig> {
     /// The running state of the Raft node, or a fatal error if the node has stopped.
     pub running_state: Result<(), Fatal<C>>,
@@ -218,7 +222,8 @@ pub struct RaftMetrics<C: RaftTypeConfig> {
 }
 
 impl<C> fmt::Display for RaftMetrics<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Metrics{{")?;
@@ -256,8 +261,14 @@ where C: RaftTypeConfig
             self.committed_membership_config,
             self.snapshot.display(),
             self.purged.display(),
-            self.replication.as_ref().map(DisplayBTreeMapOptValue).display(),
-            self.heartbeat.as_ref().map(DisplayBTreeMapOptValue).display(),
+            self.replication
+                .as_ref()
+                .map(DisplayBTreeMapOptValue)
+                .display(),
+            self.heartbeat
+                .as_ref()
+                .map(DisplayBTreeMapOptValue)
+                .display(),
         )?;
 
         write!(f, "}}")?;
@@ -266,7 +277,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RaftMetrics<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create initial metrics for a new Raft node with the given ID.
     pub fn new_initial(id: C::NodeId) -> Self {
@@ -304,7 +316,11 @@ where C: RaftTypeConfig
 /// Subset of RaftMetrics, only include data-related metrics
 #[since]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct RaftDataMetrics<C: RaftTypeConfig> {
     /// The last log id.
     pub last_log: Option<LogIdOf<C>>,
@@ -397,7 +413,8 @@ pub struct RaftDataMetrics<C: RaftTypeConfig> {
 }
 
 impl<C> fmt::Display for RaftDataMetrics<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DataMetrics{{")?;
@@ -427,8 +444,14 @@ where C: RaftTypeConfig
         write!(
             f,
             ", replication:{{{}}}, heartbeat:{{{}}}",
-            self.replication.as_ref().map(DisplayBTreeMapOptValue).display(),
-            self.heartbeat.as_ref().map(DisplayBTreeMapOptValue).display(),
+            self.replication
+                .as_ref()
+                .map(DisplayBTreeMapOptValue)
+                .display(),
+            self.heartbeat
+                .as_ref()
+                .map(DisplayBTreeMapOptValue)
+                .display(),
         )?;
 
         write!(f, "}}")?;
@@ -439,7 +462,11 @@ where C: RaftTypeConfig
 /// Subset of RaftMetrics, only include server-related metrics
 #[since]
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct RaftServerMetrics<C: RaftTypeConfig> {
     /// The ID of this Raft node.
     pub id: C::NodeId,
@@ -463,7 +490,8 @@ pub struct RaftServerMetrics<C: RaftTypeConfig> {
 }
 
 impl<C> fmt::Display for RaftServerMetrics<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ServerMetrics{{")?;
@@ -485,7 +513,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RaftServerMetrics<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create initial server metrics for a new Raft node.
     ///

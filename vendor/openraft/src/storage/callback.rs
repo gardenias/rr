@@ -19,7 +19,8 @@ pub type LogFlushed<C> = IOFlushed<C>;
 ///
 /// [`RaftLogStorage`]: `crate::storage::RaftLogStorage`
 pub enum IOFlushed<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// A placeholder that does nothing when `io_completed` is called.
     ///
@@ -40,7 +41,8 @@ where C: RaftTypeConfig
 ///
 /// This struct is public but has private fields, preventing external construction.
 pub struct IOFlushedNotify<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The IO ID to send when the IO completes.
     io_id: IOId<C>,
@@ -50,7 +52,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> IOFlushed<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Create a no-op callback that does nothing when `io_completed` is called.
     pub fn noop() -> Self {
@@ -64,7 +67,10 @@ where C: RaftTypeConfig
         Self::Signal(tx)
     }
 
-    pub(crate) fn new(io_id: IOId<C>, tx: WatchSenderOf<C, Result<IOId<C>, StorageError<C>>>) -> Self {
+    pub(crate) fn new(
+        io_id: IOId<C>,
+        tx: WatchSenderOf<C, Result<IOId<C>, StorageError<C>>>,
+    ) -> Self {
         Self::Notify(IOFlushedNotify { io_id, tx })
     }
 
@@ -134,7 +140,11 @@ where C: RaftTypeConfig
 
     /// Figure out the error subject and verb from the IO ID.
     fn make_storage_error(io_id: &IOId<C>, e: io::Error) -> StorageError<C> {
-        tracing::error!("io_completed: IOFlushed error: {}, while flushing IO: {}", e, io_id);
+        tracing::error!(
+            "io_completed: IOFlushed error: {}, while flushing IO: {}",
+            e,
+            io_id
+        );
 
         let subject = io_id.subject();
         let verb = io_id.verb();
@@ -144,14 +154,16 @@ where C: RaftTypeConfig
 
 /// A oneshot callback for completion of applying logs to the state machine.
 pub struct LogApplied<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     last_log_id: LogIdOf<C>,
     tx: OneshotSenderOf<C, Result<(LogIdOf<C>, Vec<C::R>), StorageError<C>>>,
 }
 
 impl<C> LogApplied<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     #[allow(dead_code)]
     pub(crate) fn new(
@@ -173,13 +185,20 @@ where C: RaftTypeConfig
                 self.tx.send(Ok(resp))
             }
             Err(e) => {
-                tracing::error!("LogApplied error: {}, while applying up to {}", e, self.last_log_id);
+                tracing::error!(
+                    "LogApplied error: {}, while applying up to {}",
+                    e,
+                    self.last_log_id
+                );
                 self.tx.send(Err(e))
             }
         };
 
         if let Err(_e) = res {
-            tracing::error!("failed to send apply complete event, last_log_id: {}", self.last_log_id);
+            tracing::error!(
+                "failed to send apply complete event, last_log_id: {}",
+                self.last_log_id
+            );
         }
     }
 }
@@ -248,8 +267,14 @@ mod tests {
     #[test]
     fn test_io_flushed_notify_keeps_the_newest_io_id() {
         UTConfig::<()>::run(async {
-            let term1 = IOId::<UTConfig>::new_log_io(Vote::new_committed(1, 1).to_committed(), Some(log_id(1, 1, 1)));
-            let term2 = IOId::<UTConfig>::new_log_io(Vote::new_committed(2, 1).to_committed(), Some(log_id(2, 1, 2)));
+            let term1 = IOId::<UTConfig>::new_log_io(
+                Vote::new_committed(1, 1).to_committed(),
+                Some(log_id(1, 1, 1)),
+            );
+            let term2 = IOId::<UTConfig>::new_log_io(
+                Vote::new_committed(2, 1).to_committed(),
+                Some(log_id(2, 1, 2)),
+            );
 
             let (tx, rx) = UTConfig::<()>::watch_channel(Ok(term1.clone()));
 
@@ -267,8 +292,14 @@ mod tests {
     #[test]
     fn test_io_flushed_notify_keeps_the_error() {
         UTConfig::<()>::run(async {
-            let term1 = IOId::<UTConfig>::new_log_io(Vote::new_committed(1, 1).to_committed(), Some(log_id(1, 1, 1)));
-            let term2 = IOId::<UTConfig>::new_log_io(Vote::new_committed(2, 1).to_committed(), Some(log_id(2, 1, 2)));
+            let term1 = IOId::<UTConfig>::new_log_io(
+                Vote::new_committed(1, 1).to_committed(),
+                Some(log_id(1, 1, 1)),
+            );
+            let term2 = IOId::<UTConfig>::new_log_io(
+                Vote::new_committed(2, 1).to_committed(),
+                Some(log_id(2, 1, 2)),
+            );
 
             let (tx, rx) = UTConfig::<()>::watch_channel(Ok(term1.clone()));
 

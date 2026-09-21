@@ -83,7 +83,11 @@ where
     ///
     /// It is called by the leader when a new membership log is appended to the log store.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn append_membership(&mut self, log_id: &LogIdOf<C>, m: &Membership<C::NodeId, C::Node>) {
+    pub(crate) fn append_membership(
+        &mut self,
+        log_id: &LogIdOf<C>,
+        m: &Membership<C::NodeId, C::Node>,
+    ) {
         tracing::debug!("update effective membership: log_id:{} {}", log_id, m);
 
         debug_assert!(
@@ -97,7 +101,10 @@ where
 
         self.state
             .membership_state
-            .append(StoredMembershipOf::<C>::new_arc(Some(log_id.clone()), m.clone()));
+            .append(StoredMembershipOf::<C>::new_arc(
+                Some(log_id.clone()),
+                m.clone(),
+            ));
 
         // TODO(9): currently only a leader has replication setup.
         //       It's better to setup replication for both leader and candidate.
@@ -143,8 +150,11 @@ where
         {
             let old_progress = self.leader.clock_progress.clone();
 
-            self.leader.clock_progress =
-                old_progress.upgrade_quorum_set(Arc::new((*em.membership()).clone()), learner_ids, IdVal::new_default);
+            self.leader.clock_progress = old_progress.upgrade_quorum_set(
+                Arc::new((*em.membership()).clone()),
+                learner_ids,
+                IdVal::new_default,
+            );
         }
     }
 
@@ -159,7 +169,12 @@ where
         // clock_progress and progress has the same structure but clock_progress does not store stream_id.
         // Thus we need to check stream_id in progress to ensure the stream is correct.
 
-        tracing::debug!("{}: target: {}, t: {}", func_name!(), &target, sending_time.display());
+        tracing::debug!(
+            "{}: target: {}, t: {}",
+            func_name!(),
+            &target,
+            sending_time.display()
+        );
 
         if !self.leader.is_replication_stream_valid(&target, stream_id) {
             return;
@@ -171,7 +186,12 @@ where
             "granted leader vote clock after updating: granted: {}; clock_progress: {}",
             granted.as_ref().map(|x| x.display()).display(),
             self.leader.clock_progress.display_with(|f, item| {
-                write!(f, "{}: {}", item.id, item.val.as_ref().map(|x| x.display()).display())
+                write!(
+                    f,
+                    "{}: {}",
+                    item.id,
+                    item.val.as_ref().map(|x| x.display()).display()
+                )
             })
         );
 
@@ -196,14 +216,24 @@ where
         log_id: Option<LogIdOf<C>>,
         inflight_id: Option<InflightId>,
     ) {
-        tracing::debug!("{}: node_id: {}, log_id: {}", func_name!(), node_id, log_id.display());
+        tracing::debug!(
+            "{}: node_id: {}, log_id: {}",
+            func_name!(),
+            node_id,
+            log_id.display()
+        );
 
-        debug_assert!(log_id.is_some(), "a valid update can never set matching to None");
+        debug_assert!(
+            log_id.is_some(),
+            "a valid update can never set matching to None"
+        );
 
         // The value granted by a quorum may not yet be a committed.
         // A committed is **granted** and also is in the current term.
         let Ok(quorum_accepted) = self.leader.progress.update_entry_with(&node_id, |entry| {
-            entry.new_updater(&*self.config).update_matching(log_id, inflight_id)
+            entry
+                .new_updater(&*self.config)
+                .update_matching(log_id, inflight_id)
         }) else {
             // the node does not exist anymore
             return;
@@ -226,7 +256,10 @@ where
     pub(crate) fn try_commit_quorum_accepted(&mut self, granted: Option<LogIdOf<C>>) {
         // Only when the log id is proposed by the current leader, it is committed.
         if let Some(ref c) = granted
-            && !self.state.vote_ref().is_same_leader(c.committed_leader_id())
+            && !self
+                .state
+                .vote_ref()
+                .is_same_leader(c.committed_leader_id())
         {
             return;
         }
@@ -234,7 +267,11 @@ where
         let prev_cluster_committed = self.state.cluster_committed().cloned();
 
         let committed = LogIOId::new(self.state.vote_ref().to_committed(), granted.clone());
-        self.state.io_state_mut().cluster_committed.try_update(committed).ok();
+        self.state
+            .io_state_mut()
+            .cluster_committed
+            .try_update(committed)
+            .ok();
 
         // Advance the local apply ceiling regardless; it is a no-op when nothing changed.
         self.state.update_local_committed(&granted);
@@ -288,8 +325,15 @@ where
     /// - This flag will be consumed upon the next log reversion detection, allowing for a one-time
     ///   reset.
     /// - If the node is not found in the progress tracker, this method ignore it.
-    pub(crate) fn allow_next_revert(&mut self, target: C::NodeId, allow: bool) -> Result<(), NodeNotFound<C::NodeId>> {
-        let res = self.leader.progress.update_data_with(&target, |data| data.allow_log_reversion = allow);
+    pub(crate) fn allow_next_revert(
+        &mut self,
+        target: C::NodeId,
+        allow: bool,
+    ) -> Result<(), NodeNotFound<C::NodeId>> {
+        let res = self
+            .leader
+            .progress
+            .update_data_with(&target, |data| data.allow_log_reversion = allow);
 
         if res.is_none() {
             tracing::warn!(
@@ -339,7 +383,9 @@ where
                 tracing::warn!("update progress error: {}", err_str);
 
                 // Reset inflight state and it will retry.
-                self.leader.progress.update_data_with(&target, |data| data.inflight = Inflight::None);
+                self.leader
+                    .progress
+                    .update_data_with(&target, |data| data.inflight = Inflight::None);
             }
         };
 
@@ -370,11 +416,12 @@ where
                 });
             }
         }
-        self.output.push_command(Command::RebuildReplicationStreams {
-            leader_vote: self.leader.committed_vote.clone(),
-            targets,
-            close_old_streams: close_old,
-        });
+        self.output
+            .push_command(Command::RebuildReplicationStreams {
+                leader_vote: self.leader.committed_vote.clone(),
+                targets,
+                close_old_streams: close_old,
+            });
     }
 
     /// Initiate replication for every target that is not sending data in flight.
@@ -401,7 +448,11 @@ where
                     Self::send_to_target(self.output, leader_vote, &target, inflight);
                 }
                 Err(e) => {
-                    tracing::debug!("no data to replicate for node-{}: current inflight: {:?}", target, e,);
+                    tracing::debug!(
+                        "no data to replicate for node-{}: current inflight: {:?}",
+                        target,
+                        e,
+                    );
                 }
             }
         }
@@ -501,7 +552,10 @@ where
 
         // The leader may not be in membership anymore
         if let Some(entry) = self.leader.progress.try_get(&id) {
-            tracing::debug!("update progress: self_matching: {}", entry.matching().display());
+            tracing::debug!(
+                "update progress: self_matching: {}",
+                entry.matching().display()
+            );
 
             if entry.matching() >= upto.as_ref() {
                 return;

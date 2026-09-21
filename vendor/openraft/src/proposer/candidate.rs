@@ -122,7 +122,10 @@ where
     /// Return the node ids that have granted this vote.
     #[allow(dead_code)]
     pub(crate) fn granters(&self) -> impl Iterator<Item = C::NodeId> + '_ {
-        self.progress().iter().filter(|item| item.val).map(|item| item.id.clone())
+        self.progress()
+            .iter()
+            .filter(|item| item.val)
+            .map(|item| item.id.clone())
     }
 
     pub(crate) fn into_leader(self) -> Leader<C, QS> {

@@ -74,7 +74,9 @@ impl BackoffState {
     /// Dispatches to [`Self::on_success`] or [`Self::on_error`] based on the RPC
     /// outcome, extracting the error weight from [`RPCError::backoff_rank`].
     pub(crate) fn observe<T, C>(&mut self, result: &Result<T, RPCError<C>>)
-    where C: RaftTypeConfig {
+    where
+        C: RaftTypeConfig,
+    {
         match result {
             Ok(_) => self.on_success(),
             Err(e) => self.on_error(e.backoff_rank()),
@@ -126,7 +128,10 @@ mod tests {
         state.on_error(100);
         state.reconcile(make_test_backoff);
 
-        assert!(state.is_enabled(), "backoff should be enabled after error > threshold");
+        assert!(
+            state.is_enabled(),
+            "backoff should be enabled after error > threshold"
+        );
         assert_eq!(state.rank(), 100);
     }
 
@@ -173,9 +178,15 @@ mod tests {
         let mut state = BackoffState::new();
 
         // Err arm: accumulates rank using the error's `backoff_rank` (100 for Unreachable).
-        let err: Result<(), RPCError<UTConfig>> = Err(RPCError::Unreachable(Unreachable::<UTConfig>::from_string("x")));
+        let err: Result<(), RPCError<UTConfig>> = Err(RPCError::Unreachable(
+            Unreachable::<UTConfig>::from_string("x"),
+        ));
         state.observe(&err);
-        assert_eq!(state.rank(), 100, "err arm: rank accumulated from Unreachable weight");
+        assert_eq!(
+            state.rank(),
+            100,
+            "err arm: rank accumulated from Unreachable weight"
+        );
 
         // Bring backoff into the enabled state before the Ok arm.
         state.reconcile(make_test_backoff);

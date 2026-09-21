@@ -69,10 +69,10 @@ pub(crate) mod monotonic;
 ///           '----------------------------'
 ///                  RaftStateMachine
 /// ```
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IOState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Whether it is building a snapshot
     building_snapshot: bool,
@@ -145,7 +145,8 @@ const APPLY_PROGRESS_NAME: &str = "Apply";
 const SNAPSHOT_PROGRESS_NAME: &str = "Snapshot";
 
 impl<C> Default for IOState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn default() -> Self {
         Self {
@@ -160,7 +161,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Validate for IOState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         self.log_progress.validate()?;
@@ -184,7 +186,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> IOState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Creates a new `IOState` with initial values.
     pub(crate) fn new(
@@ -284,7 +287,13 @@ where C: RaftTypeConfig
 /// Creates a new `IOProgress` wrapped in `Valid`.
 ///
 /// All three stages (accepted, submitted, flushed) are initialized to `initial_value`.
-fn new_progress<T>(initial_value: Option<T>, id: impl ToString, name: &'static str) -> Valid<IOProgress<T>>
-where T: PartialOrd + fmt::Debug + fmt::Display + Clone {
+fn new_progress<T>(
+    initial_value: Option<T>,
+    id: impl ToString,
+    name: &'static str,
+) -> Valid<IOProgress<T>>
+where
+    T: PartialOrd + fmt::Debug + fmt::Display + Clone,
+{
     Valid::new(IOProgress::new_synchronized(initial_value, id, name))
 }

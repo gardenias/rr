@@ -39,9 +39,16 @@ where
         debug_assert_eq!(range_maps.len(), N, "range_maps.len() must equal N");
         debug_assert!(!range_maps.is_empty(), "range_maps must be non-empty");
 
-        let min_end = range_maps.iter().map(|rm| rm.end().unwrap_or(begin)).min().unwrap();
+        let min_end = range_maps
+            .iter()
+            .map(|rm| rm.end().unwrap_or(begin))
+            .min()
+            .unwrap();
 
-        let right_value_iters = range_maps.iter().map(|rm| rm.entries_after(begin).peekable()).collect::<Vec<_>>();
+        let right_value_iters = range_maps
+            .iter()
+            .map(|rm| rm.entries_after(begin).peekable())
+            .collect::<Vec<_>>();
 
         let merged_boundaries: Box<dyn Iterator<Item = Bound> + 'a> = Box::new(
             range_maps
@@ -71,8 +78,9 @@ where
         let right = self.merged_boundaries.next()?;
 
         let values = std::array::from_fn(|i| {
-            let &&(entry_right, val) =
-                self.right_value_iters[i].peek().expect("right_value_iter must have covering entry");
+            let &&(entry_right, val) = self.right_value_iters[i]
+                .peek()
+                .expect("right_value_iter must have covering entry");
             if entry_right <= right {
                 self.right_value_iters[i].next();
             }

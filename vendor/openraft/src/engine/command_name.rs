@@ -1,8 +1,7 @@
 use openraft_macros::VariantName;
 
 /// Enum representing the name of each `sm::Command` variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(VariantName)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, VariantName)]
 #[variant_name(prefix = "SM::")]
 pub enum SMCommandName {
     BuildSnapshot,
@@ -16,8 +15,7 @@ pub enum SMCommandName {
 ///
 /// This provides an efficient way to identify command types without
 /// string comparisons, useful for logging, metrics, and debugging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(VariantName)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, VariantName)]
 pub enum CommandName {
     UpdateIOProgress,
     AppendEntries,
@@ -143,7 +141,9 @@ mod tests {
         assert_eq!(cmd.name(), CommandName::RebuildReplicationStreams);
 
         // SaveVote
-        let cmd: Command<C> = Command::SaveVote { vote: Vote::new(1, 0) };
+        let cmd: Command<C> = Command::SaveVote {
+            vote: Vote::new(1, 0),
+        };
         assert_eq!(cmd.name(), CommandName::SaveVote);
 
         // SendVote
@@ -153,7 +153,9 @@ mod tests {
         assert_eq!(cmd.name(), CommandName::SendVote);
 
         // PurgeLog
-        let cmd: Command<C> = Command::PurgeLog { upto: log_id(1, 0, 1) };
+        let cmd: Command<C> = Command::PurgeLog {
+            upto: log_id(1, 0, 1),
+        };
         assert_eq!(cmd.name(), CommandName::PurgeLog);
 
         // TruncateLog
@@ -180,7 +182,10 @@ mod tests {
         let cmd: Command<C> = Command::StateMachine {
             command: sm::Command::build_snapshot(),
         };
-        assert_eq!(cmd.name(), CommandName::StateMachine(SMCommandName::BuildSnapshot));
+        assert_eq!(
+            cmd.name(),
+            CommandName::StateMachine(SMCommandName::BuildSnapshot)
+        );
 
         let cmd: Command<C> = Command::StateMachine {
             command: sm::Command::apply(log_id(1, 0, 1), log_id(1, 0, 2), vec![]),
@@ -192,13 +197,28 @@ mod tests {
     fn test_command_name_as_str() {
         assert_eq!(CommandName::UpdateIOProgress.as_str(), "UpdateIOProgress");
         assert_eq!(CommandName::AppendEntries.as_str(), "AppendEntries");
-        assert_eq!(CommandName::ReplicateCommitted.as_str(), "ReplicateCommitted");
-        assert_eq!(CommandName::BroadcastHeartbeat.as_str(), "BroadcastHeartbeat");
-        assert_eq!(CommandName::SaveCommittedAndApply.as_str(), "SaveCommittedAndApply");
+        assert_eq!(
+            CommandName::ReplicateCommitted.as_str(),
+            "ReplicateCommitted"
+        );
+        assert_eq!(
+            CommandName::BroadcastHeartbeat.as_str(),
+            "BroadcastHeartbeat"
+        );
+        assert_eq!(
+            CommandName::SaveCommittedAndApply.as_str(),
+            "SaveCommittedAndApply"
+        );
         assert_eq!(CommandName::Replicate.as_str(), "Replicate");
         assert_eq!(CommandName::ReplicateSnapshot.as_str(), "ReplicateSnapshot");
-        assert_eq!(CommandName::BroadcastTransferLeader.as_str(), "BroadcastTransferLeader");
-        assert_eq!(CommandName::CloseReplicationStreams.as_str(), "CloseReplicationStreams");
+        assert_eq!(
+            CommandName::BroadcastTransferLeader.as_str(),
+            "BroadcastTransferLeader"
+        );
+        assert_eq!(
+            CommandName::CloseReplicationStreams.as_str(),
+            "CloseReplicationStreams"
+        );
         assert_eq!(
             CommandName::RebuildReplicationStreams.as_str(),
             "RebuildReplicationStreams"
@@ -214,14 +234,20 @@ mod tests {
             CommandName::StateMachine(SMCommandName::BuildSnapshot).as_str(),
             "SM::BuildSnapshot"
         );
-        assert_eq!(CommandName::StateMachine(SMCommandName::Apply).as_str(), "SM::Apply");
+        assert_eq!(
+            CommandName::StateMachine(SMCommandName::Apply).as_str(),
+            "SM::Apply"
+        );
     }
 
     #[test]
     fn test_sm_command_name_as_str() {
         assert_eq!(SMCommandName::BuildSnapshot.as_str(), "SM::BuildSnapshot");
         assert_eq!(SMCommandName::GetSnapshot.as_str(), "SM::GetSnapshot");
-        assert_eq!(SMCommandName::InstallFullSnapshot.as_str(), "SM::InstallFullSnapshot");
+        assert_eq!(
+            SMCommandName::InstallFullSnapshot.as_str(),
+            "SM::InstallFullSnapshot"
+        );
         assert_eq!(SMCommandName::Apply.as_str(), "SM::Apply");
         assert_eq!(SMCommandName::ExternalFunc.as_str(), "SM::ExternalFunc");
     }

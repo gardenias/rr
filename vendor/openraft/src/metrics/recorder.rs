@@ -109,7 +109,10 @@ pub trait MetricsRecorder: Send + Sync + std::fmt::Debug {
 ///     forward_metrics(metrics, recorder);
 /// }
 /// ```
-pub fn forward_metrics<C: RaftTypeConfig>(metrics: &RaftMetrics<C>, recorder: &dyn MetricsRecorder) {
+pub fn forward_metrics<C: RaftTypeConfig>(
+    metrics: &RaftMetrics<C>,
+    recorder: &dyn MetricsRecorder,
+) {
     if let Some(term) = metrics.current_term.as_u64() {
         recorder.set_current_term(term);
     }

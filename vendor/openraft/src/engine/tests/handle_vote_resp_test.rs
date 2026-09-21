@@ -51,13 +51,22 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.state.server_state = ServerState::Follower;
-        eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 1)),
-            m12(),
-        )));
+        eng.state.vote = Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(2, 1),
+        );
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m12(),
+            )));
 
-        eng.handle_vote_resp(2, VoteResponse::new(Vote::new(2, 2), Some(log_id(2, 1, 2)), true));
+        eng.handle_vote_resp(
+            2,
+            VoteResponse::new(Vote::new(2, 2), Some(log_id(2, 1, 2)), true),
+        );
 
         assert_eq!(Vote::new(2, 1), *eng.state.vote_ref());
 
@@ -72,11 +81,17 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 1)),
-            m12(),
-        )));
+        eng.state.vote = Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(2, 1),
+        );
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m12(),
+            )));
         eng.new_candidate(*eng.state.vote_ref());
         eng.output.take_commands();
 
@@ -85,14 +100,20 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
 
         eng.state.server_state = ServerState::Candidate;
 
-        eng.handle_vote_resp(2, VoteResponse::new(Vote::new(1, 1), Some(log_id(2, 1, 2)), true));
+        eng.handle_vote_resp(
+            2,
+            VoteResponse::new(Vote::new(1, 1), Some(log_id(2, 1, 2)), true),
+        );
 
         assert_eq!(Vote::new(2, 1), *eng.state.vote_ref());
 
         assert_eq!(&Vote::new(2, 1), eng.candidate_ref().unwrap().vote_ref());
         assert_eq!(
             btreeset! {1},
-            eng.candidate_ref().unwrap().granters().collect::<BTreeSet<_>>()
+            eng.candidate_ref()
+                .unwrap()
+                .granters()
+                .collect::<BTreeSet<_>>()
         );
 
         assert_eq!(ServerState::Candidate, eng.state.server_state);
@@ -105,12 +126,18 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
+        eng.state.vote = Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(2, 1),
+        );
         eng.state.log_ids = LogIdList::new(None, vec![log_id(3, 1, 3)]);
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 1)),
-            m12(),
-        )));
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m12(),
+            )));
         eng.new_candidate(*eng.state.vote_ref());
         eng.output.take_commands();
 
@@ -119,7 +146,10 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
 
         eng.state.server_state = ServerState::Candidate;
 
-        eng.handle_vote_resp(2, VoteResponse::new(Vote::new(3, 2), Some(log_id(2, 1, 2)), true));
+        eng.handle_vote_resp(
+            2,
+            VoteResponse::new(Vote::new(3, 2), Some(log_id(2, 1, 2)), true),
+        );
 
         assert_eq!(Vote::new(3, 2), *eng.state.vote_ref());
 
@@ -130,7 +160,9 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
         assert_eq!(
             eng.output.take_commands(),
             vec![
-                Command::SaveVote { vote: Vote::new(3, 2) },
+                Command::SaveVote {
+                    vote: Vote::new(3, 2)
+                },
                 Command::CloseReplicationStreams,
             ],
             "no SaveVote because the higher vote is not yet granted by this node"
@@ -141,11 +173,17 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 1)),
-            m1234(),
-        )));
+        eng.state.vote = Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(2, 1),
+        );
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m1234(),
+            )));
         eng.new_candidate(*eng.state.vote_ref());
         eng.output.take_commands();
 
@@ -154,14 +192,20 @@ fn test_handle_vote_resp() -> anyhow::Result<()> {
 
         eng.state.server_state = ServerState::Candidate;
 
-        eng.handle_vote_resp(2, VoteResponse::new(Vote::new(2, 1), Some(log_id(2, 1, 2)), true));
+        eng.handle_vote_resp(
+            2,
+            VoteResponse::new(Vote::new(2, 1), Some(log_id(2, 1, 2)), true),
+        );
 
         assert_eq!(Vote::new(2, 1), *eng.state.vote_ref());
 
         assert_eq!(&Vote::new(2, 1), eng.candidate_ref().unwrap().vote_ref());
         assert_eq!(
             btreeset! {1,2},
-            eng.candidate_ref().unwrap().granters().collect::<BTreeSet<_>>()
+            eng.candidate_ref()
+                .unwrap()
+                .granters()
+                .collect::<BTreeSet<_>>()
         );
 
         assert_eq!(ServerState::Candidate, eng.state.server_state);
@@ -177,11 +221,17 @@ fn test_handle_vote_resp_equal_vote() -> anyhow::Result<()> {
     {
         let mut eng = eng();
         eng.config.id = 1;
-        eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
-        eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-            Some(log_id(1, 1, 1)),
-            m12(),
-        )));
+        eng.state.vote = Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(2, 1),
+        );
+        eng.state
+            .membership_state
+            .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m12(),
+            )));
         eng.new_candidate(*eng.state.vote_ref());
 
         let voting = eng.new_candidate(*eng.state.vote_ref());
@@ -189,7 +239,10 @@ fn test_handle_vote_resp_equal_vote() -> anyhow::Result<()> {
 
         eng.state.server_state = ServerState::Candidate;
 
-        eng.handle_vote_resp(2, VoteResponse::new(Vote::new(2, 1), Some(log_id(2, 1, 2)), true));
+        eng.handle_vote_resp(
+            2,
+            VoteResponse::new(Vote::new(2, 1), Some(log_id(2, 1, 2)), true),
+        );
 
         assert_eq!(Vote::new_committed(2, 1), *eng.state.vote_ref(),);
 
@@ -199,7 +252,10 @@ fn test_handle_vote_resp_equal_vote() -> anyhow::Result<()> {
             eng.leader.as_ref().unwrap().last_log_id().copied()
         );
         assert_eq!(
-            Some(&IOId::new_log_io(Vote::new(2, 1).to_committed(), Some(log_id(2, 1, 1)))),
+            Some(&IOId::new_log_io(
+                Vote::new(2, 1).to_committed(),
+                Some(log_id(2, 1, 1))
+            )),
             eng.state.accepted_log_io()
         );
         assert!(
@@ -229,7 +285,10 @@ fn test_handle_vote_resp_equal_vote() -> anyhow::Result<()> {
                 },
                 Command::Replicate {
                     target: 2,
-                    req: Replicate::new_logs(LogIdRange::new(None, Some(log_id(2, 1, 1))), InflightId::new(1))
+                    req: Replicate::new_logs(
+                        LogIdRange::new(None, Some(log_id(2, 1, 1))),
+                        InflightId::new(1)
+                    )
                 },
             ],
             eng.output.take_commands()

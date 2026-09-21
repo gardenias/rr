@@ -9,7 +9,10 @@ use crate::storage::SnapshotMeta;
 use crate::vote::RaftCommittedLeaderId;
 
 /// The data associated with the current snapshot.
-#[since(version = "0.10.0", change = "from `Snapshot<C>` to `Snapshot<CLID, NID, N, SD>`")]
+#[since(
+    version = "0.10.0",
+    change = "from `Snapshot<C>` to `Snapshot<CLID, NID, N, SD>`"
+)]
 #[since(version = "0.10.0", change = "SnapshotData without Box")]
 #[derive(Debug, Clone)]
 pub struct Snapshot<CLID, NID, N, SD>

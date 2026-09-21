@@ -57,10 +57,10 @@ use crate::vote::RaftVote;
 use crate::vote::raft_vote::RaftVoteExt;
 
 /// A struct used to represent the raft state which a Raft node needs.
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RaftState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// The vote state of this node.
     pub(crate) vote: Leased<VoteOf<C>, InstantOf<C>>,
@@ -105,7 +105,8 @@ where
 }
 
 impl<C> LogStateReader<CommittedLeaderIdOf<C>> for RaftState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn ref_log_id(&self, index: u64) -> Option<RefLogIdOf<'_, C>> {
         self.log_ids.ref_at(index)
@@ -145,7 +146,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> VoteStateReader<C> for RaftState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn vote_ref(&self) -> &VoteOf<C> {
         self.vote.deref()
@@ -153,7 +155,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Validate for RaftState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         if self.log_ids.purged().is_none() {
@@ -181,7 +184,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RaftState<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(node_id: C::NodeId) -> Self {
         let vote = VoteOf::<C>::new_with_default_term(node_id);
@@ -226,7 +230,10 @@ where C: RaftTypeConfig
     /// [`Self::local_committed`] on a node that has not yet received the corresponding entries.
     #[since(version = "0.10.0")]
     pub fn cluster_committed(&self) -> Option<&LogIdOf<C>> {
-        self.io_state().cluster_committed.value().and_then(|io_id| io_id.last_log_id())
+        self.io_state()
+            .cluster_committed
+            .value()
+            .and_then(|io_id| io_id.last_log_id())
     }
 
     /// Get the last committed log ID.
@@ -323,7 +330,10 @@ where C: RaftTypeConfig
             self.local_committed().display()
         );
 
-        self.io_state_mut().cluster_committed.try_update(cluster_committed.clone()).ok();
+        self.io_state_mut()
+            .cluster_committed
+            .try_update(cluster_committed.clone())
+            .ok();
 
         let local_committed = self.io_state.calculate_local_committed();
 
@@ -387,7 +397,9 @@ where C: RaftTypeConfig
     /// Find the first entry in the input that does not exist on local raft-log,
     /// by comparing the log id.
     pub(crate) fn first_conflicting_index<Ent>(&self, entries: &[Ent]) -> usize
-    where Ent: RaftEntry<CommittedLeaderId = CommittedLeaderIdOf<C>> {
+    where
+        Ent: RaftEntry<CommittedLeaderId = CommittedLeaderIdOf<C>>,
+    {
         let l = entries.len();
 
         for (i, ent) in entries.iter().enumerate() {

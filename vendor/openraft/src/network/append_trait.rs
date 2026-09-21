@@ -20,7 +20,8 @@ use crate::raft::AppendEntriesResponse;
 /// [`RaftNetworkV2`]: crate::network::RaftNetworkV2
 #[add_async_trait]
 pub trait NetAppend<C>: OptionalSend + OptionalSync + 'static
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Send an AppendEntries RPC to the target.
     ///

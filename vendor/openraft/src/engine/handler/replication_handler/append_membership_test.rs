@@ -49,8 +49,14 @@ fn eng() -> Engine<UTConfig> {
     let mut eng = Engine::testing_default(0);
     eng.config.id = 2;
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )),
     );
     eng.state.vote = Leased::new(
         UTConfig::<()>::now(),
@@ -68,12 +74,19 @@ fn test_leader_append_membership_for_leader() -> anyhow::Result<()> {
     eng.testing_new_leader();
     eng.output.take_commands();
 
-    eng.replication_handler().append_membership(&log_id(3, 1, 4), &m34());
+    eng.replication_handler()
+        .append_membership(&log_id(3, 1, 4), &m34());
 
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m34()))
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(3, 1, 4)),
+                m34()
+            ))
         ),
         eng.state.membership_state
     );
@@ -123,7 +136,13 @@ fn test_leader_append_membership_for_leader() -> anyhow::Result<()> {
     );
 
     assert!(
-        eng.leader.as_ref().unwrap().progress.get(&4).matching().is_none(),
+        eng.leader
+            .as_ref()
+            .unwrap()
+            .progress
+            .get(&4)
+            .matching()
+            .is_none(),
         "exists, but it is a None"
     );
 
@@ -141,39 +160,60 @@ fn test_leader_append_membership_update_learner_process() -> anyhow::Result<()> 
     // This preserves the original ranges: (1,1) covers indices 1-9, (5,1) covers index 10
     eng.state.log_ids = LogIdList::new(None, [log_id(0, 0, 0), log_id(1, 1, 9), log_id(5, 1, 10)]);
 
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m23_45(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23_45(),
+        )));
 
     // Make it a real leader: voted for itself and vote is committed.
     eng.testing_new_leader();
 
     if let Some(l) = &mut eng.leader.as_mut() {
-        assert_eq!(&ProgressEntry::empty(4, StreamId::new(3), 11), l.progress.get(&4));
-        assert_eq!(&ProgressEntry::empty(5, StreamId::new(4), 11), l.progress.get(&5));
+        assert_eq!(
+            &ProgressEntry::empty(4, StreamId::new(3), 11),
+            l.progress.get(&4)
+        );
+        assert_eq!(
+            &ProgressEntry::empty(5, StreamId::new(4), 11),
+            l.progress.get(&5)
+        );
 
         let p = ProgressEntry::testing_new(4, Some(log_id(1, 1, 4)));
-        l.progress.update_entry_with(&4, |entry| *entry = p.clone()).ok();
+        l.progress
+            .update_entry_with(&4, |entry| *entry = p.clone())
+            .ok();
         assert_eq!(&p, l.progress.get(&4));
 
         let p = ProgressEntry::testing_new(5, Some(log_id(1, 1, 5)));
-        l.progress.update_entry_with(&5, |entry| *entry = p.clone()).ok();
+        l.progress
+            .update_entry_with(&5, |entry| *entry = p.clone())
+            .ok();
         assert_eq!(&p, l.progress.get(&5));
 
         let p = ProgressEntry::testing_new(3, Some(log_id(1, 1, 3)));
-        l.progress.update_entry_with(&3, |entry| *entry = p.clone()).ok();
+        l.progress
+            .update_entry_with(&3, |entry| *entry = p.clone())
+            .ok();
         assert_eq!(&p, l.progress.get(&3));
     } else {
         unreachable!("leader should not be None");
     }
 
-    eng.replication_handler().append_membership(&log_id(3, 1, 4), &m4_356());
+    eng.replication_handler()
+        .append_membership(&log_id(3, 1, 4), &m4_356());
 
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23_45())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 4)), m4_356()))
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23_45()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(3, 1, 4)),
+                m4_356()
+            ))
         ),
         eng.state.membership_state
     );
@@ -181,22 +221,25 @@ fn test_leader_append_membership_update_learner_process() -> anyhow::Result<()> 
     if let Some(l) = &mut eng.leader.as_mut() {
         // Progress entries with matching.next_index() == searching_end enter pipeline mode
         assert_eq!(
-            &ProgressEntry::testing_new(4, Some(log_id(1, 1, 4)))
-                .with_inflight(Inflight::logs_since(Some(log_id(1, 1, 4)), InflightId::new(1))),
+            &ProgressEntry::testing_new(4, Some(log_id(1, 1, 4))).with_inflight(
+                Inflight::logs_since(Some(log_id(1, 1, 4)), InflightId::new(1))
+            ),
             l.progress.get(&4),
             "learner-4 progress should be transferred to voter progress (pipeline mode)"
         );
 
         assert_eq!(
-            &ProgressEntry::testing_new(3, Some(log_id(1, 1, 3)))
-                .with_inflight(Inflight::logs_since(Some(log_id(1, 1, 3)), InflightId::new(2))),
+            &ProgressEntry::testing_new(3, Some(log_id(1, 1, 3))).with_inflight(
+                Inflight::logs_since(Some(log_id(1, 1, 3)), InflightId::new(2))
+            ),
             l.progress.get(&3),
             "voter-3 progress should be transferred to learner progress (pipeline mode)"
         );
 
         assert_eq!(
-            &ProgressEntry::testing_new(5, Some(log_id(1, 1, 5)))
-                .with_inflight(Inflight::logs_since(Some(log_id(1, 1, 5)), InflightId::new(3))),
+            &ProgressEntry::testing_new(5, Some(log_id(1, 1, 5))).with_inflight(
+                Inflight::logs_since(Some(log_id(1, 1, 5)), InflightId::new(3))
+            ),
             l.progress.get(&5),
             "learner-5 has previous value (pipeline mode)"
         );

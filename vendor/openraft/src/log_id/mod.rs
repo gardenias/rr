@@ -54,9 +54,14 @@ use crate::vote::leader_id_std;
     change = "from `LogId<C: RaftTypeConfig>` to `LogId<CLID: RaftCommittedLeaderId>`"
 )]
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct LogId<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// The id of the leader that proposed this log
     pub leader_id: CLID,
@@ -69,7 +74,8 @@ where CLID: RaftCommittedLeaderId
 impl<CLID> Copy for LogId<CLID> where CLID: RaftCommittedLeaderId + Copy {}
 
 impl<CLID> RaftLogId for LogId<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     type CommittedLeaderId = CLID;
 
@@ -87,7 +93,8 @@ where CLID: RaftCommittedLeaderId
 }
 
 impl<CLID> Display for LogId<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.{}", self.committed_leader_id(), self.index())
@@ -100,7 +107,8 @@ where CLID: RaftCommittedLeaderId
 /// inherent method shadows the trait method at every call site, so a second copy here would let the
 /// two drift apart without any call site changing.
 impl<CLID> LogId<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// Creates a log id proposed by a committed leader with `leader_id` at the given index.
     pub fn new(leader_id: CLID, index: u64) -> Self {
@@ -130,7 +138,8 @@ where CLID: RaftCommittedLeaderId
 /// that occurs when using `C::Term` or `C::NodeId` inside an associated type equality constraint
 /// (e.g., `LeaderId = LeaderId<C::Term, C::NodeId>`).
 impl<Term> LogId<leader_id_std::CommittedLeaderId<Term>>
-where Term: RaftTerm
+where
+    Term: RaftTerm,
 {
     /// Creates a log id from a term and index.
     ///
@@ -170,7 +179,10 @@ mod tests {
         let log_id1 = super::LogId::<TestCLID>::new_term_index(5, 100);
         let log_id2 = super::LogId::<TestCLID>::new(TestCLID::new(5), 100);
         assert_eq!(log_id1.index(), log_id2.index());
-        assert_eq!(**log_id1.committed_leader_id(), **log_id2.committed_leader_id());
+        assert_eq!(
+            **log_id1.committed_leader_id(),
+            **log_id2.committed_leader_id()
+        );
     }
 
     #[test]

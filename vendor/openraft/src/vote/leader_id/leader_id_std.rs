@@ -21,7 +21,11 @@ use crate::vote::RaftTerm;
 /// defined below.
 #[since(version = "0.10.0", change = "`voted_for` from `Option<NID>` to `NID`")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct LeaderId<Term, NID>
 where
     Term: RaftTerm,
@@ -190,22 +194,26 @@ where
 ///
 /// In std mode, `CommittedLeaderId` is just a wrapper of `Term`, which is an integer in most
 /// cases (u64, u32, u16, u8, i64, i32, i16, i8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(PartialOrd, Ord)]
-#[derive(derive_more::Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, derive_more::Display)]
 #[display("{}", term)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 #[cfg_attr(feature = "serde", serde(transparent))]
 #[repr(transparent)]
 pub struct CommittedLeaderId<Term>
-where Term: RaftTerm
+where
+    Term: RaftTerm,
 {
     /// The term of the committed leader.
     pub term: Term,
 }
 
 impl<Term> CommittedLeaderId<Term>
-where Term: RaftTerm
+where
+    Term: RaftTerm,
 {
     /// Create a new committed leader ID for the given term.
     pub fn new(term: Term) -> Self {
@@ -214,7 +222,8 @@ where Term: RaftTerm
 }
 
 impl<Term> Deref for CommittedLeaderId<Term>
-where Term: RaftTerm
+where
+    Term: RaftTerm,
 {
     type Target = Term;
 
@@ -224,7 +233,8 @@ where Term: RaftTerm
 }
 
 impl<Term> DerefMut for CommittedLeaderId<Term>
-where Term: RaftTerm
+where
+    Term: RaftTerm,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.term
@@ -312,7 +322,10 @@ mod tests {
 
         let legacy_none = bincode::serialize(&(5u64, None::<u64>))?;
         let res = bincode::deserialize::<LeaderId<u64, u64>>(&legacy_none);
-        assert_eq!("LeaderId.voted_for must not be null", res.unwrap_err().to_string());
+        assert_eq!(
+            "LeaderId.voted_for must not be null",
+            res.unwrap_err().to_string()
+        );
 
         Ok(())
     }

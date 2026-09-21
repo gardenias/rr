@@ -25,10 +25,14 @@ use crate::type_config::alias::VoteOf;
 /// [`RaftNetworkV2`]: crate::network::RaftNetworkV2
 #[add_async_trait]
 pub trait NetSnapshot<C>: OptionalSend + OptionalSync + 'static
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Snapshot data this network implementation can transmit.
-    #[since(version = "0.10.0", change = "moved SnapshotData from RaftTypeConfig to NetSnapshot")]
+    #[since(
+        version = "0.10.0",
+        change = "moved SnapshotData from RaftTypeConfig to NetSnapshot"
+    )]
     type SnapshotData: OptionalSend + 'static;
 
     /// Send a complete Snapshot to the target.

@@ -159,7 +159,9 @@ where
     }
 
     /// Creates a stream of AppendEntries requests from the given context.
-    fn new_request_stream(stream_context: StreamContext<C, LS>) -> BoxStream<'static, AppendEntriesRequest<C>> {
+    fn new_request_stream(
+        stream_context: StreamContext<C, LS>,
+    ) -> BoxStream<'static, AppendEntriesRequest<C>> {
         let strm = futures_util::stream::unfold(stream_context, Self::next_append_request);
         Box::pin(strm)
     }
@@ -211,7 +213,8 @@ where
             // to `network`, which is needed to construct the `Backoff` iterator.
             // If the network returns None, fall back to the policy configured in `Config::backoff`.
             let config = self.replication_context.config.clone();
-            self.backoff_state.reconcile(|| network.backoff().unwrap_or_else(|| config.build_backoff()));
+            self.backoff_state
+                .reconcile(|| network.backoff().unwrap_or_else(|| config.build_backoff()));
 
             let mut payload = self.select_next_payload().await?;
 
@@ -326,7 +329,8 @@ where
             Ok(resp_strm) => resp_strm,
             Err(rpc_err) => {
                 self.backoff_state.on_error(rpc_err.backoff_rank());
-                self.send_progress_error(rpc_err, "initiate-stream-replication").await;
+                self.send_progress_error(rpc_err, "initiate-stream-replication")
+                    .await;
 
                 return Ok(false);
             }
@@ -380,7 +384,8 @@ where
             let append_res = match rpc_res {
                 Ok(stream_append_res) => stream_append_res,
                 Err(rpc_err) => {
-                    self.send_progress_error(rpc_err, "stream-replication").await;
+                    self.send_progress_error(rpc_err, "stream-replication")
+                        .await;
                     return Err("RPCError");
                 }
             };
@@ -400,7 +405,8 @@ where
                 Err(append_err) => {
                     match append_err {
                         StreamAppendError::Conflict(conflict_log_id) => {
-                            self.notify_progress(ReplicationResult(Err(conflict_log_id))).await;
+                            self.notify_progress(ReplicationResult(Err(conflict_log_id)))
+                                .await;
                         }
                         StreamAppendError::HigherVote(higher) => {
                             self.replication_context
@@ -435,7 +441,9 @@ where
         if self.inflight_id.is_none() {
             return;
         }
-        self.replication_context.notify_progress(Err(err.to_string()), self.inflight_id).await;
+        self.replication_context
+            .notify_progress(Err(err.to_string()), self.inflight_id)
+            .await;
     }
 
     /// A successful replication implies a successful heartbeat.
@@ -443,8 +451,13 @@ where
     ///
     /// [`RaftCore`]: crate::core::RaftCore
     async fn notify_heartbeat_progress(&mut self, sending_time: InstantOf<C>) {
-        tracing::debug!("ReplicationCore notify_heartbeat_progress: {}", sending_time.display());
-        self.replication_context.notify_heartbeat_progress(sending_time).await;
+        tracing::debug!(
+            "ReplicationCore notify_heartbeat_progress: {}",
+            sending_time.display()
+        );
+        self.replication_context
+            .notify_heartbeat_progress(sending_time)
+            .await;
     }
 
     /// Notify RaftCore with the success replication result (log matching or conflict).
@@ -474,7 +487,9 @@ where
 
         // always send Conflict error back, even when the inflight id is None
         // for heartbeat to detect log reversion
-        self.replication_context.notify_progress(Ok(replication_result), self.inflight_id).await;
+        self.replication_context
+            .notify_progress(Ok(replication_result), self.inflight_id)
+            .await;
     }
 
     /// Receive and process events from RaftCore and set `next_action` and `inflight_id`.

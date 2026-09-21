@@ -12,7 +12,11 @@ use crate::type_config::alias::VoteOf;
 ///
 /// When this error is returned, the stream is terminated.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum StreamAppendError<C: RaftTypeConfig> {
     /// Log conflict at the given prev_log_id.
     ///
@@ -24,7 +28,8 @@ pub enum StreamAppendError<C: RaftTypeConfig> {
 }
 
 impl<C> fmt::Display for StreamAppendError<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

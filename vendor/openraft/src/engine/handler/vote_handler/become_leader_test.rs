@@ -42,10 +42,12 @@ fn eng() -> Engine<UTConfig> {
         Vote::new_committed(2, 1),
     );
     eng.state.server_state = ServerState::Candidate;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 1)),
-        m01(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )));
 
     eng.output.take_commands();
     eng
@@ -63,33 +65,36 @@ fn test_become_leader() -> anyhow::Result<()> {
 
     assert_eq!(ServerState::Leader, eng.state.server_state);
 
-    assert_eq!(eng.output.take_commands(), vec![
-        Command::UpdateIOProgress {
-            when: None,
-            io_id: IOId::new_log_io(Vote::new(2, 1).to_committed(), None)
-        },
-        Command::RebuildReplicationStreams {
-            leader_vote: Vote::new(2, 1).to_committed(),
-            targets: vec![TargetProgress {
+    assert_eq!(
+        eng.output.take_commands(),
+        vec![
+            Command::UpdateIOProgress {
+                when: None,
+                io_id: IOId::new_log_io(Vote::new(2, 1).to_committed(), None)
+            },
+            Command::RebuildReplicationStreams {
+                leader_vote: Vote::new(2, 1).to_committed(),
+                targets: vec![TargetProgress {
+                    target: 0,
+                    target_node: (),
+                    progress: ProgressEntry::empty(0, StreamId::new(1), 0),
+                }],
+                close_old_streams: true,
+            },
+            Command::AppendEntries {
+                committed_vote: Vote::new(2, 1).to_committed(),
+                entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 1, 0))])
+            },
+            // Pipeline mode: ProgressEntry::empty(0) has matching.next_index()=0 == searching_end=0
+            Command::Replicate {
                 target: 0,
-                target_node: (),
-                progress: ProgressEntry::empty(0, StreamId::new(1), 0),
-            }],
-            close_old_streams: true,
-        },
-        Command::AppendEntries {
-            committed_vote: Vote::new(2, 1).to_committed(),
-            entries: Batch::of([EntryOf::<UTConfig>::new_blank(log_id(2, 1, 0))])
-        },
-        // Pipeline mode: ProgressEntry::empty(0) has matching.next_index()=0 == searching_end=0
-        Command::Replicate {
-            target: 0,
-            req: Replicate {
-                inflight_id: InflightId::new(1),
-                payload: Payload::LogsSince { prev: None },
+                req: Replicate {
+                    inflight_id: InflightId::new(1),
+                    payload: Payload::LogsSince { prev: None },
+                }
             }
-        }
-    ]);
+        ]
+    );
 
     Ok(())
 }

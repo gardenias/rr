@@ -14,9 +14,14 @@ use crate::StorageError;
 ///
 /// [`Raft::shutdown`]: crate::Raft::shutdown
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum Fatal<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Storage error that caused the Raft node to stop.
     #[error(transparent)]

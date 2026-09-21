@@ -4,9 +4,7 @@ use openraft_macros::since;
 
 /// Types of RPC requests in the Raft protocol.
 #[since]
-#[derive(Debug, Clone, Copy)]
-#[derive(PartialEq, Eq)]
-#[derive(Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum RPCTypes {
     /// Vote request RPC.

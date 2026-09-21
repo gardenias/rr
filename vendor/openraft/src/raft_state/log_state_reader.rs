@@ -10,11 +10,16 @@ use crate::vote::RaftCommittedLeaderId;
 ///
 /// See: [`log_pointers`](`crate::docs::data::log_pointers`).
 pub(crate) trait LogStateReader<CLID>
-where CLID: RaftCommittedLeaderId
+where
+    CLID: RaftCommittedLeaderId,
 {
     /// Get previous log id, i.e., the log id at index - 1
     fn prev_log_id(&self, index: u64) -> Option<LogId<CLID>> {
-        if index == 0 { None } else { self.get_log_id(index - 1) }
+        if index == 0 {
+            None
+        } else {
+            self.get_log_id(index - 1)
+        }
     }
 
     /// Return if a log id exists.

@@ -43,7 +43,8 @@ use crate::type_config::alias::MpscReceiverOf;
 /// }
 /// ```
 pub(crate) struct BatchRaftMsgReceiver<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// A message that was received but not yet returned to the caller.
     ///
@@ -63,13 +64,18 @@ where C: RaftTypeConfig
 }
 
 impl<C> BatchRaftMsgReceiver<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Creates a new batching receiver given:
     /// - mpsc receiver channel
     /// - capacity
     /// - linger
-    pub(crate) fn new(receiver: MpscReceiverOf<C, RaftMsg<C>>, capacity: u64, linger: Duration) -> Self {
+    pub(crate) fn new(
+        receiver: MpscReceiverOf<C, RaftMsg<C>>,
+        capacity: u64,
+        linger: Duration,
+    ) -> Self {
         Self {
             buffered: None,
             capacity,
@@ -219,7 +225,9 @@ where C: RaftTypeConfig
 
             match next {
                 RaftMsg::ClientWrite {
-                    payloads, responders, ..
+                    payloads,
+                    responders,
+                    ..
                 } => {
                     batch_payloads.extend(payloads);
                     batch_responders.extend(responders);
@@ -293,7 +301,9 @@ mod tests {
             let msg = receiver.try_recv().await.unwrap().unwrap();
 
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg
             else {
                 panic!("expected ClientWrite");
@@ -319,7 +329,9 @@ mod tests {
             // First message should not be merged with second
             let msg1 = receiver.try_recv().await.unwrap().unwrap();
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg1
             else {
                 panic!("expected ClientWrite");
@@ -330,7 +342,9 @@ mod tests {
             // Second message should be buffered and returned separately
             let msg2 = receiver.try_recv().await.unwrap().unwrap();
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg2
             else {
                 panic!("expected ClientWrite");
@@ -348,7 +362,11 @@ mod tests {
 
             let leader = Some(committed_leader_id(1, 1));
             tx.send(client_write(1, leader)).await.unwrap();
-            tx.send(RaftMsg::WithRaftState { req: Box::new(|_| {}) }).await.unwrap();
+            tx.send(RaftMsg::WithRaftState {
+                req: Box::new(|_| {}),
+            })
+            .await
+            .unwrap();
             tx.send(client_write(2, leader)).await.unwrap();
 
             receiver.ensure_buffered().await.unwrap();
@@ -356,7 +374,9 @@ mod tests {
             // First ClientWrite should not merge past the WithRaftState
             let msg1 = receiver.try_recv().await.unwrap().unwrap();
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg1
             else {
                 panic!("expected ClientWrite");
@@ -371,7 +391,9 @@ mod tests {
             // Last ClientWrite should be returned
             let msg3 = receiver.try_recv().await.unwrap().unwrap();
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg3
             else {
                 panic!("expected ClientWrite");
@@ -405,7 +427,9 @@ mod tests {
             // Message should be in buffer, try_recv should return it
             let msg = receiver.try_recv().await.unwrap().unwrap();
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg
             else {
                 panic!("expected ClientWrite");
@@ -434,7 +458,9 @@ mod tests {
 
             let msg2 = receiver.try_recv().await.unwrap().unwrap();
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg2
             else {
                 panic!("expected ClientWrite");
@@ -452,7 +478,8 @@ mod tests {
 
         C::run(async {
             let (tx, rx) = C::mpsc(NUM_CLIENT_WRITES as usize);
-            let mut receiver: BatchRaftMsgReceiver<C> = BatchRaftMsgReceiver::new(rx, BATCH_CAPACITY, Duration::ZERO);
+            let mut receiver: BatchRaftMsgReceiver<C> =
+                BatchRaftMsgReceiver::new(rx, BATCH_CAPACITY, Duration::ZERO);
 
             let leader = Some(committed_leader_id(1, 1));
             for index in 0..NUM_CLIENT_WRITES {
@@ -464,7 +491,9 @@ mod tests {
             for _ in 0..NUM_BATCHES {
                 let msg = receiver.try_recv().await.unwrap().unwrap();
                 let RaftMsg::ClientWrite {
-                    payloads, responders, ..
+                    payloads,
+                    responders,
+                    ..
                 } = msg
                 else {
                     panic!("expected ClientWrite");
@@ -482,7 +511,8 @@ mod tests {
 
         C::run(async {
             let (tx, rx) = C::mpsc(BATCH_CAPACITY as usize);
-            let mut receiver: BatchRaftMsgReceiver<C> = BatchRaftMsgReceiver::new(rx, BATCH_CAPACITY, LINGER);
+            let mut receiver: BatchRaftMsgReceiver<C> =
+                BatchRaftMsgReceiver::new(rx, BATCH_CAPACITY, LINGER);
 
             let now = C::now();
 
@@ -491,7 +521,9 @@ mod tests {
 
             let msg = receiver.try_recv().await.unwrap().unwrap();
             let RaftMsg::ClientWrite {
-                payloads, responders, ..
+                payloads,
+                responders,
+                ..
             } = msg
             else {
                 panic!("expected ClientWrite");

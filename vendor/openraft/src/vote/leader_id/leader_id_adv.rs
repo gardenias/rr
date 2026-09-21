@@ -11,9 +11,12 @@ use crate::vote::RaftTerm;
 /// It includes the `term` and the `node_id`.
 ///
 /// This is totally ordered to enable multiple leaders per term.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct LeaderId<Term, NID>
 where
     Term: RaftTerm,

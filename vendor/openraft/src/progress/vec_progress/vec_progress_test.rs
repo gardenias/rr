@@ -109,9 +109,14 @@ fn next_random(seed: &mut u64) -> u64 {
 /// Randomized upgrade tests use this to preserve progress for all known
 /// nodes when switching between simple, joint, and shrunk quorum sets.
 fn learner_ids_for<QS>(quorum_set: &QS, known_ids: impl IntoIterator<Item = u64>) -> Vec<u64>
-where QS: QuorumSet<Id = u64> {
+where
+    QS: QuorumSet<Id = u64>,
+{
     let voter_ids = quorum_set.ids().collect::<BTreeSet<_>>();
-    known_ids.into_iter().filter(|id| !voter_ids.contains(id)).collect()
+    known_ids
+        .into_iter()
+        .filter(|id| !voter_ids.contains(id))
+        .collect()
 }
 
 /// Copy both sides of a `Result<&u64, &u64>` returned by progress updates.
@@ -131,15 +136,22 @@ fn copy_result(res: Result<&u64, &u64>) -> Result<u64, u64> {
 /// it tries candidate progress values from high to low and returns the first
 /// value whose reached node IDs form a quorum.
 fn model_quorum_accepted<QS>(quorum_set: &QS, entries: &[(u64, u64)]) -> u64
-where QS: QuorumSet<Id = u64> {
-    let values = entries.iter().map(|item| (item.0, item.1)).collect::<BTreeMap<_, _>>();
+where
+    QS: QuorumSet<Id = u64>,
+{
+    let values = entries
+        .iter()
+        .map(|item| (item.0, item.1))
+        .collect::<BTreeMap<_, _>>();
     let mut candidates = quorum_set.ids().map(|id| values[&id]).collect::<Vec<_>>();
 
     candidates.sort_unstable_by(|a, b| b.cmp(a));
     candidates.dedup();
 
     for candidate in candidates {
-        let ids = values.iter().filter_map(|(id, val)| (*val >= candidate).then_some(id));
+        let ids = values
+            .iter()
+            .filter_map(|(id, val)| (*val >= candidate).then_some(id));
         if quorum_set.is_quorum(ids) {
             return candidate;
         }
@@ -153,7 +165,9 @@ where QS: QuorumSet<Id = u64> {
 /// This checks both the externally visible quorum-accepted value and the
 /// internal ordering invariant relied on by the optimized update algorithm.
 fn assert_matches_model<QS>(progress: &VecProgress<(u64, u64), QS>, context: &str)
-where QS: QuorumSet<Id = u64> {
+where
+    QS: QuorumSet<Id = u64>,
+{
     let want = model_quorum_accepted(&progress.quorum_set, &progress.entries);
     assert_eq!(
         &want,
@@ -170,7 +184,9 @@ where QS: QuorumSet<Id = u64> {
 /// Voter entries above `quorum_accepted` must form a descending prefix.
 /// Learners are excluded because learner progress does not grant quorum.
 fn assert_voter_prefix_is_sorted<QS>(progress: &VecProgress<(u64, u64), QS>, context: &str)
-where QS: QuorumSet<Id = u64> {
+where
+    QS: QuorumSet<Id = u64>,
+{
     let quorum_accepted = *progress.quorum_accepted();
     let mut previous = None;
     let mut seen_not_above_quorum = false;
@@ -187,7 +203,12 @@ where QS: QuorumSet<Id = u64> {
             context, progress.entries
         );
         if let Some(prev) = previous {
-            assert!(prev >= item.1, "{}: unsorted voters: {:?}", context, progress.entries);
+            assert!(
+                prev >= item.1,
+                "{}: unsorted voters: {:?}",
+                context,
+                progress.entries
+            );
         }
         previous = Some(item.1);
     }
@@ -272,11 +293,31 @@ fn vec_progress_move_up() {
 
     // initial: 0-0, 1-0, 2-0, 3-0, 4-0
     let cases = [
-        ((1, 2), vec![(1, 2), (0, 0), (2, 0), (3, 0), (4, 0), (6, 0)], 0),
-        ((2, 3), vec![(2, 3), (1, 2), (0, 0), (3, 0), (4, 0), (6, 0)], 0),
-        ((1, 3), vec![(2, 3), (1, 3), (0, 0), (3, 0), (4, 0), (6, 0)], 1), // no move
-        ((4, 8), vec![(4, 8), (2, 3), (1, 3), (0, 0), (3, 0), (6, 0)], 0),
-        ((0, 5), vec![(4, 8), (0, 5), (2, 3), (1, 3), (3, 0), (6, 0)], 1), // move to 1st
+        (
+            (1, 2),
+            vec![(1, 2), (0, 0), (2, 0), (3, 0), (4, 0), (6, 0)],
+            0,
+        ),
+        (
+            (2, 3),
+            vec![(2, 3), (1, 2), (0, 0), (3, 0), (4, 0), (6, 0)],
+            0,
+        ),
+        (
+            (1, 3),
+            vec![(2, 3), (1, 3), (0, 0), (3, 0), (4, 0), (6, 0)],
+            1,
+        ), // no move
+        (
+            (4, 8),
+            vec![(4, 8), (2, 3), (1, 3), (0, 0), (3, 0), (6, 0)],
+            0,
+        ),
+        (
+            (0, 5),
+            vec![(4, 8), (0, 5), (2, 3), (1, 3), (3, 0), (6, 0)],
+            1,
+        ), // move to 1st
     ];
     for (ith, ((id, v), want_vec, want_new_index)) in cases.iter().enumerate() {
         // Update a value and move it up to keep the order.
@@ -284,8 +325,16 @@ fn vec_progress_move_up() {
         progress.entries[index].1 = *v;
         let got = progress.move_up(index);
 
-        assert_eq!(want_vec, &progress.entries, "{}-th case: idx:{}, v:{}", ith, *id, *v);
-        assert_eq!(*want_new_index, got, "{}-th case: idx:{}, v:{}", ith, *id, *v);
+        assert_eq!(
+            want_vec, &progress.entries,
+            "{}-th case: idx:{}, v:{}",
+            ith, *id, *v
+        );
+        assert_eq!(
+            *want_new_index, got,
+            "{}-th case: idx:{}, v:{}",
+            ith, *id, *v
+        );
     }
 }
 
@@ -310,7 +359,14 @@ fn vec_progress_update() {
 
     for (ith, ((id, v), want_quorum_accepted)) in cases.iter().enumerate() {
         let got = progress.update_with(id, |x| *x = *v);
-        assert_eq!(want_quorum_accepted.clone(), got, "{}-th case: id:{}, v:{}", ith, id, v);
+        assert_eq!(
+            want_quorum_accepted.clone(),
+            got,
+            "{}-th case: id:{}, v:{}",
+            ith,
+            id,
+            v
+        );
     }
 }
 
@@ -324,20 +380,31 @@ fn vec_progress_matches_reference_model_for_monotonic_updates() {
     for (case_id, (quorum_set, learners)) in cases.into_iter().enumerate() {
         for seed in 0..32 {
             let mut seed = seed + 1;
-            let mut progress = VecProgress::<(u64, u64), _>::new(quorum_set.clone(), learners.clone(), |id| (id, 0));
+            let mut progress =
+                VecProgress::<(u64, u64), _>::new(quorum_set.clone(), learners.clone(), |id| {
+                    (id, 0)
+                });
 
             assert_matches_model(&progress, &format!("case-{case_id} seed-{seed} initial"));
 
             for step in 0..128 {
                 let id = next_random(&mut seed) % 8;
-                let value =
-                    progress.try_get(&id).map(|entry| entry.1).unwrap_or_default() + next_random(&mut seed) % 7 + 1;
+                let value = progress
+                    .try_get(&id)
+                    .map(|entry| entry.1)
+                    .unwrap_or_default()
+                    + next_random(&mut seed) % 7
+                    + 1;
                 let got = copy_result(progress.update(&id, value));
                 let want = model_quorum_accepted(&progress.quorum_set, &progress.entries);
                 let want_result = progress.try_get(&id).map(|_| want).ok_or(want);
                 let context = format!("case-{case_id} seed-{seed} step-{step} update-{id}-{value}");
 
-                assert_eq!(want_result, got, "{context}: entries: {:?}", progress.entries);
+                assert_eq!(
+                    want_result, got,
+                    "{context}: entries: {:?}",
+                    progress.entries
+                );
                 assert_matches_model(&progress, &context);
             }
         }
@@ -366,10 +433,17 @@ fn vec_progress_matches_reference_model_after_random_quorum_upgrades() {
         for round in 0..24 {
             for step in 0..16 {
                 let id = next_random(&mut seed) % 10;
-                let value =
-                    progress.try_get(&id).map(|entry| entry.1).unwrap_or_default() + next_random(&mut seed) % 11 + 1;
+                let value = progress
+                    .try_get(&id)
+                    .map(|entry| entry.1)
+                    .unwrap_or_default()
+                    + next_random(&mut seed) % 11
+                    + 1;
                 progress.update(&id, value).ok();
-                assert_matches_model(&progress, &format!("seed-{seed} round-{round} step-{step} update"));
+                assert_matches_model(
+                    &progress,
+                    &format!("seed-{seed} round-{round} step-{step} update"),
+                );
             }
 
             let quorum_index = next_random(&mut seed) as usize % quorum_sets.len();
@@ -377,7 +451,10 @@ fn vec_progress_matches_reference_model_after_random_quorum_upgrades() {
             let learner_ids = learner_ids_for(&quorum_set, known_ids.clone());
 
             progress = progress.upgrade_quorum_set(quorum_set, learner_ids, |id| (id, 0));
-            assert_matches_model(&progress, &format!("seed-{seed} round-{round} upgrade-{quorum_index}"));
+            assert_matches_model(
+                &progress,
+                &format!("seed-{seed} round-{round} upgrade-{quorum_index}"),
+            );
         }
     }
 }
@@ -412,7 +489,10 @@ fn vec_progress_joint_quorum_update() {
     }
 
     let entries: Vec<_> = progress.collect_mapped(|item| (item.0, item.1));
-    assert_eq!(vec![(2, 7), (0, 7), (4, 6), (3, 6), (1, 5), (5, 0), (6, 0)], entries);
+    assert_eq!(
+        vec![(2, 7), (0, 7), (4, 6), (3, 6), (1, 5), (5, 0), (6, 0)],
+        entries
+    );
 }
 
 #[test]
@@ -420,7 +500,10 @@ fn vec_progress_non_member_and_learner_edge_cases() {
     let quorum_set = vec![btreeset! {0, 1, 2}];
     let mut progress = VecProgress::<(u64, u64), _>::new(quorum_set, [1, 3, 3], |id| (id, 0));
 
-    assert_eq!(vec![(0, 0), (1, 0), (2, 0), (1, 0), (3, 0), (3, 0),], progress.entries);
+    assert_eq!(
+        vec![(0, 0), (1, 0), (2, 0), (1, 0), (3, 0), (3, 0),],
+        progress.entries
+    );
     assert_eq!(3, progress.voter_count);
     assert_eq!(Some(true), progress.is_voter(&1));
     assert_eq!(Some(false), progress.is_voter(&3));
@@ -441,7 +524,10 @@ fn vec_progress_non_member_and_learner_edge_cases() {
     );
 
     assert_eq!(Ok(4), copy_result(progress.update(&2, 4)));
-    assert_eq!(vec![(1, 5), (2, 4), (0, 0), (1, 0), (3, 7), (3, 0),], progress.entries);
+    assert_eq!(
+        vec![(1, 5), (2, 4), (0, 0), (1, 0), (3, 7), (3, 0),],
+        progress.entries
+    );
 
     let quorum_set = vec![btreeset! {0, 1, 2}];
     let mut no_learners = VecProgress::<(u64, u64), _>::new(quorum_set, [], |id| (id, 0));
@@ -527,7 +613,9 @@ fn vec_progress_update_with() {
 fn vec_progress_update_data_with() {
     let quorum_set = vec![btreeset! {0, 1, 2}];
     let mut progress =
-        VecProgress::<IdValData<u64, u64, &'static str>, _>::new(quorum_set, [3], |id| IdValData::new(id, 0, "foo"));
+        VecProgress::<IdValData<u64, u64, &'static str>, _>::new(quorum_set, [3], |id| {
+            IdValData::new(id, 0, "foo")
+        });
 
     assert_eq!(Ok(&0), progress.update(&1, 2));
 
@@ -537,8 +625,14 @@ fn vec_progress_update_data_with() {
         progress.stat().is_quorum_count,
     );
 
-    assert_eq!(Some(&"bar"), progress.update_data_with(&1, |data| *data = "bar"));
-    assert_eq!(None, progress.update_data_with(&9, |data| *data = "unknown"));
+    assert_eq!(
+        Some(&"bar"),
+        progress.update_data_with(&1, |data| *data = "bar")
+    );
+    assert_eq!(
+        None,
+        progress.update_data_with(&9, |data| *data = "unknown")
+    );
 
     assert_eq!(
         vec![
@@ -631,9 +725,16 @@ fn vec_progress_upgrade_joint_quorum_set() {
 
     let mut joint = p.upgrade_quorum_set(qs012_234, [5, 6], |id| (id, 0));
 
-    assert_eq!(&2, joint.quorum_accepted(), "joint quorum lowers the accepted value");
+    assert_eq!(
+        &2,
+        joint.quorum_accepted(),
+        "joint quorum lowers the accepted value"
+    );
     let entries: Vec<_> = joint.collect_mapped(|item| (item.0, item.1));
-    assert_eq!(vec![(0, 9), (1, 8), (2, 7), (3, 2), (4, 1), (5, 10), (6, 0)], entries);
+    assert_eq!(
+        vec![(0, 9), (1, 8), (2, 7), (3, 2), (4, 1), (5, 10), (6, 0)],
+        entries
+    );
     assert_matches_model(&joint, "after upgrade to joint quorum");
 
     joint.update(&3, 8).ok();
@@ -830,9 +931,22 @@ fn vec_progress_reset_entry_with() {
     // entry is moved down, while the quorum-accepted value must be kept.
     let entry = progress.reset_entry_with(&1, |entry| entry.1 = 0);
     assert_eq!(Some(&(1, 0)), entry);
-    assert_eq!(&9, progress.quorum_accepted(), "reset never lowers quorum-accepted");
     assert_eq!(
-        vec![(0, 12), (2, 10), (3, 9), (1, 0), (4, 0), (5, 0), (6, 0), (7, 0)],
+        &9,
+        progress.quorum_accepted(),
+        "reset never lowers quorum-accepted"
+    );
+    assert_eq!(
+        vec![
+            (0, 12),
+            (2, 10),
+            (3, 9),
+            (1, 0),
+            (4, 0),
+            (5, 0),
+            (6, 0),
+            (7, 0)
+        ],
         progress.entries
     );
     assert_voter_prefix_is_sorted(&progress, "after reset");
@@ -847,7 +961,10 @@ fn vec_progress_reset_entry_with() {
     assert_matches_model(&progress, "after a real quorum at 10");
 
     // Resetting a learner or a nonexistent id does not reorder anything.
-    assert_eq!(Some(&(7, 0)), progress.reset_entry_with(&7, |entry| entry.1 = 0));
+    assert_eq!(
+        Some(&(7, 0)),
+        progress.reset_entry_with(&7, |entry| entry.1 = 0)
+    );
     assert_eq!(None, progress.reset_entry_with(&9, |entry| entry.1 = 0));
 }
 
@@ -861,7 +978,10 @@ fn vec_progress_matches_reference_model_with_resets() {
     for (case_id, (quorum_set, learners)) in cases.into_iter().enumerate() {
         for seed in 0..32 {
             let mut seed = seed + 3;
-            let mut progress = VecProgress::<(u64, u64), _>::new(quorum_set.clone(), learners.clone(), |id| (id, 0));
+            let mut progress =
+                VecProgress::<(u64, u64), _>::new(quorum_set.clone(), learners.clone(), |id| {
+                    (id, 0)
+                });
 
             // The quorum-accepted value never moves backward, so the reference
             // is the running max of the instantaneous model value.
@@ -876,12 +996,19 @@ fn vec_progress_matches_reference_model_with_resets() {
                 if (next_random(&mut seed) >> 32).is_multiple_of(8) {
                     progress.reset_entry_with(&id, |entry| entry.1 = 0);
                 } else {
-                    let value =
-                        progress.try_get(&id).map(|entry| entry.1).unwrap_or_default() + next_random(&mut seed) % 7 + 1;
+                    let value = progress
+                        .try_get(&id)
+                        .map(|entry| entry.1)
+                        .unwrap_or_default()
+                        + next_random(&mut seed) % 7
+                        + 1;
                     progress.update(&id, value).ok();
                 }
 
-                want = want.max(model_quorum_accepted(&progress.quorum_set, &progress.entries));
+                want = want.max(model_quorum_accepted(
+                    &progress.quorum_set,
+                    &progress.entries,
+                ));
                 assert_eq!(
                     &want,
                     progress.quorum_accepted(),

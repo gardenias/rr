@@ -27,13 +27,19 @@ fn eng() -> Engine<UTConfig> {
 
     eng.config.id = 1;
     // By default expire the leader lease so that a pre-vote can be granted in these tests.
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(0), Vote::new(2, 1));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(0),
+        Vote::new(2, 1),
+    );
     eng.state.server_state = ServerState::Follower;
     eng.state.log_ids = LogIdList::new(None, [log_id(1, 1, 1)]);
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 1)),
-        m01(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )));
     eng.output.take_commands();
 
     eng
@@ -80,7 +86,10 @@ fn test_handle_pre_vote_req_reject_smaller_last_log_id() -> anyhow::Result<()> {
         leadership_transfer: false,
     });
 
-    assert_eq!(VoteResponse::new(Vote::new(2, 1), Some(log_id(1, 1, 1)), false), resp);
+    assert_eq!(
+        VoteResponse::new(Vote::new(2, 1), Some(log_id(1, 1, 1)), false),
+        resp
+    );
     assert_eq!(vote_before, *eng.state.vote_ref());
     assert_eq!(0, eng.output.take_commands().len());
 
@@ -99,7 +108,10 @@ fn test_handle_pre_vote_req_granted_without_mutation() -> anyhow::Result<()> {
         leadership_transfer: false,
     });
 
-    assert_eq!(VoteResponse::new(Vote::new(2, 1), Some(log_id(1, 1, 1)), true), resp);
+    assert_eq!(
+        VoteResponse::new(Vote::new(2, 1), Some(log_id(1, 1, 1)), true),
+        resp
+    );
     // The defining invariant: granting a pre-vote changes nothing locally.
     assert_eq!(vote_before, *eng.state.vote_ref());
     assert_eq!(ServerState::Follower, eng.state.server_state);

@@ -123,14 +123,18 @@ where
     pub(crate) async fn vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
         tracing::info!("Raft::vote(): rpc: {}", rpc);
 
-        self.inner.call_core_oneshot(|tx| RaftMsg::RequestVote { rpc, tx }).await
+        self.inner
+            .call_core_oneshot(|tx| RaftMsg::RequestVote { rpc, tx })
+            .await
     }
 
     #[tracing::instrument(level = "debug", skip(self, rpc))]
     pub(crate) async fn pre_vote(&self, rpc: VoteRequest<C>) -> Result<VoteResponse<C>, Fatal<C>> {
         tracing::info!("Raft::pre_vote(): rpc: {}", rpc);
 
-        self.inner.call_core_oneshot(|tx| RaftMsg::RequestPreVote { rpc, tx }).await
+        self.inner
+            .call_core_oneshot(|tx| RaftMsg::RequestPreVote { rpc, tx })
+            .await
     }
 
     #[since(version = "0.10.0")]
@@ -141,8 +145,10 @@ where
     ) -> Result<AppendEntriesResponse<C>, Fatal<C>> {
         tracing::debug!("Raft::append_entries: rpc: {}", rpc);
 
-        let stream_result: StreamAppendResult<C> =
-            self.inner.call_core_oneshot(|tx| RaftMsg::AppendEntries { rpc, tx }).await?;
+        let stream_result: StreamAppendResult<C> = self
+            .inner
+            .call_core_oneshot(|tx| RaftMsg::AppendEntries { rpc, tx })
+            .await?;
         Ok(AppendEntriesResponse::from(stream_result))
     }
 
@@ -236,8 +242,10 @@ where
         #[allow(clippy::neg_cmp_op_on_partial_ord)]
         let vote_changed = !(req.from_leader.as_ref_vote() >= actual_vote);
         if vote_changed {
-            let actual_vote =
-                VoteOf::<C>::from_leader_id(progress.vote.leader_id().clone(), progress.vote.is_committed());
+            let actual_vote = VoteOf::<C>::from_leader_id(
+                progress.vote.leader_id().clone(),
+                progress.vote.is_committed(),
+            );
 
             return Err(TransferLeaderError::VoteChanged {
                 expected: req.from_leader.clone(),

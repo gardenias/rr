@@ -114,7 +114,9 @@ where
     /// let state = vote_progress.wait_until(|v| v.as_ref().map_or(false, |vote| vote.leader_id().term == 5)).await?;
     /// ```
     pub async fn wait_until<F>(&mut self, condition: F) -> Result<T, RecvError>
-    where F: Fn(&T) -> bool + OptionalSend {
+    where
+        F: Fn(&T) -> bool + OptionalSend,
+    {
         self.inner.wait_until(condition).await
     }
 
@@ -197,15 +199,21 @@ mod tests {
         type Term = u64;
         type LeaderId = crate::impls::leader_id_adv::LeaderId<u64, u64>;
         type Vote = Vote<Self::LeaderId>;
-        type Entry =
-            crate::Entry<<Self::LeaderId as crate::vote::RaftLeaderId>::Committed, Self::D, Self::NodeId, Self::Node>;
+        type Entry = crate::Entry<
+            <Self::LeaderId as crate::vote::RaftLeaderId>::Committed,
+            Self::D,
+            Self::NodeId,
+            Self::Node,
+        >;
         type AsyncRuntime = TokioRuntime;
         type Responder<T>
             = crate::impls::OneshotResponder<Self, T>
-        where T: OptionalSend + 'static;
+        where
+            T: OptionalSend + 'static;
         type Batch<T>
             = crate::impls::InlineBatch<T>
-        where T: OptionalSend + 'static;
+        where
+            T: OptionalSend + 'static;
         type ErrorSource = anyerror::AnyError;
     }
 

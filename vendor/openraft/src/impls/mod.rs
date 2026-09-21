@@ -29,7 +29,10 @@ mod boxed_error_source;
 
 pub use boxed_error_source::BoxedErrorSource;
 #[cfg(feature = "tokio-rt")]
-#[deprecated(since = "0.10.0", note = "use `openraft_rt_tokio::TokioRuntime` directly")]
+#[deprecated(
+    since = "0.10.0",
+    note = "use `openraft_rt_tokio::TokioRuntime` directly"
+)]
 pub use openraft_rt_tokio::TokioRuntime;
 
 pub use crate::entry::Entry;

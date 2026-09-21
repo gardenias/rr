@@ -32,10 +32,12 @@ fn test_update_snapshot_no_update() -> anyhow::Result<()> {
     // snapshot will not be updated because of equal or less `last_log_id`.
     let mut eng = eng();
 
-    let got = eng.snapshot_handler().update_snapshot(SnapshotMetaOf::<UTConfig> {
-        last_log_id: Some(log_id(2, 1, 2)),
-        last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
-    });
+    let got = eng
+        .snapshot_handler()
+        .update_snapshot(SnapshotMetaOf::<UTConfig> {
+            last_log_id: Some(log_id(2, 1, 2)),
+            last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m1234()),
+        });
 
     assert_eq!(false, got);
 
@@ -57,10 +59,12 @@ fn test_update_snapshot_updated() -> anyhow::Result<()> {
     // snapshot will be updated to a new one with greater `last_log_id`.
     let mut eng = eng();
 
-    let got = eng.snapshot_handler().update_snapshot(SnapshotMetaOf::<UTConfig> {
-        last_log_id: Some(log_id(2, 1, 3)),
-        last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 2)), m1234()),
-    });
+    let got = eng
+        .snapshot_handler()
+        .update_snapshot(SnapshotMetaOf::<UTConfig> {
+            last_log_id: Some(log_id(2, 1, 3)),
+            last_membership: StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 2)), m1234()),
+        });
 
     assert_eq!(true, got);
 

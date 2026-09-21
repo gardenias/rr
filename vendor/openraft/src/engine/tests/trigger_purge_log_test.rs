@@ -58,7 +58,11 @@ fn test_trigger_purge_log_already_scheduled() -> anyhow::Result<()> {
 
     eng.trigger_purge_log(2);
 
-    assert_eq!(Some(log_id(1, 0, 2)), eng.state.purge_upto, "already purged, no update");
+    assert_eq!(
+        Some(log_id(1, 0, 2)),
+        eng.state.purge_upto,
+        "already purged, no update"
+    );
 
     assert_eq!(0, eng.output.take_commands().len());
 
@@ -85,7 +89,9 @@ fn test_trigger_purge_log_delete_only_in_snapshot_logs() -> anyhow::Result<()> {
     );
 
     assert_eq!(
-        vec![Command::PurgeLog { upto: log_id(1, 0, 3) },],
+        vec![Command::PurgeLog {
+            upto: log_id(1, 0, 3)
+        },],
         eng.output.take_commands()
     );
 
@@ -125,7 +131,11 @@ fn test_trigger_purge_log_in_used_wont_be_delete() -> anyhow::Result<()> {
         "delete only in snapshot logs"
     );
 
-    assert_eq!(0, eng.output.take_commands().len(), "in used log won't be deleted");
+    assert_eq!(
+        0,
+        eng.output.take_commands().len(),
+        "in used log won't be deleted"
+    );
 
     Ok(())
 }

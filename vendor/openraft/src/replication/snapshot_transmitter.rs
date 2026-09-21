@@ -150,11 +150,9 @@ where
                             // period of time. Backoff will be reset if there is a
                             // successful RPC is sent.
                             if self.backoff.is_none() {
-                                self.backoff = Some(
-                                    self.network
-                                        .backoff()
-                                        .unwrap_or_else(|| self.replication_context.config.build_backoff()),
-                                );
+                                self.backoff = Some(self.network.backoff().unwrap_or_else(|| {
+                                    self.replication_context.config.build_backoff()
+                                }));
                             }
                         }
                         RPCError::Timeout(_) | RPCError::Network(_) | RPCError::RemoteError(_) => {
@@ -187,10 +185,14 @@ where
     }
 
     async fn read_and_send_snapshot(&mut self, ith: i32) -> Result<(), ReplicationError<C>> {
-        let snapshot = self.snapshot_reader.get_snapshot().await.map_err(|reason| {
-            tracing::warn!("failed to get snapshot from state machine: {}", reason);
-            ReplicationClosed::new(reason)
-        })?;
+        let snapshot = self
+            .snapshot_reader
+            .get_snapshot()
+            .await
+            .map_err(|reason| {
+                tracing::warn!("failed to get snapshot from state machine: {}", reason);
+                ReplicationClosed::new(reason)
+            })?;
 
         tracing::info!(
             "{}-th snapshot sending: has read snapshot: meta:{}",
@@ -200,14 +202,16 @@ where
 
         let snapshot = match snapshot {
             None => {
-                let sto_err = StorageError::read_snapshot(None, C::err_from_string("snapshot not found"));
+                let sto_err =
+                    StorageError::read_snapshot(None, C::err_from_string("snapshot not found"));
                 return Err(sto_err.into());
             }
             Some(x) => x,
         };
 
         let mut option = RPCOption::new(self.replication_context.config.install_snapshot_timeout());
-        option.snapshot_chunk_size = Some(self.replication_context.config.snapshot_max_chunk_size as usize);
+        option.snapshot_chunk_size =
+            Some(self.replication_context.config.snapshot_max_chunk_size as usize);
 
         self.send_snapshot(snapshot, option).await
     }
@@ -229,7 +233,10 @@ where
 
         let start_time = C::now();
 
-        let resp = self.network.full_snapshot(sender_vote.clone(), snapshot, cancel, option).await?;
+        let resp = self
+            .network
+            .full_snapshot(sender_vote.clone(), snapshot, cancel, option)
+            .await?;
 
         tracing::info!("finished sending full_snapshot, resp: {}", resp);
 
@@ -241,9 +248,14 @@ where
             }));
         }
 
-        self.replication_context.notify_heartbeat_progress(start_time).await;
         self.replication_context
-            .notify_progress(Ok(ReplicationResult(Ok(meta.last_log_id))), Some(self.inflight_id))
+            .notify_heartbeat_progress(start_time)
+            .await;
+        self.replication_context
+            .notify_progress(
+                Ok(ReplicationResult(Ok(meta.last_log_id))),
+                Some(self.inflight_id),
+            )
             .await;
         Ok(())
     }

@@ -30,10 +30,10 @@ fn test_segments_two_aligned() {
         m.get_mut(i).record(20, (i as u64 + 1) * 100);
     }
 
-    assert_eq!(collect_segments(&m, 0), vec![
-        (0..10, [10, 20, 30]),
-        (10..20, [100, 200, 300]),
-    ]);
+    assert_eq!(
+        collect_segments(&m, 0),
+        vec![(0..10, [10, 20, 30]), (10..20, [100, 200, 300]),]
+    );
 }
 
 #[test]
@@ -56,11 +56,14 @@ fn test_segments_misaligned() {
     // Segment [0,10): map0=1, map1=10, map2=100
     // Segment [10,15): map0=2, map1=10, map2=200
     // Segment [15,20): map0=2, map1=20, map2=200
-    assert_eq!(collect_segments(&m, 0), vec![
-        (0..10, [1, 10, 100]),
-        (10..15, [2, 10, 200]),
-        (15..20, [2, 20, 200]),
-    ]);
+    assert_eq!(
+        collect_segments(&m, 0),
+        vec![
+            (0..10, [1, 10, 100]),
+            (10..15, [2, 10, 200]),
+            (15..20, [2, 20, 200]),
+        ]
+    );
 }
 
 #[test]
@@ -97,10 +100,10 @@ fn test_segments_after_eviction() {
 
     // begin advanced to 10, remaining entries: (20, ..) and (30, ..)
     assert_eq!(begin, 10);
-    assert_eq!(collect_segments(&m, begin), vec![
-        (10..20, [100, 200, 300]),
-        (20..30, [1000, 2000, 3000]),
-    ]);
+    assert_eq!(
+        collect_segments(&m, begin),
+        vec![(10..20, [100, 200, 300]), (20..30, [1000, 2000, 3000]),]
+    );
 }
 
 #[test]

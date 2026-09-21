@@ -15,7 +15,8 @@ use crate::type_config::alias::LogIdOf;
 /// match the response to the correct inflight state.
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub(crate) struct Replicate<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Identifies this inflight request for matching with responses.
     pub(crate) inflight_id: InflightId,
@@ -25,7 +26,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Default for Replicate<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn default() -> Self {
         Replicate {
@@ -60,7 +62,8 @@ impl<C: RaftTypeConfig> fmt::Display for Replicate<C> {
 }
 
 impl<C> Replicate<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Creates a request to replicate logs in a fixed range.
     pub(crate) fn new_logs(log_id_range: LogIdRange<C>, inflight_id: InflightId) -> Self {

@@ -71,7 +71,10 @@ where
         members: impl Into<ChangeMembers<C::NodeId, C::Node>>,
         retain: bool,
     ) -> Result<ClientWriteResponse<C>, RaftError<C, ClientWriteError<C>>> {
-        self.management_api().change_membership(members, retain).await.into_raft_result()
+        self.management_api()
+            .change_membership(members, retain)
+            .await
+            .into_raft_result()
     }
 
     /// Add a new learner raft node, optionally, blocking until up-to-speed.
@@ -111,6 +114,9 @@ where
         node: C::Node,
         blocking: bool,
     ) -> Result<ClientWriteResponse<C>, RaftError<C, ClientWriteError<C>>> {
-        self.management_api().add_learner(id, node, blocking).await.into_raft_result()
+        self.management_api()
+            .add_learner(id, node, blocking)
+            .await
+            .into_raft_result()
     }
 }

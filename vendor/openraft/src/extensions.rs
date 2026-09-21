@@ -41,7 +41,9 @@ impl Extensions {
     ///
     /// If no value exists, `T::default()` is inserted and a clone is returned.
     pub fn get<T>(&self) -> T
-    where T: OptionalSend + Clone + Default + 'static {
+    where
+        T: OptionalSend + Clone + Default + 'static,
+    {
         let mut map = self.map.lock().unwrap();
         let type_id = TypeId::of::<T>();
 
@@ -56,16 +58,21 @@ impl Extensions {
 
     /// Check if a value of type `T` exists.
     pub fn contains<T>(&self) -> bool
-    where T: 'static {
+    where
+        T: 'static,
+    {
         let map = self.map.lock().unwrap();
         map.contains_key(&TypeId::of::<T>())
     }
 
     /// Remove and return a value of type `T`.
     pub fn remove<T>(&self) -> Option<T>
-    where T: 'static {
+    where
+        T: 'static,
+    {
         let mut map = self.map.lock().unwrap();
-        map.remove(&TypeId::of::<T>()).and_then(|boxed| boxed.downcast().ok().map(|b| *b))
+        map.remove(&TypeId::of::<T>())
+            .and_then(|boxed| boxed.downcast().ok().map(|b| *b))
     }
 }
 

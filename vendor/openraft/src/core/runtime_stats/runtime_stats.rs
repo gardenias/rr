@@ -22,7 +22,8 @@ use crate::type_config::alias::InstantOf;
 /// statistics from the time the Raft node starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStats<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Histogram tracking the distribution of log entry counts in Apply commands.
     ///
@@ -117,7 +118,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> Default for RuntimeStats<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn default() -> Self {
         Self::new(&Config::default())
@@ -125,7 +127,8 @@ where C: RaftTypeConfig
 }
 
 impl<C> RuntimeStats<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(config: &Config) -> Self {
         let _ = config;

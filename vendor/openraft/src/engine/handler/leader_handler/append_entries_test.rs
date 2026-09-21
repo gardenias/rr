@@ -30,7 +30,10 @@ use crate::type_config::alias::StoredMembershipOf;
 use crate::utime::Leased;
 use crate::vote::raft_vote::RaftVoteExt;
 
-fn committed_leader_id(term: u64, node_id: u64) -> crate::type_config::alias::CommittedLeaderIdOf<UTConfig> {
+fn committed_leader_id(
+    term: u64,
+    node_id: u64,
+) -> crate::type_config::alias::CommittedLeaderIdOf<UTConfig> {
     *log_id(term, node_id, 0).committed_leader_id()
 }
 
@@ -65,8 +68,14 @@ fn eng() -> Engine<UTConfig> {
     eng.state.log_ids.append(log_id(1, 1, 1));
     eng.state.log_ids.append(log_id(2, 1, 3));
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )),
     );
     eng.testing_new_leader();
     eng.state.server_state = eng.calc_server_state();
@@ -98,8 +107,14 @@ fn test_leader_append_entries_empty() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 3)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
         ),
         eng.state.membership_state
     );
@@ -125,7 +140,10 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
         "should return log ids for 3 entries"
     );
     assert_eq!(
-        Some(&IOId::new_log_io(Vote::new(3, 1).to_committed(), Some(log_id(3, 1, 6)))),
+        Some(&IOId::new_log_io(
+            Vote::new(3, 1).to_committed(),
+            Some(log_id(3, 1, 6))
+        )),
         eng.state.accepted_log_io()
     );
     assert_eq!(None, eng.state.log_ids.purged());
@@ -140,8 +158,14 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(3, 1, 6)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
         ),
         eng.state.membership_state
     );
@@ -157,11 +181,17 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
             },
             Command::Replicate {
                 target: 2,
-                req: Replicate::new_logs(LogIdRange::new(None, Some(log_id(3, 1, 6))), InflightId::new(1)),
+                req: Replicate::new_logs(
+                    LogIdRange::new(None, Some(log_id(3, 1, 6))),
+                    InflightId::new(1)
+                ),
             },
             Command::Replicate {
                 target: 3,
-                req: Replicate::new_logs(LogIdRange::new(None, Some(log_id(3, 1, 6))), InflightId::new(2)),
+                req: Replicate::new_logs(
+                    LogIdRange::new(None, Some(log_id(3, 1, 6))),
+                    InflightId::new(2)
+                ),
             },
         ],
         eng.output.take_commands()
@@ -173,10 +203,12 @@ fn test_leader_append_entries_normal() -> anyhow::Result<()> {
 #[test]
 fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
     let mut eng = eng();
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m1(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m1(),
+        )));
     eng.testing_new_leader();
 
     eng.output.clear_commands();
@@ -193,7 +225,10 @@ fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
         "should return log ids for 3 entries"
     );
     assert_eq!(
-        Some(&IOId::new_log_io(Vote::new(3, 1).to_committed(), Some(log_id(3, 1, 6)))),
+        Some(&IOId::new_log_io(
+            Vote::new(3, 1).to_committed(),
+            Some(log_id(3, 1, 6))
+        )),
         eng.state.accepted_log_io()
     );
     assert_eq!(None, eng.state.log_ids.purged());
@@ -208,8 +243,14 @@ fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(3, 1, 6)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m1()
+            )),
         ),
         eng.state.membership_state
     );
@@ -232,10 +273,12 @@ fn test_leader_append_entries_single_node_leader() -> anyhow::Result<()> {
 #[test]
 fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
     let mut eng = eng();
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(2, 1, 3)),
-        m1(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m1(),
+        )));
     eng.testing_new_leader();
     eng.state.server_state = eng.calc_server_state();
 
@@ -253,7 +296,10 @@ fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
         "should return log ids for 3 entries"
     );
     assert_eq!(
-        Some(&IOId::new_log_io(Vote::new(3, 1).to_committed(), Some(log_id(3, 1, 6)))),
+        Some(&IOId::new_log_io(
+            Vote::new(3, 1).to_committed(),
+            Some(log_id(3, 1, 6))
+        )),
         eng.state.accepted_log_io()
     );
     assert_eq!(None, eng.state.log_ids.purged());
@@ -268,8 +314,14 @@ fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(3, 1, 6)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m1())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 5)), m1_2())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m1()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(3, 1, 5)),
+                m1_2()
+            )),
         ),
         eng.state.membership_state
     );
@@ -296,7 +348,10 @@ fn test_leader_append_entries_with_membership_log() -> anyhow::Result<()> {
             },
             Command::Replicate {
                 target: 2,
-                req: Replicate::new_logs(LogIdRange::new(None, Some(log_id(3, 1, 6))), InflightId::new(1))
+                req: Replicate::new_logs(
+                    LogIdRange::new(None, Some(log_id(3, 1, 6))),
+                    InflightId::new(1)
+                )
             },
         ],
         eng.output.take_commands()

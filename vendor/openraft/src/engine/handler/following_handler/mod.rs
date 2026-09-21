@@ -66,7 +66,11 @@ where
     ///
     /// Also clean conflicting entries and update membership state.
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn append_entries(&mut self, prev_log_id: Option<LogIdOf<C>>, mut entries: Vec<C::Entry>) {
+    pub(crate) fn append_entries(
+        &mut self,
+        prev_log_id: Option<LogIdOf<C>>,
+        mut entries: Vec<C::Entry>,
+    ) {
         tracing::debug!(
             "{}: local last_log_id: {}, request: prev_log_id: {}, entries: {}",
             func_name!(),
@@ -82,7 +86,10 @@ where
         let last_log_id = entries.last().map(|ent| ent.log_id());
         let last_log_id = std::cmp::max(prev_log_id, last_log_id);
 
-        let prev_accepted = self.state.accept_log_io(IOId::new_log_io(self.leader_vote.clone(), last_log_id.clone()));
+        let prev_accepted = self.state.accept_log_io(IOId::new_log_io(
+            self.leader_vote.clone(),
+            last_log_id.clone(),
+        ));
 
         let l = entries.len();
         let since = self.state.first_conflicting_index(&entries);
@@ -153,7 +160,8 @@ where
         debug_assert_eq!(entries[0].index(), self.state.log_ids.last().next_index(),);
         debug_assert!(Some(entries[0].ref_log_id()) > self.state.log_ids.last_ref());
 
-        self.state.extend_log_ids(entries.iter().map(|ent| ent.ref_log_id()));
+        self.state
+            .extend_log_ids(entries.iter().map(|ent| ent.ref_log_id()));
         self.append_membership(entries.iter());
 
         self.output.push_command(Command::AppendEntries {
@@ -192,7 +200,9 @@ where
     /// Append membership log if membership config entries are found, after appending entries to
     /// log.
     fn append_membership<'a>(&mut self, entries: impl DoubleEndedIterator<Item = &'a C::Entry>)
-    where C::Entry: 'a {
+    where
+        C::Entry: 'a,
+    {
         let memberships = Self::last_two_memberships(entries);
         if memberships.is_empty() {
             return;
@@ -212,12 +222,18 @@ where
 
     /// Install into the membership state the membership config carried by a snapshot.
     #[tracing::instrument(level = "debug", skip_all)]
-    fn membership_install_snapshot(&mut self, membership: StoredMembershipOf<C>, snapshot_last_log_index: u64) {
+    fn membership_install_snapshot(
+        &mut self,
+        membership: StoredMembershipOf<C>,
+        snapshot_last_log_index: u64,
+    ) {
         tracing::debug!("install membership from snapshot: {}", membership);
 
         let m = Arc::new(membership);
 
-        self.state.membership_state.install_membership_snapshot(m, snapshot_last_log_index);
+        self.state
+            .membership_state
+            .install_membership_snapshot(m, snapshot_last_log_index);
 
         self.server_state_handler().update_server_state_if_changed();
     }
@@ -241,7 +257,10 @@ where
     /// - Otherwise `None` if the snapshot will not be installed (e.g., if it is not newer than the
     ///   current state).
     #[tracing::instrument(level = "debug", skip_all)]
-    pub(crate) fn install_full_snapshot(&mut self, snapshot: SmSnapshotOf<C, SM>) -> Option<Condition<C>> {
+    pub(crate) fn install_full_snapshot(
+        &mut self,
+        snapshot: SmSnapshotOf<C, SM>,
+    ) -> Option<Condition<C>> {
         let meta = &snapshot.meta;
         tracing::info!("install full snapshot, meta: {:?}", meta);
 
@@ -302,15 +321,25 @@ where
             self.truncate_logs(self.state.local_committed().next_index());
         }
 
-        let log_io_id = LogIOId::new(self.leader_vote.to_committed(), Some(snap_last_log_id.clone()));
+        let log_io_id = LogIOId::new(
+            self.leader_vote.to_committed(),
+            Some(snap_last_log_id.clone()),
+        );
         self.state.accept_log_io(log_io_id.to_io_id());
 
-        self.state.apply_progress_mut().accept(snap_last_log_id.clone());
-        self.state.snapshot_progress_mut().accept(snap_last_log_id.clone());
+        self.state
+            .apply_progress_mut()
+            .accept(snap_last_log_id.clone());
+        self.state
+            .snapshot_progress_mut()
+            .accept(snap_last_log_id.clone());
 
         self.membership_install_snapshot(meta.last_membership.clone(), snap_last_log_id.index());
 
-        self.output.push_command(Command::from(sm::Command::install_full_snapshot(snapshot, log_io_id)));
+        self.output
+            .push_command(Command::from(sm::Command::install_full_snapshot(
+                snapshot, log_io_id,
+            )));
 
         self.state.purge_upto = Some(snap_last_log_id.clone());
         self.log_handler().purge_log();
@@ -324,8 +353,12 @@ where
     ///
     /// A follower/learner reverts the effective membership to the previous one
     /// when conflicting logs are found.
-    fn last_two_memberships<'a>(entries: impl DoubleEndedIterator<Item = &'a C::Entry>) -> Vec<StoredMembershipOf<C>>
-    where C::Entry: 'a {
+    fn last_two_memberships<'a>(
+        entries: impl DoubleEndedIterator<Item = &'a C::Entry>,
+    ) -> Vec<StoredMembershipOf<C>>
+    where
+        C::Entry: 'a,
+    {
         let mut memberships = vec![];
 
         // Find the last 2 membership config entries: the committed and the effective.

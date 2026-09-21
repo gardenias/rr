@@ -35,7 +35,8 @@ use crate::raft::StreamAppendResult;
 ///
 /// [`RaftNetworkV2`]: crate::network::RaftNetworkV2
 pub trait NetStreamAppend<C>: OptionalSend + OptionalSync + 'static
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Send a stream of AppendEntries RPCs to the target and return a stream of responses.
     ///

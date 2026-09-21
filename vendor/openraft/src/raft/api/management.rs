@@ -24,13 +24,15 @@ use crate::type_config::alias::LogIdOf;
 /// membership changes and node additions.
 #[since(version = "0.10.0")]
 pub(crate) struct ManagementApi<'a, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     inner: &'a RaftInner<C>,
 }
 
 impl<'a, C> ManagementApi<'a, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(in crate::raft) fn new(inner: &'a RaftInner<C>) -> Self {
         Self { inner }
@@ -38,8 +40,13 @@ where C: RaftTypeConfig
 
     #[since(version = "0.10.0")]
     #[tracing::instrument(level = "debug", skip(self))]
-    pub(crate) async fn initialize<T>(&self, members: T) -> Result<Result<(), InitializeError<C>>, Fatal<C>>
-    where T: IntoNodes<C::NodeId, C::Node> + Debug {
+    pub(crate) async fn initialize<T>(
+        &self,
+        members: T,
+    ) -> Result<Result<(), InitializeError<C>>, Fatal<C>>
+    where
+        T: IntoNodes<C::NodeId, C::Node> + Debug,
+    {
         self.inner
             .call_core_oneshot(|tx| RaftMsg::Initialize {
                 members: members.into_nodes(),
@@ -103,13 +110,26 @@ where C: RaftTypeConfig
         }
 
         tracing::debug!("committed a joint config: {} {:?}", log_id, joint);
-        tracing::debug!("the second step is to change to uniform config: {:?}", changes);
+        tracing::debug!(
+            "the second step is to change to uniform config: {:?}",
+            changes
+        );
 
         let (tx, rx) = ProgressResponder::<C, _>::complete_only();
 
         // The second step, send a NOOP change to flatten the joint config.
         let changes = ChangeMembers::AddVoterIds(Default::default());
-        let client_write_result = self.inner.call_core(RaftMsg::ChangeMembership { changes, retain, tx }, rx).await?;
+        let client_write_result = self
+            .inner
+            .call_core(
+                RaftMsg::ChangeMembership {
+                    changes,
+                    retain,
+                    tx,
+                },
+                rx,
+            )
+            .await?;
 
         tracing::info!(
             "result of second step of change_membership: {}",
@@ -163,7 +183,11 @@ where C: RaftTypeConfig
             .inner
             .wait(None)
             .metrics(
-                |metrics| match self.check_replication_upto_date(metrics, &id, Some(membership_log_id)) {
+                |metrics| match self.check_replication_upto_date(
+                    metrics,
+                    &id,
+                    Some(membership_log_id),
+                ) {
                     Ok(_matching) => true,
                     // keep waiting
                     Err(_) => false,
@@ -192,7 +216,12 @@ where C: RaftTypeConfig
             return Err(());
         }
 
-        if metrics.membership_config.membership().get_node(node_id).is_none() {
+        if metrics
+            .membership_config
+            .membership()
+            .get_node(node_id)
+            .is_none()
+        {
             // This learner has been removed.
             return Ok(None);
         }

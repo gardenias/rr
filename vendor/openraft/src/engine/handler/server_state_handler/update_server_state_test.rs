@@ -34,8 +34,14 @@ fn eng() -> Engine<UTConfig> {
         Vote::new_committed(2, 2),
     );
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m123())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m123(),
+        )),
     );
     eng.state.server_state = eng.state.calc_server_state(&eng.config.id);
 
@@ -51,7 +57,11 @@ fn test_update_server_state_if_changed() -> anyhow::Result<()> {
     {
         assert_eq!(ServerState::Leader, ssh.state.server_state);
 
-        ssh.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 100));
+        ssh.state.vote = Leased::new(
+            UTConfig::<()>::now(),
+            Duration::from_millis(500),
+            Vote::new(2, 100),
+        );
         ssh.update_server_state_if_changed();
 
         assert_eq!(ServerState::Follower, ssh.state.server_state);

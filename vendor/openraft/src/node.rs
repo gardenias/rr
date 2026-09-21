@@ -33,12 +33,35 @@ use crate::base::OptionalFeatures;
 ///
 /// A `NodeId` uniquely identifies a node in the Raft cluster.
 pub trait NodeId
-where Self: Sized + OptionalFeatures + Eq + PartialEq + Ord + PartialOrd + Debug + Display + Hash + Clone + 'static
+where
+    Self: Sized
+        + OptionalFeatures
+        + Eq
+        + PartialEq
+        + Ord
+        + PartialOrd
+        + Debug
+        + Display
+        + Hash
+        + Clone
+        + 'static,
 {
 }
 
-impl<T> NodeId for T where T: Sized + OptionalFeatures + Eq + PartialEq + Ord + PartialOrd + Debug + Display + Hash + Clone + 'static
-{}
+impl<T> NodeId for T where
+    T: Sized
+        + OptionalFeatures
+        + Eq
+        + PartialEq
+        + Ord
+        + PartialOrd
+        + Debug
+        + Display
+        + Hash
+        + Clone
+        + 'static
+{
+}
 
 /// A Raft `Node`, this trait holds all relevant node information.
 ///
@@ -46,7 +69,8 @@ impl<T> NodeId for T where T: Sized + OptionalFeatures + Eq + PartialEq + Ord + 
 /// network address, but the used [`Node`] implementation can be customized to include additional
 /// information.
 pub trait Node
-where Self: Sized + OptionalFeatures + Eq + PartialEq + Debug + Clone + 'static
+where
+    Self: Sized + OptionalFeatures + Eq + PartialEq + Debug + Clone + 'static,
 {
 }
 
@@ -106,7 +130,9 @@ impl Default for BasicNode {
 impl BasicNode {
     /// Creates as [`BasicNode`].
     pub fn new(addr: impl ToString) -> Self {
-        Self { addr: addr.to_string() }
+        Self {
+            addr: addr.to_string(),
+        }
     }
 }
 

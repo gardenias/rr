@@ -28,12 +28,18 @@ fn eng() -> Engine<UTConfig> {
 
     eng.config.id = 1;
     // By default expire the leader lease so that the vote can be overridden in these tests.
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(0), Vote::new(2, 1));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(0),
+        Vote::new(2, 1),
+    );
     eng.state.server_state = ServerState::Candidate;
-    eng.state.membership_state.set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
-        Some(log_id(1, 1, 1)),
-        m01(),
-    )));
+    eng.state
+        .membership_state
+        .set_effective(Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )));
     eng.new_candidate(*eng.state.vote_ref());
     eng.output.take_commands();
 
@@ -55,7 +61,10 @@ fn test_handle_vote_req_rejected_by_leader_lease() -> anyhow::Result<()> {
         leadership_transfer: false,
     });
 
-    assert_eq!(VoteResponse::new(Vote::new_committed(2, 1), None, false), resp);
+    assert_eq!(
+        VoteResponse::new(Vote::new_committed(2, 1), None, false),
+        resp
+    );
 
     assert_eq!(Vote::new_committed(2, 1), *eng.state.vote_ref());
     assert!(eng.leader.is_none());
@@ -89,12 +98,17 @@ fn test_handle_vote_req_leadership_transfer_overrides_leader_lease() -> anyhow::
 
     assert_eq!(Vote::new(3, 2), *eng.state.vote_ref());
     assert!(eng.leader.is_none());
-    assert!(eng.candidate_ref().is_none(), "candidate yields to the new candidate");
+    assert!(
+        eng.candidate_ref().is_none(),
+        "candidate yields to the new candidate"
+    );
 
     assert_eq!(ServerState::Follower, eng.state.server_state);
     assert_eq!(
         vec![
-            Command::SaveVote { vote: Vote::new(3, 2) },
+            Command::SaveVote {
+                vote: Vote::new(3, 2)
+            },
             Command::CloseReplicationStreams,
         ],
         eng.output.take_commands()
@@ -138,7 +152,10 @@ fn test_handle_vote_req_reject_smaller_last_log_id() -> anyhow::Result<()> {
 
     // rr patch #2: the response echoes the CURRENT (adopted) vote (3,2) while
     // still rejecting (granted=false, recency branch first).
-    assert_eq!(VoteResponse::new(Vote::new(3, 2), Some(log_id(2, 1, 3)), false), resp);
+    assert_eq!(
+        VoteResponse::new(Vote::new(3, 2), Some(log_id(2, 1, 3)), false),
+        resp
+    );
 
     // rr patch #2 (2026-09-12, overload-churn heal): the recency branch still
     // rejects (granted=false — a lagging candidate can never count this), but
@@ -152,7 +169,11 @@ fn test_handle_vote_req_reject_smaller_last_log_id() -> anyhow::Result<()> {
     assert!(eng.candidate_ref().is_none());
     assert_eq!(ServerState::Follower, eng.state.server_state);
     let cmds = eng.output.take_commands();
-    assert_eq!(2, cmds.len(), "adoption emits SaveVote + transition commands: {cmds:?}");
+    assert_eq!(
+        2,
+        cmds.len(),
+        "adoption emits SaveVote + transition commands: {cmds:?}"
+    );
     Ok(())
 }
 
@@ -173,13 +194,19 @@ fn test_handle_vote_req_granted_equal_vote_and_last_log_id() -> anyhow::Result<(
         leadership_transfer: false,
     });
 
-    assert_eq!(VoteResponse::new(Vote::new(2, 1), Some(log_id(2, 1, 3)), true), resp);
+    assert_eq!(
+        VoteResponse::new(Vote::new(2, 1), Some(log_id(2, 1, 3)), true),
+        resp
+    );
 
     assert_eq!(Vote::new(2, 1), *eng.state.vote_ref());
     assert!(eng.leader.is_none());
 
     assert_eq!(ServerState::Follower, eng.state.server_state);
-    assert_eq!(vec![Command::CloseReplicationStreams], eng.output.take_commands());
+    assert_eq!(
+        vec![Command::CloseReplicationStreams],
+        eng.output.take_commands()
+    );
     Ok(())
 }
 
@@ -201,7 +228,10 @@ fn test_handle_vote_req_granted_greater_vote() -> anyhow::Result<()> {
     });
 
     // respond the updated vote.
-    assert_eq!(VoteResponse::new(Vote::new(3, 1), Some(log_id(2, 1, 3)), true), resp);
+    assert_eq!(
+        VoteResponse::new(Vote::new(3, 1), Some(log_id(2, 1, 3)), true),
+        resp
+    );
 
     assert_eq!(Vote::new(3, 1), *eng.state.vote_ref());
     assert!(eng.leader.is_none());
@@ -209,7 +239,9 @@ fn test_handle_vote_req_granted_greater_vote() -> anyhow::Result<()> {
     assert_eq!(ServerState::Follower, eng.state.server_state);
     assert_eq!(
         vec![
-            Command::SaveVote { vote: Vote::new(3, 1) },
+            Command::SaveVote {
+                vote: Vote::new(3, 1)
+            },
             Command::CloseReplicationStreams,
         ],
         eng.output.take_commands()
@@ -218,7 +250,8 @@ fn test_handle_vote_req_granted_greater_vote() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_handle_vote_req_granted_follower_learner_does_not_emit_update_server_state_cmd() -> anyhow::Result<()> {
+fn test_handle_vote_req_granted_follower_learner_does_not_emit_update_server_state_cmd()
+-> anyhow::Result<()> {
     // A greater vote should emit a SaveVote command.
 
     // Learner
@@ -240,7 +273,9 @@ fn test_handle_vote_req_granted_follower_learner_does_not_emit_update_server_sta
         assert_eq!(st, eng.state.server_state);
         assert_eq!(
             vec![
-                Command::SaveVote { vote: Vote::new(3, 1) },
+                Command::SaveVote {
+                    vote: Vote::new(3, 1)
+                },
                 Command::CloseReplicationStreams,
             ],
             eng.output.take_commands()
@@ -265,7 +300,9 @@ fn test_handle_vote_req_granted_follower_learner_does_not_emit_update_server_sta
         assert_eq!(st, eng.state.server_state);
         assert_eq!(
             vec![
-                Command::SaveVote { vote: Vote::new(3, 1) },
+                Command::SaveVote {
+                    vote: Vote::new(3, 1)
+                },
                 Command::CloseReplicationStreams,
             ],
             eng.output.take_commands()

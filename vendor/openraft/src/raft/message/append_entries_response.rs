@@ -15,9 +15,12 @@ use crate::type_config::alias::VoteOf;
 ///
 /// [`RPCError`]: crate::errors::RPCError
 /// [`RaftNetworkV2::append_entries`]: crate::network::RaftNetworkV2::append_entries
-#[derive(Debug, Clone)]
-#[derive(PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub enum AppendEntriesResponse<C: RaftTypeConfig> {
     /// Successfully replicated all log entries to the target node.
     Success,
@@ -54,7 +57,8 @@ pub enum AppendEntriesResponse<C: RaftTypeConfig> {
 }
 
 impl<C> AppendEntriesResponse<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Returns true if the response indicates a successful replication.
     pub fn is_success(&self) -> bool {
@@ -89,7 +93,9 @@ where C: RaftTypeConfig
         match self {
             AppendEntriesResponse::Success => Ok(last_log_id),
             AppendEntriesResponse::PartialSuccess(log_id) => Ok(log_id),
-            AppendEntriesResponse::Conflict => Err(StreamAppendError::Conflict(prev_log_id.unwrap())),
+            AppendEntriesResponse::Conflict => {
+                Err(StreamAppendError::Conflict(prev_log_id.unwrap()))
+            }
             AppendEntriesResponse::HigherVote(vote) => Err(StreamAppendError::HigherVote(vote)),
         }
     }
@@ -106,7 +112,8 @@ impl<C: RaftTypeConfig> From<StreamAppendResult<C>> for AppendEntriesResponse<C>
 }
 
 impl<C> fmt::Display for AppendEntriesResponse<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

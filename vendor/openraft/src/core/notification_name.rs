@@ -4,8 +4,7 @@ use openraft_macros::VariantName;
 ///
 /// This provides an efficient way to identify notification types without
 /// string comparisons, useful for logging, metrics, and debugging.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[derive(VariantName)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, VariantName)]
 #[variant_name(prefix = "Notify::")]
 pub enum NotificationName {
     VoteResponse,

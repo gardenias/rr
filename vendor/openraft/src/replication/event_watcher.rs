@@ -6,7 +6,8 @@ use crate::type_config::alias::WatchReceiverOf;
 
 #[derive(Clone)]
 pub(crate) struct EventWatcher<C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) replicate_rx: WatchReceiverOf<C, Replicate<C>>,
     pub(crate) committed_rx: WatchReceiverOf<C, Option<LogIdOf<C>>>,

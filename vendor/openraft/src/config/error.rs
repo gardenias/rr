@@ -4,8 +4,7 @@ use openraft_macros::since;
 
 /// Error variants related to configuration.
 #[since]
-#[derive(Debug, thiserror::Error)]
-#[derive(PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ConfigError {
     /// Failed to parse configuration from command-line arguments.
     #[error("ParseError: {source} while parsing ({args:?})")]
@@ -30,7 +29,9 @@ pub enum ConfigError {
     MaxPayloadIs0,
 
     /// Election timeout must be greater than heartbeat interval.
-    #[error("election_timeout_min({election_timeout_min}) must be > heartbeat_interval({heartbeat_interval})")]
+    #[error(
+        "election_timeout_min({election_timeout_min}) must be > heartbeat_interval({heartbeat_interval})"
+    )]
     ElectionTimeoutLTHeartBeat {
         /// Minimum election timeout value.
         election_timeout_min: u64,

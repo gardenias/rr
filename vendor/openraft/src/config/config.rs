@@ -97,8 +97,7 @@ fn default_removed_leader_step_down() -> StepDownPolicy {
 /// would cause a leader to send an `InstallSnapshot` RPC to a follower based on replication lag.
 ///
 /// Additional policies may become available in the future.
-#[derive(Clone, Debug)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum SnapshotPolicy {
     /// A snapshot will be generated once the log has grown the specified number of logs since
@@ -727,7 +726,8 @@ impl Config {
         // unchanged, so the constraint does not apply to it.
         let heartbeat_min_interval = self.heartbeat_min_interval();
         let suppression_enabled = heartbeat_min_interval > 0;
-        let max_heartbeat_gap = heartbeat_min_interval + self.heartbeat_interval + self.tick_interval();
+        let max_heartbeat_gap =
+            heartbeat_min_interval + self.heartbeat_interval + self.tick_interval();
 
         if suppression_enabled && self.election_timeout_min <= max_heartbeat_gap {
             return Err(ConfigError::HeartbeatMinIntervalTooLarge {
@@ -753,7 +753,8 @@ impl Config {
     /// or [`Config::validate`], which reject invalid policies up-front.
     #[since(version = "0.10.0")]
     pub fn build_backoff(&self) -> Backoff {
-        let series = BackoffSeries::parse(&self.backoff).expect("backoff policy must be validated by Config::validate");
+        let series = BackoffSeries::parse(&self.backoff)
+            .expect("backoff policy must be validated by Config::validate");
         Backoff::new(series.build())
     }
 }

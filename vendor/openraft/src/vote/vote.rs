@@ -14,9 +14,14 @@ use crate::vote::ref_vote::RefVote;
 )]
 #[since(version = "0.8.0")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize), serde(bound = ""))]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Deserialize, serde::Serialize),
+    serde(bound = "")
+)]
 pub struct Vote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     /// The id of the node that tries to become the leader.
     pub leader_id: LID,
@@ -26,7 +31,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> PartialOrd for Vote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     #[inline]
     fn partial_cmp(&self, other: &Vote<LID>) -> Option<Ordering> {
@@ -37,7 +43,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> std::fmt::Display for Vote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let ref_vote = RefVote::new(&self.leader_id, self.committed);
@@ -46,12 +53,16 @@ where LID: RaftLeaderId
 }
 
 impl<LID> RaftVote for Vote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     type LeaderId = LID;
 
     fn from_leader_id(leader_id: LID, committed: bool) -> Self {
-        Self { leader_id, committed }
+        Self {
+            leader_id,
+            committed,
+        }
     }
 
     fn leader_id(&self) -> &LID {
@@ -64,7 +75,8 @@ where LID: RaftLeaderId
 }
 
 impl<LID> Vote<LID>
-where LID: RaftLeaderId
+where
+    LID: RaftLeaderId,
 {
     /// Create a new uncommitted vote for the given term and node.
     pub fn new(term: LID::Term, node_id: LID::NodeId) -> Self {
@@ -114,7 +126,10 @@ mod tests {
         fn test_vote_serde() -> anyhow::Result<()> {
             let v = Vote::new(1, 2);
             let s = serde_json::to_string(&v)?;
-            assert_eq!(r#"{"leader_id":{"term":1,"node_id":2},"committed":false}"#, s);
+            assert_eq!(
+                r#"{"leader_id":{"term":1,"node_id":2},"committed":false}"#,
+                s
+            );
 
             let v2: Vote<UTLeaderId> = serde_json::from_str(&s)?;
             assert_eq!(v, v2);
@@ -177,7 +192,10 @@ mod tests {
         fn test_vote_serde() -> anyhow::Result<()> {
             let v = Vote::<TCLeaderId>::new(1, 2);
             let s = serde_json::to_string(&v)?;
-            assert_eq!(r#"{"leader_id":{"term":1,"voted_for":2},"committed":false}"#, s);
+            assert_eq!(
+                r#"{"leader_id":{"term":1,"voted_for":2},"committed":false}"#,
+                s
+            );
 
             let v2: Vote<TCLeaderId> = serde_json::from_str(&s)?;
             assert_eq!(v, v2);
@@ -248,7 +266,11 @@ mod tests {
 
             let committed = Vote::<TCLeaderId>::new_committed(1, 2);
             let leader_id = committed.try_to_committed_leader_id();
-            let expected = LeaderId { term: 1, voted_for: 2 }.to_committed();
+            let expected = LeaderId {
+                term: 1,
+                voted_for: 2,
+            }
+            .to_committed();
             assert_eq!(Some(expected), leader_id);
 
             Ok(())

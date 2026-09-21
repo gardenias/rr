@@ -8,7 +8,8 @@ use crate::type_config::alias::SnapshotSignatureOf;
 ///
 /// Provides methods that mirror StorageError creation methods for easier error handling.
 pub(crate) trait StorageIOResult<C, T>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     /// Convert io::Error to StorageError for writing a single log entry
     #[allow(dead_code)]
@@ -45,10 +46,16 @@ where C: RaftTypeConfig
     fn sto_read_sm(self) -> Result<T, StorageError<C>>;
 
     /// Convert io::Error to StorageError for writing a snapshot
-    fn sto_write_snapshot(self, signature: Option<SnapshotSignatureOf<C>>) -> Result<T, StorageError<C>>;
+    fn sto_write_snapshot(
+        self,
+        signature: Option<SnapshotSignatureOf<C>>,
+    ) -> Result<T, StorageError<C>>;
 
     /// Convert io::Error to StorageError for reading a snapshot
-    fn sto_read_snapshot(self, signature: Option<SnapshotSignatureOf<C>>) -> Result<T, StorageError<C>>;
+    fn sto_read_snapshot(
+        self,
+        signature: Option<SnapshotSignatureOf<C>>,
+    ) -> Result<T, StorageError<C>>;
 
     /// Convert io::Error to StorageError for general read operations
     #[allow(dead_code)]
@@ -59,7 +66,8 @@ where C: RaftTypeConfig
 }
 
 impl<C, T> StorageIOResult<C, T> for Result<T, std::io::Error>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     fn sto_write_log_entry(self, log_id: LogIdOf<C>) -> Result<T, StorageError<C>> {
         self.map_err(|e| StorageError::write_log_entry(log_id, C::err_from_error(&e)))
@@ -101,11 +109,17 @@ where C: RaftTypeConfig
         self.map_err(|e| StorageError::read_state_machine(C::err_from_error(&e)))
     }
 
-    fn sto_write_snapshot(self, signature: Option<SnapshotSignatureOf<C>>) -> Result<T, StorageError<C>> {
+    fn sto_write_snapshot(
+        self,
+        signature: Option<SnapshotSignatureOf<C>>,
+    ) -> Result<T, StorageError<C>> {
         self.map_err(|e| StorageError::write_snapshot(signature, C::err_from_error(&e)))
     }
 
-    fn sto_read_snapshot(self, signature: Option<SnapshotSignatureOf<C>>) -> Result<T, StorageError<C>> {
+    fn sto_read_snapshot(
+        self,
+        signature: Option<SnapshotSignatureOf<C>>,
+    ) -> Result<T, StorageError<C>> {
         self.map_err(|e| StorageError::read_snapshot(signature, C::err_from_error(&e)))
     }
 

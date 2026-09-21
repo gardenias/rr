@@ -45,14 +45,24 @@ fn eng() -> Engine<UTConfig> {
     eng.state.enable_validation(false); // Disable validation for incomplete state
 
     eng.config.id = 2;
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(2, 1));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(500),
+        Vote::new(2, 1),
+    );
     // Last-per-leader format: leader 1's last at index 2, leader 2's last at index 3
     eng.state.log_ids.append(log_id(1, 1, 2));
     eng.state.log_ids.append(log_id(2, 1, 3));
     eng.state.apply_progress_mut().accept(log_id(0, 1, 0));
     eng.state.membership_state = MembershipState::new(
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-        Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(1, 1, 1)),
+            m01(),
+        )),
+        Arc::new(StoredMembershipOf::<UTConfig>::new(
+            Some(log_id(2, 1, 3)),
+            m23(),
+        )),
     );
     eng.state.server_state = eng.calc_server_state();
     eng
@@ -82,8 +92,14 @@ fn test_append_entries_vote_is_rejected() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 3)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
         ),
         eng.state.membership_state
     );
@@ -97,7 +113,11 @@ fn test_append_entries_vote_is_rejected() -> anyhow::Result<()> {
 fn test_append_entries_prev_log_id_is_applied() -> anyhow::Result<()> {
     // An applied log id has to be committed thus
     let mut eng = eng();
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(1, 2));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(500),
+        Vote::new(1, 2),
+    );
     eng.output.take_commands();
 
     let res = eng.append_entries(
@@ -118,8 +138,14 @@ fn test_append_entries_prev_log_id_is_applied() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 3)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
         ),
         eng.state.membership_state
     );
@@ -170,8 +196,14 @@ fn test_append_entries_prev_log_id_conflict() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(1, 1, 1)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
         ),
         eng.state.membership_state
     );
@@ -198,10 +230,13 @@ fn test_append_entries_prev_log_id_is_committed() -> anyhow::Result<()> {
 
     let res = eng.append_entries(
         &Vote::new_committed(2, 1),
-        LogSegment::new(Some(log_id(0, 1, 0)), vec![
-            blank_ent::<UTConfig>(1, 1, 1),
-            blank_ent::<UTConfig>(2, 1, 2),
-        ]),
+        LogSegment::new(
+            Some(log_id(0, 1, 0)),
+            vec![
+                blank_ent::<UTConfig>(1, 1, 1),
+                blank_ent::<UTConfig>(2, 1, 2),
+            ],
+        ),
     );
 
     assert_eq!(Ok(Some(log_id(2, 1, 2))), res);
@@ -217,8 +252,14 @@ fn test_append_entries_prev_log_id_is_committed() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 2)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
         ),
         eng.state.membership_state
     );
@@ -246,15 +287,22 @@ fn test_append_entries_prev_log_id_is_committed() -> anyhow::Result<()> {
 #[test]
 fn test_append_entries_prev_log_id_not_exists() -> anyhow::Result<()> {
     let mut eng = eng();
-    eng.state.vote = Leased::new(UTConfig::<()>::now(), Duration::from_millis(500), Vote::new(1, 2));
+    eng.state.vote = Leased::new(
+        UTConfig::<()>::now(),
+        Duration::from_millis(500),
+        Vote::new(1, 2),
+    );
     eng.output.take_commands();
 
     let res = eng.append_entries(
         &Vote::new_committed(2, 1),
-        LogSegment::new(Some(log_id(2, 1, 4)), vec![
-            blank_ent::<UTConfig>(2, 1, 5),
-            blank_ent::<UTConfig>(2, 1, 6),
-        ]),
+        LogSegment::new(
+            Some(log_id(2, 1, 4)),
+            vec![
+                blank_ent::<UTConfig>(2, 1, 5),
+                blank_ent::<UTConfig>(2, 1, 6),
+            ],
+        ),
     );
 
     assert_eq!(
@@ -276,8 +324,14 @@ fn test_append_entries_prev_log_id_not_exists() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(2, 1, 3)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(2, 1, 3)), m23())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(2, 1, 3)),
+                m23()
+            )),
         ),
         eng.state.membership_state
     );
@@ -306,10 +360,13 @@ fn test_append_entries_conflict() -> anyhow::Result<()> {
 
     let resp = eng.append_entries(
         &Vote::new_committed(2, 1),
-        LogSegment::new(Some(log_id(1, 1, 1)), vec![
-            blank_ent::<UTConfig>(1, 1, 2),
-            EntryOf::<UTConfig>::new_membership(log_id(3, 1, 3), m34()),
-        ]),
+        LogSegment::new(
+            Some(log_id(1, 1, 1)),
+            vec![
+                blank_ent::<UTConfig>(1, 1, 2),
+                EntryOf::<UTConfig>::new_membership(log_id(3, 1, 3), m34()),
+            ],
+        ),
     );
 
     assert_eq!(Ok(Some(log_id(3, 1, 3))), resp);
@@ -325,8 +382,14 @@ fn test_append_entries_conflict() -> anyhow::Result<()> {
     assert_eq!(Some(&log_id(3, 1, 3)), eng.state.last_log_id());
     assert_eq!(
         MembershipState::new(
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(1, 1, 1)), m01())),
-            Arc::new(StoredMembershipOf::<UTConfig>::new(Some(log_id(3, 1, 3)), m34())),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(1, 1, 1)),
+                m01()
+            )),
+            Arc::new(StoredMembershipOf::<UTConfig>::new(
+                Some(log_id(3, 1, 3)),
+                m34()
+            )),
         ),
         eng.state.membership_state
     );

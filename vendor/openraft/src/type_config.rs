@@ -82,7 +82,18 @@ use crate::vote::raft_vote::RaftVote;
 /// [`Raft`]: crate::Raft
 /// [`declare_raft_types!`]: crate::declare_raft_types
 pub trait RaftTypeConfig:
-    Sized + OptionalSend + OptionalSync + Debug + Clone + Copy + Default + Eq + PartialEq + Ord + PartialOrd + 'static
+    Sized
+    + OptionalSend
+    + OptionalSync
+    + Debug
+    + Clone
+    + Copy
+    + Default
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + 'static
 {
     /// Application-specific request data passed to the state machine.
     type D: AppData;
@@ -145,10 +156,12 @@ pub trait RaftTypeConfig:
     ///
     /// [`Raft::client_write`]: `crate::raft::Raft::client_write`
     type Responder<T>: Responder<Self, T>
-    where T: OptionalSend + 'static;
+    where
+        T: OptionalSend + 'static;
 
     type Batch<T>: Batch<T>
-    where T: OptionalSend + 'static;
+    where
+        T: OptionalSend + 'static;
 
     /// Error wrapper type for storage and network errors.
     ///
@@ -232,16 +245,23 @@ pub mod alias {
     // Usually used types
     pub type LogIdOf<C> = LogId<CommittedLeaderIdOf<C>>;
     pub type CommittedLeaderIdOf<C> = <LeaderIdOf<C> as RaftLeaderId>::Committed;
-    pub(crate) type RefLogIdOf<'a, C> = crate::log_id::ref_log_id::RefLogId<'a, CommittedLeaderIdOf<C>>;
+    pub(crate) type RefLogIdOf<'a, C> =
+        crate::log_id::ref_log_id::RefLogId<'a, CommittedLeaderIdOf<C>>;
     pub type EntryPayloadOf<C> = EntryPayload<DOf<C>, NodeIdOf<C>, NodeOf<C>>;
-    pub type DefaultEntryOf<C> = crate::Entry<CommittedLeaderIdOf<C>, DOf<C>, NodeIdOf<C>, NodeOf<C>>;
-    pub type StoredMembershipOf<C> = crate::StoredMembership<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>>;
+    pub type DefaultEntryOf<C> =
+        crate::Entry<CommittedLeaderIdOf<C>, DOf<C>, NodeIdOf<C>, NodeOf<C>>;
+    pub type StoredMembershipOf<C> =
+        crate::StoredMembership<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>>;
     pub type SnapshotSignatureOf<C> = crate::storage::SnapshotSignature<CommittedLeaderIdOf<C>>;
-    pub type SnapshotMetaOf<C> = crate::storage::SnapshotMeta<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>>;
-    pub type SnapshotOf<C, SD> = crate::storage::Snapshot<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>, SD>;
+    pub type SnapshotMetaOf<C> =
+        crate::storage::SnapshotMeta<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>>;
+    pub type SnapshotOf<C, SD> =
+        crate::storage::Snapshot<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>, SD>;
     pub type SmSnapshotOf<C, SM> = SnapshotOf<C, SnapshotDataOf<C, SM>>;
-    pub type MembershipStateOf<C> = crate::MembershipState<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>>;
-    pub type ChangeMembershipErrorOf<C> = crate::errors::ChangeMembershipError<CommittedLeaderIdOf<C>, NodeIdOf<C>>;
+    pub type MembershipStateOf<C> =
+        crate::MembershipState<CommittedLeaderIdOf<C>, NodeIdOf<C>, NodeOf<C>>;
+    pub type ChangeMembershipErrorOf<C> =
+        crate::errors::ChangeMembershipError<CommittedLeaderIdOf<C>, NodeIdOf<C>>;
     pub type InProgressOf<C> = crate::errors::InProgress<CommittedLeaderIdOf<C>>;
     pub type SerdeInstantOf<C> = crate::metrics::SerdeInstant<InstantOf<C>>;
 
@@ -252,7 +272,8 @@ pub mod alias {
 
     // Internal vote types parameterized by C
     pub(crate) type CommittedVoteOf<C> = crate::vote::committed::CommittedVote<LeaderIdOf<C>>;
-    pub(crate) type UncommittedVoteOf<C> = crate::vote::non_committed::UncommittedVote<LeaderIdOf<C>>;
+    pub(crate) type UncommittedVoteOf<C> =
+        crate::vote::non_committed::UncommittedVote<LeaderIdOf<C>>;
 
     pub type LogIdListOf<C> = crate::engine::log_id_list::LogIdList<CommittedLeaderIdOf<C>>;
 }

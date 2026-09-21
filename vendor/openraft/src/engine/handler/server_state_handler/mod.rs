@@ -8,14 +8,16 @@ mod update_server_state_test;
 
 /// Handle raft server-state related operations
 pub(crate) struct ServerStateHandler<'st, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) config: &'st EngineConfig<C>,
     pub(crate) state: &'st mut RaftState<C>,
 }
 
 impl<'st, C> ServerStateHandler<'st, C>
-where C: RaftTypeConfig
+where
+    C: RaftTypeConfig,
 {
     pub(crate) fn new(config: &'st EngineConfig<C>, state: &'st mut RaftState<C>) -> Self {
         Self { config, state }
