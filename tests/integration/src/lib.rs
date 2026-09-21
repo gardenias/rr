@@ -1437,6 +1437,141 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    /// T5 / A-0033 AC-1（框架层契约）: deferred 意图必须随 SM 快照存活——
+    /// begin 挂起（Pending 计入意图表）→ snapshot → 新实例 restore → complete
+    /// 按记录的 correlation id 完成原挂起响应，意图表清空；未知意图的
+    /// complete 响亮报错（绝不静默吞）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_deferred_intent_survives_snapshot_restore() {
+        use rr_core::deferred::{CompletedResponse, DeferredHandleResult};
+        use rr_core::error::RrError;
+        use rr_core::output::HandleResult;
+        use rr_core::service::Service;
+        use rr_core::types::ApplyContext;
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        /// 玩具两阶段服务：begin:<k> 挂起并把 (k → 其 log_index) 记入意图表；
+        /// complete:<k> 完成之。意图表随 snapshot/restore 序列化——这正是
+        /// cex pending_intents 的模式（A-0033 §3.1）。
+        struct TwoPhaseEcho {
+            pending: Arc<Mutex<BTreeMap<String, u64>>>,
+        }
+        #[async_trait::async_trait]
+        impl Service for TwoPhaseEcho {
+            async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+                Ok(request)
+            }
+            async fn handle_deferred(
+                &self,
+                request: Vec<u8>,
+                ctx: ApplyContext,
+            ) -> Result<DeferredHandleResult, RrError> {
+                let s = String::from_utf8_lossy(&request).to_string();
+                if let Some(k) = s.strip_prefix("begin:") {
+                    self.pending
+                        .lock()
+                        .unwrap()
+                        .insert(k.to_string(), ctx.log_index);
+                    return Ok(DeferredHandleResult::Pending {
+                        correlation_id: ctx.log_index,
+                    });
+                }
+                if let Some(k) = s.strip_prefix("complete:") {
+                    let corr = self.pending.lock().unwrap().remove(k).ok_or_else(|| {
+                        RrError::Application(format!("complete for unknown intent {k}"))
+                    })?;
+                    return Ok(DeferredHandleResult::Complete {
+                        completions: vec![CompletedResponse {
+                            correlation_id: corr,
+                            response: format!("done:{k}").into_bytes(),
+                        }],
+                        result: HandleResult::from_response(b"ok".to_vec()),
+                    });
+                }
+                Ok(DeferredHandleResult::Immediate(
+                    HandleResult::from_response(request),
+                ))
+            }
+            fn name(&self) -> &str {
+                "two-phase-echo"
+            }
+            async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+                let map = self.pending.lock().unwrap();
+                let mut out = String::new();
+                for (k, v) in map.iter() {
+                    out.push_str(&format!("{k}:{v};"));
+                }
+                Ok(out.into_bytes())
+            }
+            async fn restore(&mut self, data: &[u8]) -> Result<(), RrError> {
+                let mut map = self.pending.lock().unwrap();
+                map.clear();
+                let s = String::from_utf8_lossy(data);
+                for part in s.split(';').filter(|p| !p.is_empty()) {
+                    let (k, v) = part
+                        .split_once(':')
+                        .ok_or_else(|| RrError::Application("bad snapshot row".into()))?;
+                    map.insert(
+                        k.to_string(),
+                        v.parse()
+                            .map_err(|_| RrError::Application("bad snapshot seq".into()))?,
+                    );
+                }
+                Ok(())
+            }
+        }
+
+        let shared = Arc::new(Mutex::new(BTreeMap::new()));
+        let mut svc = TwoPhaseEcho {
+            pending: Arc::clone(&shared),
+        };
+
+        // begin:A at log_index 41 → parked, intent recorded.
+        let out = svc
+            .handle_deferred(b"begin:A".to_vec(), ApplyContext::new(41, 1))
+            .await
+            .unwrap();
+        assert!(
+            matches!(out, DeferredHandleResult::Pending { correlation_id: 41 }),
+            "begin must park under its own log index, got {out:?}"
+        );
+
+        // 快照 → 新实例 restore（模拟重启/换主后的状态恢复）。
+        let bytes = svc.snapshot().await.unwrap();
+        let mut restored = TwoPhaseEcho {
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+        };
+        restored.restore(&bytes).await.unwrap();
+
+        // complete:A on the restored instance → 按记录的 41 完成原挂起响应。
+        let out = restored
+            .handle_deferred(b"complete:A".to_vec(), ApplyContext::new(55, 1))
+            .await
+            .unwrap();
+        match out {
+            DeferredHandleResult::Complete {
+                completions,
+                result: _,
+            } => {
+                assert_eq!(completions.len(), 1);
+                assert_eq!(completions[0].correlation_id, 41);
+                assert_eq!(completions[0].response, b"done:A");
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+        assert!(
+            restored.pending.lock().unwrap().is_empty(),
+            "intent consumed"
+        );
+
+        // 未知意图 complete → 响亮报错，绝不静默吞。
+        let err = restored
+            .handle_deferred(b"complete:ghost".to_vec(), ApplyContext::new(56, 1))
+            .await;
+        assert!(err.is_err(), "unknown intent must be a loud error");
+    }
+
     /// T23d — Client leader failover: kill leader, cluster elects new one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_client_leader_failover() {
