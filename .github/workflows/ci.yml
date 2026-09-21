@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install RocksDB dependencies
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -61,8 +61,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install RocksDB dependencies
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -110,8 +110,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -133,7 +133,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install RocksDB dependencies
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -185,7 +185,7 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install RocksDB dependencies
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - name: Generate coverage
         # integration/rocks needed so the rocks-gated persistence tests are included in coverage.
         run: cargo llvm-cov --workspace --features rr-storage/rocks,integration/rocks --lcov --output-path lcov.info
@@ -214,8 +214,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -232,7 +232,7 @@ jobs:
           restore-keys: |
             criterion-main-
       - name: Install RocksDB dependencies
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - name: Bench (compile + test mode)
         # rr-benches/rocks enables the required-features = ["rocks"] benches
         # (log_append_rocks, log_append_batched, log_tps), otherwise they are skipped.
@@ -260,8 +260,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -279,8 +279,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -308,8 +308,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -347,8 +347,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -367,8 +367,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install protoc (etcd-client's build script compiles protos)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |

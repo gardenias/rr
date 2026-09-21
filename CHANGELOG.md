@@ -251,7 +251,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - All workspace-building jobs install `protobuf-compiler` (apt; `brew` on
     macOS): third-party `etcd-client`'s build script compiles protos with the
     system protoc — it cannot use our vendored one. (`rr-network` itself
-    stays vendored, so dev machines still need nothing.)
+    stays vendored, so dev machines still need nothing.) The same step also
+    installs `libcurl4-openssl-dev` + `zlib1g-dev` on ubuntu: librdkafka's
+    cmake build (rdkafka-sys) compiles C sources needing curl/zlib headers,
+    which runner images lack (macOS provides them via the Xcode SDK).
   - Dependency bumps clearing the 10 error-level `cargo audit` advisories:
     aws-lc-sys 0.38→0.45 (+aws-lc-rs 1.16.1→1.18.1), rustls
     0.23.37→0.23.45, rustls-webpki 0.103.9→0.103.15, h2 0.4.13→0.4.19,
