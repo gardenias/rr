@@ -19,11 +19,14 @@ const BROADCAST_CAPACITY: usize = 64;
 
 /// In-memory implementation of [`ConfigProvider`] for testing and development.
 ///
-/// Uses a [`tokio::sync::RwLock`]-protected [`RoutingTable`] and a
-/// [`broadcast`] channel to notify watchers of changes.
+/// Holds the [`RoutingTable`] behind a [`tokio::sync::RwLock`] as an
+/// immutable `Arc` snapshot: mutations copy the table, apply the change, and
+/// atomically swap the snapshot (copy-on-write), so
+/// `routing_table_snapshot()` is a lock + `Arc` clone with no table copy.
+/// Change notifications go out over a [`broadcast`] channel.
 #[derive(Clone)]
 pub struct MemConfigProvider {
-    routing_table: Arc<RwLock<RoutingTable>>,
+    routing_table: Arc<RwLock<Arc<RoutingTable>>>,
     change_tx: broadcast::Sender<RoutingTableChange>,
 }
 
@@ -32,9 +35,19 @@ impl MemConfigProvider {
     pub fn new() -> Self {
         let (change_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
-            routing_table: Arc::new(RwLock::new(RoutingTable::default())),
+            routing_table: Arc::new(RwLock::new(Arc::new(RoutingTable::default()))),
             change_tx,
         }
+    }
+
+    /// Apply `f` to a copy of the current table, then swap it in as the new
+    /// snapshot. Mutations are rare admin operations; the per-mutation table
+    /// clone keeps reads allocation-free.
+    async fn mutate(&self, f: impl FnOnce(&mut RoutingTable)) {
+        let mut guard = self.routing_table.write().await;
+        let mut table = (*guard).as_ref().clone();
+        f(&mut table);
+        *guard = Arc::new(table);
     }
 
     /// Add a partition to the routing table and notify watchers.
@@ -45,14 +58,16 @@ impl MemConfigProvider {
         group_id: GroupId,
         replicas: Vec<NodeId>,
     ) {
-        let mut table = self.routing_table.write().await;
-        table
-            .partitions
-            .insert(partition_id, (config.clone(), group_id));
-        table.groups.entry(group_id).or_insert_with(|| GroupMeta {
-            group_id,
-            replicas: replicas.clone(),
-        });
+        self.mutate(|table| {
+            table
+                .partitions
+                .insert(partition_id, (config.clone(), group_id));
+            table.groups.entry(group_id).or_insert_with(|| GroupMeta {
+                group_id,
+                replicas: replicas.clone(),
+            });
+        })
+        .await;
         // Ignore send error — no subscribers is OK.
         let _ = self.change_tx.send(RoutingTableChange::PartitionAdded {
             partition_id,
@@ -63,8 +78,10 @@ impl MemConfigProvider {
 
     /// Remove a partition from the routing table and notify watchers.
     pub async fn remove_partition(&self, partition_id: PartitionId) {
-        let mut table = self.routing_table.write().await;
-        table.partitions.remove(&partition_id);
+        self.mutate(|table| {
+            table.partitions.remove(&partition_id);
+        })
+        .await;
         let _ = self
             .change_tx
             .send(RoutingTableChange::PartitionRemoved { partition_id });
@@ -72,8 +89,10 @@ impl MemConfigProvider {
 
     /// Add a node address to the routing table and notify watchers.
     pub async fn add_node(&self, node_id: NodeId, addr: NodeAddr) {
-        let mut table = self.routing_table.write().await;
-        table.nodes.insert(node_id, addr.clone());
+        self.mutate(|table| {
+            table.nodes.insert(node_id, addr.clone());
+        })
+        .await;
         let _ = self
             .change_tx
             .send(RoutingTableChange::NodeAdded { node_id, addr });
@@ -81,8 +100,10 @@ impl MemConfigProvider {
 
     /// Remove a node from the routing table and notify watchers.
     pub async fn remove_node(&self, node_id: NodeId) {
-        let mut table = self.routing_table.write().await;
-        table.nodes.remove(&node_id);
+        self.mutate(|table| {
+            table.nodes.remove(&node_id);
+        })
+        .await;
         let _ = self
             .change_tx
             .send(RoutingTableChange::NodeRemoved { node_id });
@@ -90,18 +111,20 @@ impl MemConfigProvider {
 
     /// Update group membership and notify watchers.
     pub async fn update_group_membership(&self, group_id: GroupId, replicas: Vec<NodeId>) {
-        let mut table = self.routing_table.write().await;
-        if let Some(group) = table.groups.get_mut(&group_id) {
-            group.replicas = replicas.clone();
-        } else {
-            table.groups.insert(
-                group_id,
-                GroupMeta {
+        self.mutate(|table| {
+            if let Some(group) = table.groups.get_mut(&group_id) {
+                group.replicas = replicas.clone();
+            } else {
+                table.groups.insert(
                     group_id,
-                    replicas: replicas.clone(),
-                },
-            );
-        }
+                    GroupMeta {
+                        group_id,
+                        replicas: replicas.clone(),
+                    },
+                );
+            }
+        })
+        .await;
         let _ = self
             .change_tx
             .send(RoutingTableChange::GroupMembershipChanged { group_id, replicas });
@@ -117,7 +140,11 @@ impl Default for MemConfigProvider {
 #[async_trait]
 impl ConfigProvider for MemConfigProvider {
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError> {
-        Ok(self.routing_table.read().await.clone())
+        Ok((*self.routing_table.read().await).as_ref().clone())
+    }
+
+    async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError> {
+        Ok(Arc::clone(&*self.routing_table.read().await))
     }
 
     async fn watch_changes(

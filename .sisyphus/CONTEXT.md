@@ -5,7 +5,8 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-21（**W9 INV-1 全链路闭环:根因定点 + 三修复落地 + perf-lab smoke ×3 / 宿主机 oracle 5000/5000 双路实证;既有选举 flake 根治;A-0012 watch 守卫闭环**）
+**Last updated**: 2026-09-22（**100k roadmap 首轮执行：M1 TCP 量化(+5.6% 非杠杆)、M2 热路径 metrics 零分配化 + MemConfigProvider Arc 快照、mimalloc A/B 否决(macOS)；路由缓存提案因 INV-6 明文否决、改 provider 内快照形态**）
+> 前情 2026-09-21（**W9 INV-1 全链路闭环:根因定点 + 三修复落地 + perf-lab smoke ×3 / 宿主机 oracle 5000/5000 双路实证;既有选举 flake 根治;A-0012 watch 守卫闭环**）
 > 前情 2026-09-17（**perf-lab 加固批次：soak lanes open-loop 化（134→2000/s 实测达标）、RaftService gRPC 4MiB 解码上限修复（16KiB 档 wedge 真凶）、探针取证加固；W9 罕见 INV-1 flake 立案观察**）
 > 前情 2026-09-13（**M4 完成：活性缺陷链全部定点修复；首份生产基线 17/18 绿 + W9 全长复核绿（oracle 5000/5000）——18/18 达成；判据表已回填，A-0010 已重判维持 deferred；上游 issue 草稿已备**）
 **Current phase**: **v0.2.0 已发布**；下一里程碑 v0.3.0 规划见 `rr-phase4-v030.md`，WAL（A-0010）维持 deferred
@@ -24,6 +25,53 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-09-22 — 100k roadmap 首轮:TCP 量化 + 热路径零分配 + 分配器 A/B 否决
+
+> 目标锚点:`docs/perf/roadmap-100k.md`(G2 单组 100k ops/s)。本 session = 全项目
+> 对照 review + M1/M2 高置信项落地。**改动未 commit**(门禁全绿:fmt/clippy
+> `-D warnings`/rr-config+rr-router+rr-server+rr-raft(166)/integration(81)/
+> invariants-lint 70 links)。bench 原始 JSON 归档 `docs/perf/baselines/
+> raw-20260922-s2-*-mem.json`(未 commit)。
+
+- **Review 结论(符号级,采样锚定 roadmap 热点表)**:
+  ① client 写路径 `gRPC decode → dispatch → route → client_write` 本身已相当干净
+  (unkeyed payload 全程移动语义,无冗余拷贝);**真正的逐请求浪费集中在 metrics
+  标签 String 化与路由表 clone**。
+  ② `Service` trait 按值收 `Vec<u8>` 强制 unkeyed apply 路径每条 entry 一次
+  `to_vec()` —— 消除需破坏性 API(Bytes 化),记 v0.3.0 候选。
+  ③ `rocks_log_storage` overlay `entry.clone()` 是 openraft owned-Vec 返回契约的
+  固有成本,判定不可消除(roadmap 已回写理由)。
+- **M1 TCP 量化(勾选)**:S2 k=200 mem,`--use-tcp-transport` 31.9k vs gRPC 30.2k
+  (+5.6%),p99 -23%。**复制面 TCP 是温和正收益而非 3× 杠杆**;不推广到 client
+  路径;M1 主杠杆改为 client 面请求级批处理/h2 调参。
+- **M2 落地(零分配化)**:
+  - metrics 标签 intern:dispatch.rs(每写 3 次 `to_string()`)、
+    network_factory.rs(每 AppendEntries RPC 3 次,含心跳)、service_adapter.rs
+    (每 applied entry 2 次)全部改进程内 `&'static str` intern(每 id 泄漏一次,
+    有界)。
+  - `ConfigProvider::routing_table_snapshot()` 新增带默认实现(trait 方法,
+    semver-minor);`MemConfigProvider` 改 copy-on-write `Arc<RoutingTable>`,
+    `route()` 热路径 = 读锁 + Arc incref,零表拷贝。**INV-6 合规形态**:路由仍逐
+    调用取 provider 当前快照,无第二份缓存视图(router 侧缓存提案被 INV-6 明文
+    否决,改 provider 内快照)。
+  - **遗留(prod 地雷记录)**:etcd provider `get_routing_table` 仍是逐调用全前缀
+    扫描 —— etcd 后端部署下每个 client 请求打一次 etcd。默认方法保持行为等价;
+    revision 感知缓存列为 follow-up。
+- **mimalloc A/B(勾选,结论否决)**:feature `rr-server/mimalloc`、
+  `rr-perf-bench/mimalloc` 落地(默认关)。macOS arm64 两轮 25.4k/23.6k vs 系统
+  分配器 30.1k/30.2k,稳定 **-20%** —— macOS 否决;Linux 对照留到 M5 重测。
+- **前后宏基准**:HEAD 30.2k → 全改动 28.4k/29.1k/29.3k(median 29.1k,-3.6%,
+  在本机 ±5% 噪声带内;bench-compare 硬门禁阈值 15%)。收益主要来自"构造上消除
+  分配/锁"(采样占比小但确定),宏基准分辨不出;etcd 路径的 prod 收益是结构性的。
+- **detect_changes**:40 changed symbols / risk=critical(纯计数阈值, affected
+  processes 全部为单测流程且全绿);语义上 = 低风险(加性 trait 方法 + 内部表示
+  替换 + 标签 intern,无行为变更)。
+- **下一步候选**(按 roadmap):client 面请求级批处理评估(M1 主杠杆)→ tonic/h2
+  调参扫描 → M3 worker/亲和性扫描;`Service` Bytes 化并入 v0.3.0 规划;
+  etcd provider revision 缓存单独立项。
+
+
 
 ### Session 2026-09-21 — W9 INV-1 闭环 + 既有 flake 根治 + A-0012 watch 守卫 + 两个遗留问题结案
 

@@ -15,6 +15,7 @@
 
 use std::io::Cursor;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use dashmap::DashMap;
 use openraft::error::RPCError;
@@ -290,6 +291,26 @@ impl ChannelPoolLike for ChannelPool {
 }
 
 // ---------------------------------------------------------------------------
+// Metric label interning
+// ---------------------------------------------------------------------------
+
+/// Intern a u64 id as a `&'static str` metric label.
+///
+/// `to_string()` per RPC was a steady allocation stream on the replication
+/// hot path (AppendEntries fire per batch per follower, plus heartbeats).
+/// Distinct ids in a deployment are few and dense; each value is leaked
+/// exactly once, keeping the per-RPC metrics path allocation-free.
+pub(crate) fn intern_id_label(v: u64) -> &'static str {
+    static LABELS: OnceLock<DashMap<u64, &'static str>> = OnceLock::new();
+    let labels = LABELS.get_or_init(DashMap::new);
+    if let Some(label) = labels.get(&v) {
+        return *label;
+    }
+    let leaked: &'static str = Box::leak(v.to_string().into_boxed_str());
+    *labels.entry(v).or_insert(leaked)
+}
+
+// ---------------------------------------------------------------------------
 // Tonic gRPC client for rr.raft.RaftService
 // ---------------------------------------------------------------------------
 
@@ -429,7 +450,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             .map_err(to_unreachable)?;
 
         let batch_size = rpc.entries.len() as f64;
-        metrics::histogram!("rr_replication_batch_entries", "group_id" => self.group_id.to_string())
+        metrics::histogram!("rr_replication_batch_entries", "group_id" => intern_id_label(self.group_id))
             .record(batch_size);
 
         let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
@@ -446,7 +467,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             .map_err(|status| {
                 if status.code() == tonic::Code::Unavailable {
                     self.channel_pool.remove(self.target);
-                    metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+                    metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
                 }
                 to_unreachable(status)
             })?
@@ -457,8 +478,8 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         // the entry-count `rr_raft_replication_lag` gauge.
         metrics::histogram!(
             "rr_raft_append_entries_rtt_seconds",
-            "group_id" => self.group_id.to_string(),
-            "follower_node_id" => self.target.to_string(),
+            "group_id" => intern_id_label(self.group_id),
+            "follower_node_id" => intern_id_label(self.target),
             "kind" => if batch_size == 0.0 { "heartbeat" } else { "append" }
         )
         .record(rpc_started.elapsed().as_secs_f64());
@@ -493,7 +514,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             .map_err(|status| {
                 if status.code() == tonic::Code::Unavailable {
                     self.channel_pool.remove(self.target);
-                    metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+                    metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
                 }
                 to_unreachable(status)
             })?
@@ -585,7 +606,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
                         .map_err(|status| {
                             if status.code() == tonic::Code::Unavailable {
                                 self.channel_pool.remove(self.target);
-                                metrics::counter!("rr_channel_reconnects_total", "node_id" => self.target.to_string()).increment(1);
+                                metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
                             }
                             to_unreachable_streaming(status)
                         })?

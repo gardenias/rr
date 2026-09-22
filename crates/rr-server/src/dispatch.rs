@@ -31,6 +31,9 @@ use tracing::instrument;
 pub struct ClientDispatchImpl {
     group_manager: Arc<RaftGroupManager>,
     shard_router: Arc<ShardRouter>,
+    /// Interned `group_id` metric labels: one bounded entry per group id,
+    /// so the per-request metrics path allocates nothing.
+    group_labels: dashmap::DashMap<GroupId, &'static str>,
 }
 
 impl ClientDispatchImpl {
@@ -39,7 +42,18 @@ impl ClientDispatchImpl {
         Self {
             group_manager,
             shard_router,
+            group_labels: dashmap::DashMap::new(),
         }
+    }
+
+    /// Intern the `group_id` label, leaking a few bytes once per distinct
+    /// group id instead of allocating a `String` on every request.
+    fn group_label(&self, group_id: GroupId) -> &'static str {
+        if let Some(label) = self.group_labels.get(&group_id) {
+            return *label;
+        }
+        let leaked: &'static str = Box::leak(group_id.to_string().into_boxed_str());
+        *self.group_labels.entry(group_id).or_insert(leaked)
     }
 }
 
@@ -64,6 +78,7 @@ impl ClientDispatch for ClientDispatchImpl {
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
         let keyed = idem_key.is_some();
+        let group_label = self.group_label(group_id);
         let entry_bytes = if let Some(key) = idem_key {
             FramedEntry::from_payload(payload)
                 .with_idem_key(key)
@@ -142,7 +157,7 @@ impl ClientDispatch for ClientDispatchImpl {
         if proposed {
             metrics::histogram!(
                 "rr_proposal_duration_seconds",
-                "group_id" => group_id.to_string(),
+                "group_id" => group_label,
                 "source" => "client"
             )
             .record(raft_started.elapsed().as_secs_f64());
@@ -153,7 +168,7 @@ impl ClientDispatch for ClientDispatchImpl {
             Ok(_) => "redirect",
             Err(_) => "error",
         };
-        record_request_metrics(group_id, "write", start, outcome);
+        record_request_metrics(group_label, "write", start, outcome);
         result
     }
 
@@ -181,7 +196,7 @@ impl ClientDispatch for ClientDispatchImpl {
                 tonic::Status::internal("local read failed")
             });
         let outcome = if result.is_ok() { "success" } else { "error" };
-        record_request_metrics(group_id, "read", start, outcome);
+        record_request_metrics(self.group_label(group_id), "read", start, outcome);
         result
     }
 
@@ -228,7 +243,7 @@ impl ClientDispatch for ClientDispatchImpl {
             Ok(_) => "success",
             Err(_) => "error",
         };
-        record_request_metrics(group_id, "lin_read", start, outcome);
+        record_request_metrics(self.group_label(group_id), "lin_read", start, outcome);
         result
     }
 
@@ -269,24 +284,25 @@ impl ClientDispatch for ClientDispatchImpl {
 /// `rr_server_requests_total{group_id, op, outcome}` (counter) and
 /// `rr_server_request_duration_seconds{group_id, op}` (histogram).
 /// `op` is one of `write|read|lin_read`; `outcome` is
-/// `success|redirect|error|idempotency_expired`.
+/// `success|redirect|error|idempotency_expired`. `group_label` is an interned
+/// `&'static str` (see [`ClientDispatchImpl::group_label`]) so recording
+/// allocates nothing per request.
 fn record_request_metrics(
-    group_id: GroupId,
+    group_label: &'static str,
     op: &'static str,
     start: std::time::Instant,
     outcome: &'static str,
 ) {
-    let gid = group_id.to_string();
     metrics::counter!(
         "rr_server_requests_total",
-        "group_id" => gid.clone(),
+        "group_id" => group_label,
         "op" => op,
         "outcome" => outcome
     )
     .increment(1);
     metrics::histogram!(
         "rr_server_request_duration_seconds",
-        "group_id" => gid,
+        "group_id" => group_label,
         "op" => op
     )
     .record(start.elapsed().as_secs_f64());

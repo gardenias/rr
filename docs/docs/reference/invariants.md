@@ -503,9 +503,11 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
 ### 不变量链
 
 1. **表更新**:`MemConfigProvider::add_partition` / etcd watch 更新路由表并广播
-   `RoutingTableChange`(`crates/rr-config/src/mem.rs:48-62`)。
-2. **每请求实时查表**:`ShardRouter::route` 不做缓存,每次请求都 `get_routing_table()` 查
-   最新表(`crates/rr-router/src/router.rs:34-48`)——"切换生效"的时点就是表更新的时点。
+   `RoutingTableChange`(`crates/rr-config/src/mem.rs`)。mem 后端为 copy-on-write:
+   变更克隆表、应用改动、原子换入新 `Arc` 快照。
+2. **每请求实时查表**:`ShardRouter::route` 不做缓存,每次请求都经
+   `routing_table_snapshot()` 取 provider 当前快照(mem 后端 = 读锁 + `Arc` clone,
+   零表拷贝)——"切换生效"的时点就是表更新的时点(`crates/rr-router/src/router.rs`)。
 3. **写路径路由**:`ClientDispatchImpl::submit_write` 先 `route(partition_id)` 再向该 group
    提交(`crates/rr-server/src/dispatch.rs:54-62`);未登记的 partition 直接 `NotFound`,
    无默认落点。
@@ -513,14 +515,14 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
    `start_group`)、`GroupMembershipChanged`(加入则 start、移出则 `stop_group`)
    (`crates/rr-server/src/node.rs:271-321`、`:374-412`)。
 5. **非 leader 不写**:请求落到非 leader 节点时,openraft `ForwardToLeader` → SDK 重定向
-   (`dispatch.rs:115-122`),不会因路由表之外的线索把写发给错误节点。
+   (`dispatch.rs` `submit_write` 的 `forward_to_leader` 分支),不会因路由表之外的线索把写发给错误节点。
 
 ### 强制点
 
 | # | 位置 | 强制内容 |
 |---|---|---|
-| 1 | `crates/rr-router/src/router.rs:34-48` | 路由 = 每次实时查表,partition → group 映射唯一;未命中计数 `router.route.not_found` |
-| 2 | `crates/rr-server/src/dispatch.rs:54-62` | 写提交前强制路由;group 不存在即失败,无旁路 |
+| 1 | `crates/rr-router/src/router.rs`(`ShardRouter::route`) | 路由 = 每次实时取表快照,partition → group 映射唯一;未命中计数 `router.route.not_found` |
+| 2 | `crates/rr-server/src/dispatch.rs`(`submit_write`) | 写提交前强制路由;group 不存在即失败,无旁路 |
 | 3 | `crates/rr-server/src/node.rs:374-412` | 成员变化驱动 start/stop group,使节点上运行的 group 集合收敛于路由表 |
 | 4 | `crates/rr-server/src/dispatch.rs:115-122` | 非 leader 仅重定向,不在本地强制提交 |
 

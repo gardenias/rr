@@ -123,6 +123,12 @@ pub trait ConfigProvider: Send + Sync {
     /// 获取当前完整的路由表 / Get the current full routing table.
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
 
+    /// 当前路由表的共享快照；内存后端应覆写为廉价 Arc clone。
+    /// 默认实现包装 get_routing_table()。每次调用都取最新快照（INV-6）。
+    /// Current table as a shared snapshot; in-memory backends should override
+    /// with a cheap Arc clone. Default wraps get_routing_table().
+    async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError>;
+
     /// 订阅路由表变更事件流 / Subscribe to routing table change events as a stream.
     async fn watch_changes(&self) -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError>;
 

@@ -66,7 +66,7 @@ Defined in `rr-core::types`. A **pure data structure** that serializes freely. C
 `crates/rr-router/src/router.rs`
 
 **职责 / Responsibilities**:
-1. 无启动加载、无本地缓存：每次 `route()` 都通过 `ConfigProvider::get_routing_table()` **完整克隆**当前路由表，然后做一次 HashMap 查询。
+1. 无启动加载、无本地缓存：每次 `route()` 都通过 `ConfigProvider::routing_table_snapshot()` 取 provider 的**当前**表快照，然后做一次 HashMap 查询。内存后端下快照是 `Arc` clone（零表拷贝）；provider 仍是单一事实源（INV-6）。
 2. 不订阅变更事件——监听 `watch_changes()` 并按事件启停 group 的循环在 `RrNode`（`rr-server::node`）里，不在 router 里。
 3. 查询 API 仅两个：
    - `route(partition_id) → Result<GroupId>` — 热路径；未命中返回 `PartitionNotFound`
@@ -76,7 +76,7 @@ Defined in `rr-core::types`. A **pure data structure** that serializes freely. C
 ---
 
 **Responsibilities**:
-1. No startup load, no local cache: every `route()` call **clones the full routing table** via `ConfigProvider::get_routing_table()`, then does a single HashMap lookup.
+1. No startup load, no local cache: every `route()` call takes the provider's **current** table snapshot via `ConfigProvider::routing_table_snapshot()`, then does a single HashMap lookup. With the in-memory backend the snapshot is an `Arc` clone (no table copy); the provider remains the single source of truth (INV-6).
 2. No change subscription — the loop that watches `watch_changes()` and starts/stops groups lives in `RrNode` (`rr-server::node`), not in the router.
 3. Exactly two query APIs:
    - `route(partition_id) → Result<GroupId>` — hot path; a miss returns `PartitionNotFound`
@@ -84,15 +84,19 @@ Defined in `rr-core::types`. A **pure data structure** that serializes freely. C
 4. A single routing metric: the `router.route.not_found` counter (incremented on miss).
 
 ### ConfigProvider trait
-定义在 `rr-core::config`。抽象了 **路由表的来源和变更通知**。trait 是**只读的**——恰有三个方法：
+定义在 `rr-core::config`。抽象了 **路由表的来源和变更通知**。trait 是**只读的**——三个必需方法，外加一个带默认实现的快照方法：
 
-Defined in `rr-core::config`. Abstracts **where the routing table comes from and how changes are delivered**. The trait is **read-only** — exactly three methods:
+Defined in `rr-core::config`. Abstracts **where the routing table comes from and how changes are delivered**. The trait is **read-only** — three required methods plus one defaulted snapshot method:
 
 ```rust
 #[async_trait]
 pub trait ConfigProvider: Send + Sync {
     /// Get the current full routing table.
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
+    /// Current table as a shared snapshot; backends holding the table in
+    /// memory override this to return a cheap Arc clone. Default: wraps
+    /// get_routing_table(). Fresh fetch on every call (INV-6).
+    async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError> { /* default */ }
     /// Subscribe to routing table change events as a stream.
     async fn watch_changes(
         &self,

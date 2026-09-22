@@ -71,6 +71,9 @@ use crate::idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
 /// ```
 pub struct ServiceStateMachineAdapter<S: Service> {
     group_id: GroupId,
+    /// Interned `group_id` metric label — interned once at construction so
+    /// the per-entry apply metrics allocate nothing.
+    metrics_label: &'static str,
     service: Arc<TokioRwLock<S>>,
     applied_count: u64,
     idempotency: IdempotencyLayer,
@@ -207,6 +210,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             Arc::new(SharedOutboxControl::new(outbox_state.clone())) as Arc<dyn OutboxControl>;
         Self {
             group_id,
+            metrics_label: crate::network_factory::intern_id_label(group_id),
             service: Arc::new(TokioRwLock::new(service)),
             applied_count: 0,
             idempotency: IdempotencyLayer::new(capacity),
@@ -293,7 +297,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             // unlike rate(rr_raft_last_log_index).
             metrics::counter!(
                 "rr_raft_applied_entries_total",
-                "group_id" => self.group_id.to_string()
+                "group_id" => self.metrics_label
             )
             .increment(1);
             if let Some(off) = offset {
@@ -302,7 +306,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         }
         metrics::histogram!(
             "rr_raft_apply_duration_seconds",
-            "group_id" => self.group_id.to_string()
+            "group_id" => self.metrics_label
         )
         .record(apply_started.elapsed().as_secs_f64());
         result
@@ -578,7 +582,7 @@ impl<S: Service + 'static> StateMachine for ServiceStateMachineAdapter<S> {
         self.service.write().await.restore(&user_bytes).await?;
         metrics::counter!(
             "rr_snapshot_installs_total",
-            "group_id" => self.group_id.to_string()
+            "group_id" => self.metrics_label
         )
         .increment(1);
         Ok(())

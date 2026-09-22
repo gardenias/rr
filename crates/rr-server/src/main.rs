@@ -8,6 +8,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+// Allocator A/B switch (docs/perf/roadmap-100k.md M2): with `--features
+// mimalloc` the whole process — tonic/h2, openraft, storage — allocates via
+// mimalloc. Off by default; promote only on measured improvement.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use openraft::BasicNode;

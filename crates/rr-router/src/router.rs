@@ -30,9 +30,14 @@ impl ShardRouter {
     ///
     /// Returns [`RouterError::PartitionNotFound`] if the partition is not in
     /// the routing table.
+    ///
+    /// Reads the provider's current table snapshot on every call (INV-6:
+    /// the ConfigProvider is the single source of truth — no cached view is
+    /// retained here). Providers holding the table in memory serve the
+    /// snapshot as an `Arc` clone, so the hot path does no table copy.
     #[instrument(skip(self))]
     pub async fn route(&self, partition_id: PartitionId) -> Result<GroupId, RrError> {
-        let table = self.config.get_routing_table().await?;
+        let table = self.config.routing_table_snapshot().await?;
 
         let result = table
             .partitions

@@ -1,6 +1,7 @@
 //! ConfigProvider trait for pluggable cluster configuration sources.
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Stream;
@@ -63,6 +64,17 @@ pub enum RoutingTableChange {
 pub trait ConfigProvider: Send + Sync {
     /// Get the current full routing table.
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
+    /// Get the current routing table as a shared snapshot.
+    ///
+    /// Semantics are identical to [`get_routing_table`](Self::get_routing_table)
+    /// — a point-in-time view of the provider's own table, fetched fresh on
+    /// every call (INV-6: the provider stays the single source of truth; no
+    /// caller-side cache is introduced). Backends that already hold the table
+    /// in memory should override this to return a cheap `Arc` clone instead of
+    /// a deep copy; the default falls back to `get_routing_table`.
+    async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError> {
+        Ok(Arc::new(self.get_routing_table().await?))
+    }
     /// Subscribe to routing table change events as a stream.
     ///
     /// # Stream semantics (current behavior, contractual as of v0.2.0)

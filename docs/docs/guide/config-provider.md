@@ -40,6 +40,15 @@ pub trait ConfigProvider: Send + Sync {
     /// 获取当前的完整路由表 / Get the current full routing table.
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
 
+    /// 当前表的共享快照；内存后端覆写为廉价 Arc clone，默认包装
+    /// get_routing_table()。每次调用取最新快照，不引入调用方缓存（INV-6）。
+    /// Shared snapshot of the current table; in-memory backends override with
+    /// a cheap Arc clone. Default wraps get_routing_table(). Every call sees
+    /// the latest table — no caller-side cache (INV-6).
+    async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError> {
+        Ok(Arc::new(self.get_routing_table().await?))
+    }
+
     /// 订阅路由表变更事件流 / Subscribe to routing table change events as a stream.
     async fn watch_changes(
         &self,

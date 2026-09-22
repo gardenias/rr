@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ConfigProvider::routing_table_snapshot()`** (semver-minor): new defaulted
+  trait method returning `Arc<RoutingTable>`. `MemConfigProvider` switches to
+  copy-on-write `Arc` snapshots and overrides it, so `ShardRouter::route` no
+  longer deep-clones the routing table per request. Routing semantics are
+  unchanged — every `route()` call still sees the provider's current table
+  (INV-6: no caller-side cache). Custom `ConfigProvider` implementations keep
+  working via the default method (which wraps `get_routing_table()`).
+- **Opt-in `mimalloc` allocator features** (`rr-server/mimalloc`,
+  `rr-perf-bench/mimalloc`, both off by default): A/B switch for the
+  allocator. Note: measured on macOS arm64 it is consistently ~20% *slower*
+  than the system allocator (25.4k/23.6k vs 30.1k/30.2k TPS, S2 k=200 mem) —
+  keep off on macOS; re-evaluate on Linux.
 - **Multi-group stock topology (`rr-server --groups N` / `[cluster].groups`)**:
   the stock server now hosts N Raft groups with partition i → group i and all
   peers as replicas (default 1 — behavior unchanged). Bootstrap initializes
@@ -232,6 +244,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on the oldest sampled records — a latent limit first exposed by the
     perf-lab's W9 smoke (16.7k acks). The crash-harness oracle
     (tests/crash) is unchanged.
+
+### Performance
+
+- **Zero-allocation metric labels on hot paths**: `group_id`/`node_id` label
+  values were built with `to_string()` on every client write
+  (`rr-server/dispatch.rs`), every AppendEntries RPC incl. heartbeats
+  (`rr-raft/network_factory.rs`), and every applied entry
+  (`rr-raft/service_adapter.rs`). They are now interned once per id as
+  `&'static str`, removing that allocation stream entirely.
+- **No per-request routing-table copy**: `ShardRouter::route` reads the
+  provider's current table via the new `routing_table_snapshot()`; with
+  `MemConfigProvider` the snapshot is an `Arc` clone instead of a full table
+  clone on every request.
 
 ### Fixed
 
