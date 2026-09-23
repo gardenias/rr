@@ -126,6 +126,43 @@ Metrics flagged as "known issue" in `metrics-reference.md` (currently
 in the next MAJOR and are treated as bug fixes rather than breaking
 changes.
 
+## 字节格式版本约定 / Byte-Format Versioning Policy
+
+**规则（2026-09-23 起生效）**：任何**新引入**的协议层/持久化字节格式必须携带
+（a）类型魔数前缀与（b）显式版本位；解码端必须拒绝 `version > 当前支持版本`
+（响亮失败，绝不猜测未知布局）。版本位只在该格式的**非兼容**演进时递增；
+同版本内只允许新增可选尾部字段。回归由金色语料（`crates/rr-core/tests/golden/`）
+与畸形/未来版本拒绝测试钉死。
+
+**Rule (effective 2026-09-23)**: every NEW protocol-layer or persisted byte format
+MUST carry (a) a type magic prefix and (b) an explicit version field, and decoders
+MUST reject `version > supported` loudly. Bump the version only on incompatible
+evolution; same-version changes may only append optional trailer fields. The golden
+corpus (`crates/rr-core/tests/golden/`) plus malformed/future-version rejection
+tests pin the formats.
+
+### 现有格式盘点 / Inventory of Existing Formats
+
+| 格式 / Format | 位置 | 魔数 | 版本位 | 备注 |
+|---|---|---|---|---|
+| `FramedEntry`（日志条目信封） | `rr-core/src/framed_entry.rs` | `\0rrENT01` | `version: u8`（=1），拒绝未来版本 | 金色语料钉死 |
+| `FramedSnapshot`（快照信封） | `rr-core/src/framed_snapshot.rs` | `\0rrSNAP1` | `version: u8`（=1） | 同上 |
+| `ApplyOutcome`（apply 响应信封） | `rr-core/src/idempotency.rs` | tag `0xAA` | `version`（=1） | 同上 |
+| 批处理帧（client batching） | `rr-core/src/batch.rs` | `\0rrBAT01` | `version`（=1） | 同上 |
+| RRAF TCP 复制帧 | `rr-network/tcp_raft_server.rs`、`rr-raft/tcp_transport.rs` | `RRAF` | 头部 `FRAME_VERSION`（=1），不匹配即拒 | 实验性，loopback 门控 |
+| gRPC wire（proto3） | `rr-network/proto/*.proto` | — | 字段号演进（protobuf 内建） | 只允许 additive 字段 |
+| openraft 内部 bincode（raft log 条目、RPC payload） | `rr-raft` 存储/网络适配层 | — | 无（依赖 `openraft =0.10.0-alpha.34` 精确钉版承担格式稳定） | openraft 升级即格式评审点 |
+| `PersistentSnapshot`（`sm-snapshot.bin`，T1） | `rr-raft/src/snapshot_store.rs` | **无** | **无** | 已随 0.2.x 发布；裸 bincode。v0.3.0 破坏窗口内包信封（A-0017 范围），旧文件由 fail-closed 解码错误响亮暴露（runbook: 删文件从 leader 重建） |
+| 成员 sidecar（`sm-membership.bin`，A-0016） | `rr-raft/src/sm_adapter.rs` | **无** | **无** | 同上，随同一窗口处理 |
+
+**两个无版本位的已发布格式**（最后两行）不改 0.2.x 字节布局——它们的解码失败路径
+本来就是 fail-closed（响亮拒绝启动），格式演进排入 v0.3.0 窗口并附带 legacy 探测回退。
+新格式一律按本节规则引入。
+
+The two shipped formats without a version field (last two rows) keep their 0.2.x
+byte layout — their decode path is already fail-closed; format evolution is
+scheduled for the v0.3.0 breaking window with a legacy-detection fallback.
+
 ## Minimum Supported Rust Version (MSRV)
 
 **当前 / Current**: Rust `1.98`（workspace `rust-version` field in `Cargo.toml`）。

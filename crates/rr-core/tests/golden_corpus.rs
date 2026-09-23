@@ -18,6 +18,7 @@
 
 use std::fs;
 
+use rr_core::batch::{decode_batch, encode_batch, BATCH_FRAME_MAGIC, BATCH_FRAME_VERSION};
 use rr_core::framed_entry::{FramedEntry, FRAMED_ENTRY_MAGIC, FRAMED_ENTRY_VERSION};
 use rr_core::framed_snapshot::{
     FramedSnapshot, FrameworkState, IdempotencyState, IngestorState, OutboxState,
@@ -36,6 +37,8 @@ enum Golden {
     Entry(FramedEntry),
     Snapshot(FramedSnapshot),
     Outcome(ApplyOutcome),
+    /// Client-write batch frame: the value is the item list.
+    Batch(Vec<Vec<u8>>),
 }
 
 impl Golden {
@@ -44,6 +47,7 @@ impl Golden {
             Golden::Entry(e) => e.encode().expect("golden entry encode"),
             Golden::Snapshot(s) => s.encode().expect("golden snapshot encode"),
             Golden::Outcome(o) => o.encode().expect("golden outcome encode"),
+            Golden::Batch(items) => encode_batch(items),
         }
     }
 }
@@ -116,6 +120,14 @@ fn golden_samples() -> Vec<(&'static str, Golden)> {
                 request_id: 42,
                 watermark: 77,
             })),
+        ),
+        (
+            "batch_frame_basic.bin",
+            Golden::Batch(vec![
+                b"golden: batch item 1".to_vec(),
+                vec![],
+                b"golden: batch item 3".to_vec(),
+            ]),
         ),
     ]
 }
@@ -202,7 +214,7 @@ fn assert_outcome_matches(decoded: &ApplyOutcome, expected: &ApplyOutcome, file:
 #[test]
 fn golden_corpus_decodes_and_reencodes_byte_identical() {
     let samples = golden_samples();
-    assert_eq!(samples.len(), 6, "the corpus must stay small and fixed");
+    assert_eq!(samples.len(), 7, "the corpus must stay small and fixed");
 
     for (file, expected) in &samples {
         let path = format!("{GOLDEN_DIR}/{file}");
@@ -245,6 +257,17 @@ fn golden_corpus_decodes_and_reencodes_byte_identical() {
                 let decoded = ApplyOutcome::decode(&bytes)
                     .unwrap_or_else(|err| panic!("{file}: decode failed: {err}"));
                 assert_outcome_matches(&decoded, o, file);
+            }
+            Golden::Batch(items) => {
+                assert!(
+                    bytes.starts_with(&BATCH_FRAME_MAGIC),
+                    "{file}: missing batch magic"
+                );
+                assert_eq!(bytes[8], BATCH_FRAME_VERSION, "{file}: batch version");
+                let decoded = decode_batch(&bytes)
+                    .unwrap_or_else(|err| panic!("{file}: decode failed: {err}"))
+                    .unwrap_or_else(|| panic!("{file}: golden bytes must decode to Some"));
+                assert_eq!(&decoded, items, "{file}: batch items");
             }
         }
 

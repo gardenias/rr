@@ -21,9 +21,10 @@
 //! # Wire format (big-endian)
 //!
 //! ```text
-//! magic:  8 bytes  — BATCH_FRAME_MAGIC
-//! count:  u32      — number of items
-//! items:  count × { len: u32, bytes: [u8; len] }
+//! magic:   8 bytes  — BATCH_FRAME_MAGIC
+//! version: u8       — BATCH_FRAME_VERSION; readers reject version > current
+//! count:   u32      — number of items
+//! items:   count × { len: u32, bytes: [u8; len] }
 //! ```
 
 use crate::error::{CodecError, RrError};
@@ -34,7 +35,12 @@ use crate::error::{CodecError, RrError};
 /// never be mistaken for one another.
 pub const BATCH_FRAME_MAGIC: [u8; 8] = *b"\0rrBAT01";
 
-const HEADER_LEN: usize = BATCH_FRAME_MAGIC.len() + 4;
+/// Current batch-frame schema version. Rejecting `version > current` on
+/// decode (instead of guessing at an unknown layout) is the house
+/// convention — same as `FramedEntry` / `FramedSnapshot` / `ApplyOutcome`.
+pub const BATCH_FRAME_VERSION: u8 = 1;
+
+const HEADER_LEN: usize = BATCH_FRAME_MAGIC.len() + 1 + 4;
 
 /// Returns `true` iff `bytes` carries the batch-frame magic prefix.
 /// A false result means "not a batch" — callers fall back to the raw
@@ -51,6 +57,7 @@ pub fn encode_batch(items: &[Vec<u8>]) -> Vec<u8> {
     let total = items.iter().map(Vec::len).sum::<usize>();
     let mut out = Vec::with_capacity(HEADER_LEN + 4 * items.len() + total);
     out.extend_from_slice(&BATCH_FRAME_MAGIC);
+    out.push(BATCH_FRAME_VERSION);
     out.extend_from_slice(&(items.len() as u32).to_be_bytes());
     for item in items {
         out.extend_from_slice(&(item.len() as u32).to_be_bytes());
@@ -62,7 +69,8 @@ pub fn encode_batch(items: &[Vec<u8>]) -> Vec<u8> {
 /// Decode a batch frame. Returns `Ok(None)` when `bytes` is not a batch
 /// (no magic) so the caller continues down the raw-payload path; returns
 /// `Err` only when the magic is present but the frame is malformed
-/// (truncated header, truncated item, trailing garbage).
+/// (truncated header, truncated item, trailing garbage) or carries a
+/// newer schema version than this build understands.
 pub fn decode_batch(bytes: &[u8]) -> Result<Option<Vec<Vec<u8>>>, RrError> {
     if !is_batch_frame(bytes) {
         return Ok(None);
@@ -75,7 +83,13 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Option<Vec<Vec<u8>>>, RrError> {
     if bytes.len() < HEADER_LEN {
         return Err(malformed("header truncated"));
     }
-    let count = u32::from_be_bytes(bytes[8..12].try_into().expect("4 bytes")) as usize;
+    let version = bytes[8];
+    if version > BATCH_FRAME_VERSION {
+        return Err(malformed(&format!(
+            "batch frame version {version} exceeds supported {BATCH_FRAME_VERSION} — upgrade the framework"
+        )));
+    }
+    let count = u32::from_be_bytes(bytes[9..13].try_into().expect("4 bytes")) as usize;
     let mut items = Vec::with_capacity(count.min(1 << 16));
     let mut cursor = HEADER_LEN;
     for _ in 0..count {
@@ -139,7 +153,18 @@ mod tests {
         let mut with_tail = frame.clone();
         with_tail.push(0xAB);
         assert!(decode_batch(&with_tail).is_err());
-        // Magic only, no count.
+        // Magic only, no version/count.
         assert!(decode_batch(&BATCH_FRAME_MAGIC).is_err());
+    }
+
+    #[test]
+    fn future_version_is_rejected_loudly() {
+        let mut frame = encode_batch(&[b"hello".to_vec()]);
+        frame[8] = BATCH_FRAME_VERSION + 1;
+        let err = decode_batch(&frame).expect_err("future version must be rejected");
+        assert!(
+            err.to_string().contains("version"),
+            "error should name the version problem: {err}"
+        );
     }
 }

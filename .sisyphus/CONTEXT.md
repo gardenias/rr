@@ -66,6 +66,14 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
   与批处理回滚注意;invariants.md INV-6 链按 etcd 探针/快照措辞刷新。
 - **perf-bench 量化开关**:`--client-batching --batch-max-entries --batch-max-bytes
   --batch-linger-ms`(client 侧旋钮,`--cluster-addrs` 模式同样可用)。
+- **字节格式版本位审计(用户提出,当日闭环)**:盘点全部协议层/持久化字节格式
+  ——已带版本位:FramedEntry / FramedSnapshot / ApplyOutcome / RRAF TCP;proto3
+  靠字段号;openraft 内部 bincode 由精确钉版兜底。**批帧补上漏掉的 `version: u8`**
+  (尚未发布,免费窗口)+ 未来版本拒绝测试 + 金色语料第 7 样本(`batch_frame_basic.bin`,
+  漂移绊线)。**两个已发布的无版本位文件**(`sm-snapshot.bin` T1、`sm-membership.bin`
+  A-0016 sidecar)不动 0.2.x 布局——fail-closed 解码保底,信封化 + legacy 回退排入
+  A-0017 破坏窗口(ADR 第 6 条)。新规写进 `compatibility.md`"字节格式版本约定":
+  新格式必须 magic + 版本位 + 拒绝未来版本。
 
 ### Session 2026-09-22 — 100k roadmap 首轮:TCP 量化 + 热路径零分配 + 分配器 A/B 否决
 
