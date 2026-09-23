@@ -507,7 +507,9 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
    变更克隆表、应用改动、原子换入新 `Arc` 快照。
 2. **每请求实时查表**:`ShardRouter::route` 不做缓存,每次请求都经
    `routing_table_snapshot()` 取 provider 当前快照(mem 后端 = 读锁 + `Arc` clone,
-   零表拷贝)——"切换生效"的时点就是表更新的时点(`crates/rr-router/src/router.rs`)。
+   零表拷贝;etcd 后端 = 每调用一次 keys-only revision 探针,revision 未变才服务
+   缓存快照、变了立即全量重扫)——"切换生效"的时点不晚于下一次探针
+   (`crates/rr-router/src/router.rs`、`crates/rr-config-etcd/src/lib.rs`)。
 3. **写路径路由**:`ClientDispatchImpl::submit_write` 先 `route(partition_id)` 再向该 group
    提交(`crates/rr-server/src/dispatch.rs:54-62`);未登记的 partition 直接 `NotFound`,
    无默认落点。

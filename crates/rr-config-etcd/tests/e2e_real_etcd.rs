@@ -147,3 +147,106 @@ async fn routing_table_and_watch_work_end_to_end() {
         }
     ));
 }
+
+/// The revision-probe cache must serve identical snapshots for an unchanged
+/// table and must observe a write on the very next call (INV-6: etcd stays
+/// the single source of truth — a stale cached table is never served after
+/// the store revision has moved).
+#[tokio::test]
+#[ignore = "requires Docker + RR_TEST_ETCD=1"]
+async fn routing_table_snapshot_tracks_revision() {
+    if !live_etcd_enabled() {
+        eprintln!("RR_TEST_ETCD != 1; skipping live etcd e2e test");
+        return;
+    }
+
+    let container = GenericImage::new("quay.io/coreos/etcd", "v3.5.13")
+        .with_exposed_port(2379.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("ready to serve client requests"))
+        .with_cmd(vec![
+            "--name=node1",
+            "--listen-client-urls=http://0.0.0.0:2379",
+            "--advertise-client-urls=http://0.0.0.0:2379",
+            "--listen-peer-urls=http://0.0.0.0:2380",
+            "--initial-advertise-peer-urls=http://0.0.0.0:2380",
+            "--initial-cluster=node1=http://0.0.0.0:2380",
+            "--initial-cluster-state=new",
+        ])
+        .start()
+        .await
+        .expect("etcd container should start");
+
+    let host = container
+        .get_host()
+        .await
+        .expect("container host should be available")
+        .to_string();
+    let port = container
+        .get_host_port_ipv4(2379.tcp())
+        .await
+        .expect("mapped etcd client port should be available");
+
+    let endpoint = format!("http://{host}:{port}");
+    let cluster_id = "e2e-snapshot-cache";
+
+    let mut setup_client = Client::connect([endpoint.as_str()], None)
+        .await
+        .expect("setup etcd client should connect");
+    setup_client
+        .put(
+            format!("/rr/{cluster_id}/partitions/10"),
+            serde_json::to_vec(&json!({
+                "config": { "SingleId": 10 },
+                "group_id": 1
+            }))
+            .unwrap(),
+            None,
+        )
+        .await
+        .expect("seed partition key should succeed");
+
+    let provider = EtcdConfigProvider::new(vec![endpoint], cluster_id.to_string())
+        .await
+        .expect("provider should construct");
+
+    let first = provider
+        .routing_table_snapshot()
+        .await
+        .expect("snapshot should load");
+    assert_eq!(first.partitions.len(), 1);
+
+    // Unchanged revision: same Arc is served (no re-scan).
+    let second = provider
+        .routing_table_snapshot()
+        .await
+        .expect("cached snapshot should be served");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "unchanged revision must serve the cached Arc"
+    );
+
+    // A write moves the revision: the next snapshot must reflect it.
+    setup_client
+        .put(
+            format!("/rr/{cluster_id}/partitions/11"),
+            serde_json::to_vec(&json!({
+                "config": { "SingleId": 11 },
+                "group_id": 1
+            }))
+            .unwrap(),
+            None,
+        )
+        .await
+        .expect("second partition write should succeed");
+
+    let third = provider
+        .routing_table_snapshot()
+        .await
+        .expect("post-write snapshot should load");
+    assert_eq!(
+        third.partitions.len(),
+        2,
+        "snapshot must observe the write that moved the revision"
+    );
+    assert!(!std::sync::Arc::ptr_eq(&first, &third));
+}

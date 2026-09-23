@@ -33,6 +33,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+mod batch;
+
+pub use batch::BatchConfig;
+use batch::BatchState;
+
 use rr_core::error::{NetworkError, RaftError, RrError};
 use rr_core::idempotency::IdempotencyKey;
 use rr_core::types::{GroupId, NodeId};
@@ -100,6 +105,10 @@ pub struct RrClient {
     /// (R-2 / A-0033 "超时映射"). `None` (default) = unbounded wait, preserving
     /// prior behavior. See [`RrClientBuilder::with_request_timeout`].
     request_timeout_ms: Option<u64>,
+    /// Client-side write batching state. `None` (default) = every
+    /// `send_request` is its own RPC, byte-for-byte the v0.2.x path.
+    /// See [`RrClientBuilder::with_batching`].
+    batch: Option<Arc<BatchState>>,
 }
 
 /// Builder for [`RrClient`] with optional TLS and bearer-token configuration.
@@ -123,6 +132,7 @@ pub struct RrClientBuilder {
     bearer_token: Option<String>,
     strict_security: bool,
     request_timeout_ms: Option<u64>,
+    batch_config: Option<BatchConfig>,
 }
 
 impl RrClientBuilder {
@@ -135,6 +145,7 @@ impl RrClientBuilder {
             bearer_token: None,
             strict_security: false,
             request_timeout_ms: None,
+            batch_config: None,
         }
     }
 
@@ -183,6 +194,20 @@ impl RrClientBuilder {
         self
     }
 
+    /// Enable client-side write batching (Kafka-producer style), OFF by
+    /// default. Unkeyed `send_request` writes accumulate per partition and
+    /// flush as one Raft entry when `max_entries` / `max_bytes` is reached
+    /// or `linger` elapses. Idempotency-keyed writes bypass the batcher.
+    ///
+    /// Requires servers running a framework version whose apply path splits
+    /// batch frames; against an older server the batch fails loudly (no fake
+    /// success). Incompatible with services using deferred two-phase apply
+    /// (A-0033): batch items are applied via the immediate path.
+    pub fn with_batching(mut self, config: BatchConfig) -> Self {
+        self.batch_config = Some(config);
+        self
+    }
+
     /// Validate the configuration and produce an [`RrClient`].
     ///
     /// Returns `RrError::Network(NetworkError::ConnectionFailed)` if:
@@ -213,10 +238,15 @@ impl RrClientBuilder {
             );
         }
 
+        if let Some(cfg) = &self.batch_config {
+            cfg.validate()?;
+        }
+
         tracing::info!(
             bootstrap_count = self.bootstrap_addrs.len(),
             tls = self.tls_config.is_some(),
             bearer = self.bearer_token.is_some(),
+            batching = self.batch_config.is_some(),
             "RrClient connecting"
         );
         Ok(RrClient {
@@ -228,6 +258,7 @@ impl RrClientBuilder {
             tls_config: self.tls_config,
             bearer_token: self.bearer_token,
             request_timeout_ms: self.request_timeout_ms,
+            batch: self.batch_config.map(|cfg| Arc::new(BatchState::new(cfg))),
         })
     }
 }
@@ -357,12 +388,20 @@ impl RrClient {
     /// 3. If transport error: remove from cache, try next bootstrap addr round-robin
     /// 4. Max `retry_config.max_retries` total attempts before returning error
     /// 5. Exponential backoff: `retry_delay_ms * 2^attempt`
+    ///
+    /// With batching enabled ([`RrClientBuilder::with_batching`], off by
+    /// default) the payload instead joins the partition's batch buffer and
+    /// this future resolves with the item's own response once the batch
+    /// commits.
     #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len()))]
     pub async fn send_request(
         &self,
         group_id: GroupId,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, RrError> {
+        if self.batch.is_some() {
+            return self.batch_submit(group_id, payload).await;
+        }
         self.send_request_inner(group_id, payload, None).await
     }
 

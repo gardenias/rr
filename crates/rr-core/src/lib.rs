@@ -44,6 +44,7 @@
 //! }
 //! ```
 
+pub mod batch;
 pub mod codec;
 pub mod config;
 pub mod deferred;

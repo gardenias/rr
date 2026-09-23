@@ -7,6 +7,7 @@
 //! * `/rr/{cluster_id}/groups/{group_id}/replicas`
 
 use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use etcd_client::{Client, Event, EventType, GetOptions, WatchOptions, WatchStream, Watcher};
@@ -288,10 +289,62 @@ async fn run_watch_loop(
 ///
 /// This type is intentionally read-only at the trait surface:
 /// it implements reads and watch subscriptions only.
-#[derive(Debug, Clone)]
+///
+/// # Read-path caching
+///
+/// `routing_table_snapshot()` probes the store revision with a tiny
+/// keys-only `GET` (serializable by default — member-local, no quorum
+/// round-trip) and only re-scans the full prefix when the revision has
+/// moved. Routing decisions therefore still consult etcd on every call
+/// (INV-6: etcd stays the single source of truth), but the per-request
+/// cost is one small probe instead of a full prefix scan + reconnect.
+/// Serializable probes may lag quorum writes by the member's apply lag
+/// (sub-millisecond on a healthy cluster); pass
+/// [`with_linearizable_probes`](Self::with_linearizable_probes) for
+/// quorum-fresh probes at the price of one quorum RTT per call.
+#[derive(Clone)]
 pub struct EtcdConfigProvider {
-    endpoints: Vec<String>,
+    client: Client,
     cluster_id: String,
+    cache: Arc<RevisionCache>,
+    linearizable_probes: bool,
+}
+
+impl std::fmt::Debug for EtcdConfigProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EtcdConfigProvider")
+            .field("cluster_id", &self.cluster_id)
+            .field("linearizable_probes", &self.linearizable_probes)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Revision-keyed routing-table cache: a snapshot is served only when a
+/// fresh probe returns the exact revision it was scanned at.
+#[derive(Debug, Default)]
+struct RevisionCache {
+    inner: std::sync::Mutex<Option<(i64, Arc<RoutingTable>)>>,
+}
+
+impl RevisionCache {
+    /// Return the cached table iff it was scanned at exactly `probed`.
+    /// `probed == 0` (no header) never matches — always refetch.
+    fn get_if_current(&self, probed: i64) -> Option<Arc<RoutingTable>> {
+        if probed == 0 {
+            return None;
+        }
+        let guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match &*guard {
+            Some((revision, table)) if *revision == probed => Some(Arc::clone(table)),
+            _ => None,
+        }
+    }
+
+    /// Publish a freshly scanned table at its scan revision.
+    fn store(&self, revision: i64, table: Arc<RoutingTable>) {
+        let mut guard = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some((revision, table));
+    }
 }
 
 impl EtcdConfigProvider {
@@ -319,50 +372,49 @@ impl EtcdConfigProvider {
             .map_err(|err| map_etcd_error("status etcd", err))?;
 
         Ok(Self {
-            endpoints,
+            client,
             cluster_id: resolved_cluster_id,
+            cache: Arc::new(RevisionCache::default()),
+            linearizable_probes: false,
         })
     }
 
+    /// Use quorum (linearizable) revision probes instead of the default
+    /// serializable ones. Every `routing_table_snapshot()` call then costs
+    /// one quorum RTT but cannot lag behind quorum-committed table writes.
+    pub fn with_linearizable_probes(mut self, on: bool) -> Self {
+        self.linearizable_probes = on;
+        self
+    }
+
     async fn connect(&self) -> Result<Client, ConfigError> {
-        Client::connect(self.endpoints.clone(), None)
-            .await
-            .map_err(|err| map_etcd_error("connect etcd", err))
+        // `Client::clone` shares the underlying channel — no reconnect.
+        Ok(self.client.clone())
     }
 
-    async fn spawn_watcher(
-        &self,
-        domain: WatchDomain,
-        sender: mpsc::Sender<RoutingTableChange>,
-    ) -> Result<(), ConfigError> {
-        let mut client = self.connect().await?;
-
-        let prefix = match domain {
-            WatchDomain::Node => nodes_prefix(&self.cluster_id),
-            WatchDomain::Partition => partitions_prefix(&self.cluster_id),
-            WatchDomain::Group => groups_prefix(&self.cluster_id),
-        };
-
-        let (watcher, stream) = client
-            .watch(
-                prefix,
-                Some(WatchOptions::new().with_prefix().with_prev_key()),
-            )
+    /// Probe the store revision with a keys-only, limit-1 GET on the
+    /// cluster prefix. No KV payloads cross the wire; serializable mode
+    /// (default) is served member-locally without a quorum round-trip.
+    async fn probe_revision(&self) -> Result<i64, ConfigError> {
+        let mut client = self.client.clone();
+        let probe = format!("{}/", root_prefix(&self.cluster_id));
+        let mut options = GetOptions::new()
+            .with_prefix()
+            .with_keys_only()
+            .with_limit(1);
+        if !self.linearizable_probes {
+            options = options.with_serializable();
+        }
+        let response = client
+            .get(probe, Some(options))
             .await
-            .map_err(|err| map_etcd_error("create watch", err))?;
-
-        let cluster_id = self.cluster_id.clone();
-        tokio::spawn(async move {
-            run_watch_loop(cluster_id, domain, watcher, stream, client, sender).await;
-        });
-
-        Ok(())
+            .map_err(|err| map_etcd_error("probe routing-table revision", err))?;
+        Ok(response.header().map(|h| h.revision()).unwrap_or(0))
     }
-}
 
-#[async_trait]
-impl ConfigProvider for EtcdConfigProvider {
-    async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError> {
+    /// Full prefix scan of the routing table, returning the store revision
+    /// the scan was served at alongside the parsed table.
+    async fn fetch_routing_table(&self) -> Result<(i64, Arc<RoutingTable>), ConfigError> {
         let mut client = self.connect().await?;
         let scan_prefix = format!("{}/", root_prefix(&self.cluster_id));
 
@@ -371,6 +423,7 @@ impl ConfigProvider for EtcdConfigProvider {
             .await
             .map_err(|err| map_etcd_error("scan routing table", err))?;
 
+        let revision = response.header().map(|h| h.revision()).unwrap_or(0);
         let mut table = RoutingTable::default();
 
         for kv in response.kvs() {
@@ -410,6 +463,53 @@ impl ConfigProvider for EtcdConfigProvider {
             });
         }
 
+        Ok((revision, Arc::new(table)))
+    }
+
+    async fn spawn_watcher(
+        &self,
+        domain: WatchDomain,
+        sender: mpsc::Sender<RoutingTableChange>,
+    ) -> Result<(), ConfigError> {
+        let mut client = self.connect().await?;
+
+        let prefix = match domain {
+            WatchDomain::Node => nodes_prefix(&self.cluster_id),
+            WatchDomain::Partition => partitions_prefix(&self.cluster_id),
+            WatchDomain::Group => groups_prefix(&self.cluster_id),
+        };
+
+        let (watcher, stream) = client
+            .watch(
+                prefix,
+                Some(WatchOptions::new().with_prefix().with_prev_key()),
+            )
+            .await
+            .map_err(|err| map_etcd_error("create watch", err))?;
+
+        let cluster_id = self.cluster_id.clone();
+        tokio::spawn(async move {
+            run_watch_loop(cluster_id, domain, watcher, stream, client, sender).await;
+        });
+
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConfigProvider for EtcdConfigProvider {
+    async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError> {
+        let (_revision, table) = self.fetch_routing_table().await?;
+        Ok(table.as_ref().clone())
+    }
+
+    async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError> {
+        let probed = self.probe_revision().await?;
+        if let Some(table) = self.cache.get_if_current(probed) {
+            return Ok(table);
+        }
+        let (revision, table) = self.fetch_routing_table().await?;
+        self.cache.store(revision, Arc::clone(&table));
         Ok(table)
     }
 
@@ -447,6 +547,38 @@ impl ConfigProvider for EtcdConfigProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revision_cache_serves_only_exact_revision() {
+        let cache = RevisionCache::default();
+        let table = Arc::new(RoutingTable::default());
+
+        // Empty cache never serves.
+        assert!(cache.get_if_current(7).is_none());
+
+        cache.store(7, Arc::clone(&table));
+        assert!(cache.get_if_current(7).is_some());
+        assert!(Arc::ptr_eq(&cache.get_if_current(7).unwrap(), &table));
+
+        // A moved revision invalidates the cached view.
+        assert!(cache.get_if_current(8).is_none());
+        assert!(cache.get_if_current(6).is_none());
+
+        // Missing probe header (revision 0) never matches, even a stored 0.
+        cache.store(0, Arc::clone(&table));
+        assert!(cache.get_if_current(0).is_none());
+    }
+
+    #[test]
+    fn revision_cache_store_replaces_older_snapshot() {
+        let cache = RevisionCache::default();
+        let old = Arc::new(RoutingTable::default());
+        let new = Arc::new(RoutingTable::default());
+        cache.store(3, old);
+        cache.store(5, Arc::clone(&new));
+        assert!(cache.get_if_current(3).is_none());
+        assert!(Arc::ptr_eq(&cache.get_if_current(5).unwrap(), &new));
+    }
 
     #[test]
     fn node_addr_json_wire_shape() {

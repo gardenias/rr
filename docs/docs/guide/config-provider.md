@@ -148,7 +148,8 @@ let provider = EtcdConfigProvider::new(
 ).await?;
 ```
 
-- **只读实现 / Read-only**：`EtcdConfigProvider` 只实现 `get_routing_table` / `watch_changes` / `get_node_addr`。rr 永远不会把路由信息写回 etcd——路由表由外部工具或运维流程写入 etcd，rr 只负责消费。 / It implements only `get_routing_table` / `watch_changes` / `get_node_addr`. rr never writes routing state back to etcd — the routing table is provisioned into etcd by external tooling or operator workflows, and rr only consumes it.
+- **只读实现 / Read-only**：`EtcdConfigProvider` 只实现 `get_routing_table` / `routing_table_snapshot` / `watch_changes` / `get_node_addr`。rr 永远不会把路由信息写回 etcd——路由表由外部工具或运维流程写入 etcd，rr 只负责消费。 / It implements only `get_routing_table` / `routing_table_snapshot` / `watch_changes` / `get_node_addr`. rr never writes routing state back to etcd — the routing table is provisioned into etcd by external tooling or operator workflows, and rr only consumes it.
+- **读路径缓存 / Read-path caching**：`routing_table_snapshot()` 每次调用只做一次 keys-only 的 revision 探针（默认 serializable，成员本地应答、无 quorum 往返）；revision 未变即服务缓存的 `Arc` 快照，变了才全量重扫。路由判定每次都咨询 etcd（INV-6 不变），但成本从"逐请求全前缀扫描 + 重连"降为一次轻量探针。serializable 探针可能落后 quorum 写一个 apply 延迟（健康集群亚毫秒）；需要 quorum 级新鲜度时用 `with_linearizable_probes(true)`（每调用一次 quorum RTT）。 / `routing_table_snapshot()` performs a tiny keys-only revision probe per call (serializable by default — member-local, no quorum RTT) and only re-scans the full prefix when the revision moved. Serializable probes may lag quorum writes by the member's apply lag; use `with_linearizable_probes(true)` for quorum-fresh probes.
 - **Key 布局 / Key layout**：`/rr/{cluster_id}/nodes/{node_id}`、`/rr/{cluster_id}/partitions/{partition_id}`、`/rr/{cluster_id}/groups/{group_id}/replicas`。
 - **示例 / Example**：`examples/etcd-config-quickstart` 演示了完整的读取 + watch 流程，运行前需要在 `localhost:2379` 启动一个 etcd v3 实例。 / `examples/etcd-config-quickstart` demonstrates the full read + watch flow; it requires an etcd v3 instance running at `localhost:2379`.
 

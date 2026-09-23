@@ -96,6 +96,43 @@ Besides `send_request` for writes, `RrClient` offers two read APIs:
 - `read(group_id, payload)` — stale/local read: served directly by any replica without Raft consensus; lowest latency, but the data may lag slightly behind the latest committed write.
 - `read_linearizable(group_id, payload)` — linearizable read: the server confirms the commit index via Raft ReadIndex before answering; follower redirects to the leader are retried automatically.
 
+## 写批处理 / Client Write Batching（opt-in）
+
+`RrClientBuilder::with_batching(BatchConfig)` 开启 Kafka-producer 式写批处理（**默认关闭**）。
+开启后，未带幂等键的 `send_request` 先按 partition 进入客户端缓冲，满足任一条件即整批
+作为**一条 Raft entry** 提交：攒够 `max_entries` 条、或累计 `max_bytes` 字节、或首条入队后
+等待满 `linger`。apply 侧把批帧逐条拆开调用 `Service::handle`，响应按序打包回客户端，
+每个等待者拿到自己的响应。带幂等键的写（`send_request_idempotent`）始终绕过批处理。
+
+```rust
+let client = RrClientBuilder::new(addrs)
+    .with_batching(rr_client::BatchConfig {
+        max_entries: 64,                       // 批大小（条数）
+        max_bytes: 1 << 20,                    // 批大小（字节）
+        linger: std::time::Duration::from_millis(5), // 时间限制（linger.ms）
+        max_buffered: 8192,                    // 缓冲上限——超限立即报错（背压）
+    })
+    .build()
+    .await?;
+```
+
+- 收益（S2 k=200、128B、64 条/批、linger 1ms 实测）：**175.2k TPS vs ~29k（6×）**，p99 2.4ms。
+- 代价：串行写要付 linger（S1 p50 161µs → ~3.1ms）。**延迟敏感的串行写场景请保持关闭**。
+- 兼容性：需要服务端框架带批帧拆分（本版本起）；对旧服务端开启会在首个批次响亮报错
+  （绝不假成功）。与 A-0033 deferred（两阶段）apply 的服务不兼容。
+- 背压：缓冲总量超过 `max_buffered` 时 `send_request` 立即返回错误，由调用方降速/重试。
+
+---
+
+`RrClientBuilder::with_batching(BatchConfig)` enables Kafka-producer-style write batching
+(**off by default**). Unkeyed `send_request` writes accumulate per partition and flush as
+**one Raft entry** when `max_entries` / `max_bytes` is reached or `linger` elapses; the
+apply side splits the batch frame and calls `Service::handle` per item, packing responses
+positionally. Idempotency-keyed writes always bypass the batcher. Measured gain: 6×
+throughput on concurrent writes; cost: serial writes pay the linger — keep it off for
+latency-bound callers. Requires servers with batch-aware apply; incompatible with deferred
+(A-0033) services; `max_buffered` caps memory with fail-fast backpressure.
+
 ## 自动领导者重定向 / Auto Leader Redirect
 
 `RrClient` 实现了透明的领导者重定向逻辑：
@@ -127,10 +164,10 @@ let cluster_info = client.get_cluster_info().await?;
 println!("Groups in cluster: {:?}", cluster_info.groups);
 ```
 
-:::caution
-服务端目前为 `ClusterInfo` 返回的是占位数据：每个 `GroupInfo` 只有 `group_id` 是真实值，`leader_node_id` 恒为 `0`，`replica_node_ids` 为空。需要真实的 leader / 成员信息时请使用 Admin API（`rr-admin`）。
+:::info
+`GetClusterInfo` 返回真实运行时拓扑（`leader_node_id` 来自 raft metrics，选主窗口期为 `0`——0 不是合法 NodeId；`replica_node_ids` 为完整成员集）。
 
-The server currently returns placeholder data for `ClusterInfo`: in each `GroupInfo` only `group_id` is real — `leader_node_id` is always `0` and `replica_node_ids` is empty. Use the Admin API (`rr-admin`) when you need real leader / membership information.
+`GetClusterInfo` returns real runtime topology (`leader_node_id` comes from raft metrics and is `0` mid-election — 0 is not a valid NodeId; `replica_node_ids` is the full membership).
 :::
 
 ## 错误处理 / Error Handling

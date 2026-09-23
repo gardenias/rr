@@ -108,6 +108,24 @@ struct Args {
     #[arg(long)]
     use_tcp_transport: bool,
 
+    /// Enable client-side write batching (opt-in, rr-client `BatchConfig`).
+    /// Packs unkeyed writes into shared Raft entries per partition.
+    #[arg(long)]
+    client_batching: bool,
+
+    /// Batch flush threshold in entries (with --client-batching).
+    #[arg(long, default_value = "64")]
+    batch_max_entries: usize,
+
+    /// Batch flush threshold in accumulated payload bytes (with
+    /// --client-batching).
+    #[arg(long, default_value = "1048576")]
+    batch_max_bytes: usize,
+
+    /// Batching linger in milliseconds (with --client-batching).
+    #[arg(long, default_value = "5")]
+    batch_linger_ms: u64,
+
     /// Optional per-service client-side rate limit (requests/sec) passed to
     /// every rr-server node (`--client-rps`). Use to measure the cluster
     /// under self-protecting backpressure.
@@ -854,6 +872,14 @@ async fn connect_client(addrs: Vec<String>, args: &Args) -> Result<RrClient> {
             .filter(|t| !t.is_empty())
             .with_context(|| format!("--token-env {env_var}: variable not set or empty"))?;
         builder = builder.with_bearer_token(token);
+    }
+    if args.client_batching {
+        builder = builder.with_batching(rr_client::BatchConfig {
+            max_entries: args.batch_max_entries,
+            max_bytes: args.batch_max_bytes,
+            linger: Duration::from_millis(args.batch_linger_ms),
+            ..rr_client::BatchConfig::default()
+        });
     }
     builder.build().await.context("RrClient connect failed")
 }

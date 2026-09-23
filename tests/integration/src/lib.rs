@@ -4,6 +4,8 @@
 //! exercising Raft leader election, fault tolerance, and multi-group routing.
 
 #[cfg(test)]
+mod client_batching;
+#[cfg(test)]
 mod cross_tier_ingestor;
 pub mod fault_injection;
 #[cfg(test)]

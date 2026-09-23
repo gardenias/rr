@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in client-side write batching** (`rr-client`, off by default):
+  `RrClientBuilder::with_batching(BatchConfig)` enables Kafka-producer-style
+  batching with `max_entries` / `max_bytes` / `linger` / `max_buffered`
+  (backpressure) knobs. Unkeyed `send_request` writes accumulate per
+  partition and flush as ONE Raft entry (`rr_core::batch` frame, magic
+  `\0rrBAT01`); the apply side splits the frame and calls the service per
+  item, packing responses positionally. Idempotency-keyed writes bypass the
+  batcher. Measured (S2 k=200 mem, 64/batch, linger 1ms): **175.2k TPS vs
+  ~29k unbatched (6×)**, p50 686µs. Trade-off: serial (S1) writes pay the
+  linger (p50 161µs → 3.1ms) — keep batching off for latency-bound callers.
+  Requires servers whose apply path splits batch frames (this release);
+  against older servers batches fail loudly, never fake-success. Not
+  compatible with deferred two-phase apply (A-0033) services.
+- **`EtcdConfigProvider` revision-probe snapshot cache**: `get_routing_table`
+  / `routing_table_snapshot` no longer reconnect AND full-prefix-scan per
+  call — the provider holds one shared `Client` and serves snapshots from a
+  revision-keyed cache, probing the store revision with a tiny keys-only
+  serializable GET per call (quorum-fresh probes available via
+  `with_linearizable_probes(true)`). etcd remains the single source of truth
+  (INV-6); a table write is visible from the next probe onward.
 - **`ConfigProvider::routing_table_snapshot()`** (semver-minor): new defaulted
   trait method returning `Arc<RoutingTable>`. `MemConfigProvider` switches to
   copy-on-write `Arc` snapshots and overrides it, so `ShardRouter::route` no

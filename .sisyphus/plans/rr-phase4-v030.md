@@ -28,6 +28,7 @@
 | [A-0001 CommandIngestor](../adr/A-0001-command-ingestor-abstraction.md) | T1 (framework wrapper) + T3 (ingestor crate) |
 | [A-0002 Snapshot contract + recovery](../adr/A-0002-snapshot-consistency-and-recovery.md) | T0.1 + T0.2 + T0.3 |
 | [A-0003 Idempotency](../adr/A-0003-framework-idempotency-layer.md) | T1 (framework wrapper) + T2 (idempotency layer) |
+| [A-0017 Service Bytes 化](../adr/A-0017-service-bytes-migration.md) | **新增候选(2026-09-23 立项)**:共享本版本的破坏性窗口;改动面与迁移桥设计见 ADR。是否纳入 v0.3.0 在 kickoff 评审裁定,不纳入则顺延为下一破坏窗口的首个候选 |
 
 ## Dependency Graph
 
@@ -678,3 +679,4 @@ Moves to Tier 2 roadmap (not part of this plan):
 | Date | Change | Trigger |
 |---|---|---|
 | 2026-04-24 | Initial draft | I/O design session with Louis; user requested execution plan for combined A-0001/A-0002/A-0003 shipment |
+| 2026-09-23 | A-0017(Service Bytes 化)立项并加入 ADR 映射表(候选,共享破坏窗口) | 2026-09-22 全项目 review(100k roadmap M2):`Service::handle(Vec<u8>)` 所有权签名强制 apply 路径逐 entry 拷贝 |

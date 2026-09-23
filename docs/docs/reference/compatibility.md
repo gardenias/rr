@@ -72,6 +72,18 @@ or `repeated`); field numbers, once assigned, are never reused.
 
 **承诺 / Commitment**: patch-level 升级（`0.2.0 → 0.2.1`）可以直接滚动重启；无需迁移。
 
+**日志 payload 解释约定 / Log payload interpretation**: Raft log 条目的 payload 对存储层是
+不透明字节,但 apply 侧按 magic 前缀解释信封:`\0rrENT01` = `FramedEntry`(offset/幂等键),
+`\0rrBAT01` = client 批处理帧(apply 时拆分,逐条进 service)。无 magic = 原始应用字节
+(v0.2.x 语义)。**回滚注意**:批处理开启期间产生的 `\0rrBAT01` 条目被旧版本(无拆分逻辑)
+按单条不透明 payload 交给 service——回滚前请关闭 client 批处理并滚动重启。
+
+Entry payloads are opaque to storage but interpreted by magic prefix at apply:
+`\0rrENT01` = `FramedEntry`, `\0rrBAT01` = client batch frame (split at apply),
+no magic = raw application bytes (v0.2.x semantics). **Rollback**: entries written
+while client batching was enabled are handed to the service as one opaque payload
+by older binaries — disable client batching before downgrading.
+
 在 MAJOR 或 pre-1.0 MINOR 间，可能需要:
 - 先运行 `rr-admin backup` → shutdown → clean data_dir → upgrade → restore
 - 或提供专门的迁移工具（会在该版本 CHANGELOG 说明）

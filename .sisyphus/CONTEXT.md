@@ -5,7 +5,8 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-22（**100k roadmap 首轮执行：M1 TCP 量化(+5.6% 非杠杆)、M2 热路径 metrics 零分配化 + MemConfigProvider Arc 快照、mimalloc A/B 否决(macOS)；路由缓存提案因 INV-6 明文否决、改 provider 内快照形态**）
+**Last updated**: 2026-09-23（**100k 目标条件达成:client 批处理 175.2k TPS(6×,默认关);etcd revision 探针缓存;A-0017 Service Bytes 化立项**）
+> 前情 2026-09-22（**100k roadmap 首轮执行:M1 TCP 量化(+5.6% 非杠杆)、M2 热路径零分配化 + Arc 快照、mimalloc A/B 否决(macOS)**）
 > 前情 2026-09-21（**W9 INV-1 全链路闭环:根因定点 + 三修复落地 + perf-lab smoke ×3 / 宿主机 oracle 5000/5000 双路实证;既有选举 flake 根治;A-0012 watch 守卫闭环**）
 > 前情 2026-09-17（**perf-lab 加固批次：soak lanes open-loop 化（134→2000/s 实测达标）、RaftService gRPC 4MiB 解码上限修复（16KiB 档 wedge 真凶）、探针取证加固；W9 罕见 INV-1 flake 立案观察**）
 > 前情 2026-09-13（**M4 完成：活性缺陷链全部定点修复；首份生产基线 17/18 绿 + W9 全长复核绿（oracle 5000/5000）——18/18 达成；判据表已回填，A-0010 已重判维持 deferred；上游 issue 草稿已备**）
@@ -25,6 +26,46 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-09-23 — client 批处理落地(100k 条件达成) + etcd 缓存 + A-0017 立项
+
+> 承接 09-22 review 的三个遗留立项。09-22 批次已 commit(`60030fd`);本 session
+> 改动见当日 commit。用户指令:推进遗留 1&2;批处理"要开关、批大小、时间限制,
+> 类似 kafka producer 最必要参数,默认不开启"。
+
+- **遗留 3(主杠杆,目标达成)— client 写批处理(opt-in,默认关)**:
+  `RrClientBuilder::with_batching(BatchConfig{max_entries, max_bytes, linger,
+  max_buffered})`(Kafka 式四旋钮;validate 拒绝 0 值)。`rr_core::batch` 帧
+  (magic `\0rrBAT01`,count+len-prefixed items)作为普通 ClientRequest.payload
+  传输,**dispatch 零改动**;apply 侧在 `ServiceStateMachineAdapter::apply_entry`
+  的 unkeyed 分支拆分,逐 item 走 immediate 路径、响应按位打包回传;客户端按序
+  解析到各 waiter。keyed 写结构性绕开(INV-3 不动);deferred(A-0033)服务声明
+  不兼容(文档化);旧服务端收到批帧 → 客户端缺响应帧响亮报错(绝不假成功)。
+  背压:跨 partition 总缓冲超 `max_buffered` 立即报错。
+  **实测 S2 k=200 mem、64 条/批、linger 1ms:175.2k TPS(对未开批 ~29k = 6×),
+  p50 686µs p99 2.4ms 0 错误**;代价 S1 串行 p50 161µs→3.1ms(linger 主导,
+  串行延迟敏感场景保持关闭)。roadmap 退出判据吞吐项转**条件达成**——转正式需
+  批处理开启态跑 crash/soak/fuzz 门禁后再议默认化。
+  测试:rr-core 编解码 roundtrip/畸形帧;adapter 拆分/畸形/透传 ×3;client 单测
+  ×4(背压 fail-fast、阈值 flush 失败响亮、keyed 绕开);integration
+  `client_batching.rs` ×3(Service 适配器集群,防 EchoSM 假阳性——纯 EchoSM 会把
+  批帧整条 echo 回去造成"看起来像通了"的巧合)。
+- **遗留 1 — etcd provider revision 探针缓存**:`EtcdConfigProvider` 持单一共享
+  `Client`(不再逐调用重连);`routing_table_snapshot` override = 每调用一次
+  keys-only/limit-1 **revision 探针**(默认 serializable,成员本地应答;`with_
+  linearizable_probes(true)` 可升级 quorum 级),revision 未变服务缓存 `Arc` 快照、
+  变了全量重扫并换存。INV-6 语义:每调用仍咨询 etcd,切换生效时点 ≤ 下一探针。
+  单测 RevisionCache ×2;e2e(testcontainers,`RR_TEST_ETCD=1`)新增
+  `routing_table_snapshot_tracks_revision`(Arc 命中 + 写后立见)。
+- **遗留 2 — Service Bytes 化立项**:ADR `A-0017-service-bytes-migration.md`
+  (status: drafted)——Vec<u8>→Bytes 五方法 + RrAppData 迁移 + 过渡桥 + bincode
+  字节兼容验证(golden corpus);已接线 `rr-phase4-v030.md` ADR 映射表(候选,
+  共享 A-0001/A-0003 破坏窗口,kickoff 裁定是否纳入 v0.3.0)。
+- **顺带修复文档漂移**:client-sdk.md 的 GetClusterInfo "占位数据" caution 已过时
+  (d677f9f 已上真实现)→ 改 info 块;compatibility.md 增补 log payload magic 约定
+  与批处理回滚注意;invariants.md INV-6 链按 etcd 探针/快照措辞刷新。
+- **perf-bench 量化开关**:`--client-batching --batch-max-entries --batch-max-bytes
+  --batch-linger-ms`(client 侧旋钮,`--cluster-addrs` 模式同样可用)。
 
 ### Session 2026-09-22 — 100k roadmap 首轮:TCP 量化 + 热路径零分配 + 分配器 A/B 否决
 

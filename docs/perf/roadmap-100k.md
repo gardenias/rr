@@ -46,8 +46,16 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
       ——瓶颈大头在 client→server gRPC 路径与每请求 CPU。不推广 RRAF 到 client 路径;
       TCP 保持实验性 loopback 选项。数据:`docs/perf/baselines/raw-20260922-s2-*-mem.json`。
 - [ ] tonic/h2 调参:initial window、max frame size、每连接并发流的实测扫描;
-- [ ] 评估 client→server 的请求级批处理(单连接多请求已有多路复用,瓶颈在帧/系统调用密度)。
-      **M1 量化后该项升为 M1 主杠杆**(client 面帧/系统调用密度是唯一未被削掉的大头)。
+- [x] 评估 client→server 的请求级批处理(2026-09-23,**主杠杆确认,目标达成**):
+      rr-client 新增 opt-in 批处理(`RrClientBuilder::with_batching(BatchConfig)`,
+      默认关;Kafka 式旋钮 max_entries/max_bytes/linger/max_buffered 背压),
+      批内 N 个写合并为**一条 Raft entry**(一次复制、一次提交),apply 侧按
+      `rr_core::batch` 帧逐条拆分、响应按位打包;keyed 写绕开批处理。
+      **实测(同环境 S2 k=200 mem,64 条/批,linger 1ms):175.2k TPS(6×),
+      p50 686µs / p99 2.4ms,0 错误**(`raw-20260923-s2-grpc-clientbatch64-mem.json`)。
+      代价:S1 串行写 p50 161µs → 3.1ms(linger 主导)——批处理是并发吞吐特性,
+      串行延迟敏感场景保持关闭(故默认关)。
+      约束:全集群需带 apply 拆分的框架版本;deferred(A-0033)服务不兼容。
 
 ### M2 — 分配与拷贝削减
 
@@ -86,6 +94,10 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
 - bench-compare 硬门禁(2026-09-22 已转 blocking)全程无红灯;
 - 若 M1+M2 后仍 <100k:如实记录单机上限,把 100k 改写为多机组扩展目标
   (前置条件:组副本集合不相交,见 `docs/docs/reference/benchmarks.md` 多组实测注记)。
+
+**判据状态(2026-09-23)**:吞吐项 **条件达成** —— opt-in 批处理下 175.2k TPS。
+转正式前尚需:批处理开启状态跑 crash harness + soak(oracle) + fuzz 门禁;
+之后评估是否对特定 profile 默认开启(串行延迟代价 161µs→3.1ms,默认关维持不变)。
 
 ## 复现 / Reproduce
 

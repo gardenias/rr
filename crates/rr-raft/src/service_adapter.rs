@@ -269,22 +269,42 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
                 }
             }
             None => {
-                if deferred {
-                    let ctx = ctx.expect("deferred apply always carries an ApplyContext");
-                    match self
-                        .service
-                        .read()
-                        .await
-                        .handle_deferred(payload, ctx)
-                        .await
-                    {
-                        Ok(dhr) => Ok(self.map_deferred_result(dhr)),
-                        Err(e) => Err(e),
+                // Client-write batching (opt-in on rr-client): an unframed
+                // payload that decodes as a batch frame is split here — each
+                // item is applied individually through the immediate path and
+                // per-item responses are packed positionally. Deferred
+                // (two-phase) services must not be combined with client
+                // batching — see `rr_core::batch` module docs.
+                match rr_core::batch::decode_batch(&payload)? {
+                    Some(items) => {
+                        let mut responses = Vec::with_capacity(items.len());
+                        for item in items {
+                            let resp = self.handle_and_collect_outputs(item, ctx).await?;
+                            responses.push(resp);
+                        }
+                        Ok(DeferredApply::Immediate(rr_core::batch::encode_batch(
+                            &responses,
+                        )))
                     }
-                } else {
-                    match self.handle_and_collect_outputs(payload, ctx).await {
-                        Ok(resp) => Ok(DeferredApply::Immediate(resp)),
-                        Err(e) => Err(e),
+                    None => {
+                        if deferred {
+                            let ctx = ctx.expect("deferred apply always carries an ApplyContext");
+                            match self
+                                .service
+                                .read()
+                                .await
+                                .handle_deferred(payload, ctx)
+                                .await
+                            {
+                                Ok(dhr) => Ok(self.map_deferred_result(dhr)),
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            match self.handle_and_collect_outputs(payload, ctx).await {
+                                Ok(resp) => Ok(DeferredApply::Immediate(resp)),
+                                Err(e) => Err(e),
+                            }
+                        }
                     }
                 }
             }
@@ -1260,5 +1280,84 @@ mod tests {
 
         let seen = seen.lock().await;
         assert_eq!(seen.as_slice(), &[rr_core::types::ApplyContext::new(9, 2)]);
+    }
+
+    // ── Client-write batching: apply-side split (rr_core::batch) ────────
+
+    struct BatchEchoService {
+        calls: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    #[async_trait]
+    impl Service for BatchEchoService {
+        async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+            self.calls.lock().await.push(request.clone());
+            Ok(request)
+        }
+        fn name(&self) -> &str {
+            "batch-echo"
+        }
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+        async fn restore(&mut self, _data: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+    }
+
+    /// A batch frame is split at apply: every item reaches the service
+    /// individually (in order) and the response is a positional batch frame.
+    #[tokio::test]
+    async fn apply_batch_frame_splits_items_and_packs_responses() {
+        let svc = BatchEchoService {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let calls = Arc::clone(&svc.calls);
+        let mut adapter = ServiceStateMachineAdapter::new(1, svc);
+
+        let items = vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()];
+        let frame = rr_core::batch::encode_batch(&items);
+        let resp = adapter.apply(&frame).await.unwrap();
+
+        assert_eq!(
+            calls.lock().await.as_slice(),
+            items.as_slice(),
+            "each batch item must reach the service exactly once, in order"
+        );
+        let decoded = rr_core::batch::decode_batch(&resp)
+            .unwrap()
+            .expect("apply of a batch must answer with a batch frame");
+        assert_eq!(decoded, items, "responses are positional echoes");
+    }
+
+    /// Malformed batch frames (magic present, body truncated) fail the apply
+    /// loudly instead of reaching the service as a corrupt payload.
+    #[tokio::test]
+    async fn apply_malformed_batch_frame_errors() {
+        let svc = BatchEchoService {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let calls = Arc::clone(&svc.calls);
+        let mut adapter = ServiceStateMachineAdapter::new(1, svc);
+
+        let mut frame = rr_core::batch::encode_batch(&[b"x".to_vec()]);
+        frame.truncate(frame.len() - 1);
+        assert!(adapter.apply(&frame).await.is_err());
+        assert!(calls.lock().await.is_empty());
+    }
+
+    /// Raw unkeyed payloads that merely lack the magic keep the verbatim
+    /// v0.2.x path — no batch interpretation.
+    #[tokio::test]
+    async fn apply_non_batch_unkeyed_payload_unchanged() {
+        let svc = BatchEchoService {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let calls = Arc::clone(&svc.calls);
+        let mut adapter = ServiceStateMachineAdapter::new(1, svc);
+
+        let resp = adapter.apply(b"plain").await.unwrap();
+        assert_eq!(resp, b"plain");
+        assert_eq!(calls.lock().await.as_slice(), &[b"plain".to_vec()]);
     }
 }
