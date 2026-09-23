@@ -152,16 +152,19 @@ tests pin the formats.
 | RRAF TCP 复制帧 | `rr-network/tcp_raft_server.rs`、`rr-raft/tcp_transport.rs` | `RRAF` | 头部 `FRAME_VERSION`（=1），不匹配即拒 | 实验性，loopback 门控 |
 | gRPC wire（proto3） | `rr-network/proto/*.proto` | — | 字段号演进（protobuf 内建） | 只允许 additive 字段 |
 | openraft 内部 bincode（raft log 条目、RPC payload） | `rr-raft` 存储/网络适配层 | — | 无（依赖 `openraft =0.10.0-alpha.34` 精确钉版承担格式稳定） | openraft 升级即格式评审点 |
-| `PersistentSnapshot`（`sm-snapshot.bin`，T1） | `rr-raft/src/snapshot_store.rs` | **无** | **无** | 已随 0.2.x 发布；裸 bincode。v0.3.0 破坏窗口内包信封（A-0017 范围），旧文件由 fail-closed 解码错误响亮暴露（runbook: 删文件从 leader 重建） |
-| 成员 sidecar（`sm-membership.bin`，A-0016） | `rr-raft/src/sm_adapter.rs` | **无** | **无** | 同上，随同一窗口处理 |
+| `PersistentSnapshot`（`sm-snapshot.bin`，T1） | `rr-raft/src/snapshot_store.rs` | `\0rrPST01` | `version`（=1） | 2026-09-23 包信封；**无 legacy 回退**——旧裸 bincode 文件按 fail-closed 响亮拒启（错误信息附恢复 runbook） |
+| 成员 sidecar（`sm-membership.bin`，A-0016） | `rr-raft/src/sm_adapter.rs` | `\0rrMBR01` | `version`（=1） | 同上日期包信封；旧文件 warn + 从空启动（刻意 fail-open 语义不变），无 legacy 回退 |
 
-**两个无版本位的已发布格式**（最后两行）不改 0.2.x 字节布局——它们的解码失败路径
-本来就是 fail-closed（响亮拒绝启动），格式演进排入 v0.3.0 窗口并附带 legacy 探测回退。
-新格式一律按本节规则引入。
+**2026-09-23 格式升级说明**：上两行的两个持久化文件在该日一步包入信封（项目处于
+预采用阶段，刻意**不保留** legacy 兼容代码）。0.2.x 旧文件：`sm-snapshot.bin`
+触发 fail-closed 启动失败（错误信息指引删除后从 leader 重建）；`sm-membership.bin`
+warn 后从空启动，成员关系由 raft 日志回放/快照恢复重建。
 
-The two shipped formats without a version field (last two rows) keep their 0.2.x
-byte layout — their decode path is already fail-closed; format evolution is
-scheduled for the v0.3.0 breaking window with a legacy-detection fallback.
+**Format upgrade note (2026-09-23)**: both persisted files were enveloped in one
+step with NO legacy fallback (project is pre-adoption). A 0.2.x `sm-snapshot.bin`
+now aborts startup fail-closed (the error names the recovery runbook);
+a 0.2.x `sm-membership.bin` is skipped with a warn and membership is rebuilt
+from the raft log/snapshot as before.
 
 ## Minimum Supported Rust Version (MSRV)
 

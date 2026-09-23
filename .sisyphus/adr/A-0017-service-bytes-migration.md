@@ -63,12 +63,12 @@ leader CPU。Bytes 化把链路上的 buffer 从"逐跳深拷贝"变为"引用�
    下不变(验证节第 3 条);`FramedSnapshot`/`FramedEntry` 外层 envelope 不动。
 5. **批次与 idempotency 格式不动**:`rr_core::batch` 帧与幂等 LRU 的 key 语义与
    buffer 类型无关,不受影响。
-6. **顺手补齐版本位(2026-09-23 审计结论)**:两个已发布但无 magic/版本位的持久化
-   文件纳入同一破坏窗口——`sm-snapshot.bin`(T1 `PersistentSnapshot`)与
-   `sm-membership.bin`(A-0016 sidecar)。新规:带 `\0rrSNAP1`-系信封 + 版本位,
-   解码端先试新信封、无 magic 回退 legacy 裸 bincode 解码(一次性自动迁移,
-   迁移成功后按新格式落盘)。版本位约定见
-   `docs/docs/reference/compatibility.md` 的"字节格式版本约定"。
+6. ~~**顺手补齐版本位(2026-09-23 审计结论)**~~ → **已提前于 2026-09-23 执行
+   (无兼容代码)**:两个已发布但无 magic/版本位的持久化文件当日一步包信封——
+   `sm-snapshot.bin`(`\0rrPST01` + version)与 `sm-membership.bin`(`\0rrMBR01` +
+   version)。项目处于预采用阶段,决策改为**不留 legacy 回退**:旧文件按既有失败
+   语义处理(snapshot store fail-closed 响亮拒启、membership sidecar warn + 从空
+   启动)。本 ADR 范围内不再包含该项。
 
 ### 否决的替代方案
 

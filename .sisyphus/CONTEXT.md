@@ -71,9 +71,12 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
   靠字段号;openraft 内部 bincode 由精确钉版兜底。**批帧补上漏掉的 `version: u8`**
   (尚未发布,免费窗口)+ 未来版本拒绝测试 + 金色语料第 7 样本(`batch_frame_basic.bin`,
   漂移绊线)。**两个已发布的无版本位文件**(`sm-snapshot.bin` T1、`sm-membership.bin`
-  A-0016 sidecar)不动 0.2.x 布局——fail-closed 解码保底,信封化 + legacy 回退排入
-  A-0017 破坏窗口(ADR 第 6 条)。新规写进 `compatibility.md`"字节格式版本约定":
-  新格式必须 magic + 版本位 + 拒绝未来版本。
+  A-0016 sidecar)——**按用户决策(项目预采用、无外部用户)当日一步包信封、
+  刻意不留兼容代码**:信封 `\0rrPST01` / `\0rrMBR01` + version=1,各自保持既有失败
+  语义(snapshot store fail-closed 响亮拒启、sidecar fail-open warn+空启动);
+  新增拒绝测试 ×5(无信封/坏 body/未来版本)。A-0017 第 6 条标记提前执行完毕。
+  新规写进 `compatibility.md`"字节格式版本约定":新格式必须 magic + 版本位 +
+  拒绝未来版本。
 
 ### Session 2026-09-22 — 100k roadmap 首轮:TCP 量化 + 热路径零分配 + 分配器 A/B 否决
 

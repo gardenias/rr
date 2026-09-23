@@ -17,12 +17,18 @@
 //!
 //! # Layout & durability
 //!
-//! One live snapshot per Raft group, stored as a single bincode file next to
-//! the group's RocksDB directory (following the `sm-membership.bin` sidecar
-//! precedent). Writes are atomic: the payload is written to a `*.tmp` sibling,
+//! One live snapshot per Raft group, stored next to the group's RocksDB
+//! directory (following the `sm-membership.bin` sidecar precedent) as a
+//! single enveloped file: `SNAPSHOT_STORE_MAGIC | version: u8 | bincode body`.
+//! Writes are atomic: the payload is written to a `*.tmp` sibling,
 //! `fsync`ed, then `rename`d over the live file and the parent directory is
 //! `fsync`ed. A crash mid-write therefore leaves either the old or the new
 //! snapshot — never a torn one — and a leftover `*.tmp` is ignored on load.
+//!
+//! The envelope carries a schema version (house byte-format versioning
+//! policy). Files without the envelope — including pre-versioning 0.2.x
+//! files — are rejected loudly on load (see `load`'s fail-closed policy);
+//! there is no legacy fallback.
 
 use std::io;
 use std::io::Write;
@@ -34,6 +40,43 @@ use openraft::type_config::alias::SnapshotMetaOf;
 use openraft::type_config::alias::StoredMembershipOf;
 
 use crate::type_config::RrTypeConfig;
+
+/// Envelope magic identifying the snapshot-store file (house magic
+/// convention, distinct from `FramedSnapshot` / `FramedEntry` / batch).
+pub(crate) const SNAPSHOT_STORE_MAGIC: [u8; 8] = *b"\0rrPST01";
+
+/// Current schema version of the snapshot-store envelope. Decoders reject
+/// `version > current` loudly rather than guessing at an unknown layout.
+pub(crate) const SNAPSHOT_STORE_VERSION: u8 = 1;
+
+const ENVELOPE_HEADER_LEN: usize = SNAPSHOT_STORE_MAGIC.len() + 1;
+
+/// Strip and validate the envelope, returning the bincode body. Files
+/// without the envelope (including pre-versioning 0.2.x files) and future
+/// schema versions are both rejected — the caller's fail-closed policy
+/// turns that into a loud startup abort with the recovery runbook
+/// (inspect/delete the file; the node rebuilds from the leader).
+fn envelope_body<'a>(bytes: &'a [u8], path: &Path) -> Result<&'a [u8], io::Error> {
+    if bytes.len() < ENVELOPE_HEADER_LEN
+        || bytes[..SNAPSHOT_STORE_MAGIC.len()] != SNAPSHOT_STORE_MAGIC
+    {
+        return Err(io::Error::other(format!(
+            "snapshot store: {} is not a snapshot-store envelope (missing magic — \
+             pre-versioning 0.2.x file or wrong file); inspect/delete it to rebuild \
+             from the leader",
+            path.display()
+        )));
+    }
+    let version = bytes[SNAPSHOT_STORE_MAGIC.len()];
+    if version > SNAPSHOT_STORE_VERSION {
+        return Err(io::Error::other(format!(
+            "snapshot store: {} has schema version {version} > supported \
+             {SNAPSHOT_STORE_VERSION} — upgrade the framework",
+            path.display()
+        )));
+    }
+    Ok(&bytes[ENVELOPE_HEADER_LEN..])
+}
 
 /// The persisted unit: the snapshot payload plus the two pieces of meta
 /// OpenRaft needs to resume from it (`SnapshotMeta` itself is
@@ -120,16 +163,17 @@ impl SnapshotStore {
                 ))
             }
         };
-        let (snap, _): (PersistentSnapshot, usize) =
-            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).map_err(
-                |e| {
-                    io::Error::other(format!(
-                        "snapshot store: failed to decode {} ({} bytes): {e}",
-                        self.path.display(),
-                        bytes.len()
-                    ))
-                },
-            )?;
+        let (snap, _): (PersistentSnapshot, usize) = bincode::serde::decode_from_slice(
+            envelope_body(&bytes, &self.path)?,
+            bincode::config::standard(),
+        )
+        .map_err(|e| {
+            io::Error::other(format!(
+                "snapshot store: failed to decode {} ({} bytes): {e}",
+                self.path.display(),
+                bytes.len()
+            ))
+        })?;
         Ok(Some(snap))
     }
 
@@ -140,8 +184,12 @@ impl SnapshotStore {
     /// snapshot as durable as the Raft log before OpenRaft purges the covered
     /// prefix (which only happens *after* a successful build/install).
     pub(crate) fn save(&self, snap: &PersistentSnapshot) -> Result<(), io::Error> {
-        let bytes = bincode::serde::encode_to_vec(snap, bincode::config::standard())
+        let body = bincode::serde::encode_to_vec(snap, bincode::config::standard())
             .map_err(|e| io::Error::other(format!("snapshot store: encode failed: {e}")))?;
+        let mut bytes = Vec::with_capacity(ENVELOPE_HEADER_LEN + body.len());
+        bytes.extend_from_slice(&SNAPSHOT_STORE_MAGIC);
+        bytes.push(SNAPSHOT_STORE_VERSION);
+        bytes.extend_from_slice(&body);
 
         let tmp = self.tmp_path();
         {
@@ -309,18 +357,57 @@ mod tests {
     }
 
     #[test]
-    fn load_corrupt_snapshot_fails_closed() {
+    fn load_missing_envelope_fails_closed_with_runbook_hint() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sm-snapshot.bin");
+        // Pre-versioning 0.2.x file (or any foreign bytes): no envelope.
         std::fs::write(&path, b"not-valid-bincode\x00\x01").unwrap();
 
         let store = SnapshotStore::new(path);
         let err = store.load().unwrap_err();
-        // Fail-closed: corruption surfaces as an error, never as "no snapshot"
-        // (which would silently restart the state machine empty).
+        // Fail-closed: an unreadable snapshot surfaces as an error, never as
+        // "no snapshot" (which would silently restart the state machine empty).
+        assert!(
+            err.to_string().contains("not a snapshot-store envelope"),
+            "expected an envelope error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("delete"),
+            "error should point at the recovery runbook: {err}"
+        );
+    }
+
+    #[test]
+    fn load_corrupt_envelope_body_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sm-snapshot.bin");
+        let mut bytes = Vec::from(SNAPSHOT_STORE_MAGIC);
+        bytes.push(SNAPSHOT_STORE_VERSION);
+        bytes.extend_from_slice(b"garbage-body");
+        std::fs::write(&path, bytes).unwrap();
+
+        let store = SnapshotStore::new(path);
+        let err = store.load().unwrap_err();
         assert!(
             err.to_string().contains("decode"),
             "expected a decode error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_future_version_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sm-snapshot.bin");
+        let mut bytes = Vec::from(SNAPSHOT_STORE_MAGIC);
+        bytes.push(SNAPSHOT_STORE_VERSION + 1);
+        bytes.extend_from_slice(b"whatever");
+        std::fs::write(&path, bytes).unwrap();
+
+        let store = SnapshotStore::new(path);
+        let err = store.load().unwrap_err();
+        assert!(
+            err.to_string().contains("version"),
+            "expected a version error, got: {err}"
         );
     }
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Durable-artifact formats enveloped, no legacy fallback** (pre-adoption
+  breaking change, 2026-09-23): `sm-snapshot.bin` (T1 `PersistentSnapshot`)
+  and `sm-membership.bin` (A-0016 sidecar) now carry a magic + version
+  envelope (`\0rrPST01` / `\0rrMBR01`, version 1). Files written by 0.2.x
+  are NOT read by this build: a stale `sm-snapshot.bin` aborts startup
+  fail-closed (the error names the recovery runbook — delete the file, the
+  node rebuilds from the leader); a stale `sm-membership.bin` is skipped
+  with a warn and membership is rebuilt from the raft log/snapshot as
+  before. Decoders reject future schema versions loudly.
+
 ### Added
 
 - **Opt-in client-side write batching** (`rr-client`, off by default):

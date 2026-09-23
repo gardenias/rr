@@ -25,6 +25,28 @@ use crate::snapshot_store::PersistentSnapshot;
 use crate::snapshot_store::SnapshotStore;
 use crate::type_config::RrTypeConfig;
 
+/// Envelope magic identifying the membership-sidecar file (house magic
+/// convention, distinct from `FramedSnapshot` / snapshot-store / batch).
+pub(crate) const MEMBERSHIP_SIDECAR_MAGIC: [u8; 8] = *b"\0rrMBR01";
+
+/// Current schema version of the membership-sidecar envelope.
+pub(crate) const MEMBERSHIP_SIDECAR_VERSION: u8 = 1;
+
+/// Strip and validate the membership-sidecar envelope. Returns a static
+/// reason string on any mismatch — the caller logs it and starts empty
+/// (the sidecar is deliberately fail-open).
+fn membership_envelope_body(bytes: &[u8]) -> Result<&[u8], &'static str> {
+    let header = MEMBERSHIP_SIDECAR_MAGIC.len() + 1;
+    if bytes.len() < header || bytes[..MEMBERSHIP_SIDECAR_MAGIC.len()] != MEMBERSHIP_SIDECAR_MAGIC {
+        return Err("not a membership-sidecar envelope (missing magic — pre-versioning file)");
+    }
+    let version = bytes[MEMBERSHIP_SIDECAR_MAGIC.len()];
+    if version > MEMBERSHIP_SIDECAR_VERSION {
+        return Err("sidecar schema version newer than supported — upgrade the framework");
+    }
+    Ok(&bytes[header..])
+}
+
 /// Bridges openraft's `RaftStateMachine` to the user-defined `StateMachine` trait.
 pub struct RrStateMachine {
     inner: Box<dyn StateMachine>,
@@ -88,10 +110,27 @@ impl RrStateMachine {
     /// W7 reproduced this 2/2). Only committed memberships are written
     /// (apply/install paths), never last_applied — replay positioning must
     /// keep coming from openraft, since the inner SM's data is not durable.
+    ///
+    /// File format: `MEMBERSHIP_SIDECAR_MAGIC | version: u8 | bincode body`.
+    /// A file without the envelope (including pre-versioning 0.2.x files) or
+    /// with a future version is skipped with a warn (the sidecar is
+    /// deliberately fail-open, see `persist_membership`).
     pub fn with_membership_sidecar(mut self, path: std::path::PathBuf) -> Self {
         match std::fs::read(&path) {
             Ok(bytes) => {
-                match bincode::serde::decode_from_slice(&bytes, bincode::config::standard()) {
+                let body = match membership_envelope_body(&bytes) {
+                    Ok(body) => body,
+                    Err(reason) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            reason,
+                            "membership sidecar skipped, starting empty"
+                        );
+                        self.membership_sidecar = Some(path);
+                        return self;
+                    }
+                };
+                match bincode::serde::decode_from_slice(body, bincode::config::standard()) {
                     Ok((membership, _)) => {
                         self.last_membership = membership;
                     }
@@ -123,7 +162,7 @@ impl RrStateMachine {
         let Some(path) = &self.membership_sidecar else {
             return;
         };
-        let bytes =
+        let body =
             match bincode::serde::encode_to_vec(&self.last_membership, bincode::config::standard())
             {
                 Ok(b) => b,
@@ -132,6 +171,10 @@ impl RrStateMachine {
                     return;
                 }
             };
+        let mut bytes = Vec::with_capacity(MEMBERSHIP_SIDECAR_MAGIC.len() + 1 + body.len());
+        bytes.extend_from_slice(&MEMBERSHIP_SIDECAR_MAGIC);
+        bytes.push(MEMBERSHIP_SIDECAR_VERSION);
+        bytes.extend_from_slice(&body);
         if let Err(e) = std::fs::write(path, bytes) {
             tracing::warn!(error = %e, "membership sidecar write failed");
         }
@@ -788,6 +831,46 @@ mod tests {
         assert!(
             !sidecar.exists(),
             "no sidecar may be created before a membership is applied"
+        );
+    }
+
+    /// A file without the envelope (pre-versioning 0.2.x sidecar) is skipped
+    /// with a warn — the adapter starts empty instead of guessing.
+    #[tokio::test]
+    async fn test_membership_sidecar_legacy_file_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sm-membership.bin");
+        std::fs::write(&sidecar, b"pre-versioning-raw-bincode").unwrap();
+
+        let mut sm =
+            RrStateMachine::new(Box::new(VecSM { state: vec![] })).with_membership_sidecar(sidecar);
+        let (_, membership) = sm.applied_state().await.unwrap();
+        assert_eq!(
+            membership.membership().nodes().count(),
+            0,
+            "a non-envelope sidecar must be skipped, not decoded"
+        );
+    }
+
+    /// An envelope with a future schema version is skipped the same way.
+    #[tokio::test]
+    async fn test_membership_sidecar_future_version_starts_empty() {
+        use super::{MEMBERSHIP_SIDECAR_MAGIC, MEMBERSHIP_SIDECAR_VERSION};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sm-membership.bin");
+        let mut bytes = Vec::from(MEMBERSHIP_SIDECAR_MAGIC);
+        bytes.push(MEMBERSHIP_SIDECAR_VERSION + 1);
+        bytes.extend_from_slice(b"whatever");
+        std::fs::write(&sidecar, bytes).unwrap();
+
+        let mut sm =
+            RrStateMachine::new(Box::new(VecSM { state: vec![] })).with_membership_sidecar(sidecar);
+        let (_, membership) = sm.applied_state().await.unwrap();
+        assert_eq!(
+            membership.membership().nodes().count(),
+            0,
+            "a future-version sidecar must be skipped, not decoded"
         );
     }
 
