@@ -5,7 +5,7 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-24（**review 落地波收尾:invariants.md 登记 43 测试/113 links 全绿 + 门禁复验(fmt 遗留修复/clippy/fuzz 编译);仍未 commit,待用户决策**）
+**Last updated**: 2026-09-24（**A–E 波次+收尾已 commit & push(`d65f74e`,130 文件,gitnexus 索引刷新 7821 节点);批处理开启态 crash/fuzz/soak 三门禁本地实证全绿;远端 CI 幻影事故,cron 重试已挂**）
 > 前情 2026-09-23 深夜场（**review 批次 A–E 全部落地（89+ 文件,门禁全绿）;批次 C 收官:连接扇出实证 2.4×,批+扇出 121.2k TPS;未 commit,待用户决策**）
 > 前情 2026-09-23 晚场（**全项目全新 review:9 agent 并行全新分析,6 个 P0 全部实证到行;报告 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`**）
 > 前情 2026-09-23 早场（**100k 目标条件达成:client 批处理 175.2k TPS(6×,默认关);etcd revision 探针缓存;A-0017 Service Bytes 化立项**）
@@ -62,9 +62,36 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 - **detect_changes**(scope=all):825 changed symbols / 504 affected / 101 files /
   risk=critical——纯计数阈值;主体为 A–E 波次,本 session 增量为注释/文档/fmt 空白
   + `scenarios.rs` teardown 的 batch_lane 消费段(测试 harness 内部,3 个同文件调用点)。
-- **下轮候选**:commit(待用户拍板,建议按"P0 修复/批次 B–E/invariants 登记"切分或
-  单 commit,提交后刷新 gitnexus 索引);批处理开启态 crash/soak/fuzz 门禁实跑(100k
-  判据转正式的前置);`BatchConfig::ordered` 旋钮与 ADR A-0018 评审(v0.3.0 kickoff)。
+
+**Session 2026-09-24(下半场)— commit & push + 批处理开启态三门禁实证(用户:"commit & push & 刷新 gitnexus;继续下轮")**
+
+- **已 commit & push**:`d65f74e`(130 文件,+13125/−1387)= A–E 波次 + 上午收尾;
+  本地不再领先 origin。gitnexus 索引已刷新(7821 节点 / 19677 边 / 250 clusters /
+  631 flows)。
+- **批处理开启态门禁首轮实证(本地,全绿)**:
+  ① crash harness 全量 **11/11**(批处理道默认开;scenario A/B/C 批道
+  sent=168/785/1171,`corrupted=0` ×3,失败均为 kill 窗口连接错误=设计语义
+  max_retries=0;主 oracle 571/571 · 125/125 · 949/949);
+  ② fuzz 双 batch target 各 241s 共 **81M runs 零 crash**(本机新装 cargo-fuzz
+  0.13.2,已登记 INSTALLED-SOFTWARE.md);
+  ③ soak 批处理+unkeyed 道 smoke:**Docker 路径被堵**(本机无 `rust:1.98-bookworm`
+  等基础镜像且 registry 不可达;`soak.sh` 顺手改为只拉起 oracle 实际使用的 kv 服务,
+  `SOAK_WITH_OBSERVABILITY=1` 恢复 prom/grafana——脚本此前从不查询它们)→
+  **宿主机路径跑通**(一次性编排 `target/soak-host/soak-host.sh`,不入库):180s ×
+  200/s + `--client-batching --soak-unkeyed-ratio 0.1`,1×SIGKILL(node1 重启追平),
+  lag 60s 内收敛(35954 三一致),**oracle 5000/5000**(replay 1232 + survival 3275 +
+  unkeyed 493),零 panic。
+- **远端 CI(重大环境状况,如实记录)**:GitHub Actions 幻影事故——自 ~09-21 起
+  该仓**全部** workflow run 零步骤秒败(3-11s)、日志 BlobNotFound,githubstatus
+  误报 operational(与 5f7b9ee 所述事故同款);09-21 的 ci 修复提交(protoc/libcurl)
+  从未获得干净裁决。**夜间 crash/fuzz/soak nightly 已连续 ~3 天无真实运行**。
+  我的 push 触发三连同样秒败,已重试仍秒败 → 挂 cron `01M39Z5KCH2Y0CZB3NDEFANEEM`
+  (每小时 :23)自动重试,有真实裁决即回报。注意:**semver-checks 恢复后预期红**
+  ——workspace 仍 `0.2.0` 而 v0.2.0 基线后已有多个 `!` 提交,这是发版治理的既定
+  承载红(待 0.3.0 version bump 决策,非新问题)。
+- **下轮候选**:`BatchConfig::ordered` 旋钮与 ADR A-0018 评审(v0.3.0 kickoff);
+  nightly 累积(事故解除后);Docker soak 复跑(镜像可得后,或直接 CI nightly);
+  workspace 0.3.0 / Java sdkVersion bump(发版治理)。
 
 ### Session 2026-09-23(晚场)— 全项目全新 review(9 agent 并行;6 P0 实证;零代码改动)
 

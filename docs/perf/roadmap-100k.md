@@ -121,11 +121,25 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
 - 若 M1+M2 后仍 <100k:如实记录单机上限,把 100k 改写为多机组扩展目标
   (前置条件:组副本集合不相交,见 `docs/docs/reference/benchmarks.md` 多组实测注记)。
 
-**判据状态(2026-09-23 深夜)**:吞吐项 **条件达成** —— opt-in 批处理+扇出下 121.2k TPS
+**判据状态(2026-09-24)**:吞吐项 **条件达成** —— opt-in 批处理+扇出下 121.2k TPS
 (无扇出 76.6k;扇出对未批路径 28.1k→67.4k=2.4×)。
-转正式前尚需:批处理开启态的 crash/soak/fuzz 门禁(本波已补 fuzz target 与 soak unkeyed 道,
-尚需实际跑)+ 跨批顺序串行化的吞吐代价评估(见 M3 节 ordered 旋钮决策点);
-之后评估是否对特定 profile 默认开启(串行延迟代价 161µs→3.1ms,默认关维持不变)。
+批处理开启态门禁 **首轮实证全绿(本地)**:
+- crash harness 全量 **11/11**(批处理道默认开:三场景 sent=785/168/1171,
+  `corrupted=0`;主 oracle 571/571 · 125/125 · 949/949);
+- fuzz 双 batch target 各 241s 共 **81M runs 零 crash**(decode 30.9M + roundtrip 50.2M);
+- soak 批处理+unkeyed 道 smoke(宿主机路径,180s,1×SIGKILL+重启):
+  **oracle 5000/5000**(replay 1232 + survival 3275 + **unkeyed 493**,线性一致读验证),
+  lag 60s 内收敛(last_log_index=35954 三节点一致),零 panic。
+
+证据边界(如实记录):Docker soak 路径因本机缺 `rust:1.98-bookworm` 等基础镜像且
+registry 不可达受阻——`soak.sh` 已改为只拉起其 oracle 实际使用的 kv 服务
+(`SOAK_WITH_OBSERVABILITY=1` 恢复 prom/grafana),Docker 跑通仍待镜像可得;
+远端 GitHub Actions 自 ~09-21 起处于幻影事故(全部 run 零步骤秒败、日志
+BlobNotFound,githubstatus 误报 operational),crash/fuzz/soak nightly 的批处理
+覆盖累积与 semver-checks 裁决均待事故解除。
+转正式剩余项:跨批顺序串行化的吞吐代价评估(见 M3 节 ordered 旋钮决策点,
+v0.3.0 kickoff)+ nightly 累积;之后评估是否对特定 profile 默认开启
+(串行延迟代价 161µs→3.1ms,默认关维持不变)。
 
 ## 复现 / Reproduce
 

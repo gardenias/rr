@@ -14,6 +14,9 @@
 #   SOAK_FAULT_MEAN_SECS   mean interval between faults      (default 600)
 #   SOAK_SEED              fault-schedule seed (entropy if unset)
 #   SOAK_KEEP_STACK=1      don't compose down at the end (forensics)
+#   SOAK_WITH_OBSERVABILITY=1  also start the lab's prometheus + grafana
+#                          (purely visual; the soak oracle never queries them,
+#                          and their images require Docker Hub access)
 #   SOAK_PORT_BASE         host-side health/metrics port base; kv-N answers on
 #                          SOAK_PORT_BASE+N                    (default 9110,
 #                          i.e. the stock lab's 9111-9113). The lab compose
@@ -80,9 +83,17 @@ python3 -V >/dev/null || fail "python3 not found"
 # in-network. The bench image carries the workspace's rr-perf-bench.
 
 # ── 1. cluster up ───────────────────────────────────────────────────────────
+# The soak oracle never queries Prometheus/Grafana, so only the kv services
+# are started: their rr-lab:dev image is built locally, while prom/grafana
+# must come from Docker Hub (offline/limited environments cannot pull them).
+# SOAK_WITH_OBSERVABILITY=1 also starts prometheus + grafana for eyeballing.
 log "bringing up lab stack (duration=${DURATION}s rate=${RATE}/s seed=$SEED fault-mean=${FAULT_MEAN}s)…"
+SERVICES=(kv-1 kv-2 kv-3)
+if [[ "${SOAK_WITH_OBSERVABILITY:-0}" == "1" ]]; then
+  SERVICES+=(prometheus grafana)
+fi
 $COMPOSE down -v >/dev/null 2>&1 || true
-$COMPOSE up -d --build
+$COMPOSE up -d --build "${SERVICES[@]}"
 
 cleanup() {
   if [[ "${SOAK_KEEP_STACK:-0}" != "1" ]]; then
