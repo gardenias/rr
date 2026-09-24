@@ -113,6 +113,13 @@ struct Args {
     #[arg(long)]
     client_batching: bool,
 
+    /// Number of H2 connections per server address (rr-client channel
+    /// fan-out, round-robin). Default 1 = one connection per address.
+    /// Fan-out parallelizes the server-side per-connection h2 task — the
+    /// serializer on unbatched high-concurrency paths (100k roadmap M3).
+    #[arg(long, default_value = "1")]
+    channel_fanout: usize,
+
     /// Batch flush threshold in entries (with --client-batching).
     #[arg(long, default_value = "64")]
     batch_max_entries: usize,
@@ -195,6 +202,14 @@ struct Args {
     /// [soak] Skip the post-load oracle replay.
     #[arg(long)]
     no_oracle: bool,
+
+    /// [soak] Fraction of scheduled writes sent UNKEYED (unique keys
+    /// `u:<client>:<seq>`, no idempotency key) — the only soak traffic
+    /// `--client-batching` packs. The oracle verifies unkeyed acks by
+    /// linearizable Get (unkeyed writes have no replay probe) and counts
+    /// them separately. 0.0 = keyed-only (unchanged behavior).
+    #[arg(long, default_value = "0.0")]
+    soak_unkeyed_ratio: f64,
 
     // ── Open-loop scenarios (mix / wladder, rr-prod-perf M2) ────────────────
     // These knobs apply ONLY to `--scenario mix|wladder`; they are ignored
@@ -362,6 +377,30 @@ async fn main() -> Result<()> {
         .try_init();
 
     let args = Args::parse();
+
+    // Batching packs UNKEYED writes only (rr-client `BatchConfig`; keyed
+    // idempotent writes bypass the batcher by design), so a keyed-only soak
+    // would silently never exercise it. Fail loudly instead of producing a
+    // "batched" run that wasn't. S1/S2/S3 and mix/wladder send unkeyed
+    // writes, so batching is real there.
+    if args.client_batching && args.scenario == Scenario::Soak && args.soak_unkeyed_ratio <= 0.0 {
+        anyhow::bail!(
+            "--client-batching has no effect with --scenario soak at --soak-unkeyed-ratio 0: \
+             soak traffic is keyed idempotent writes, which bypass the batcher. Give the \
+             batcher traffic with --soak-unkeyed-ratio > 0 (e.g. 0.1) or drop --client-batching."
+        );
+    }
+    if !(0.0..=1.0).contains(&args.soak_unkeyed_ratio) {
+        anyhow::bail!(
+            "--soak-unkeyed-ratio must be within 0.0..=1.0, got {}",
+            args.soak_unkeyed_ratio
+        );
+    }
+    if args.soak_unkeyed_ratio != 0.0 && args.scenario != Scenario::Soak {
+        eprintln!(
+            "[rr-perf-bench] note: --soak-unkeyed-ratio applies to --scenario soak only; ignoring"
+        );
+    }
 
     // Open-loop knobs are silently meaningless for the closed-loop scenarios —
     // say so instead of letting a typo'd scenario flag eat them.
@@ -636,6 +675,7 @@ async fn main() -> Result<()> {
             oracle_sample: args.oracle_sample,
             skip_oracle: args.no_oracle || args.oracle_only,
             op_timeout: Duration::from_secs(args.op_timeout_secs),
+            unkeyed_ratio: args.soak_unkeyed_ratio,
         };
 
         if args.oracle_only {
@@ -646,12 +686,13 @@ async fn main() -> Result<()> {
             );
             let oracle = soak::run_oracle(Arc::clone(&client), &cfg).await?;
             println!(
-                "soak oracle: {}/{} verified in {:.1}s (replay {} + survival-only {})",
+                "soak oracle: {}/{} verified in {:.1}s (replay {} + survival-only {} + unkeyed {})",
                 oracle.verified,
                 oracle.checked,
                 oracle.elapsed_secs,
                 oracle.replay_verified,
-                oracle.survival_only
+                oracle.survival_only,
+                oracle.unkeyed_verified
             );
             soak_summary = Some(soak::SoakSummary {
                 duration_secs: 0,
@@ -662,6 +703,8 @@ async fn main() -> Result<()> {
                 failed: 0,
                 reads_ok: 0,
                 reads_failed: 0,
+                unkeyed_sent: 0,
+                unkeyed_acked: 0,
                 ack_log_records: oracle.sampled_from,
                 started_unix_secs: None,
                 server_side: None,
@@ -669,25 +712,28 @@ async fn main() -> Result<()> {
             });
         } else {
             println!(
-                "soak: {} writes/s for {}s, ack log {}",
+                "soak: {} writes/s for {}s (unkeyed ratio {:.2}), ack log {}",
                 cfg.rate_per_sec,
                 cfg.duration.as_secs(),
+                cfg.unkeyed_ratio,
                 cfg.ack_log.display()
             );
             let mut summary = soak::run_soak_load(Arc::clone(&client), &cfg).await?;
             println!(
-                "soak load done: sent={} acked={} failed={} reads_ok={} reads_failed={}",
-                summary.sent, summary.acked, summary.failed, summary.reads_ok, summary.reads_failed
+                "soak load done: sent={} acked={} failed={} reads_ok={} reads_failed={} unkeyed_sent={} unkeyed_acked={}",
+                summary.sent, summary.acked, summary.failed, summary.reads_ok,
+                summary.reads_failed, summary.unkeyed_sent, summary.unkeyed_acked
             );
             if !cfg.skip_oracle {
                 let oracle = soak::run_oracle(Arc::clone(&client), &cfg).await?;
                 println!(
-                    "soak oracle: {}/{} verified in {:.1}s (replay {} + survival-only {})",
+                    "soak oracle: {}/{} verified in {:.1}s (replay {} + survival-only {} + unkeyed {})",
                     oracle.verified,
                     oracle.checked,
                     oracle.elapsed_secs,
                     oracle.replay_verified,
-                    oracle.survival_only
+                    oracle.survival_only,
+                    oracle.unkeyed_verified
                 );
                 summary.oracle = Some(oracle);
             }
@@ -881,6 +927,7 @@ async fn connect_client(addrs: Vec<String>, args: &Args) -> Result<RrClient> {
             ..rr_client::BatchConfig::default()
         });
     }
+    builder = builder.with_channel_fanout(args.channel_fanout);
     builder.build().await.context("RrClient connect failed")
 }
 

@@ -36,6 +36,20 @@ pub enum RrError {
         /// Current dedup watermark; IDs at or below it are no longer tracked.
         watermark: u64,
     },
+    /// A keyed request tried to open a NEW idempotency namespace
+    /// (`request_type`) beyond the per-group cap
+    /// (`rr_raft::idempotency::MAX_IDEMPO_NAMESPACES`). Fail-loud guard
+    /// against unbounded watermark-map growth from client-controlled
+    /// `request_type` values; already-tracked namespaces are unaffected.
+    #[error("idempotency namespace limit exceeded: refusing new request_type '{request_type}' ({namespaces} namespaces tracked, max {max})")]
+    IdempotencyNamespaceLimitExceeded {
+        /// The rejected namespace.
+        request_type: String,
+        /// Namespaces currently tracked on this group.
+        namespaces: usize,
+        /// The configured cap.
+        max: usize,
+    },
 }
 
 /// Errors raised by the Raft consensus layer.
@@ -154,6 +168,10 @@ pub enum NetworkError {
     /// A network operation timed out.
     #[error("network timeout")]
     Timeout,
+    /// A configuration value is invalid (e.g. a client-side knob that would
+    /// wedge or misbehave); raised before any connection is attempted.
+    #[error("invalid config: {0}")]
+    InvalidConfig(String),
 }
 
 /// Errors raised while encoding or decoding payloads.

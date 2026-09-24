@@ -1,5 +1,10 @@
 # Upstream issue draft — openraft (databendlabs/openraft)
 
+> **Submitted 2026-09-21** (sanitized: rr references removed, line numbers re-verified on main @ 7703f44):
+> - Issue 1 → https://github.com/databendlabs/openraft/issues/2116
+> - Issue 2 → https://github.com/databendlabs/openraft/issues/2117
+> - Issue 3 → https://github.com/databendlabs/openraft/issues/2118
+
 > Two liveness defects found in 0.10.0-alpha.34 (also present on `main` as of
 > 2026-09-12), reproduced and root-caused by the rr perf-lab. rr currently
 > carries both as a vendored patch (`vendor/openraft` + `[patch.crates-io]`);

@@ -16,7 +16,7 @@ This page defines rr's durability boundary: what lands on disk, what lives only 
 | :--- | :--- | :--- |
 | Raft 日志 / Raft log | 内存 `BTreeMap`，重启即丢失 / in-memory, lost on restart | 每组独立 RocksDB 实例（`{base_path}/{group_id}`），fsync 由 `DurabilityPolicy` 控制 |
 | Raft vote / `last_purged` 元数据 | 同上，不持久化 | `metadata` CF，仅 `vote` 与 `last_purged` 两个键；vote 写直连 fsync（绕过 batcher） |
-| 快照 / Snapshot | **仅内存**（`Vec<u8>`） | **同样仅内存**——见下文"快照"一节 |
+| 快照 / Snapshot | **仅内存**（`Vec<u8>`） | 经 `SnapshotStore` 原子落盘到 `{base_path}/{group_id}/sm-snapshot.bin`（fail-closed）——见下文"快照"一节 |
 | 用户业务状态 / User service state | 用户 `Service` 自行负责 | 用户 `Service` 自行负责（框架不替你落盘） |
 | 框架状态（幂等/ingestor/outbox） | 随内存快照存活 | 随快照复制传播；重启后同样取决于日志与 Service 持久化 |
 
@@ -26,7 +26,7 @@ This page defines rr's durability boundary: what lands on disk, what lives only 
 | :--- | :--- | :--- |
 | Raft log | In-memory `BTreeMap`, lost on restart | Independent RocksDB instance per group (`{base_path}/{group_id}`); fsync governed by `DurabilityPolicy` |
 | Raft vote / `last_purged` metadata | Not persisted | `metadata` CF, exactly two keys: `vote` and `last_purged`; vote writes bypass the batcher and fsync directly |
-| Snapshot | **In-memory only** (`Vec<u8>`) | **Also in-memory only** — see "Snapshots" below |
+| Snapshot | **In-memory only** (`Vec<u8>`) | Persisted atomically to `{base_path}/{group_id}/sm-snapshot.bin` via `SnapshotStore` (fail-closed) — see "Snapshots" below |
 | User service state | The user `Service`'s own responsibility | Same — the framework does not persist it for you |
 | Framework state (idempotency / ingestor / outbox) | Lives with the in-memory snapshot | Propagates via snapshot replication; after restart it depends on the log and the Service's own persistence |
 

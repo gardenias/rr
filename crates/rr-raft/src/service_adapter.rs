@@ -253,9 +253,9 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         // rr_server_request_duration_seconds (dispatch total) it closes the
         // server-side latency budget: server ≈ routing + replication + apply.
         let apply_started = std::time::Instant::now();
-        let (offset, idem_key, payload) = match FramedEntry::decode(entry)? {
-            Some(framed) => (framed.offset, framed.idem_key, framed.payload),
-            None => (None, None, entry.to_vec()),
+        let (framed, offset, idem_key, payload) = match FramedEntry::decode(entry)? {
+            Some(f) => (true, f.offset, f.idem_key, f.payload),
+            None => (false, None, None, entry.to_vec()),
         };
 
         let result: Result<DeferredApply, RrError> = match idem_key {
@@ -269,13 +269,28 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
                 }
             }
             None => {
-                // Client-write batching (opt-in on rr-client): an unframed
-                // payload that decodes as a batch frame is split here — each
-                // item is applied individually through the immediate path and
-                // per-item responses are packed positionally. Deferred
-                // (two-phase) services must not be combined with client
-                // batching — see `rr_core::batch` module docs.
-                match rr_core::batch::decode_batch(&payload)? {
+                // Client-write batching (opt-in on rr-client): a raw,
+                // unframed payload that decodes as a batch frame is split
+                // here — each item is applied individually through the
+                // immediate path and per-item responses are packed
+                // positionally. Deferred (two-phase) services must not be
+                // combined with client batching — see `rr_core::batch`
+                // module docs.
+                //
+                // The split is reserved for raw client bytes: the inner
+                // payload of a FramedEntry envelope is applied verbatim, so
+                // ingestor-sourced entries (offset = Some) never have their
+                // upstream bytes re-interpreted — a Kafka record carrying
+                // the batch magic applies as-is instead of failing the apply
+                // (log poison). This also keeps
+                // `rr_core::ingress::validate_client_payload` exactly aligned
+                // with what the apply path would reject.
+                let batch = if framed {
+                    None
+                } else {
+                    rr_core::batch::decode_batch(&payload)?
+                };
+                match batch {
                     Some(items) => {
                         let mut responses = Vec::with_capacity(items.len());
                         for item in items {
@@ -288,7 +303,13 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
                     }
                     None => {
                         if deferred {
-                            let ctx = ctx.expect("deferred apply always carries an ApplyContext");
+                            let Some(ctx) = ctx else {
+                                return Err(RrError::Application(
+                                    "apply_deferred called without an ApplyContext — \
+                                     internal contract violation"
+                                        .to_string(),
+                                ));
+                            };
                             match self
                                 .service
                                 .read()
@@ -437,7 +458,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         ctx: Option<ApplyContext>,
     ) -> Result<Vec<u8>, RrError> {
         let group_id_label = self.group_id.to_string();
-        match self.idempotency.decide(&key) {
+        match self.idempotency.decide(&key)? {
             IdempotencyDecision::Replay(cached) => {
                 metrics::counter!(
                     "rr_idempotency_replays_total",
@@ -487,7 +508,7 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
             }
             IdempotencyDecision::New => {
                 let response = self.handle_and_collect_outputs(payload, ctx).await?;
-                self.idempotency.record(&key, response.clone());
+                self.idempotency.record(&key, response.clone())?;
                 metrics::gauge!(
                     "rr_idempotency_cache_size",
                     "group_id" => group_id_label
@@ -1359,5 +1380,82 @@ mod tests {
         let resp = adapter.apply(b"plain").await.unwrap();
         assert_eq!(resp, b"plain");
         assert_eq!(calls.lock().await.as_slice(), &[b"plain".to_vec()]);
+    }
+
+    /// INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
+    /// P0-1: an ingestor-sourced entry (offset present) whose payload carries
+    /// the batch magic is applied VERBATIM — never split, never failed on a
+    /// malformed frame. Upstream bytes are opaque to the framework; a Kafka
+    /// record that happens to start with the batch magic must not kill the
+    /// group.
+    #[tokio::test]
+    async fn apply_ingestor_entry_with_batch_magic_payload_applies_verbatim() {
+        let svc = BatchEchoService {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let calls = Arc::clone(&svc.calls);
+        let mut adapter = ServiceStateMachineAdapter::new(1, svc);
+
+        // Well-formed batch frame as an ingestor entry's payload: no split.
+        let inner = rr_core::batch::encode_batch(&[b"a".to_vec(), b"b".to_vec()]);
+        let entry = entry_with_offset(&inner, vec![0, 0, 0, 1]);
+        let resp = adapter.apply(&entry).await.unwrap();
+        assert_eq!(
+            resp, inner,
+            "ingestor payload must apply verbatim, not as a split batch"
+        );
+        assert_eq!(
+            calls.lock().await.as_slice(),
+            std::slice::from_ref(&inner),
+            "the service must see the whole payload exactly once"
+        );
+        assert_eq!(adapter.latest_ingestor_offset(), Some(vec![0, 0, 0, 1]));
+
+        // Malformed batch frame as an ingestor entry's payload: must NOT
+        // fail the apply — the group survives poisoned upstream bytes.
+        let mut poison = Vec::from(rr_core::batch::BATCH_FRAME_MAGIC);
+        poison.extend_from_slice(b"garbage");
+        let entry = entry_with_offset(&poison, vec![0, 0, 0, 2]);
+        let resp = adapter.apply(&entry).await.unwrap();
+        assert_eq!(resp, poison);
+        assert_eq!(adapter.latest_ingestor_offset(), Some(vec![0, 0, 0, 2]));
+    }
+
+    /// INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
+    /// A framed entry without offset or idem key whose inner payload is a
+    /// batch frame is applied verbatim: batch splitting is reserved for raw
+    /// top-level client payloads. This keeps
+    /// `rr_core::ingress::validate_client_payload` exactly aligned with what
+    /// the apply path would reject (a nested hand-crafted frame cannot
+    /// smuggle a malformed batch past ingress validation into apply).
+    #[tokio::test]
+    async fn apply_framed_entry_does_not_split_inner_batch_payload() {
+        let svc = BatchEchoService {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        let calls = Arc::clone(&svc.calls);
+        let mut adapter = ServiceStateMachineAdapter::new(1, svc);
+
+        let inner = rr_core::batch::encode_batch(&[b"a".to_vec(), b"b".to_vec()]);
+        let entry = unkeyed_entry(&inner);
+        let resp = adapter.apply(&entry).await.unwrap();
+        assert_eq!(resp, inner, "framed inner payload must apply verbatim");
+        assert_eq!(calls.lock().await.as_slice(), &[inner]);
+    }
+
+    /// No-panic invariant: the deferred path invoked without an
+    /// `ApplyContext` must return an internal error, never panic.
+    #[tokio::test]
+    async fn deferred_apply_without_context_errors_instead_of_panicking() {
+        let svc = MockService::new(b"ok".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(1, svc);
+        let err = adapter
+            .apply_entry(b"plain", None, true)
+            .await
+            .expect_err("deferred apply without a context must error, not panic");
+        assert!(
+            err.to_string().contains("ApplyContext"),
+            "error should name the missing context: {err}"
+        );
     }
 }

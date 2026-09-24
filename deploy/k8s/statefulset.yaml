@@ -1,10 +1,12 @@
 # rr — 3-node multi-Raft StatefulSet (raw manifests; the Helm chart lives in
 # deploy/helm/rr).
 #
-# DEFAULT = SECURE-ON. rr-server runs startup security gates G1-G7
-# (validate_security_invariants in crates/rr-server/src/node.rs): RaftService
-# without TLS, TLS without mTLS (require_client_cert), bearer auth without
-# TLS, and AdminService without TLS / without admin_token all REFUSE to boot.
+# DEFAULT = SECURE-ON. rr-server runs startup security gates
+# (validate_security_invariants in crates/rr-server/src/node.rs): five gates
+# (G1-G5) guard the gRPC transport — RaftService without TLS, TLS without mTLS
+# (require_client_cert), bearer auth without TLS, and AdminService without
+# TLS / without admin_token all REFUSE to boot. G6/G7 apply to the
+# experimental TCP transport, which these manifests do not use.
 # These manifests therefore reference two Secrets that you MUST create before
 # applying (they intentionally do NOT live in this repo):
 #
@@ -23,8 +25,10 @@
 # LOCAL PLAYGROUND ONLY (kind/minikube, no certs): uncomment the
 # RR_ALLOW_INSECURE env entry in the StatefulSet below, comment out the [tls]
 # section in the ConfigMap template, and drop the tls volume + volumeMount.
-# This bypasses six of the seven gates (G1-G6; the G7 TCP-loopback gate is
-# never bypassed) — never enable it outside a throwaway local cluster.
+# This bypasses the five gRPC startup gates (G1-G5) and satisfies G6's
+# insecure opt-in; G6/G7 apply to the experimental TCP transport and the G7
+# TCP-loopback gate is never bypassed — never enable it outside a throwaway
+# local cluster.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -43,6 +47,9 @@ data:
     data_dir = "/var/lib/rr/data"
     admin_port = 52001
     metrics_port = 9100
+    # Prometheus scrapes cross-pod: bind the HTTP observability server wide
+    # (v0.3.0 defaults it to loopback).
+    metrics_bind_host = "0.0.0.0"
 
     [storage]
     backend = "rocks"
@@ -203,9 +210,11 @@ spec:
                   name: rr-admin-token
                   key: token
                   optional: false
-            # LOCAL PLAYGROUND ONLY — bypasses all five startup security
-            # gates. Also comment out [tls] in the ConfigMap template and the
-            # tls volume/volumeMount below. NEVER enable in production.
+            # LOCAL PLAYGROUND ONLY — bypasses the five gRPC startup gates
+            # (G1-G5); G6/G7 apply to the experimental TCP transport (the G7
+            # loopback gate is never bypassed). Also comment out [tls] in the
+            # ConfigMap template and the tls volume/volumeMount below. NEVER
+            # enable in production.
             # - name: RR_ALLOW_INSECURE
             #   value: "true"
             - name: RUST_LOG

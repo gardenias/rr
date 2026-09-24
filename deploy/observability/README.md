@@ -8,7 +8,7 @@ Drop-in observability artifacts for an rr cluster.
 |---|---|
 | `prometheus/rr-recording-rules.yml` | Pre-computed aggregations (max lag, leader count, p99 latency, idempotency rates) |
 | `prometheus/rr-alerts.yml` | Alert rules (insecure mode, idempotency collisions, leader flap, no leader, high lag, ingestor seed failures) |
-| `grafana/rr-cluster-overview.json` | Six-panel dashboard: leaders / replication lag / proposal latency / idempotency replays / ingestor poll / auth rejects |
+| `grafana/rr-cluster-overview.json` | 24-panel dashboard in 4 row groups (throughput / latency / replication / cluster health): applied-entries TPS, per-op client latency, proposal latency, AppendEntries RTT, per-follower lag, leaders, idempotency rates & cache, ingestor health, framing decode failures, auth rejects |
 
 ## Prometheus integration
 
@@ -17,14 +17,17 @@ Drop-in observability artifacts for an rr cluster.
 scrape_configs:
   - job_name: rr
     static_configs:
-      - targets: ['rr-1:9090', 'rr-2:9090', 'rr-3:9090']
+      - targets: ['rr-1:9100', 'rr-2:9100', 'rr-3:9100']
 
 rule_files:
   - /etc/prometheus/rr/recording-rules.yml
   - /etc/prometheus/rr/alerts.yml
 ```
 
-`9090` is the default `metrics_port` from `NodeConfig`. Change to your value.
+`NodeConfig.metrics_port` defaults to `None` (metrics endpoint disabled) — there
+is no built-in default port. `9100` is the convention used by every manifest in
+this repo (lab/perf compose, k8s StatefulSet, Helm values); set the targets to
+whatever port you configured.
 
 ## Grafana import
 
@@ -80,4 +83,4 @@ Existing alert rules are preserved. Added alerts:
 - [`docs/docs/reference/metrics-reference.md`](../../docs/docs/reference/metrics-reference.md) — full per-metric reference.
 - [`docs/docs/operations/runbooks/`](../../docs/docs/operations/runbooks/) — runbooks for triggered alerts.
 
-Last updated: 2026-04-27
+Last updated: 2026-09-23

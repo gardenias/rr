@@ -119,13 +119,6 @@ removal requires a MAJOR bump. Changes are declared in CHANGELOG under
 or renaming a metric requires a MAJOR bump; adding a new metric or label
 is a MINOR.
 
-**例外 / Exception**: 见 `metrics-reference.md` 中标注 "known issue" 的 metric（目前是 `rr_snapshot_installs_total` 的硬编码 group_id 标签），会在下一个 MAJOR 里修复 — 视为 bug fix 而非 breaking change。
-
-Metrics flagged as "known issue" in `metrics-reference.md` (currently
-`rr_snapshot_installs_total`'s hardcoded `group_id` label) will be fixed
-in the next MAJOR and are treated as bug fixes rather than breaking
-changes.
-
 ## 字节格式版本约定 / Byte-Format Versioning Policy
 
 **规则（2026-09-23 起生效）**：任何**新引入**的协议层/持久化字节格式必须携带
@@ -140,6 +133,21 @@ MUST reject `version > supported` loudly. Bump the version only on incompatible
 evolution; same-version changes may only append optional trailer fields. The golden
 corpus (`crates/rr-core/tests/golden/`) plus malformed/future-version rejection
 tests pin the formats.
+
+**前向兼容边界 / Forward-compatibility boundary**：同版本内新增可选尾部字段只在
+**老 reader / 新 writer** 方向安全（老节点忽略不认识的尾部字节）。反过来——老 writer /
+新 reader 读到缺失字段——解码端按 `None` 处理，同样安全；但**新字段的生产者**只有在
+全集群都跑上新二进制后才允许开启（两阶段滚动：先全量部署"能解码新字段"的版本，再逐台
+打开写入开关）。无法安排两阶段滚动时，必须递增版本位，让老节点响亮拒解而不是猜。
+
+Additive optional trailer fields within one format version are safe in the
+**old-reader / new-writer** direction only (old nodes ignore unknown trailer
+bytes). The reverse — a new reader seeing the field absent — decodes as
+`None` and is likewise safe; but a **producer of a new field may only be
+enabled after every node runs the new binary** (two-phase rollout: deploy the
+"can-decode" build fleet-wide first, then flip the write switch node by node).
+When a two-phase rollout cannot be scheduled, the version byte MUST be bumped
+so old nodes reject loudly instead of guessing.
 
 ### 现有格式盘点 / Inventory of Existing Formats
 

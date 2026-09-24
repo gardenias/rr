@@ -42,6 +42,25 @@ pub enum KafkaIngestorError {
     /// was unset or empty.
     #[error("kafka security env var {var} unset or empty")]
     MissingSecret { var: String },
+    /// The requested seek offset is above the partition's high
+    /// watermark: the persisted offset belongs to a different/recreated
+    /// topic. Fail-closed — with `auto.offset.reset = "earliest"` an
+    /// out-of-range seek would silently replay the WHOLE topic.
+    #[error(
+        "kafka seek target {target} above high watermark {high} (low {low}) for \
+         {topic}[{partition}]; refusing to seek — check that the persisted offset matches the topic"
+    )]
+    SeekAboveWatermark {
+        topic: String,
+        partition: i32,
+        target: i64,
+        low: i64,
+        high: i64,
+    },
+    /// `offset + 1` overflowed `i64` in Kafka's next-offset arithmetic.
+    /// Fail-closed instead of wrapping to a negative sentinel.
+    #[error("kafka offset {0} has no successor (i64 overflow)")]
+    OffsetOverflow(i64),
 }
 
 impl From<KafkaIngestorError> for RrError {
@@ -50,7 +69,9 @@ impl From<KafkaIngestorError> for RrError {
             KafkaIngestorError::Config(_) | KafkaIngestorError::MissingSecret { .. } => {
                 RrError::Config(rr_core::error::ConfigError::InvalidConfig(e.to_string()))
             }
-            KafkaIngestorError::Kafka(_) => RrError::Application(format!("kafka: {e}")),
+            KafkaIngestorError::Kafka(_)
+            | KafkaIngestorError::SeekAboveWatermark { .. }
+            | KafkaIngestorError::OffsetOverflow(_) => RrError::Application(format!("kafka: {e}")),
         }
     }
 }
@@ -86,16 +107,19 @@ impl KafkaIngestor {
     ///   operators see the data loss; we don't return an error
     ///   because the rr supervisor's only recovery is to restart
     ///   from `low`, which is what auto.offset.reset already does.
-    /// - Above `high`: seeking past the end of the topic. rdkafka
-    ///   will block forever waiting for new messages — this is
-    ///   acceptable for tailing but suggests a stale persisted
-    ///   offset, so we emit a warn + metric.
+    /// - Above `high`: the persisted offset points past the end of the
+    ///   topic — it belongs to a different or recreated topic. With
+    ///   `auto.offset.reset = "earliest"` the out-of-range seek would
+    ///   NOT block: rdkafka resets to the earliest offset and replays
+    ///   the WHOLE topic. That is fail-closed territory, so this is a
+    ///   hard [`KafkaIngestorError::SeekAboveWatermark`] (plus the
+    ///   `rr_ingestor_seek_above_watermark_total{group_id}` metric).
     /// - Otherwise: clean.
     ///
     /// Watermark-fetch errors are logged but non-fatal: if the
     /// broker is reachable enough to serve the next `poll`, the
     /// validation simply degrades to a no-op for this seek.
-    async fn validate_seek_target(&self, target_offset: i64) {
+    async fn validate_seek_target(&self, target_offset: i64) -> Result<(), KafkaIngestorError> {
         let topic = self.topic.clone();
         let partition = self.partition;
         let consumer = Arc::clone(&self.consumer);
@@ -114,7 +138,7 @@ impl KafkaIngestor {
                     error = %e,
                     "fetch_watermarks failed; skipping seek-range validation"
                 );
-                return;
+                return Ok(());
             }
             Err(e) => {
                 debug!(
@@ -123,7 +147,7 @@ impl KafkaIngestor {
                     error = %e,
                     "fetch_watermarks task join failed; skipping seek-range validation"
                 );
-                return;
+                return Ok(());
             }
         };
 
@@ -144,23 +168,23 @@ impl KafkaIngestor {
                 "group_id" => group_id_label.clone()
             )
             .increment(1);
-        } else if target_offset > high {
-            warn!(
-                group_id = self.group_id,
-                topic = %self.topic,
-                partition = self.partition,
-                target = target_offset,
-                low,
-                high,
-                "kafka seek target above high watermark — poll will block until new messages \
-                 arrive; check that the persisted offset matches the topic"
-            );
+            return Ok(());
+        }
+        if target_offset > high {
             metrics::counter!(
                 "rr_ingestor_seek_above_watermark_total",
                 "group_id" => group_id_label
             )
             .increment(1);
+            return Err(KafkaIngestorError::SeekAboveWatermark {
+                topic: self.topic.clone(),
+                partition: self.partition,
+                target: target_offset,
+                low,
+                high,
+            });
         }
+        Ok(())
     }
 
     /// Construct a `KafkaIngestor` bound to `group_id`'s topic.
@@ -170,11 +194,7 @@ impl KafkaIngestor {
     /// `(topic, partition)`. Does NOT seek — the framework supervisor
     /// calls `seek()` first thing on leader promotion.
     pub async fn new(group_id: u64, cfg: KafkaIngestorConfig) -> Result<Self, KafkaIngestorError> {
-        if cfg.bootstrap_servers.is_empty() {
-            return Err(KafkaIngestorError::Config(
-                "bootstrap_servers must be non-empty".to_string(),
-            ));
-        }
+        validate_config(&cfg)?;
 
         let topic = cfg.topic_for(group_id);
         let client_id = cfg.client_id_for(group_id);
@@ -223,6 +243,47 @@ impl KafkaIngestor {
             group_id,
         })
     }
+}
+
+/// Fail-fast config validation, before any broker round-trip. Catching
+/// these at attach time beats a consumer that silently misbehaves
+/// (zero-sized polls, negative partition, half-configured SASL).
+fn validate_config(cfg: &KafkaIngestorConfig) -> Result<(), KafkaIngestorError> {
+    let invalid = |msg: &str| KafkaIngestorError::Config(msg.to_string());
+
+    if cfg.bootstrap_servers.is_empty() {
+        return Err(invalid("bootstrap_servers must be non-empty"));
+    }
+    if cfg.max_batch_size == 0 {
+        return Err(invalid("max_batch_size must be > 0"));
+    }
+    if cfg.poll_timeout.is_zero() {
+        return Err(invalid("poll_timeout must be > 0"));
+    }
+    if cfg.partition < 0 {
+        return Err(invalid("partition must be >= 0"));
+    }
+    if let Some(sec) = &cfg.security
+        && matches!(
+            sec.protocol,
+            SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl
+        )
+    {
+        if sec.sasl_mechanism.is_none() {
+            return Err(invalid(
+                "sasl_mechanism must be set when using a SASL security protocol",
+            ));
+        }
+        match (&sec.sasl_username, &sec.sasl_password_env) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(invalid(
+                    "sasl_username and sasl_password_env must be set together",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn apply_security(
@@ -283,8 +344,17 @@ impl CommandIngestor for KafkaIngestor {
     type Offset = i64;
 
     async fn seek(&mut self, offset: Option<i64>) -> Result<(), RrError> {
-        let target = match offset {
-            Some(o) => KafkaOffset::Offset(o + 1),
+        // Kafka seeks/commits address the NEXT offset to consume.
+        // checked_add: i64::MAX would wrap to a negative sentinel in
+        // release (panic in debug) — fail closed instead.
+        let target_offset = offset
+            .map(|o| {
+                o.checked_add(1)
+                    .ok_or(KafkaIngestorError::OffsetOverflow(o))
+            })
+            .transpose()?;
+        let target = match target_offset {
+            Some(o) => KafkaOffset::Offset(o),
             None => KafkaOffset::Beginning,
         };
         debug!(
@@ -294,8 +364,8 @@ impl CommandIngestor for KafkaIngestor {
             offset = ?target,
             "kafka ingestor seek"
         );
-        if let Some(target_offset) = offset.map(|o| o + 1) {
-            self.validate_seek_target(target_offset).await;
+        if let Some(target_offset) = target_offset {
+            self.validate_seek_target(target_offset).await?;
         }
         let mut tpl = TopicPartitionList::new();
         tpl.add_partition_offset(&self.topic, self.partition, target)
@@ -328,8 +398,19 @@ impl CommandIngestor for KafkaIngestor {
                             warn!(
                                 group_id = self.group_id,
                                 error = %e,
+                                batch_len = batch.len(),
                                 "kafka ingestor poll error"
                             );
+                            // Messages already in `batch` advanced the
+                            // consumer position — returning Err would
+                            // discard them, and the supervisor retries
+                            // WITHOUT re-seek, skipping those commands for
+                            // the rest of the leader tenure. Flush the
+                            // partial batch instead; the error resurfaces
+                            // on the next poll and still triggers backoff.
+                            if !batch.is_empty() {
+                                return Ok(batch);
+                            }
                             return Err(KafkaIngestorError::Kafka(e).into());
                         }
                         None => break,
@@ -341,8 +422,11 @@ impl CommandIngestor for KafkaIngestor {
     }
 
     async fn commit_applied(&mut self, offset: i64) -> Result<(), RrError> {
+        let committed = offset
+            .checked_add(1)
+            .ok_or(KafkaIngestorError::OffsetOverflow(offset))?;
         let mut tpl = TopicPartitionList::new();
-        tpl.add_partition_offset(&self.topic, self.partition, KafkaOffset::Offset(offset + 1))
+        tpl.add_partition_offset(&self.topic, self.partition, KafkaOffset::Offset(committed))
             .map_err(KafkaIngestorError::Kafka)?;
         self.consumer
             .commit(&tpl, CommitMode::Async)
@@ -361,6 +445,106 @@ mod tests {
         let cfg = KafkaIngestorConfig::default();
         let err = KafkaIngestor::new(1, cfg).await.err().unwrap();
         assert!(matches!(err, KafkaIngestorError::Config(_)));
+    }
+
+    fn valid_cfg() -> KafkaIngestorConfig {
+        KafkaIngestorConfig {
+            bootstrap_servers: vec!["localhost:9092".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_config_accepts_valid() {
+        validate_config(&valid_cfg()).unwrap();
+    }
+
+    #[test]
+    fn validate_config_rejects_zero_max_batch_size() {
+        let cfg = KafkaIngestorConfig {
+            max_batch_size: 0,
+            ..valid_cfg()
+        };
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(matches!(err, KafkaIngestorError::Config(_)));
+        assert!(err.to_string().contains("max_batch_size"));
+    }
+
+    #[test]
+    fn validate_config_rejects_zero_poll_timeout() {
+        let cfg = KafkaIngestorConfig {
+            poll_timeout: Duration::ZERO,
+            ..valid_cfg()
+        };
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("poll_timeout"));
+    }
+
+    #[test]
+    fn validate_config_rejects_negative_partition() {
+        let cfg = KafkaIngestorConfig {
+            partition: -1,
+            ..valid_cfg()
+        };
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("partition"));
+    }
+
+    fn sasl_security() -> KafkaSecurityConfig {
+        KafkaSecurityConfig {
+            protocol: SecurityProtocol::SaslSsl,
+            ssl_ca_path: None,
+            ssl_cert_path: None,
+            ssl_key_path: None,
+            ssl_key_password_env: None,
+            sasl_mechanism: Some("SCRAM-SHA-256".into()),
+            sasl_username: Some("rr".into()),
+            sasl_password_env: Some("RR_TEST_KAFKA_PASSWORD".into()),
+        }
+    }
+
+    #[test]
+    fn validate_config_rejects_sasl_without_mechanism() {
+        let cfg = KafkaIngestorConfig {
+            security: Some(KafkaSecurityConfig {
+                sasl_mechanism: None,
+                ..sasl_security()
+            }),
+            ..valid_cfg()
+        };
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("sasl_mechanism"));
+    }
+
+    #[test]
+    fn validate_config_rejects_unpaired_sasl_credentials() {
+        for (username, password_env) in [
+            (Some("rr".to_string()), None),
+            (None, Some("RR_TEST_KAFKA_PASSWORD".to_string())),
+        ] {
+            let cfg = KafkaIngestorConfig {
+                security: Some(KafkaSecurityConfig {
+                    sasl_username: username,
+                    sasl_password_env: password_env,
+                    ..sasl_security()
+                }),
+                ..valid_cfg()
+            };
+            let err = validate_config(&cfg).unwrap_err();
+            assert!(
+                err.to_string().contains("sasl_username"),
+                "expected paired-credential error, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_config_accepts_complete_sasl() {
+        let cfg = KafkaIngestorConfig {
+            security: Some(sasl_security()),
+            ..valid_cfg()
+        };
+        validate_config(&cfg).unwrap();
     }
 
     fn set_env(key: &str, val: &str) {

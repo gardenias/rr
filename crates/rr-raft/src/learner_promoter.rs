@@ -192,12 +192,94 @@ async fn evaluate_and_promote(
 
     stable_ticks.retain(|nid, _| learner_ids.contains(nid));
 
-    for nid in &learner_ids {
-        let matched = replication
-            .get(nid)
-            .and_then(|opt| opt.as_ref())
-            .map(|l| l.index)
-            .unwrap_or(0);
+    // Every learner crossing the stability threshold THIS tick goes into ONE
+    // change_membership call. Promoting one at a time would build the second
+    // call's voter set from the pre-tick membership and thereby demote the
+    // learner promoted moments earlier.
+    let promotable = plan_promotions(
+        group_id,
+        &learner_ids,
+        |nid| {
+            replication
+                .get(nid)
+                .and_then(|opt| opt.as_ref())
+                .map(|l| l.index)
+                .unwrap_or(0)
+        },
+        leader_index,
+        config,
+        stable_ticks,
+    );
+    if promotable.is_empty() {
+        return;
+    }
+
+    let mut new_voters = voter_ids.clone();
+    new_voters.extend(promotable.iter().copied());
+    info!(
+        target: AUDIT_TARGET,
+        op = "AutoPromoteLearner",
+        group_id,
+        promoted_node_ids = ?promotable,
+        new_voter_count = new_voters.len(),
+        result = "started",
+        "auto-promoting caught-up learners"
+    );
+    metrics::counter!(
+        "rr_learner_promotions_total",
+        "group_id" => group_id.to_string()
+    )
+    .increment(promotable.len() as u64);
+    match mgr.change_membership(group_id, new_voters).await {
+        Ok(()) => {
+            info!(
+                target: AUDIT_TARGET,
+                op = "AutoPromoteLearner",
+                group_id,
+                promoted_node_ids = ?promotable,
+                success = true,
+                result = "succeeded",
+                "learners auto-promoted"
+            );
+            for nid in &promotable {
+                stable_ticks.remove(nid);
+            }
+        }
+        Err(e) => {
+            warn!(
+                target: AUDIT_TARGET,
+                op = "AutoPromoteLearner",
+                group_id,
+                promoted_node_ids = ?promotable,
+                success = false,
+                result = "failed",
+                error = %e,
+                "learner auto-promotion failed; will retry next tick"
+            );
+            metrics::counter!(
+                "rr_learner_promotion_failures_total",
+                "group_id" => group_id.to_string()
+            )
+            .increment(1);
+        }
+    }
+}
+
+/// Advance every caught-up learner's stability counter and return the ids
+/// that reached `config.stability_ticks` on this tick. Pure planning, split
+/// from [`evaluate_and_promote`] so the batching rule (one change_membership
+/// per tick, no same-tick demotion) is unit-testable without a live cluster.
+fn plan_promotions(
+    group_id: GroupId,
+    learner_ids: &BTreeSet<NodeId>,
+    matched_index: impl Fn(&NodeId) -> u64,
+    leader_index: u64,
+    config: &AutoPromoteConfig,
+    stable_ticks: &mut BTreeMap<NodeId, u32>,
+) -> Vec<NodeId> {
+    let mut promotable = Vec::new();
+    for nid in learner_ids {
+        let matched = matched_index(nid);
         let lag = leader_index.saturating_sub(matched);
         if lag <= config.max_lag {
             let entry = stable_ticks.entry(*nid).or_insert(0);
@@ -211,53 +293,7 @@ async fn evaluate_and_promote(
                 "learner caught-up tick"
             );
             if *entry >= config.stability_ticks {
-                let mut new_voters = voter_ids.clone();
-                new_voters.insert(*nid);
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "AutoPromoteLearner",
-                    group_id,
-                    promoted_node_id = nid,
-                    new_voter_count = new_voters.len(),
-                    result = "started",
-                    "auto-promoting caught-up learner"
-                );
-                metrics::counter!(
-                    "rr_learner_promotions_total",
-                    "group_id" => group_id.to_string()
-                )
-                .increment(1);
-                match mgr.change_membership(group_id, new_voters).await {
-                    Ok(()) => {
-                        info!(
-                            target: AUDIT_TARGET,
-                            op = "AutoPromoteLearner",
-                            group_id,
-                            promoted_node_id = nid,
-                            success = true,
-                            result = "succeeded",
-                            "learner auto-promoted"
-                        );
-                        stable_ticks.remove(nid);
-                    }
-                    Err(e) => {
-                        warn!(
-                            target: AUDIT_TARGET,
-                            op = "AutoPromoteLearner",
-                            group_id,
-                            promoted_node_id = nid,
-                            success = false,
-                            result = "failed",
-                            error = %e,
-                            "learner auto-promotion failed; will retry next tick"
-                        );
-                        metrics::counter!(
-                            "rr_learner_promotion_failures_total",
-                            "group_id" => group_id.to_string()
-                        )
-                        .increment(1);
-                    }
-                }
+                promotable.push(*nid);
             }
         } else if let Some(entry) = stable_ticks.get_mut(nid) {
             if *entry > 0 {
@@ -271,6 +307,7 @@ async fn evaluate_and_promote(
             }
         }
     }
+    promotable
 }
 
 #[cfg(test)]
@@ -348,5 +385,54 @@ mod tests {
         assert_eq!(cfg.max_lag, DEFAULT_MAX_LAG);
         assert_eq!(cfg.stability_ticks, DEFAULT_STABILITY_TICKS);
         assert_eq!(cfg.poll_interval, DEFAULT_POLL_INTERVAL);
+    }
+
+    /// Two learners crossing the stability threshold in the SAME tick must be
+    /// collected into one promotion plan — promoting them one at a time with
+    /// the pre-tick voter set would demote the first one promoted.
+    #[test]
+    fn plan_promotions_batches_all_stable_learners_in_one_tick() {
+        let cfg = AutoPromoteConfig {
+            max_lag: 10,
+            stability_ticks: 2,
+            poll_interval: Duration::from_millis(50),
+        };
+        let learners = BTreeSet::from([2u64, 3u64]);
+        let mut stable = BTreeMap::new();
+
+        // Tick 1: both caught up but below the threshold.
+        let p = plan_promotions(1, &learners, |_| 100, 100, &cfg, &mut stable);
+        assert!(p.is_empty());
+        assert_eq!(stable.get(&2), Some(&1));
+        assert_eq!(stable.get(&3), Some(&1));
+
+        // Tick 2: both cross the threshold together → ONE batched plan.
+        let p = plan_promotions(1, &learners, |_| 100, 100, &cfg, &mut stable);
+        assert_eq!(
+            p,
+            vec![2, 3],
+            "all learners stable in one tick must be promoted together"
+        );
+    }
+
+    /// A learner that falls behind resets its counter and is excluded from
+    /// the batch; counters of removed learners are pruned by the caller.
+    #[test]
+    fn plan_promotions_resets_lagging_learners() {
+        let cfg = AutoPromoteConfig {
+            max_lag: 10,
+            stability_ticks: 2,
+            poll_interval: Duration::from_millis(50),
+        };
+        let learners = BTreeSet::from([2u64, 3u64]);
+        let mut stable = BTreeMap::new();
+        plan_promotions(1, &learners, |_| 100, 100, &cfg, &mut stable);
+
+        // Node 3 falls 50 behind (lag > max_lag): counter resets, only node 2
+        // crosses the threshold.
+        let matched = |nid: &u64| if *nid == 3 { 50 } else { 100 };
+        let p = plan_promotions(1, &learners, matched, 100, &cfg, &mut stable);
+        assert_eq!(p, vec![2]);
+        assert_eq!(stable.get(&3), Some(&0));
     }
 }

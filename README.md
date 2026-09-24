@@ -199,8 +199,8 @@ OK
 (nil)
 ```
 
-> **Note**: `kv-store` 不启用 Admin 端口，REPL 中的 `status`/`members` 会返回 Unimplemented——只有 `put`/`get`/`delete` 可用。
-> `kv-store` does not enable an admin port, so `status`/`members` in the REPL fail with Unimplemented — only `put`/`get`/`delete` work.
+> **Note**: `kv-store` 会把 Admin API 挂在客户端端口 +1000（51001 → 52001）。REPL 的 KV 与管理命令共用同一个 `--addr`——指向客户端端口 51001 时只有 `put`/`get`/`delete` 可用，`status`/`members` 会返回 Unimplemented（AdminService 只在管理端口上服务）。要用管理命令：一次性子命令加 `--addr 127.0.0.1:52001`（如 `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`），或另起一个指向 52001 的 REPL。
+> `kv-store` serves its Admin API on the client port +1000 (51001 → 52001). The REPL carries both KV and admin commands over a single `--addr` — pointed at the client port 51001, only `put`/`get`/`delete` work and `status`/`members` fail with Unimplemented (AdminService listens only on the admin port). For admin commands, run one-shot subcommands with `--addr 127.0.0.1:52001` (e.g. `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`) or start a second REPL against 52001.
 
 想以编程方式嵌入节点，请参考 [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) 和[快速入门指南](https://rr-framework.github.io/guide/getting-started)。真实 API 为 `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?`（同步、单参数）→ `node.start().await?`。
 

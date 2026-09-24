@@ -441,7 +441,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<RrTypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<AppendEntriesResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         let channel = self
             .channel_pool
@@ -458,20 +458,38 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
 
         let mut client = RaftGrpcClient::new(channel);
         let rpc_started = std::time::Instant::now();
-        let response = client
-            .append_entries(ProtoAppendReq {
-                group_id: self.group_id,
-                payload,
-            })
-            .await
-            .map_err(|status| {
-                if status.code() == tonic::Code::Unavailable {
-                    self.channel_pool.remove(self.target);
-                    metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
-                }
-                to_unreachable(status)
-            })?
-            .into_inner();
+        // Enforce the RPC's soft TTL: openraft delegates this to the
+        // transport, and without it a half-open connection would wedge
+        // replication until the hard TTL. A timeout maps to Unreachable so
+        // the replicator backs off, and the channel is evicted so the next
+        // attempt reconnects instead of reusing the wedged one.
+        let ttl = option.soft_ttl();
+        let send = client.append_entries(ProtoAppendReq {
+            group_id: self.group_id,
+            payload,
+        });
+        let response = match tokio::time::timeout(ttl, send).await {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    target = self.target,
+                    group_id = self.group_id,
+                    "append_entries timed out after {ttl:?}; evicting channel"
+                );
+                self.channel_pool.remove(self.target);
+                return Err(to_unreachable(format!(
+                    "append_entries timed out after {ttl:?}"
+                )));
+            }
+            Ok(r) => r
+                .map_err(|status| {
+                    if status.code() == tonic::Code::Unavailable {
+                        self.channel_pool.remove(self.target);
+                        metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
+                    }
+                    to_unreachable(status)
+                })?
+                .into_inner(),
+        };
 
         // Leader→follower replication round-trip (includes heartbeats,
         // split out via the `kind` label) — the time-based companion to
@@ -493,7 +511,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
     async fn vote(
         &mut self,
         rpc: VoteRequest<RrTypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<VoteResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         let channel = self
             .channel_pool
@@ -505,20 +523,33 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             .map_err(to_unreachable)?;
 
         let mut client = RaftGrpcClient::new(channel);
-        let response = client
-            .vote(ProtoVoteReq {
-                group_id: self.group_id,
-                payload,
-            })
-            .await
-            .map_err(|status| {
-                if status.code() == tonic::Code::Unavailable {
-                    self.channel_pool.remove(self.target);
-                    metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
-                }
-                to_unreachable(status)
-            })?
-            .into_inner();
+        // Same soft-ttl enforcement as append_entries: a half-open connection
+        // must fail loudly (Unreachable) instead of wedging an election.
+        let ttl = option.soft_ttl();
+        let send = client.vote(ProtoVoteReq {
+            group_id: self.group_id,
+            payload,
+        });
+        let response = match tokio::time::timeout(ttl, send).await {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    target = self.target,
+                    group_id = self.group_id,
+                    "vote timed out after {ttl:?}; evicting channel"
+                );
+                self.channel_pool.remove(self.target);
+                return Err(to_unreachable(format!("vote timed out after {ttl:?}")));
+            }
+            Ok(r) => r
+                .map_err(|status| {
+                    if status.code() == tonic::Code::Unavailable {
+                        self.channel_pool.remove(self.target);
+                        metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
+                    }
+                    to_unreachable(status)
+                })?
+                .into_inner(),
+        };
 
         let (resp, _): (VoteResponse<RrTypeConfig>, _) =
             bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())

@@ -123,7 +123,7 @@ first curve to rise under chaos (latency/packet-loss injection).
 | 类型 / Type | Histogram |
 | 标签 / Labels | `group_id`, `follower_node_id`, `kind` (`heartbeat` \| `append`) |
 | 记录位置 / Recorded in | `rr-raft/src/network_factory.rs` — `append_entries()` |
-| 可用版本 / Available since | v0.2.0 (unreleased) |
+| 可用版本 / Available since | v0.2.0 |
 
 ---
 
@@ -144,7 +144,7 @@ The Kafka ingestor path does NOT cross this boundary (it calls `write_batch` dir
 | 类型 / Type | Histogram |
 | 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`) |
 | 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()` / `submit_read()` / `submit_linearizable_read()` |
-| 可用版本 / Available since | v0.2.0 (unreleased) |
+| 可用版本 / Available since | v0.2.0 |
 
 ---
 
@@ -164,7 +164,60 @@ segment of the write latency chain: `proposal ≈ replication + apply`.
 | 类型 / Type | Histogram |
 | 标签 / Labels | `group_id` |
 | 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply()` |
-| 可用版本 / Available since | v0.2.0 (unreleased) |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_ingestor_poll_duration_seconds`
+
+Kafka ingestor 单次 poll 的耗时（秒），含批聚合等待。用于观察摄取循环的健康度。
+
+---
+
+Duration of one ingestor `poll()` call (seconds), including batch-aggregation
+wait. Health signal for the ingestion loop.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` — poll loop |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_output_send_duration_seconds`
+
+outbox 单条 output 的投递耗时（秒），按投递目标类型分标签。
+
+---
+
+Per-output delivery latency (seconds), labelled by delivery target type.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | `group_id`, `target` (`raft_write` \| `kafka_publish`) |
+| 记录位置 / Recorded in | `rr-raft/src/output_runner.rs` — send loop |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_config_etcd_probe_duration_seconds`
+
+etcd 前缀指纹探针（revision 缓存的每调用校验）耗时（秒）。
+
+---
+
+Latency of the etcd prefix-fingerprint probe guarding the revision cache
+(seconds).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-config-etcd/src/lib.rs` — `probe_revision()` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
 
 ---
 
@@ -242,6 +295,79 @@ absence as "lag is 0". Always predicate alerts on
 
 ---
 
+#### `rr_idempotency_cache_size`
+
+幂等层 LRU 响应缓存的当前条数。接近容量上限时重放命中会退化为 `Expired`。
+
+---
+
+Current occupancy of the idempotency layer's LRU response cache. Near the cap,
+replays degrade into `Expired`.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Gauge |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_output_pending`
+
+outbox 待投递条数（watermark 之后）。持续增长 = 投递卡滞。
+
+---
+
+Outbox backlog depth (entries past the watermark). Sustained growth means
+delivery is stuck.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Gauge |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/output_runner.rs` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_security_insecure_mode`
+
+`allow_insecure=true` 启动时置 1。生产环境应配置告警（`== 1` 即报警）。
+
+---
+
+Set to 1 when the node runs with `allow_insecure=true`. Alert on `== 1` in
+production deployments.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Gauge |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-server/src/node.rs` — startup |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_raft_pending_deferred`
+
+deferred（两阶段）apply 当前挂起的客户端响应数；有上限（10 000），溢出见
+`rr_raft_pending_deferred_overflow_total`。
+
+---
+
+Currently parked deferred (two-phase) client responses; bounded (10 000) —
+overflow is counted by `rr_raft_pending_deferred_overflow_total`.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Gauge |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
 ### Counters (计数器)
 
 #### `rr_snapshot_installs_total`
@@ -295,7 +421,7 @@ the client). `rate()` gives TPS by operation type.
 | 类型 / Type | Counter |
 | 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`), `outcome` (`success` \| `redirect` \| `error` \| `idempotency_expired`) |
 | 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()` / `submit_read()` / `submit_linearizable_read()` |
-| 可用版本 / Available since | v0.2.0 (unreleased) |
+| 可用版本 / Available since | v0.2.0 |
 
 ---
 
@@ -315,7 +441,7 @@ producer's send rate and application-level counters.
 | 类型 / Type | Counter |
 | 标签 / Labels | `group_id` |
 | 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` — poll/write loop |
-| 可用版本 / Available since | v0.2.0 (unreleased) |
+| 可用版本 / Available since | v0.2.0 |
 
 ---
 
@@ -337,7 +463,7 @@ value use `max by (group_id) (rate(...[1m]))`.
 | 类型 / Type | Counter |
 | 标签 / Labels | `group_id` |
 | 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply()` |
-| 可用版本 / Available since | v0.2.0 (unreleased) |
+| 可用版本 / Available since | v0.2.0 |
 
 ---
 
@@ -442,6 +568,255 @@ client using a wrong partition.
 
 ---
 
+#### `rr_idempotency_replays_total` / `rr_idempotency_expired_total` / `rr_idempotency_collisions_total`
+
+幂等层判定计数：重放命中（返回缓存响应）/ 因 watermark 过期被拒（`IdempotencyExpired`）/
+键冲突（同键不同负载，响亮拒绝）。持续增长碰撞率 = 客户端键生成有 bug。
+
+---
+
+Idempotency-layer decisions: replay hits (cached response served) / requests
+refused as expired below the watermark (`IdempotencyExpired`) / key collisions
+(same key, different payload — loudly rejected). A growing collision rate means
+a client key-generation bug.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — keyed apply path |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_learner_promotions_total` / `rr_learner_promotion_failures_total`
+
+learner 自动提升为 voter 的成功/失败计数（`learner_promoter`，仅 leader 发射）。
+
+---
+
+Learner auto-promotion successes/failures (`learner_promoter`; leader-only).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/learner_promoter.rs` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_snapshot_build_failures_total`
+
+快照构建失败计数（fail-closed poisoned-builder 路径，ADR A-0011）。出现即查日志。
+
+---
+
+Snapshot build failures (the fail-closed poisoned-builder path, ADR A-0011).
+Investigate logs when nonzero.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_framing_decode_failures_total`
+
+字节信封解码失败计数，按 `kind` 分（`framed_entry_body` / `framed_snapshot_*` /
+`apply_outcome_*` / `batch_*`）。非零 = 有不兼容或损坏的写入方。
+
+---
+
+Envelope decode failures by `kind` (`framed_entry_body` / `framed_snapshot_*` /
+`apply_outcome_*` / `batch_*`). Nonzero means an incompatible or corrupt writer.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `kind` |
+| 记录位置 / Recorded in | `rr-core/src/{framed_entry,framed_snapshot,idempotency,batch}.rs` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_ingestor_seed_failures_total` / `rr_ingestor_seek_total` / `rr_ingestor_offset_map_failures_total` / `rr_ingestor_step_down_drops_total` / `rr_ingestor_seed_snapshot_refreshes_total`
+
+ingestor 生命周期计数：种子 offset 失败（fail-closed，致命）/ seek 次数 /
+offset→request_id 映射失败（fail-closed）/ 下台丢弃的批尾命令 / 种子快照刷新次数。
+
+---
+
+Ingestor lifecycle counters: seed-offset failures (fail-closed, fatal) / seeks /
+offset→request-id mapping failures (fail-closed) / batch-tail commands dropped
+on step-down / seed snapshot refreshes.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_ingestor_seek_below_watermark_total` / `rr_ingestor_seek_above_watermark_total`
+
+Kafka seek 目标超出 broker 水位线的计数（below = 数据已被保留期删除；above =
+持久 offset 超过 topic 末尾，fail-closed 报错——疑似 topic 重建）。
+
+---
+
+Seek target outside broker watermarks (below = retention already deleted data;
+above = persisted offset past the topic end, fail-closed — likely a recreated
+topic).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-ingestor-kafka/src/backend.rs` — `seek()` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_ingestor_encode_failures_total`
+
+ingestor 消息编码为 FramedEntry 失败的计数（fail-closed：supervisor 退出，
+不推进 offset）。非零需要人工介入。
+
+---
+
+Ingestor message→FramedEntry encode failures (fail-closed: the supervisor exits
+without advancing the offset). Nonzero requires operator attention.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_output_send_total` / `rr_output_send_failures_total`
+
+outbox 投递成功/失败计数，按目标类型分。失败会持续退避重试（at-least-once）。
+
+---
+
+Outbox delivery successes/failures by target type. Failures retry with backoff
+(at-least-once).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id`, `target` (`raft_write` \| `kafka_publish`) |
+| 记录位置 / Recorded in | `rr-raft/src/output_runner.rs` |
+| 可用版本 / Available since | v0.2.0 |
+
+---
+
+#### `rr_raft_pending_deferred_overflow_total` / `rr_raft_pending_deferred_duplicate_total`
+
+deferred 挂起注册表异常：溢出（新写被拒，客户端收到错误）/ 重复 correlation id
+（旧 responder 被覆盖，其客户端收到错误）。两者都应罕见，非零即服务实现有 bug。
+
+---
+
+Deferred-registry anomalies: overflow (new write refused, client gets an error)
+/ duplicate correlation id (old responder displaced; its client gets an error).
+Both should be rare — nonzero means a `Service` implementation bug.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_storage_wal_flush_errors_total`
+
+`ReplicatedOnly` 组提交任务的后台 WAL fsync 失败计数。持续非零 = 磁盘子系统故障。
+
+---
+
+Background WAL-fsync failures of the `ReplicatedOnly` group-commit task.
+Sustained nonzero means disk-subsystem failure.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-storage/src/rocks.rs` — group-commit task |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_config_mem_watch_lagged_total`
+
+`MemConfigProvider`（dev/test 后端）watch 溢出丢弃的事件数。生产后端（etcd）是
+背压而非丢弃；此计数在 dev 集群非零 = 消费端滞后。
+
+---
+
+Events dropped on lag by the `MemConfigProvider` (dev/test backend) watch
+broadcast. The production etcd backend back-pressures instead of dropping; a
+nonzero value in dev clusters means a lagging consumer.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-config/src/mem.rs` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_config_etcd_watch_reconnects_total{domain}` / `rr_config_etcd_watch_events_total{domain}` / `rr_config_etcd_watch_compactions_total`
+
+etcd watch 通道健康度：重连次数（按 domain: nodes/partitions/groups）/ 收到的事件 /
+因 compaction 触发的全量对账次数。
+
+---
+
+etcd watch-channel health: reconnects (by domain: nodes/partitions/groups) /
+events received / full reconciliations triggered by compaction.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `domain`（仅前两个 / first two） |
+| 记录位置 / Recorded in | `rr-config-etcd/src/lib.rs` — watch loop |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_config_etcd_stale_serves_total` / `rr_config_etcd_cache_hits_total` / `rr_config_etcd_cache_misses_total` / `rr_config_etcd_rescans_total` / `rr_config_etcd_bad_keys_total` / `rr_config_etcd_fabricated_groups_total`
+
+etcd revision 缓存行为：探针失败时用缓存应答（stale serve，伴随 warn）/ 缓存命中 /
+未命中 / 全量重扫 / 跳过的不良 key / 缺 replicas 时编造的空组（均伴随日志）。
+
+---
+
+etcd revision-cache behaviour: stale serves on probe failure (with a warn) /
+cache hits / misses / full rescans / skipped malformed keys / fabricated empty
+groups on a missing replicas key (all accompanied by logs).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-config-etcd/src/lib.rs` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
 ### Client-side (rr-client, emitted by applications that embed the SDK)
 
 #### `rr_client_request_duration_seconds`
@@ -483,6 +858,28 @@ Hit / miss counts for the client's leader cache. A miss means fallback to round-
 | 类型 / Type | Counter |
 | 标签 / Labels | `group_id` |
 | 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
+
+---
+
+#### `rr_client_batch_flush_total` / `rr_client_batch_entries` / `rr_client_batch_buffer_rejected_total`
+
+客户端批处理（opt-in，默认关）：flush 次数（`trigger` = `size` \| `bytes` \|
+`linger` \| `immediate`）/ 每批条数（histogram）/ 缓冲拒绝计数（`limit` =
+`entries` \| `bytes`，背压 fail-fast 信号）。
+
+---
+
+Client write batching (opt-in, off by default): flush count (`trigger` =
+`size` \| `bytes` \| `linger` \| `immediate`) / entries per batch (histogram) /
+buffer rejections (`limit` = `entries` \| `bytes` — the fail-fast backpressure
+signal).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter / Histogram / Counter |
+| 标签 / Labels | `partition_id`（+ `trigger` / `limit`） |
+| 记录位置 / Recorded in | `rr-client/src/batch.rs` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
 
 ---
 

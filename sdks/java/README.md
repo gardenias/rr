@@ -5,6 +5,7 @@ Async Java SDK for the [rr distributed Multi-Raft consensus framework](https://g
 Features:
 
 - Automatic leader-redirect with per-group leader cache.
+- Linearizable reads via `readLinearizable(...)` with `leader_info` redirect handling.
 - Exponential-backoff retry on transport errors.
 - Framework-level idempotency with `sendRequestIdempotent(...)`.
 - TLS / mTLS client configuration via `TlsConfig`.
@@ -105,6 +106,22 @@ byte[] response = client.sendRequestIdempotent(1L, payload, key).join();
 
 If `request_id` is below the framework watermark and evicted from the LRU cache,
 the call completes exceptionally with `IdempotencyExpiredException`.
+
+## Reads: stale vs linearizable
+
+`read(...)` is a stale read — any replica serves it without Raft consensus (lowest latency,
+may lag the latest committed write). `readLinearizable(...)` runs a server-side Raft ReadIndex
+round-trip: the leader confirms its commit index and waits for local apply before replying.
+When the contacted replica is not the leader, the SDK follows the `leader_info` redirect to
+the indicated leader address within the same retry budget.
+
+```java
+byte[] stale = client.read(1L, payload).join();              // any replica, may be stale
+byte[] fresh = client.readLinearizable(1L, payload).join();  // leader-confirmed
+```
+
+Blocking variants: `readSync(...)` / `readLinearizableSync(...)`. Redirect exhaustion surfaces
+as `RpcFailedException`; transport failure (after retries) as `NetworkException`.
 
 ## Cluster discovery
 

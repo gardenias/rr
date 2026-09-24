@@ -87,6 +87,14 @@ pub struct AdminServiceImpl {
     group_manager: Arc<RaftGroupManager>,
     config_provider: Arc<dyn ConfigProvider>,
     start_time: Instant,
+    /// Tracks every spawned `OnlineBackup` streaming task (no
+    /// fire-and-forget): each task terminates itself when the client
+    /// disconnects (channel send fails), and finished tasks are reaped
+    /// on the next `online_backup` call.
+    backup_streams: std::sync::Mutex<tokio::task::JoinSet<()>>,
+    /// One-shot guard so the `snapshot_in_progress` stub (always `false`)
+    /// warns once per service instance instead of on every call.
+    snapshot_stub_warned: std::sync::atomic::AtomicBool,
 }
 
 impl AdminServiceImpl {
@@ -103,6 +111,8 @@ impl AdminServiceImpl {
             group_manager,
             config_provider,
             start_time: Instant::now(),
+            backup_streams: std::sync::Mutex::new(tokio::task::JoinSet::new()),
+            snapshot_stub_warned: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -187,6 +197,15 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(GroupList { groups }))
     }
 
+    /// Return snapshot state for a group.
+    ///
+    /// **STUB FIELD — do not rely on `snapshot_in_progress`:** it is
+    /// hardcoded `false` for wire compatibility. openraft 0.10 metrics
+    /// expose the latest *completed* snapshot id but no "snapshot build in
+    /// progress" runtime flag, so there is no truthful value to return
+    /// here in v0.3.0. The field is deprecated in `admin.proto`; use
+    /// `last_snapshot_index` / `last_snapshot_term` instead. A WARN is
+    /// logged once per service instance on first use.
     async fn get_snapshot_status(
         &self,
         request: Request<GroupId>,
@@ -201,6 +220,22 @@ impl AdminService for AdminServiceImpl {
             group_id,
             "admin rpc"
         );
+        // Loud honesty: the stubbed field below must not pass silently.
+        if !self
+            .snapshot_stub_warned
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            warn!(
+                target: AUDIT_TARGET,
+                op = "GetSnapshotStatus",
+                peer = %peer,
+                node_id = self.node_id,
+                group_id,
+                "GetSnapshotStatus: snapshot_in_progress is a deprecated stub and is \
+                 always false (openraft 0.10 exposes no in-progress flag); use \
+                 last_snapshot_index / last_snapshot_term instead"
+            );
+        }
         let raft = self
             .group_manager
             .get_raft(group_id)
@@ -213,8 +248,7 @@ impl AdminService for AdminServiceImpl {
             .as_ref()
             .map(|log_id| log_id.leader_id.term);
 
-        // openraft 0.10 metrics expose the latest completed snapshot id,
-        // but not an explicit "building snapshot" runtime flag.
+        // Deprecated stub — see the method rustdoc; always false.
         let snapshot_in_progress = false;
 
         Ok(Response::new(SnapshotStatus {
@@ -848,51 +882,63 @@ impl AdminService for AdminServiceImpl {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let peer_for_audit = peer.clone();
         let node_id = self.node_id;
-        tokio::spawn(async move {
-            let total = snapshot_bytes.len();
-            let metadata_chunk = OnlineBackupChunk {
-                body: Some(OnlineBackupBody::Metadata(metadata)),
-            };
-            if tx.send(Ok(metadata_chunk)).await.is_err() {
-                return;
-            }
-            let mut sent = 0usize;
-            for chunk in snapshot_bytes.chunks(ONLINE_BACKUP_CHUNK_BYTES) {
-                let data = chunk.to_vec();
-                sent += data.len();
-                let msg = OnlineBackupChunk {
-                    body: Some(OnlineBackupBody::Data(data)),
-                };
-                if tx.send(Ok(msg)).await.is_err() {
-                    info!(
-                        target: AUDIT_TARGET,
-                        op = "OnlineBackup",
-                        peer = %peer_for_audit,
-                        node_id,
-                        group_id,
-                        sent_bytes = sent,
-                        total_bytes = total,
-                        success = false,
-                        result = "failed",
-                        reason = "client_disconnected",
-                        "admin rpc result"
-                    );
-                    return;
+        {
+            let mut streams = self
+                .backup_streams
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Reap finished stream tasks so the set stays bounded.
+            while let Some(outcome) = streams.try_join_next() {
+                if let Err(e) = outcome {
+                    warn!(error = %e, "online backup stream task failed");
                 }
             }
-            info!(
-                target: AUDIT_TARGET,
-                op = "OnlineBackup",
-                peer = %peer_for_audit,
-                node_id,
-                group_id,
-                sent_bytes = sent,
-                total_bytes = total,
-                success = true,
-                result = "succeeded",
-                "admin rpc result"
-            );
-        });
+            streams.spawn(async move {
+                let total = snapshot_bytes.len();
+                let metadata_chunk = OnlineBackupChunk {
+                    body: Some(OnlineBackupBody::Metadata(metadata)),
+                };
+                if tx.send(Ok(metadata_chunk)).await.is_err() {
+                    return;
+                }
+                let mut sent = 0usize;
+                for chunk in snapshot_bytes.chunks(ONLINE_BACKUP_CHUNK_BYTES) {
+                    let data = chunk.to_vec();
+                    sent += data.len();
+                    let msg = OnlineBackupChunk {
+                        body: Some(OnlineBackupBody::Data(data)),
+                    };
+                    if tx.send(Ok(msg)).await.is_err() {
+                        info!(
+                            target: AUDIT_TARGET,
+                            op = "OnlineBackup",
+                            peer = %peer_for_audit,
+                            node_id,
+                            group_id,
+                            sent_bytes = sent,
+                            total_bytes = total,
+                            success = false,
+                            result = "failed",
+                            reason = "client_disconnected",
+                            "admin rpc result"
+                        );
+                        return;
+                    }
+                }
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "OnlineBackup",
+                    peer = %peer_for_audit,
+                    node_id,
+                    group_id,
+                    sent_bytes = sent,
+                    total_bytes = total,
+                    success = true,
+                    result = "succeeded",
+                    "admin rpc result"
+                );
+            });
+        }
 
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::OnlineBackupStream
@@ -933,6 +979,13 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(RoutingTableSnapshot { partitions }))
     }
 
+    /// **NOT IMPLEMENTED in v0.3.0** — returns `Status::unimplemented`.
+    ///
+    /// This RPC previously returned constant zeros, a silent wrong answer.
+    /// The truthful per-node counters live in the Prometheus recorder owned
+    /// by the node (not reachable from this service); scrape the HTTP
+    /// `/metrics` endpoint instead. The `MetricsSummary` fields are
+    /// deprecated in `admin.proto`.
     async fn get_metrics_summary(
         &self,
         request: Request<Empty>,
@@ -945,11 +998,16 @@ impl AdminService for AdminServiceImpl {
             node_id = self.node_id,
             "admin rpc"
         );
-        Ok(Response::new(MetricsSummary {
-            total_proposals: 0,
-            total_applied: 0,
-            total_snapshots: 0,
-        }))
+        // Loud honesty: this RPC previously returned constant zeros — a
+        // silent wrong answer. The real per-node counters live in the
+        // Prometheus recorder owned by the node, which this service does
+        // not have access to, so there is no truthful value to return
+        // here in v0.3.0.
+        Err(Status::unimplemented(
+            "GetMetricsSummary is not available: it previously returned constant zeros, \
+             a silent wrong answer. Scrape the Prometheus /metrics endpoint instead \
+             (rr_server_requests_total, rr_raft_applied_entries_total, ...)",
+        ))
     }
 }
 
@@ -1119,17 +1177,50 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::NotFound);
     }
 
+    // The RPC must fail loudly (Unimplemented) rather than return constant
+    // zeros — a silent wrong answer. Real per-node counters are on the
+    // Prometheus /metrics endpoint.
     #[tokio::test]
     async fn test_get_metrics_summary() {
         let svc = make_admin_service();
-        let resp = svc
+        let err = svc
             .get_metrics_summary(Request::new(Empty {}))
             .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(resp.total_proposals, 0);
-        assert_eq!(resp.total_applied, 0);
-        assert_eq!(resp.total_snapshots, 0);
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+        assert!(err.message().contains("/metrics"));
+    }
+
+    // The deprecated `snapshot_in_progress` stub must stay wire-compatible
+    // (always false) AND be loud: exactly one WARN per service instance.
+    #[tokio::test]
+    async fn test_get_snapshot_status_stub_warns_once_and_reports_false() {
+        let svc = make_admin_service_with_group().await;
+        let buf = AuditBuf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        for _ in 0..3 {
+            let resp = svc
+                .get_snapshot_status(Request::new(GroupId { group_id: 1 }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(
+                !resp.snapshot_in_progress,
+                "deprecated stub field must remain wire-compatible (false)"
+            );
+        }
+
+        let log = buf.contents();
+        let hits = log
+            .matches("snapshot_in_progress is a deprecated stub")
+            .count();
+        assert_eq!(hits, 1, "stub warn must fire exactly once, got {hits}");
     }
 
     #[tokio::test]

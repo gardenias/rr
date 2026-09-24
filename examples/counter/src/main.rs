@@ -22,7 +22,8 @@
 //! ## Arguments:
 //! - `--node-id <N>`         — Node ID (u64). Defaults to 1 for single-node demo.
 //! - `--port <PORT>`         — gRPC listen port. Defaults to 52001.
-//!   The admin API is served on PORT + 1000 (52001 → 53001).
+//!   The admin API is served on PORT + 1000 (52001 → 53001), so `--port`
+//!   must be ≤ 64535.
 //! - `--peers <ID@ADDR,...>` — Full cluster roster, comma-separated `id@addr` pairs
 //!   (must include this node). Empty means single-node roster.
 //! - `--bootstrap`           — Initialize Raft membership (run on exactly one node).
@@ -135,7 +136,11 @@ impl Service for CounterService {
                 debug!(%key, delta, "Counter Increment");
                 let mut guard = self.counters.write().await;
                 let entry = guard.entry(key).or_insert(0);
-                *entry += delta;
+                *entry = entry.checked_add(delta).ok_or_else(|| {
+                    RrError::Application(format!(
+                        "counter overflow: {entry} + {delta} exceeds i64 range"
+                    ))
+                })?;
                 CounterResponse::some(*entry)
             }
             CounterRequest::Get { key } => {
@@ -294,6 +299,15 @@ async fn run_demo() -> Result<()> {
 // ── Multi-node mode (with gRPC server) ─────────────────────────────────────
 
 async fn run_node(cli: CliConfig) -> Result<()> {
+    // The admin API is served on PORT + 1000; reject ports where that
+    // would overflow u16 instead of panicking deep in startup.
+    if cli.port > 64535 {
+        return Err(anyhow!(
+            "--port {} is too large: the admin port is PORT + 1000 and must fit a u16 \
+             (max --port 64535)",
+            cli.port
+        ));
+    }
     let listen_addr = format!("127.0.0.1:{}", cli.port);
     info!(
         node_id = cli.node_id,
@@ -688,5 +702,40 @@ mod tests {
 
         assert_eq!(resp_a.value, Some(1));
         assert_eq!(resp_b.value, Some(100));
+    }
+
+    /// Regression: Increment must not wrap/panic on i64 overflow — it
+    /// returns a loud application error and leaves the counter unchanged.
+    #[tokio::test]
+    async fn test_increment_overflow_returns_error() {
+        let svc = CounterService::new();
+
+        let inc = encode_req(CounterRequest::Increment {
+            key: "big".into(),
+            delta: i64::MAX,
+        });
+        svc.handle(inc).await.expect("handle Increment MAX");
+
+        let over = encode_req(CounterRequest::Increment {
+            key: "big".into(),
+            delta: 1,
+        });
+        let err = svc.handle(over).await.expect_err("overflow must error");
+        assert!(
+            matches!(err, RrError::Application(ref m) if m.contains("overflow")),
+            "expected application overflow error, got: {err}"
+        );
+
+        // Counter unchanged, still usable.
+        let get = encode_req(CounterRequest::Get { key: "big".into() });
+        let resp = decode_resp(svc.handle(get).await.expect("handle Get"));
+        assert_eq!(resp.value, Some(i64::MAX));
+
+        let under = encode_req(CounterRequest::Increment {
+            key: "big".into(),
+            delta: -1,
+        });
+        let resp = decode_resp(svc.handle(under).await.expect("decrement back"));
+        assert_eq!(resp.value, Some(i64::MAX - 1));
     }
 }

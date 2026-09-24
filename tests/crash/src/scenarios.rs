@@ -49,6 +49,7 @@ mod rocks_scenarios {
     struct Harness {
         cluster: CrashCluster,
         driver: Driver,
+        batch_lane: Option<crate::driver::BatchLane>,
         client: RrClient,
         fault_log: Journal,
         ack_path: PathBuf,
@@ -118,9 +119,22 @@ mod rocks_scenarios {
             let ack_path = run_dir.join("ack-log.jsonl");
             let driver = Driver::start(client.clone(), write_rps, Journal::create(&ack_path)?);
 
+            // Batched unkeyed write lane (client-side batching) — the crash
+            // coverage for batch frames in the log. Default on;
+            // CRASH_BATCH_LANE=0 disables.
+            let batch_lane = if std::env::var("CRASH_BATCH_LANE").as_deref() == Ok("0") {
+                None
+            } else {
+                Some(crate::driver::BatchLane::start(
+                    cluster.all_grpc_addrs(),
+                    write_rps,
+                ))
+            };
+
             Ok(Self {
                 cluster,
                 driver,
+                batch_lane,
                 client,
                 fault_log,
                 ack_path,
@@ -185,6 +199,29 @@ mod rocks_scenarios {
                 0,
                 "driver observed responses that did not echo their request: {errors:?}"
             );
+            if let Some(lane) = self.batch_lane {
+                let lane_stats = Arc::clone(lane.stats());
+                let lane_errors = lane.error_samples();
+                lane.stop().await;
+                println!(
+                    "[crash-harness] scenario={scenario} batch-lane: sent={} acked={} failed={} corrupted={}",
+                    lane_stats.sent.load(std::sync::atomic::Ordering::Relaxed),
+                    lane_stats.acked.load(std::sync::atomic::Ordering::Relaxed),
+                    lane_stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+                    lane_stats.corrupted.load(std::sync::atomic::Ordering::Relaxed),
+                );
+                for e in &lane_errors {
+                    println!("[crash-harness] batch-lane error sample: {e}");
+                }
+                assert_eq!(
+                    lane_stats
+                        .corrupted
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    0,
+                    "batch lane observed responses that did not echo their request \
+                     (batch framing regression): {lane_errors:?}"
+                );
+            }
             // CrashCluster::drop SIGKILLs and reaps any surviving children.
             drop(self.cluster);
         }

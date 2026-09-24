@@ -53,6 +53,7 @@ pub mod framed_entry;
 pub mod framed_snapshot;
 pub mod idempotency;
 pub mod ingestor;
+pub mod ingress;
 pub mod membership;
 pub mod output;
 pub mod service;

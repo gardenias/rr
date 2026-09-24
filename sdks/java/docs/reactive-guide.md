@@ -148,6 +148,7 @@ public class ReactiveQuickStart {
 | `sendRequestIdempotent(groupId, payload, key)` | `sendRequestIdempotentSync(groupId, payload, key)` | 幂等写 / Idempotent write |
 | `sendRequestWithPartition(partitionId, payload)` | — | 别名 / Alias |
 | `read(groupId, payload)` | `readSync(groupId, payload)` | 陈旧读 / Stale read |
+| `readLinearizable(groupId, payload)` | `readLinearizableSync(groupId, payload)` | 线性一致读 / Linearizable read |
 | `getClusterInfo()` | `getClusterInfoSync()` | 集群拓扑 / Cluster topology |
 
 **何时选哪个 / When to choose which**：

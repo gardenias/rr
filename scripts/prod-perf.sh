@@ -274,8 +274,12 @@ w9_tier() {
     log "[w9] leader=$leader → transfer-leader to node $to"
     # TransferLeader must be invoked on the TARGET node's admin API (the
     # server rejects transfer requests addressed at the current leader).
+    # `-e RR_ADMIN_TOKEN` (bare name) makes compose resolve the value from
+    # this process's exported environment — the token stays OFF the compose
+    # argv, where `ps` would expose it (`.env` is sourced with `set -a`, so
+    # the variable is guaranteed exported).
     "${COMPOSE[@]}" --profile selfcheck run --rm \
-      -e "RR_ADMIN_TOKEN=$RR_ADMIN_TOKEN" \
+      -e RR_ADMIN_TOKEN \
       probe -c "rr-admin --addr kv-$to:52001 \
         --tls-ca /etc/rr/certs/ca.pem --tls-cert /etc/rr/certs/client.pem --tls-key /etc/rr/certs/client.key \
         --token-env RR_ADMIN_TOKEN \

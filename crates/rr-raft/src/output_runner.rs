@@ -31,7 +31,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use rr_core::error::RrError;
+use rr_core::error::{RaftError, RrError};
 use rr_core::output::{KafkaProducer, NoopKafkaProducer, Output, OutputTarget};
 use rr_core::types::GroupId;
 
@@ -52,6 +52,12 @@ pub const MAX_SEND_BACKOFF: Duration = Duration::from_secs(30);
 /// the node is still the leader. Short enough to keep p99 delivery latency
 /// low without burning CPU when the outbox is empty.
 pub const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How often the supervisor re-checks whether a group that vanished
+/// mid-leadership has been re-created. The group being gone is not an error
+/// storm worth hot-looping over; 1s bounds the resume latency after a
+/// stop→start cycle.
+pub const GROUP_GONE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Handle for the background output runner task.
 pub struct OutputHandle {
@@ -107,7 +113,7 @@ async fn supervise(
     kafka: Arc<dyn KafkaProducer>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), RrError> {
-    let raft = mgr.get_raft(group_id).await.ok_or_else(|| {
+    let mut raft = mgr.get_raft(group_id).await.ok_or_else(|| {
         RrError::Application(format!("output runner: group {group_id} not started"))
     })?;
     let mut metrics_rx = raft.metrics();
@@ -136,7 +142,7 @@ async fn supervise(
         }
 
         info!(group_id, "output runner became leader; draining outbox");
-        run_send_loop(
+        match run_send_loop(
             &mgr,
             group_id,
             rr_client.as_deref(),
@@ -144,14 +150,69 @@ async fn supervise(
             &mut metrics_rx,
             &mut stop_rx,
         )
-        .await;
-
-        if check_stop(&mut stop_rx) {
-            debug!(group_id, "output runner stopped after step-down");
-            return Ok(());
+        .await
+        {
+            SendLoopExit::Parked => {
+                if check_stop(&mut stop_rx) {
+                    debug!(group_id, "output runner stopped after step-down");
+                    return Ok(());
+                }
+                info!(group_id, "output runner lost leadership; parking");
+            }
+            SendLoopExit::GroupGone => {
+                // The group was stopped underneath us (stop_group removes it
+                // from the manager while the runner is mid-leadership). Park
+                // until the group is re-created or the runner is stopped —
+                // re-entering the send loop immediately would hot-spin on the
+                // same GroupNotFound error.
+                warn!(
+                    group_id,
+                    "group removed while output runner was active; parking until it returns"
+                );
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => {
+                            debug!(group_id, "output runner stopped while parked on a removed group");
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(GROUP_GONE_POLL_INTERVAL) => {
+                            if let Some(new_raft) = mgr.get_raft(group_id).await {
+                                raft = new_raft;
+                                metrics_rx = raft.metrics();
+                                info!(group_id, "group returned; output runner resuming");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            SendLoopExit::OutboxUnsupported(e) => {
+                // Permanent misconfiguration (state machine without outbox
+                // support): warn ONCE and park until stopped — re-entering
+                // the send loop would spin and flood the log.
+                warn!(
+                    group_id,
+                    error = %e,
+                    "outbox unsupported on this group; output runner parking permanently"
+                );
+                let _ = (&mut stop_rx).await;
+                return Ok(());
+            }
         }
-        info!(group_id, "output runner lost leadership; parking");
     }
+}
+
+/// Why [`run_send_loop`] returned to the supervisor.
+enum SendLoopExit {
+    /// Lost leadership or stop requested — the supervisor parks until the
+    /// next leadership transition.
+    Parked,
+    /// The group disappeared from the manager (`stop_group`) while the
+    /// runner held leadership.
+    GroupGone,
+    /// The group's state machine has no outbox control — a permanent
+    /// misconfiguration, not a transient error.
+    OutboxUnsupported(RrError),
 }
 
 async fn run_send_loop(
@@ -161,18 +222,23 @@ async fn run_send_loop(
     kafka: &dyn KafkaProducer,
     metrics_rx: &mut RrMetricsRx,
     stop_rx: &mut oneshot::Receiver<()>,
-) {
+) -> SendLoopExit {
     let mut backoff = INITIAL_SEND_BACKOFF;
     loop {
         if check_stop(stop_rx) || !is_leader(metrics_rx) {
-            return;
+            return SendLoopExit::Parked;
         }
 
         let pending = match mgr.pending_outputs(group_id).await {
             Ok(p) => p,
             Err(e) => {
-                warn!(group_id, error = %e, "pending_outputs failed; outbox unsupported on this group");
-                return;
+                // Distinguish "group is gone" (stop_group won the race) from
+                // "state machine has no outbox" (permanent): the supervisor
+                // parks differently for each and neither may hot-spin.
+                return match e {
+                    RrError::Raft(RaftError::GroupNotFound { .. }) => SendLoopExit::GroupGone,
+                    other => SendLoopExit::OutboxUnsupported(other),
+                };
             }
         };
         metrics::gauge!(
@@ -183,9 +249,9 @@ async fn run_send_loop(
 
         if pending.is_empty() {
             tokio::select! {
-                _ = &mut *stop_rx => return,
+                _ = &mut *stop_rx => return SendLoopExit::Parked,
                 _ = metrics_rx.changed() => {
-                    if !is_leader(metrics_rx) { return; }
+                    if !is_leader(metrics_rx) { return SendLoopExit::Parked; }
                 }
                 _ = tokio::time::sleep(IDLE_POLL_INTERVAL) => {}
             }
@@ -195,7 +261,7 @@ async fn run_send_loop(
         let mut had_failure = false;
         for output in pending {
             if check_stop(stop_rx) || !is_leader(metrics_rx) {
-                return;
+                return SendLoopExit::Parked;
             }
             let seq = output.seq;
             let target_label = match &output.target {
@@ -203,7 +269,7 @@ async fn run_send_loop(
                 OutputTarget::KafkaPublish { .. } => "kafka_publish",
             };
             let send_started = std::time::Instant::now();
-            let send_result = dispatch_one(&output, rr_client, kafka).await;
+            let send_result = dispatch_one(&output, group_id, rr_client, kafka).await;
             metrics::histogram!(
                 "rr_output_send_duration_seconds",
                 "group_id" => group_id.to_string(),
@@ -245,7 +311,12 @@ async fn run_send_loop(
                         backoff_ms = backoff.as_millis() as u64,
                         "output send failed; backing off"
                     );
-                    tokio::time::sleep(backoff).await;
+                    // The backoff (up to MAX_SEND_BACKOFF) must not delay a
+                    // stop_group shutdown: race it against the stop channel.
+                    tokio::select! {
+                        _ = &mut *stop_rx => return SendLoopExit::Parked,
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
                     backoff = (backoff * 2).min(MAX_SEND_BACKOFF);
                     break;
                 }
@@ -259,6 +330,7 @@ async fn run_send_loop(
 
 async fn dispatch_one(
     output: &Output,
+    source_group_id: GroupId,
     rr_client: Option<&rr_client::RrClient>,
     kafka: &dyn KafkaProducer,
 ) -> Result<(), RrError> {
@@ -271,11 +343,7 @@ async fn dispatch_one(
                         .to_string(),
                 )
             })?;
-            let idem_key = rr_core::idempotency::IdempotencyKey::with_client_id(
-                "rr.output",
-                seq_to_request_id(output.seq),
-                output.idempotency_key.clone(),
-            );
+            let idem_key = raft_write_idem_key(source_group_id, output);
             client
                 .send_request_idempotent(*group_id, output.payload.clone(), idem_key)
                 .await
@@ -299,11 +367,24 @@ async fn dispatch_one(
     }
 }
 
-/// Derive a monotonic `request_id` for `IdempotencyKey` from the outbox
-/// sequence. The outbox guarantees seq is monotone, which is the only
-/// property the framework idempotency layer requires.
-fn seq_to_request_id(seq: u64) -> u64 {
-    seq
+/// Idempotency key for an [`OutputTarget::RaftWrite`] delivery.
+///
+/// `request_type` is namespaced per SOURCE group (`rr.output.g<N>`) because
+/// the request id is the per-source-group outbox `seq`: two source groups
+/// writing the same target group must not share a watermark namespace —
+/// otherwise equal seqs collide (`Collision`/`Expired`) and outputs are
+/// silently dropped. Per-source-group monotonicity of `seq` keeps the
+/// target's watermark contract intact. `output.idempotency_key` remains the
+/// diagnostic-only `client_id`.
+fn raft_write_idem_key(
+    source_group_id: GroupId,
+    output: &Output,
+) -> rr_core::idempotency::IdempotencyKey {
+    rr_core::idempotency::IdempotencyKey::with_client_id(
+        format!("rr.output.g{source_group_id}"),
+        output.seq,
+        output.idempotency_key.clone(),
+    )
 }
 
 fn is_leader(metrics_rx: &RrMetricsRx) -> bool {
@@ -325,6 +406,12 @@ mod tests {
     use rr_core::output::{KafkaProducer, Output, OutputTarget};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
+
+    use crate::group_manager::{RaftGroupManager, StateMachineFactory};
+    use openraft::BasicNode;
+    use rr_core::state_machine::StateMachine;
+    use rr_core::types::LogIndex;
+    use std::collections::BTreeMap;
 
     type PublishedRecord = (String, i32, Vec<u8>, Vec<u8>, String);
 
@@ -400,7 +487,7 @@ mod tests {
             },
             b"order-payload".to_vec(),
         );
-        dispatch_one(&output, None, producer.as_ref())
+        dispatch_one(&output, 7, None, producer.as_ref())
             .await
             .unwrap();
     }
@@ -418,7 +505,7 @@ mod tests {
             },
             b"order-payload".to_vec(),
         );
-        let err = dispatch_one(&output, None, producer.as_ref())
+        let err = dispatch_one(&output, 7, None, producer.as_ref())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("scripted failure"));
@@ -436,12 +523,39 @@ mod tests {
             },
             b"payload".to_vec(),
         );
-        let err = dispatch_one(&output, None, producer.as_ref())
+        let err = dispatch_one(&output, 7, None, producer.as_ref())
             .await
             .unwrap_err();
         assert!(err
             .to_string()
             .contains("OutputTarget::RaftWrite requires an RrClient"));
+    }
+
+    /// INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
+    /// The RaftWrite idempotency namespace is per SOURCE group: two source
+    /// groups writing one target group reuse the same per-source outbox seq
+    /// range, so a shared `request_type` would collide and silently drop
+    /// outputs on the target's idempotency layer.
+    #[test]
+    fn raft_write_idem_key_is_namespaced_per_source_group() {
+        let output = Output::new(
+            "tx-42:0",
+            OutputTarget::RaftWrite {
+                addrs: vec!["127.0.0.1:50051".into()],
+                group_id: 9,
+            },
+            b"payload".to_vec(),
+        );
+        let key_a = raft_write_idem_key(1, &output);
+        let key_b = raft_write_idem_key(2, &output);
+        assert_eq!(key_a.request_type, "rr.output.g1");
+        assert_eq!(key_b.request_type, "rr.output.g2");
+        assert_ne!(
+            key_a, key_b,
+            "two source groups must never share an idempotency namespace"
+        );
+        assert_eq!(key_a.request_id, output.seq);
+        assert_eq!(key_a.client_id.as_deref(), Some("tx-42:0"));
     }
 
     // INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
@@ -456,5 +570,219 @@ mod tests {
             join,
         };
         handle.stop().await;
+    }
+
+    // ── Supervisor parking semantics (send-loop exit classification) ─────
+
+    /// State machine without outbox support (the `outbox_control` default).
+    struct NoOutboxSM;
+
+    #[async_trait]
+    impl StateMachine for NoOutboxSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+            Ok(entry.to_vec())
+        }
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+        async fn restore(&mut self, _: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+    }
+
+    struct EchoService;
+
+    #[async_trait]
+    impl rr_core::service::Service for EchoService {
+        async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+            Ok(request)
+        }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+        async fn restore(&mut self, _: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+    }
+
+    fn outbox_factory() -> StateMachineFactory {
+        Box::new(|gid| {
+            Box::new(crate::service_adapter::ServiceStateMachineAdapter::new(
+                gid,
+                EchoService,
+            ))
+        })
+    }
+
+    async fn single_node_leader(mgr: &RaftGroupManager, group_id: GroupId) {
+        mgr.start_group(group_id).await.unwrap();
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        );
+        mgr.init_cluster(group_id, members).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let raft = mgr.get_raft(group_id).await.unwrap();
+            if matches!(raft.metrics().borrow_watched().state, ServerState::Leader) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for leadership"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    /// INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
+    /// A leader whose state machine has no outbox must exit the send loop
+    /// with `OutboxUnsupported` immediately — the supervisor parks it
+    /// permanently instead of hot-spinning on the error.
+    #[tokio::test]
+    async fn run_send_loop_reports_outbox_unsupported() {
+        let mgr = RaftGroupManager::new(1, Box::new(|_| Box::new(NoOutboxSM)));
+        single_node_leader(&mgr, 1).await;
+        let raft = mgr.get_raft(1).await.unwrap();
+        let mut metrics_rx = raft.metrics();
+        let (_stop_tx, mut stop_rx) = oneshot::channel();
+
+        let kafka = NoopKafkaProducer;
+        let exit = run_send_loop(&mgr, 1, None, &kafka, &mut metrics_rx, &mut stop_rx).await;
+        assert!(
+            matches!(exit, SendLoopExit::OutboxUnsupported(_)),
+            "expected OutboxUnsupported, got {}",
+            match exit {
+                SendLoopExit::Parked => "Parked",
+                SendLoopExit::GroupGone => "GroupGone",
+                SendLoopExit::OutboxUnsupported(_) => "OutboxUnsupported",
+            }
+        );
+        mgr.stop_group(1).await.unwrap();
+    }
+
+    /// INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
+    /// A group stopped mid-leadership parks the send loop: by the time
+    /// `stop_group` returns, the metrics channel already carries the
+    /// shutdown state, so the loop sees "not leader" and parks — the
+    /// supervisor's GroupGone arm covers only the narrower race where a
+    /// stale snapshot still says Leader while the manager dropped the group.
+    #[tokio::test]
+    async fn run_send_loop_parks_when_group_stopped() {
+        let mgr = RaftGroupManager::new(1, outbox_factory());
+        single_node_leader(&mgr, 1).await;
+        let raft = mgr.get_raft(1).await.unwrap();
+        let mut metrics_rx = raft.metrics();
+        let (_stop_tx, mut stop_rx) = oneshot::channel();
+
+        mgr.stop_group(1).await.unwrap();
+
+        let kafka = NoopKafkaProducer;
+        let exit = run_send_loop(&mgr, 1, None, &kafka, &mut metrics_rx, &mut stop_rx).await;
+        assert!(
+            matches!(exit, SendLoopExit::Parked | SendLoopExit::GroupGone),
+            "a stopped group must park the runner (never an error storm); got {}",
+            match exit {
+                SendLoopExit::Parked => "Parked",
+                SendLoopExit::GroupGone => "GroupGone",
+                SendLoopExit::OutboxUnsupported(_) => "OutboxUnsupported",
+            }
+        );
+    }
+
+    /// INV-4: every committed output is eventually delivered (at-least-once); the watermark advances only after confirmed delivery.
+    /// A stop fired while the send loop is sleeping off a send failure must
+    /// interrupt the backoff, not wait it out (backoff grows to 30s;
+    /// stop_group would otherwise block on the runner for tens of seconds).
+    #[tokio::test]
+    async fn send_backoff_is_cancellable_via_stop() {
+        struct EmittingService;
+
+        #[async_trait]
+        impl rr_core::service::Service for EmittingService {
+            async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
+                Ok(request)
+            }
+            async fn handle_with_outputs(
+                &self,
+                request: Vec<u8>,
+            ) -> Result<rr_core::output::HandleResult, RrError> {
+                Ok(rr_core::output::HandleResult::with_outputs(
+                    request,
+                    vec![Output::new(
+                        "idem:x",
+                        OutputTarget::KafkaPublish {
+                            topic: "t".to_string(),
+                            partition: 0,
+                            key: b"k".to_vec(),
+                        },
+                        b"payload".to_vec(),
+                    )],
+                ))
+            }
+            fn name(&self) -> &str {
+                "emitting"
+            }
+            async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+                Ok(vec![])
+            }
+            async fn restore(&mut self, _: &[u8]) -> Result<(), RrError> {
+                Ok(())
+            }
+        }
+
+        let mgr = Arc::new(RaftGroupManager::new(
+            1,
+            Box::new(|gid| {
+                Box::new(crate::service_adapter::ServiceStateMachineAdapter::new(
+                    gid,
+                    EmittingService,
+                ))
+            }),
+        ));
+        single_node_leader(&mgr, 1).await;
+        mgr.write(1, b"x".to_vec()).await.unwrap();
+        let raft = mgr.get_raft(1).await.unwrap();
+        let mut metrics_rx = raft.metrics();
+        let (stop_tx, mut stop_rx) = oneshot::channel();
+
+        // Always-failing producer: the loop sleeps with doubling backoff
+        // (100ms, 200ms, 400ms, …) between attempts.
+        let kafka = CapturingKafka {
+            published: Mutex::new(Vec::new()),
+            fail_n: AtomicU64::new(u64::MAX),
+        };
+        let mgr2 = Arc::clone(&mgr);
+        let runner = tokio::spawn(async move {
+            run_send_loop(&mgr2, 1, None, &kafka, &mut metrics_rx, &mut stop_rx).await
+        });
+
+        // Let backoff grow past 1s (5 failures ⇒ 1600ms sleep window).
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        let stop_sent = std::time::Instant::now();
+        let _ = stop_tx.send(());
+        let exit = tokio::time::timeout(Duration::from_secs(2), runner)
+            .await
+            .expect("send loop must exit promptly once stopped")
+            .unwrap();
+        assert!(
+            matches!(exit, SendLoopExit::Parked),
+            "stop during backoff must park the send loop"
+        );
+        assert!(
+            stop_sent.elapsed() < Duration::from_secs(1),
+            "stop must interrupt the in-flight backoff sleep, took {:?}",
+            stop_sent.elapsed()
+        );
+        mgr.stop_group(1).await.unwrap();
     }
 }

@@ -17,13 +17,20 @@
 //!
 //! # Pre-conditions (enforced)
 //!
-//! 1. The node MUST be stopped. We detect a held RocksDB `LOCK` file
-//!    and refuse to proceed.
+//! 1. The node MUST be stopped. We probe the RocksDB `LOCK` file for a
+//!    held OS-level lock and refuse to proceed while one is held.
+//!    On Unix this probes both `fcntl(F_SETLK)` (what RocksDB's
+//!    PosixFileSystem uses) and `flock` lock namespaces; an unexpected
+//!    probe error fails CLOSED (refuses) with a WARN log.
+//!    On non-Unix platforms the probe is not implemented and only the
+//!    existence of `LOCK` is checked — the operator is responsible for
+//!    ensuring the node is stopped there.
 //! 2. The data_dir MUST exist and look like a real rr data dir
 //!    (contains either RocksDB column-family files or is empty —
 //!    the bare existence of an arbitrary directory tree is rejected
 //!    to prevent fat-finger of a wrong path wiping unrelated data).
-//! 3. Operator MUST confirm via `--force` or interactive `y/N`.
+//! 3. Operator MUST confirm via `--force` (there is no interactive
+//!    prompt; the flag IS the confirmation).
 //!
 //! # Post-conditions
 //!
@@ -69,9 +76,9 @@ pub struct NodeResetReport {
 /// Wipe `data_dir` after enforcing the pre-conditions documented at
 /// the module level.
 ///
-/// `force = true` skips the interactive confirmation. Tests pass
-/// `force = true` to keep them non-interactive; production CLI
-/// drives this via `--force` after explicit operator confirmation.
+/// `force = true` IS the operator confirmation (there is no interactive
+/// prompt; the CLI help text and module docs describe the flag as such).
+/// Tests pass `force = true` to keep them non-interactive.
 pub fn reset_node_data_dir(data_dir: &Path, force: bool) -> Result<NodeResetReport> {
     if !data_dir.exists() {
         return Err(anyhow!(
@@ -165,16 +172,107 @@ fn looks_like_rr_data_dir(data_dir: &Path) -> Result<bool> {
     Ok(saw_marker)
 }
 
+/// Probe whether the RocksDB `LOCK` file in `data_dir` is currently
+/// locked by another (presumably running) process.
+///
+/// RocksDB's PosixFileSystem takes an exclusive `fcntl(F_SETLK)` write
+/// lock on `LOCK` for the lifetime of an open DB (falling back to
+/// `flock` on systems without `fcntl`), so we probe BOTH lock
+/// namespaces: a held lock in either one means the node is still
+/// running (or crashed without closing the DB — same operational
+/// meaning: do not wipe).
+///
+/// Both probes are non-destructive: on success WE acquire and
+/// immediately release the lock by closing our own file description,
+/// which never touches another process's lock.
+///
+/// Fail-closed: an unexpected probe error (e.g. `ENOLCK` on NFS)
+/// returns `true` (with a WARN) — wiping is destructive, so ambiguity
+/// must stop the operation, not silently allow it.
+#[cfg(unix)]
+fn rocks_lock_held(data_dir: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    let lock = data_dir.join("LOCK");
+    // Read+write: fcntl(F_WRLCK) and flock(LOCK_EX) both require a
+    // write-capable fd (EBADF otherwise on several platforms).
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(e) => {
+            tracing::warn!(
+                "cannot open {} to probe the RocksDB lock ({e}); \
+                 refusing to treat the node as stopped",
+                lock.display()
+            );
+            return true;
+        }
+    };
+    let fd = file.as_raw_fd();
+
+    // Probe 1: POSIX record lock (fcntl), the primary RocksDB mechanism.
+    let mut fl: libc::flock = unsafe { std::mem::zeroed() };
+    fl.l_type = libc::F_WRLCK as libc::c_short;
+    fl.l_whence = libc::SEEK_SET as libc::c_short;
+    fl.l_start = 0;
+    fl.l_len = 0; // to EOF
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETLK, &fl) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EACCES) | Some(libc::EAGAIN) => return true,
+            _ => {
+                tracing::warn!(
+                    "fcntl lock probe on {} failed unexpectedly ({err}); \
+                     refusing to treat the node as stopped",
+                    lock.display()
+                );
+                return true;
+            }
+        }
+    }
+    // We acquired the fcntl lock; release it explicitly before probing
+    // flock (dropping `file` would also release it, but be explicit).
+    fl.l_type = libc::F_UNLCK as libc::c_short;
+    unsafe { libc::fcntl(fd, libc::F_SETLK, &fl) };
+
+    // Probe 2: BSD flock, RocksDB's documented fallback (ENOSYS systems).
+    let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EWOULDBLOCK) | Some(libc::EACCES) => return true,
+            _ => {
+                tracing::warn!(
+                    "flock probe on {} failed unexpectedly ({err}); \
+                     refusing to treat the node as stopped",
+                    lock.display()
+                );
+                return true;
+            }
+        }
+    }
+    false // both probes acquired the lock → nobody else holds it
+}
+
+/// Non-Unix fallback: there is no portable OS-lock probe on this
+/// platform, so the live-node guard is NOT enforced here. Only the
+/// existence fast-path is kept, and only in the negative: a missing
+/// `LOCK` is conclusive, while a present one proves nothing (RocksDB
+/// unlocks but does NOT delete `LOCK` on clean shutdown, so refusing
+/// on existence alone would make `node-reset` unusable). The operator
+/// MUST ensure the node is stopped before running `node-reset`.
+#[cfg(not(unix))]
 fn rocks_lock_held(data_dir: &Path) -> bool {
     let lock = data_dir.join("LOCK");
     if !lock.exists() {
-        return false;
+        return false; // no LOCK file → nothing to probe
     }
-    let Ok(file) = std::fs::OpenOptions::new().write(true).open(&lock) else {
-        return false;
-    };
-    drop(file);
-    false
+    false // LOCK present but not probeable on this platform
 }
 
 fn dir_size(path: &Path) -> Result<u64> {
@@ -290,5 +388,52 @@ mod tests {
         touch(tmp.path(), "IDENTITY", b"abc123");
         let report = reset_node_data_dir(tmp.path(), true).expect("IDENTITY marker accepted");
         assert_eq!(report.files_removed, 1);
+    }
+
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// Regression: a LOCK file held by a live (flock'd) RocksDB process must
+    /// make node-reset refuse the wipe. RocksDB leaves `LOCK` behind after a
+    /// clean shutdown, so presence alone must NOT refuse — only a held lock.
+    /// (Only the flock probe is exercised in-process: POSIX `fcntl` record
+    /// locks are per-process, so a lock taken by this same process would not
+    /// conflict with the probe — testing that path would require a fork.)
+    #[cfg(unix)]
+    #[test]
+    fn refuses_when_lock_file_is_flock_held() {
+        use std::os::unix::io::AsRawFd;
+
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "CURRENT", b"MANIFEST-000001\n");
+        touch(tmp.path(), "LOCK", b"");
+        let lock_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp.path().join("LOCK"))
+            .unwrap();
+        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "test setup: flock must succeed");
+
+        let err = reset_node_data_dir(tmp.path(), true).unwrap_err();
+        assert!(
+            err.to_string().contains("still be running"),
+            "expected live-node refusal, got: {err}"
+        );
+        // The dir must be untouched.
+        assert!(tmp.path().join("CURRENT").exists());
+
+        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_UN) };
+    }
+
+    /// Companion to the refusal test: a LOCK file left over from a clean
+    /// shutdown (unlocked) must NOT block the reset.
+    #[cfg(unix)]
+    #[test]
+    fn allows_when_lock_file_present_but_unlocked() {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "CURRENT", b"MANIFEST-000001\n");
+        touch(tmp.path(), "LOCK", b"");
+        let report = reset_node_data_dir(tmp.path(), true)
+            .expect("stale-but-unlocked LOCK must not block reset");
+        assert_eq!(report.files_removed, 2);
     }
 }

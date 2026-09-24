@@ -8,10 +8,10 @@
 //!
 //! Seeds are produced exclusively through the crates' *real* encode paths
 //! (`FramedEntry::encode`, `FramedSnapshot::encode`, `ApplyOutcome::encode`,
-//! `prost::Message::encode_to_vec`) so they are guaranteed to be valid
-//! current-format frames. Each target also gets a truncated sample and
-//! (for the versioned formats) a future-version sample so the rejection
-//! paths are covered from the first run.
+//! `encode_batch`, `prost::Message::encode_to_vec`) so they are guaranteed
+//! to be valid current-format frames. Each target also gets a truncated
+//! sample and (for the versioned formats) a future-version sample so the
+//! rejection paths are covered from the first run.
 //!
 //! Layout follows the cargo-fuzz default convention:
 //! `fuzz/corpus/<target>/<seed-file>`.
@@ -20,6 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use prost::Message;
+use rr_core::batch::{encode_batch, BATCH_FRAME_VERSION};
 use rr_core::framed_entry::FramedEntry;
 use rr_core::framed_snapshot::{FramedSnapshot, FrameworkState, IdempotencyState, IngestorState, OutboxState};
 use rr_core::idempotency::{ApplyOutcome, IdempotencyError, IdempotencyKey};
@@ -231,11 +232,41 @@ fn client_request_proto_seeds() -> Vec<(&'static str, Vec<u8>)> {
     seeds
 }
 
+fn batch_frame_seeds() -> Vec<(&'static str, Vec<u8>)> {
+    let mut seeds: Vec<(&'static str, Vec<u8>)> = Vec::new();
+
+    seeds.push((
+        "batch_multi.bin",
+        encode_batch(&[b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()]),
+    ));
+    seeds.push(("batch_single.bin", encode_batch(&[b"hello".to_vec()])));
+    // Empty items are legal (len: u32 = 0) — the decoder must not choke.
+    seeds.push((
+        "batch_empty_items.bin",
+        encode_batch(&[b"a".to_vec(), vec![], b"b".to_vec()]),
+    ));
+    // count = 0: a well-formed frame carrying no items.
+    seeds.push(("batch_empty.bin", encode_batch(&[])));
+    // No magic: decode accepts it as `Ok(None)` (raw-payload fallback).
+    seeds.push(("batch_not_a_batch.bin", b"plain application payload".to_vec()));
+
+    // Rejection paths: item length prefix cut off mid-header-tail, and a
+    // version newer than this binary (version lives at byte 8).
+    let valid = seeds[0].1.clone(); // batch_multi.bin
+    seeds.push(("batch_truncated.bin", truncated(&valid, 15)));
+    let mut future = valid.clone();
+    future[8] = BATCH_FRAME_VERSION + 1; // must decode to a loud Err
+    seeds.push(("batch_future_version.bin", future));
+
+    seeds
+}
+
 fn main() {
     let entry = framed_entry_seeds();
     let snapshot = framed_snapshot_seeds();
     let outcome = apply_outcome_seeds();
     let proto = client_request_proto_seeds();
+    let batch = batch_frame_seeds();
 
     // The roundtrip targets share the input format with their decode
     // counterpart, so they get identical seeds.
@@ -246,6 +277,8 @@ fn main() {
         ("fuzz_apply_outcome_decode", &outcome),
         ("fuzz_apply_outcome_roundtrip", &outcome),
         ("fuzz_client_request_proto", &proto),
+        ("fuzz_batch_frame_decode", &batch),
+        ("fuzz_batch_frame_roundtrip", &batch),
     ] {
         for (name, bytes) in seeds {
             write_seed(target, name, bytes);

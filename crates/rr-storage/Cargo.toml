@@ -8,6 +8,7 @@ rr-core = { path = "../rr-core" }
 async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 rocksdb = { workspace = true, optional = true }
 
 [features]

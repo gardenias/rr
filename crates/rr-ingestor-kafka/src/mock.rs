@@ -27,6 +27,7 @@ struct MockState {
     last_seek: Option<Option<i64>>,
     commits: Vec<i64>,
     fail_next_poll: bool,
+    fail_after: Option<usize>,
 }
 
 /// Cloneable handle for a test to push messages into the mock and
@@ -44,6 +45,7 @@ impl MockKafkaIngestor {
             last_seek: None,
             commits: Vec::new(),
             fail_next_poll: false,
+            fail_after: None,
         }));
         (
             Self {
@@ -85,6 +87,16 @@ impl MockKafkaHandle {
     pub async fn fail_next_poll(&self) {
         self.inner.lock().await.fail_next_poll = true;
     }
+
+    /// Mid-batch failure seam: the next [`CommandIngestor::poll`] returns
+    /// up to `n` queued messages as a partial batch, and the FOLLOWING
+    /// poll errors. This mirrors the real `KafkaIngestor`'s contract —
+    /// messages already consumed from the stream are flushed (`Ok`), and
+    /// the broker error resurfaces on the next poll, where the supervisor
+    /// backs off and retries.
+    pub async fn fail_next_poll_after(&self, n: usize) {
+        self.inner.lock().await.fail_after = Some(n);
+    }
 }
 
 #[async_trait]
@@ -110,7 +122,22 @@ impl CommandIngestor for MockKafkaIngestor {
                 "mock kafka: simulated poll failure".to_string(),
             ));
         }
-        let n = g.queue.len().min(max_batch_size);
+        let limit = match g.fail_after.take() {
+            // Zero messages before the error == plain poll failure (the
+            // real backend returns Err when its batch is still empty).
+            Some(0) => {
+                return Err(RrError::Application(
+                    "mock kafka: simulated poll failure".to_string(),
+                ));
+            }
+            // Partial batch first; the error fires on the NEXT poll.
+            Some(after) => {
+                g.fail_next_poll = true;
+                max_batch_size.min(after)
+            }
+            None => max_batch_size,
+        };
+        let n = g.queue.len().min(limit);
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             if let Some(cmd) = g.queue.pop_front() {
@@ -204,5 +231,52 @@ mod tests {
         assert!(err.to_string().contains("simulated"));
         let batch = ing.poll(10).await.unwrap();
         assert_eq!(batch.len(), 1, "next poll should succeed");
+    }
+
+    /// INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
+    /// Regression: the real backend must NOT drop a partial batch when a
+    /// poll errors mid-stream — consumed messages have advanced the
+    /// consumer position and the supervisor retries without re-seek.
+    /// The mock models the fixed contract: partial batch returns `Ok`,
+    /// the error resurfaces on the following poll.
+    #[tokio::test]
+    async fn fail_next_poll_after_returns_partial_batch_then_errors() {
+        let (mut ing, h) = MockKafkaIngestor::new();
+        for i in 0..5 {
+            h.push(i, vec![i as u8]).await;
+        }
+        h.fail_next_poll_after(2).await;
+
+        let batch = ing.poll(10).await.unwrap();
+        assert_eq!(
+            batch.len(),
+            2,
+            "partial batch must be returned, not dropped"
+        );
+        assert_eq!(batch[0].offset, 0);
+        assert_eq!(batch[1].offset, 1);
+
+        let err = ing.poll(10).await.unwrap_err();
+        assert!(
+            err.to_string().contains("simulated"),
+            "error must resurface on the next poll"
+        );
+
+        let rest = ing.poll(10).await.unwrap();
+        assert_eq!(rest.len(), 3, "remaining messages survive the failure");
+        assert_eq!(rest[0].offset, 2);
+    }
+
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
+    #[tokio::test]
+    async fn fail_next_poll_after_more_than_queued_returns_all_then_errors() {
+        let (mut ing, h) = MockKafkaIngestor::new();
+        h.push(0, b"a".to_vec()).await;
+        h.fail_next_poll_after(10).await;
+
+        let batch = ing.poll(10).await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(ing.poll(10).await.is_err());
+        assert!(ing.poll(10).await.unwrap().is_empty());
     }
 }

@@ -46,9 +46,31 @@ pub trait StorageEngine: Send + Sync {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
+    /// Fetch the greatest key-value pair in a column family (lexicographic
+    /// key order), or `None` if the column family is empty.
+    ///
+    /// The default implementation is an **O(n) fallback**: it scans the whole
+    /// column family and keeps only the tail pair. Backends over ordered
+    /// storage should override it with a native reverse seek (both built-in
+    /// backends — `MemStorage` and `RocksStorage` — do).
+    ///
+    /// The fallback scans `[&[], &[0xff; 64])`: a key at or beyond the
+    /// 64-byte all-`0xff` sentinel would be missed, so an engine permitting
+    /// such keys MUST override this method.
+    async fn last_key_value(&self, cf: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+        const SCAN_END_SENTINEL: [u8; 64] = [0xff; 64];
+        let pairs = self.scan(cf, &[], &SCAN_END_SENTINEL).await?;
+        Ok(pairs.into_iter().last())
+    }
     /// Apply multiple operations atomically.
     async fn write_batch(&self, ops: Vec<BatchOp>) -> Result<(), StorageError>;
-    /// Flush pending writes to durable storage (no-op for in-memory).
+    /// Flush every column family's in-memory write buffer (memtable) to
+    /// storage files. No-op for in-memory engines.
+    ///
+    /// This is a maintenance flush, not a durability barrier: the durability
+    /// of already-acknowledged writes is governed by the engine's per-write
+    /// options (e.g. `RocksStorage` under `DurabilityPolicy::Strict` fsyncs
+    /// the WAL on each write), not by this call.
     async fn flush(&self) -> Result<(), StorageError>;
     /// Create a new column family.
     async fn create_cf(&self, name: &str) -> Result<(), StorageError>;
@@ -95,5 +117,51 @@ mod tests {
     fn test_storage_engine_is_object_safe() {
         // This is a compile-time check — if StorageEngine wasn't object-safe, this wouldn't compile
         let _: Option<Box<dyn StorageEngine>> = None;
+    }
+
+    /// The default `last_key_value` fallback derives the tail pair from a
+    /// full-CF `scan` — engines that only implement `scan` get correct
+    /// behavior (O(n)) without an override.
+    #[tokio::test]
+    async fn test_last_key_value_default_via_scan() {
+        struct ScanOnly;
+
+        #[async_trait]
+        impl StorageEngine for ScanOnly {
+            async fn put(&self, _cf: &str, _key: &[u8], _value: &[u8]) -> Result<(), StorageError> {
+                unimplemented!()
+            }
+            async fn get(&self, _cf: &str, _key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+                unimplemented!()
+            }
+            async fn delete(&self, _cf: &str, _key: &[u8]) -> Result<(), StorageError> {
+                unimplemented!()
+            }
+            async fn scan(
+                &self,
+                _cf: &str,
+                _start: &[u8],
+                _end: &[u8],
+            ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError> {
+                Ok(vec![
+                    (b"a".to_vec(), b"1".to_vec()),
+                    (b"m".to_vec(), b"2".to_vec()),
+                    (b"z".to_vec(), b"3".to_vec()),
+                ])
+            }
+            async fn write_batch(&self, _ops: Vec<BatchOp>) -> Result<(), StorageError> {
+                unimplemented!()
+            }
+            async fn flush(&self) -> Result<(), StorageError> {
+                unimplemented!()
+            }
+            async fn create_cf(&self, _name: &str) -> Result<(), StorageError> {
+                unimplemented!()
+            }
+        }
+
+        let engine = ScanOnly;
+        let last = engine.last_key_value("any").await.unwrap();
+        assert_eq!(last, Some((b"z".to_vec(), b"3".to_vec())));
     }
 }

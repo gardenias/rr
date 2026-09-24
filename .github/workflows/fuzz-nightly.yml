@@ -5,8 +5,9 @@
 # with `cargo fuzz tmin` and archived as a downloadable artifact.
 #
 # Triage contract: this workflow never blocks merges. Crash artifacts land
-# in the run's artifact list; dedup (by backtrace hash) and weekly rollup
-# issues are handled by maintainers per the risk register in
+# in the run's artifact list, and a failure auto-files (or comments on) one
+# open `nightly-failure` issue per target; deeper dedup (by backtrace hash)
+# and weekly rollup stay with maintainers per the risk register in
 # .sisyphus/plans/rr-reliability-program.md ("fuzz nightly 发现噪声化").
 # The PR-level smoke from the R-6 design is deliberately NOT wired into
 # ci.yml yet (noise control) — see the design doc before adding it.
@@ -21,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  issues: write # the on-failure step opens/comments on the tracking issue
 
 jobs:
   fuzz:
@@ -37,13 +39,18 @@ jobs:
           - fuzz_client_request_proto
           - fuzz_framed_entry_roundtrip
           - fuzz_apply_outcome_roundtrip
+          - fuzz_batch_frame_decode
+          - fuzz_batch_frame_roundtrip
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@nightly
 
+      # Pin within the 0.12 series: installing from HEAD makes the nightly
+      # unreproducible (a breaking cargo-fuzz release would fail every
+      # target leg at once). Bump deliberately.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --locked --version 0.12
 
       # Committed seed corpus lives in fuzz/corpus/<target>/ (cargo-fuzz
       # default convention); cargo fuzz picks it up automatically.
@@ -72,3 +79,28 @@ jobs:
           path: fuzz/artifacts/${{ matrix.target }}/
           if-no-files-found: ignore
           retention-days: 30
+
+      # Auto-file (or append to) a tracking issue. Dedupe key is workflow +
+      # target: one open issue per fuzz target; repeat failures comment.
+      - name: Open/update tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          label="nightly-failure"
+          key="${{ github.workflow }} / ${{ matrix.target }}"
+          title="[nightly] $key failed — $(date +%F)"
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh label create "$label" --color db6d6d \
+            --description "Automated nightly workflow failure tracker" --force >/dev/null 2>&1 || true
+          existing="$(gh issue list --state open --label "$label" \
+            --search "\"$key\" in:title" --json number --jq ".[0].number")"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --body "Failed again on $(date +%F): $url"
+            echo "commented on existing issue #$existing"
+          else
+            body="$(printf 'Scheduled fuzz run crashed for %s.\n\nRun: %s\n\nThe minimized reproducer (cargo fuzz tmin) is attached to the run as an artifact. Add it to fuzz/corpus/%s/ once fixed so the regression is caught on every run.\n\nClose this issue once triaged.' "${{ matrix.target }}" "$url" "${{ matrix.target }}")"
+            gh issue create --label "$label" --title "$title" --body "$body"
+            echo "issue created"
+          fi

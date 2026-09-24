@@ -34,6 +34,8 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use openraft::type_config::alias::LogIdOf;
 use openraft::type_config::alias::SnapshotMetaOf;
@@ -50,6 +52,80 @@ pub(crate) const SNAPSHOT_STORE_MAGIC: [u8; 8] = *b"\0rrPST01";
 pub(crate) const SNAPSHOT_STORE_VERSION: u8 = 1;
 
 const ENVELOPE_HEADER_LEN: usize = SNAPSHOT_STORE_MAGIC.len() + 1;
+
+/// Atomically write `body` wrapped in the house envelope (`magic | version |
+/// body`) to `path`: write a `*.tmp` sibling, fsync the file, rename over
+/// `path`, then fsync the parent directory. A crash mid-write therefore
+/// leaves either the old or the new file — never a torn one — and a leftover
+/// `*.tmp` is ignored by readers.
+///
+/// The directory fsync is best-effort but LOUD: it is what makes the rename
+/// itself survive a power loss (kill -9 never needs it, but Strict promises
+/// power-loss durability), so both an open failure and a sync failure are
+/// `warn!`ed instead of silently dropping the guarantee.
+pub(crate) fn atomic_write_enveloped(
+    path: &Path,
+    magic: &[u8; 8],
+    version: u8,
+    body: &[u8],
+) -> Result<(), io::Error> {
+    let mut bytes = Vec::with_capacity(magic.len() + 1 + body.len());
+    bytes.extend_from_slice(magic);
+    bytes.push(version);
+    bytes.extend_from_slice(body);
+
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("atomic write: create {} failed: {e}", tmp.display()),
+            )
+        })?;
+        f.write_all(&bytes)
+            .and_then(|()| f.sync_all())
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("atomic write: write/fsync {} failed: {e}", tmp.display()),
+                )
+            })?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!(
+                "atomic write: rename {} → {} failed: {e}",
+                tmp.display(),
+                path.display()
+            ),
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        match std::fs::File::open(parent) {
+            Ok(dir) => {
+                if let Err(e) = dir.sync_all() {
+                    tracing::warn!(
+                        error = %e,
+                        dir = %parent.display(),
+                        "atomic write: directory fsync failed — rename may not survive power loss"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    dir = %parent.display(),
+                    "atomic write: cannot open parent dir for fsync — rename may not survive power loss"
+                );
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Strip and validate the envelope, returning the bincode body. Files
 /// without the envelope (including pre-versioning 0.2.x files) and future
@@ -110,20 +186,37 @@ impl PersistentSnapshot {
 
 /// Atomic file-backed store holding a group's single live snapshot.
 ///
-/// Clone is cheap (a `PathBuf`); clones share the same on-disk file. The
-/// store performs no in-process caching — `save` writes through and `load`
-/// reads from disk — because OpenRaft drives both at snapshot/build/install
-/// boundaries, not on the hot apply path.
+/// Clone is cheap; clones share the same on-disk file AND the same
+/// `last_persisted_index` cache (an `Arc`). The store performs no snapshot
+/// caching — `save` writes through and `load` reads from disk — because
+/// OpenRaft drives both at snapshot/build/install boundaries, not on the hot
+/// apply path. The one exception is the monotonic guard's covered-index
+/// cache (below), which exists precisely so `save_if_newer` does not have to
+/// re-read and decode the whole previous snapshot on every build.
 #[derive(Debug, Clone)]
 pub struct SnapshotStore {
     /// Final path of the live snapshot file, e.g. `{group_dir}/sm-snapshot.bin`.
     path: PathBuf,
+    /// Greatest `covered_index` known to be durably persisted, shared by all
+    /// clones. Seeded by the one `load()` at open() (`fetch_max`) and bumped
+    /// by every successful `save()`, so the steady-state `save_if_newer`
+    /// guard is a pure in-memory compare and the save is a pure write.
+    /// `0` = unseeded (no snapshot ever observed by this handle).
+    last_persisted_index: Arc<AtomicU64>,
 }
 
 impl SnapshotStore {
     /// A store whose live snapshot file is `path`.
+    ///
+    /// Performs no IO: the monotonic guard's covered-index cache starts
+    /// unseeded (`0`) and is filled by the first [`load`](Self::load) — the
+    /// open path (`RrStateMachine::with_snapshot_store`) always loads once
+    /// before any save.
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            last_persisted_index: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// The live snapshot file path.
@@ -132,6 +225,7 @@ impl SnapshotStore {
     }
 
     /// The transient sibling a save writes before the atomic rename.
+    #[cfg(test)]
     fn tmp_path(&self) -> PathBuf {
         let mut tmp = self.path.clone().into_os_string();
         tmp.push(".tmp");
@@ -160,7 +254,7 @@ impl SnapshotStore {
                         "snapshot store: failed to read {}: {e}",
                         self.path.display()
                     ),
-                ))
+                ));
             }
         };
         let (snap, _): (PersistentSnapshot, usize) = bincode::serde::decode_from_slice(
@@ -174,58 +268,32 @@ impl SnapshotStore {
                 bytes.len()
             ))
         })?;
+        // Seed the monotonic guard's cache: this is the "one load() at
+        // open()" that lets `save_if_newer` skip re-reading the previous
+        // snapshot on every build.
+        self.last_persisted_index
+            .fetch_max(snap.covered_index(), Ordering::AcqRel);
         Ok(Some(snap))
     }
 
     /// Atomically persist `snap` as the group's live snapshot.
     ///
-    /// `write tmp → fsync file → rename → fsync dir`, so the live file is
-    /// never torn. Under the Strict durability contract this makes the
-    /// snapshot as durable as the Raft log before OpenRaft purges the covered
-    /// prefix (which only happens *after* a successful build/install).
+    /// `write tmp → fsync file → rename → fsync dir` (see
+    /// [`atomic_write_enveloped`]), so the live file is never torn. Under the
+    /// Strict durability contract this makes the snapshot as durable as the
+    /// Raft log before OpenRaft purges the covered prefix (which only happens
+    /// *after* a successful build/install).
     pub(crate) fn save(&self, snap: &PersistentSnapshot) -> Result<(), io::Error> {
         let body = bincode::serde::encode_to_vec(snap, bincode::config::standard())
             .map_err(|e| io::Error::other(format!("snapshot store: encode failed: {e}")))?;
-        let mut bytes = Vec::with_capacity(ENVELOPE_HEADER_LEN + body.len());
-        bytes.extend_from_slice(&SNAPSHOT_STORE_MAGIC);
-        bytes.push(SNAPSHOT_STORE_VERSION);
-        bytes.extend_from_slice(&body);
-
-        let tmp = self.tmp_path();
-        {
-            let mut f = std::fs::File::create(&tmp).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("snapshot store: create {} failed: {e}", tmp.display()),
-                )
-            })?;
-            f.write_all(&bytes)
-                .and_then(|()| f.sync_all())
-                .map_err(|e| {
-                    io::Error::new(
-                        e.kind(),
-                        format!("snapshot store: write/fsync {} failed: {e}", tmp.display()),
-                    )
-                })?;
-        }
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "snapshot store: rename {} → {} failed: {e}",
-                    tmp.display(),
-                    self.path.display()
-                ),
-            )
-        })?;
-        // Durable-rename: fsync the parent directory so the directory entry
-        // itself survives a power loss (kill -9 alone never needs this, but
-        // Strict promises power-loss durability).
-        if let Some(parent) = self.path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
+        atomic_write_enveloped(
+            &self.path,
+            &SNAPSHOT_STORE_MAGIC,
+            SNAPSHOT_STORE_VERSION,
+            &body,
+        )?;
+        self.last_persisted_index
+            .fetch_max(snap.covered_index(), Ordering::AcqRel);
         Ok(())
     }
 
@@ -234,16 +302,37 @@ impl SnapshotStore {
     /// operation, so this guard is a cheap tripwire against a stale overwrite
     /// (e.g. an unexpected startup rebuild racing a real snapshot). Returns
     /// `Ok(true)` if written, `Ok(false)` if the existing snapshot is newer.
+    ///
+    /// The comparison runs against the in-memory `last_persisted_index` cache
+    /// seeded by the open-time `load()` — the steady-state save path is a
+    /// pure write, with no read+decode of the previous snapshot. While the
+    /// cache is unseeded (`0` — a handle that has not loaded or saved yet)
+    /// the guard falls back to one on-disk `load()` check so a store whose
+    /// open skipped `load()` still cannot overwrite a newer persisted
+    /// snapshot; a genuinely fresh store pays only a NotFound stat per call
+    /// until the first successful save seeds the cache.
     pub(crate) fn save_if_newer(&self, snap: &PersistentSnapshot) -> Result<bool, io::Error> {
-        if let Some(existing) = self.load()? {
-            if existing.covered_index() > snap.covered_index() {
-                tracing::warn!(
-                    existing = existing.covered_index(),
-                    new = snap.covered_index(),
-                    "snapshot store: refusing to overwrite a newer persisted snapshot \
-                     with an older one"
-                );
-                return Ok(false);
+        let cached = self.last_persisted_index.load(Ordering::Acquire);
+        if cached > snap.covered_index() {
+            tracing::warn!(
+                existing = cached,
+                new = snap.covered_index(),
+                "snapshot store: refusing to overwrite a newer persisted snapshot \
+                 with an older one"
+            );
+            return Ok(false);
+        }
+        if cached == 0 {
+            if let Some(existing) = self.load()? {
+                if existing.covered_index() > snap.covered_index() {
+                    tracing::warn!(
+                        existing = existing.covered_index(),
+                        new = snap.covered_index(),
+                        "snapshot store: refusing to overwrite a newer persisted snapshot \
+                         with an older one"
+                    );
+                    return Ok(false);
+                }
             }
         }
         self.save(snap)?;
@@ -425,5 +514,132 @@ mod tests {
             "a torn tmp must not be mistaken for a snapshot"
         );
         assert!(store.tmp_path().exists(), "tmp is left for inspection");
+    }
+
+    // INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
+    #[test]
+    fn atomic_write_enveloped_round_trip_and_tmp_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sm-membership.bin");
+
+        // A torn tmp from a crashed writer must not resurrect: the live file
+        // does not exist yet, so the tmp garbage is simply ignored.
+        let mut tmp = path.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, b"torn-partial-write").unwrap();
+
+        atomic_write_enveloped(
+            &path,
+            &SNAPSHOT_STORE_MAGIC,
+            SNAPSHOT_STORE_VERSION,
+            b"body",
+        )
+        .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            bytes,
+            [
+                &SNAPSHOT_STORE_MAGIC[..],
+                &[SNAPSHOT_STORE_VERSION],
+                b"body"
+            ]
+            .concat(),
+            "written file must be magic | version | body"
+        );
+        assert!(
+            !tmp.exists(),
+            "a successful atomic write overwrites and renames the torn tmp away"
+        );
+    }
+
+    /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
+    /// The steady-state guard compares against the in-memory cache seeded by
+    /// `load()`/`save()` — no re-read of the previous snapshot. Proven by
+    /// deleting the live file: the guard must STILL refuse the stale write.
+    #[test]
+    fn save_if_newer_refuses_stale_write_from_cache_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sm-snapshot.bin");
+        let store = SnapshotStore::new(path.clone());
+
+        let (id5, m5) = make_meta(5);
+        store
+            .save(&PersistentSnapshot {
+                last_log_id: id5,
+                last_membership: m5,
+                data: b"newer".to_vec(),
+            })
+            .unwrap();
+
+        // Remove the evidence: a disk-reading guard would now see "no
+        // snapshot" and allow the overwrite; the cache must still refuse.
+        std::fs::remove_file(&path).unwrap();
+
+        let (id3, m3) = make_meta(3);
+        let wrote = store
+            .save_if_newer(&PersistentSnapshot {
+                last_log_id: id3,
+                last_membership: m3,
+                data: b"older".to_vec(),
+            })
+            .unwrap();
+        assert!(
+            !wrote,
+            "the cached covered_index must refuse the stale write"
+        );
+        assert!(
+            !path.exists(),
+            "the refused write must not recreate the file"
+        );
+    }
+
+    /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
+    /// A store handle that never loaded (cache unseeded) still cannot
+    /// overwrite a newer persisted snapshot: the guard falls back to one
+    /// on-disk load in that case.
+    #[test]
+    fn save_if_newer_unseeded_handle_falls_back_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sm-snapshot.bin");
+
+        let (id5, m5) = make_meta(5);
+        SnapshotStore::new(path.clone())
+            .save(&PersistentSnapshot {
+                last_log_id: id5,
+                last_membership: m5,
+                data: b"newer".to_vec(),
+            })
+            .unwrap();
+
+        // A FRESH handle over the same file (own cache, unseeded).
+        let fresh = SnapshotStore::new(path.clone());
+        let (id3, m3) = make_meta(3);
+        let wrote = fresh
+            .save_if_newer(&PersistentSnapshot {
+                last_log_id: id3,
+                last_membership: m3,
+                data: b"older".to_vec(),
+            })
+            .unwrap();
+        assert!(
+            !wrote,
+            "an unseeded handle must consult the disk, not blindly overwrite"
+        );
+        assert_eq!(fresh.load().unwrap().unwrap().data, b"newer");
+
+        // And the fallback seeded the cache: a subsequent newer write is a
+        // pure save.
+        let (id6, m6) = make_meta(6);
+        let wrote = fresh
+            .save_if_newer(&PersistentSnapshot {
+                last_log_id: id6,
+                last_membership: m6,
+                data: b"newest".to_vec(),
+            })
+            .unwrap();
+        assert!(wrote);
+        assert_eq!(fresh.load().unwrap().unwrap().data, b"newest");
     }
 }

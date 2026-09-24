@@ -85,8 +85,34 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
 
 ### M3 — 并发结构
 
-- [ ] tokio worker 数与 CPU 亲和性扫描(当前默认);
-- [ ] per-group 串行段(apply 管线、metrics tick)的跨组并行度验证。
+- [x] **单 h2 连接串行点假设 —— 实证成立(2026-09-23,主杠杆)**:review 提出
+      "30k 平台与多组 26k 平顶的共同串行点 = 每 addr 单条 h2 连接"(hyper 默认
+      `max_concurrent_streams=200` 恰=bench k;server 侧单 conn task 做全部帧处理)。
+      落地 `RrClientBuilder::with_channel_fanout`(默认 1,轮询)+ rr-server
+      `--grpc-max-concurrent-streams/--grpc-max-frame-size`(CLI/env/TOML 三层)。
+      **实测(S2 k=200 mem,raw-20260923-s2-m3-*-mem.json)**:
+
+      | 配置 | TPS | p50 | p99 | vs 基线 |
+      |---|---|---|---|---|
+      | 基线 fanout=1 | 28.1k | 6.0ms | 10.9ms | — |
+      | fanout=4 | 53.6k | 2.4ms | 15.1ms | **1.91×** |
+      | fanout=8 | 67.4k | 2.1ms | 11.7ms | **2.40×** |
+      | streams1024+frame256k(fanout=1) | 31.1k | 5.5ms | 9.5ms | 1.11× |
+      | fanout=4 + 同上旋钮 | 59.3k | 2.3ms | 13.7ms | 2.11× |
+
+      结论:连接扇出是唯一大杠杆(h2 旋钮单独仅 +11%);4→8 亚线性(1.9→2.4×),
+      下一个串行点浮现(per-group Mutex/tokio 调度/客户端 CPU——留 M3 续查)。
+      扇出默认保持 1(行为不变),bench/prod 按需开。
+      **与批处理叠加**(raw-20260923-s2-m3-batch64-fan{1,4}-mem.json):
+      batch64 fan1 = 76.6k / fan4 = **121.2k**(p99 3.0ms)。注意:本波修复给批处理
+      加了 per-partition flush 串行化(跨批乱序修正,Kafka max.in.flight=1 类比),
+      fan1 从 175.2k → 76.6k 是**正确性代价**(稳态下批 RPC 不再重叠);
+      fan4 恢复到 121k。若需兼得,候选是给 BatchConfig 加 `ordered: bool`(默认 true)
+      让吞吐优先用户显式放弃跨批顺序——留作 v0.3.0 kickoff 决策点。
+- [ ] tokio worker 数与 CPU 亲和性扫描(当前默认)——未做,留 M3 续;
+- [ ] per-group 串行段(apply 管线、metrics tick)的跨组并行度验证——多组平顶根因
+      已由扇出实验解释大半(单连接),组内 Mutex(`group_manager.rs` get_raft_for_write)
+      是否次要点待扇出后复测。
 
 ### 退出判据 / Exit criteria
 
@@ -95,8 +121,10 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
 - 若 M1+M2 后仍 <100k:如实记录单机上限,把 100k 改写为多机组扩展目标
   (前置条件:组副本集合不相交,见 `docs/docs/reference/benchmarks.md` 多组实测注记)。
 
-**判据状态(2026-09-23)**:吞吐项 **条件达成** —— opt-in 批处理下 175.2k TPS。
-转正式前尚需:批处理开启状态跑 crash harness + soak(oracle) + fuzz 门禁;
+**判据状态(2026-09-23 深夜)**:吞吐项 **条件达成** —— opt-in 批处理+扇出下 121.2k TPS
+(无扇出 76.6k;扇出对未批路径 28.1k→67.4k=2.4×)。
+转正式前尚需:批处理开启态的 crash/soak/fuzz 门禁(本波已补 fuzz target 与 soak unkeyed 道,
+尚需实际跑)+ 跨批顺序串行化的吞吐代价评估(见 M3 节 ordered 旋钮决策点);
 之后评估是否对特定 profile 默认开启(串行延迟代价 161µs→3.1ms,默认关维持不变)。
 
 ## 复现 / Reproduce

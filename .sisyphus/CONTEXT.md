@@ -5,7 +5,10 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-23（**100k 目标条件达成:client 批处理 175.2k TPS(6×,默认关);etcd revision 探针缓存;A-0017 Service Bytes 化立项**）
+**Last updated**: 2026-09-24（**review 落地波收尾:invariants.md 登记 43 测试/113 links 全绿 + 门禁复验(fmt 遗留修复/clippy/fuzz 编译);仍未 commit,待用户决策**）
+> 前情 2026-09-23 深夜场（**review 批次 A–E 全部落地（89+ 文件,门禁全绿）;批次 C 收官:连接扇出实证 2.4×,批+扇出 121.2k TPS;未 commit,待用户决策**）
+> 前情 2026-09-23 晚场（**全项目全新 review:9 agent 并行全新分析,6 个 P0 全部实证到行;报告 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`**）
+> 前情 2026-09-23 早场（**100k 目标条件达成:client 批处理 175.2k TPS(6×,默认关);etcd revision 探针缓存;A-0017 Service Bytes 化立项**）
 > 前情 2026-09-22（**100k roadmap 首轮执行:M1 TCP 量化(+5.6% 非杠杆)、M2 热路径零分配化 + Arc 快照、mimalloc A/B 否决(macOS)**）
 > 前情 2026-09-21（**W9 INV-1 全链路闭环:根因定点 + 三修复落地 + perf-lab smoke ×3 / 宿主机 oracle 5000/5000 双路实证;既有选举 flake 根治;A-0012 watch 守卫闭环**）
 > 前情 2026-09-17（**perf-lab 加固批次：soak lanes open-loop 化（134→2000/s 实测达标）、RaftService gRPC 4MiB 解码上限修复（16KiB 档 wedge 真凶）、探针取证加固；W9 罕见 INV-1 flake 立案观察**）
@@ -14,7 +17,7 @@
 **Active plan**: `.sisyphus/plans/rr-prod-perf.md`（**M0–M4 全部完成**，基线 `docs/perf/prod/20260912-234352-9fa8347/`，M5=Linux 宿主正式基线）；v0.3.0 候选 `.sisyphus/plans/rr-phase4-v030.md`、`rr-wal-impl.md`（deferred，重判结论+解锁路径已回写）
 **Latest tags**: **`v0.2.0`(final,2026-09-10)** + `v0.2.0-rc1` + `v0.2.0-rc2`
 **Main branch HEAD**: 见下文 Git 状态段
-**Latest full review**: 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
+**Latest full review**: 2026-09-23（`.sisyphus/evidence/rr-fresh-review-2026-09-23.md`，6 P0 + 批次 A–E）;前次 2026-08-16 (`.sisyphus/evidence/rr-full-review-2026-08-16.md`,11 P0);架构归档 2026-08-28 (`.sisyphus/evidence/rr-architecture-analysis-2026-08-28.md`)
 **Latest Oracle review**: 2026-04-26 (`bg_1d8162f6`);Oracle 判断已并入 8-16 review
 **Latest Momus review**: 2026-05-13 (`bg_a0e5a6d2`) on rr-wal-impl.md — pending
 
@@ -26,6 +29,151 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-09-24 — review 落地波收尾:invariants.md 登记 + 门禁复验
+
+> 承接 09-23 深夜场"遗留给下轮"。用户指令:"继续"。本 session 改动 = 43 行 INV 反链注释
+> (20 个源码文件)+ invariants.md 登记 + driver.rs 单行 fmt + crash harness `batch_lane`
+> 接入 teardown oracle(clippy dead_code 修复)。**未 commit**(本地 main 领先
+> origin/main 4 commit + A–E 波次全部工作树改动)。
+
+- **invariants.md 登记闭环**:本波 43 个新测试逐条映射 INV-1/2/3/4/5/6/8 并双侧落地——
+  代码侧补 `/// INV-n:` 反链(首行 doc 约定,逐条与 lint 核对);注册表侧 8 条 INV 中
+  7 条补"现有测试"条目(每条带 `(:NNN)` 行号)、"强制点"表 +7 行(ingress 校验/TCP
+  demux/apply 批拆分 gate/kafka poll 错误臂/output 幂等键命名空间/etcd watch 重连/
+  bind host 校验,行号按当前源码核实)、"已知缺口" +6 条 ✅ 已闭环(6 个 P0,证据链
+  `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)+ 对照表 +6 行;INV-8 P2 条目
+  修正为"loopback 半段 ✅(2026-09-23 批次 B)/ 明文无 auth 半段仍 open(0.2.1)"。
+  **`scripts/check-invariants.sh` 70 → 113 links 全绿**。
+- **门禁复验**:① `cargo fmt --all -- --check` 抓到波次遗留 1 处违规
+  (`tests/crash/src/driver.rs:280`,深夜场集成期引入)——已修,现全绿;
+  ② workspace clippy `--all-targets --features rocks -D warnings` 抓到波次遗留
+  `dead_code`:crash harness 的 `Harness.batch_lane` 只建不读(其 doc 承诺"mirrored
+  into the harness's count-bounds oracle"的接入点缺失)——已在 `teardown` 补齐消费:
+  停道 + 打印统计 + `corrupted == 0` 断言(批帧错位绊线),scenario A 端到端实测
+  `batch-lane: sent=180 acked=180 failed=0 corrupted=0`、主 oracle 148/148 绿;
+  ③ rr-core / rr-config-etcd / rr-ingestor-kafka 测试绿(ingress 校验/etcd watch/
+  poll 部分批等本波新测试在列);④ fuzz crate nightly `cargo check` 绿(8 target 含
+  2 个新 batch target;cargo-fuzz 未装,种子回放仍归 CI nightly,同 R-6 立场)。
+- **perf 归档核对**:roadmap-100k.md M3 节与判据状态上轮已回填,无需补;8 份 raw
+  JSON(7×M3 扇出 + 1×早场批处理 175.2k)在 `docs/perf/baselines/` 待随提交入库;
+  `docs/perf/prod/2026091*` 5 个运行目录按既定约定不入库(保持未跟踪)。
+- **Java sdkVersion bump**:按既定留发版治理,不动。
+- **detect_changes**(scope=all):825 changed symbols / 504 affected / 101 files /
+  risk=critical——纯计数阈值;主体为 A–E 波次,本 session 增量为注释/文档/fmt 空白
+  + `scenarios.rs` teardown 的 batch_lane 消费段(测试 harness 内部,3 个同文件调用点)。
+- **下轮候选**:commit(待用户拍板,建议按"P0 修复/批次 B–E/invariants 登记"切分或
+  单 commit,提交后刷新 gitnexus 索引);批处理开启态 crash/soak/fuzz 门禁实跑(100k
+  判据转正式的前置);`BatchConfig::ordered` 旋钮与 ADR A-0018 评审(v0.3.0 kickoff)。
+
+### Session 2026-09-23(晚场)— 全项目全新 review(9 agent 并行;6 P0 实证;零代码改动)
+
+> 用户指令:"根据我们的目标再一次 review 整个项目,进一步的优化改进;忘记之前的分析结果,全新分析和探索"。
+> 完整报告:`.sisyphus/evidence/rr-fresh-review-2026-09-23.md`(含全部 file:line 证据与修复方向)。
+> 本地 main 领先 origin/main 4 个 commit;`v0.2.0` tag 已在 origin(确认推送完成)。
+
+- **6 个 P0(主会话逐行复核确认)**:① 日志投毒崩溃循环——unkeyed 客户端字节带 house magic + 畸形 body 在
+  apply 期 decode Err → sm worker 死 → RaftCore Fatal → rocks 下重启重放再死;入口无校验(dispatch.rs:90 直通,
+  service_adapter.rs:256/278,sm_adapter.rs:326);且批拆分对 ingestor 来源同样无条件生效。② TCP 传输 request_id
+  跨组碰撞 → 响应错投 → false matched 推进(tcp_transport.rs:344/370/217,池跨组共享、帧内 group_id 被丢弃)。
+  ③ `OutputTarget::RaftWrite` 幂等键 `"rr.output"+源组局部 seq` 跨源组碰撞 → 静默丢输出/Expired 锁死
+  (output_runner.rs:274)。④ `node-reset` 的 `rocks_lock_held` 恒 false——`--force` 可抹运行中节点的数据目录
+  (node_reset.rs:168-178)。⑤ Kafka `poll()` 错误路径丢已消费部分批 + supervisor 不重 seek → 当前 leader 任期
+  静默跳命令(backend.rs:327-334 + ingestor_runner.rs:429-431)。⑥ etcd watch 三出口一次性 break,无重连/恢复/
+  指标,JoinHandle 被丢——配置面永久失明且无信号(lib.rs:248-267/491)。
+- **P1 主题**:durability 长尾(membership sidecar 裸写非原子且 fail-open;stop_group 错误路径跳过契约性 close;
+  get_log_state 启动全 CF 扫描;save_if_newer 全量读解码挡 apply);etcd provider 仍在 route() 关键路径(每写
+  一次 probe RTT、probe 失败硬错、revision 键用集群全局值);rate limiter 高 rps 忙转 + per-caller 无兜底桶;
+  dispatch 路由错误泄漏 provider 内部 + 错标 NotFound;/ready 在 gRPC bind 失败时仍 200;批处理语义缺口
+  (重试双写放大/跨批乱序/max_buffered 按条不按字节/linger=0 反 Kafka 语义)。
+- **门禁 verdict**:现有门禁够 merge,**不够"批处理默认化"或发版**——批处理在 crash/soak/fuzz 下零覆盖
+  (soak 只有 keyed 写,--client-batching 组合是静默空转);external-broker job 绿得有名无实(etcd/kafka e2e
+  从不运行);fuzz corpus 无新格式;nightly 失败无人收信;invariants.md 行号漂移 lint 不可见。
+- **性能新假设(M3 最优先实证)**:30k 平台与多组 26k 平顶的疑似共同串行点 = **每 addr 单条 h2 连接**
+  (lib.rs:99;200 流=hyper 默认 max_concurrent_streams,恰=bench k)——L1 连接扇出 N∈{1,2,4,8} 实验 +
+  L2 流/帧上限一行级提升先行;L4 Bytes 化仍留 A-0017 窗口。
+- **部署高危**:根 Dockerfile 与 deploy/lab/Dockerfile 缺 `COPY vendor`(9134d87 只修了 perf 的)——HEAD 下
+  release 镜像 job 与本地 compose 栈无法构建。
+- **落地批次(待拍板)**:A=6 个 P0 修复(小改动+回归测试;apply-错误契约另起 ADR)/ B=P1 耐久可靠快赢 /
+  C=perf M3 实验 / D=门禁补全 / E=文档部署。优势面(信封纪律/SnapshotStore/IoBatcher close/G1–G7/错误脱敏/
+  INV 执法)复核确认保持。
+
+### Session 2026-09-23(深夜场)— review 落地批次 A+B+D+E 实施(用户:"全部开工吧")
+
+> 9 个 coder 工作流并行实施;中途撞 5h 配额(5 个工作流"failed"实为已落地大部分编辑、死在验证阶段),
+> 集成者(主会话)完成收尾修复+门禁+集成。89 文件 +9130/−1342。**未 commit**。
+> 配额事故教训:swarm 单项文本内嵌英文双引号会被切成多个 agent(rr-server+rr-network 项裂成 3 个)——
+> 下回 item 文本避免裸 `"`。
+
+- **6 个 P0 全部落地+回归测试**:① ingress 校验 `rr_core::ingress::validate_client_payload`(dispatch 在
+  propose 前拒畸形/未来版本帧,INVALID_ARGUMENT)+ apply 侧批拆分 gate 到 raw client bytes(framed/ingestor
+  条目verbatim)+ ADR A-0018(drafted);② TCP 池级 request_id + (group,id) demux + 撞号响亮化 + 跨组并发回归;
+  ③ `rr.output.g<N>` 命名空间化;④ node-reset 真 fcntl/flock 双探测(fail-closed)+ 持锁拒绝回归;⑤ kafka
+  poll 错误臂先交付部分批(+Mock 注入 seam 回归);⑥ etcd watch 重连/恢复/compaction 对账 + WatchStreamGuard
+  abort-on-drop + 全套 rr_config_etcd_* 指标。
+- **集成期自抓自修 ×3**(跨工作流交互,swarm 不可能预见):⑴ agent-22 的 mem provider `remove_node` 预剥离
+  replicas 使 watch 守卫的"收缩检测"对 provider 表恒假 → INV-7 守卫被绕过(`test_node_removed_quorum_guard`
+  红);修为以 **raft membership 为真相源**(node.rs watch 处理器)。⑵ output_runner 新测试把 Parked/GroupGone
+  前提写反(stop_group 后 metrics 已是 Shutdown);改为两者皆可的诚实断言。⑶ 新 `metrics_bind_host`/
+  `admin_bind_host` 默认 loopback(v0.3.0 破坏窗口)会使 k8s/helm/compose 的跨 Pod Prometheus 抓取失联——
+  全部部署制品补 `metrics_bind_host = "0.0.0.0"`(k8s/helm/lab×2/perf)。
+- **批次 B 全量落地**:sidecar 原子写(共享 `atomic_write_enveloped`);stop_group 错误路径照常 close;
+  `StorageEngine::last_key_value`(默认 scan 兜底,mem/rocks 原生反向 seek)消启动全 CF 扫描;快照守卫
+  `last_persisted_index` O(1) 化 + spawn_blocking 下 sm worker;rocks:flush_wal(true)+响亮错误、共享块缓存
+  (原 ≈3× 文档值)、ENOSPC→StorageKind、flush 全 CF;DurabilityPolicy 弃用别名按约移除(0.3.0 窗口);
+  MemStorage 三处分歧(Default/write_batch 原子性/scan panic);dispatch 路由错误脱敏+改码;readiness 诚实
+  bind(start 内同步 bind);rate limiter elapsed 批量补发+per-caller 兜底桶强制;TCP 帧上限+JoinSet 跟踪;
+  install_snapshot 单缓冲+总超时+done 终止;RPCOption soft_ttl 执法(AppendEntries/Vote);runner 生命周期竞态
+  全修(attach 重查/parked 臂 sender-drop/30s 等待可取消/输出 runner 防自旋/learner 批量提升);write()
+  结构化 NotLeader;幂等 namespace 上限(1024,响亮拒绝);pending_deferred 上限+gauge。
+- **批次 D 落地**:fuzz 双 batch target+种子重生;soak unkeyed 道(`--soak-unkeyed-ratio`,oracle 线性读验证)
+  + 批处理×soak 空转组合硬错;CI 重 job timeout + per-job cache key + external-broker 补 `RR_TEST_ETCD=1`
+  (原绿得有名无实);四个 nightly 失败自动开 issue(去重);bench-compare 缺输入 exit 2;invariants.md 行号
+   hygiene(70 links 仍绿)。
+- **批次 E 落地**:两个 Dockerfile 补 COPY vendor;metrics-reference 补 ~40 条(分 Histogram/Gauge/Counter/
+  Client-side,标 unreleased);compatibility.md 删失效 known-issue 段+前向兼容两阶段 rollout 注记;
+  client-sdk 批处理 admonition;durability.md 快照行改正;Java SDK `readLinearizable(/Sync)` + 顺带修复
+  CompletableFuture relay 包装吞 typed 异常的真 bug(31 测试绿)。
+- **批次 C(M3)收官**:`RrClientBuilder::with_channel_fanout`(默认 1)+ `--channel-fanout`;rr-server 增
+  `grpc_max_concurrent_streams`/`grpc_max_frame_size`(CLI/env/TOML 三层)。**单连接串行点假设实证成立**
+  (raw-20260923-s2-m3-*-mem.json):未批路径 fanout 1→4→8 = 28.1k→53.6k→67.4k(2.4×);h2 旋钮单独仅
+  +11%;批处理叠加 batch64:fan1 76.6k / fan4 **121.2k**。⚠️ 本波的 per-partition flush 串行化(跨批乱序
+  修正)使批路径 fan1 从 175.2k→76.6k——正确性代价;`BatchConfig::ordered` 旋钮留 v0.3.0 kickoff 决策。
+  roadmap-100k.md M3 节与判据状态已回填。
+- **遗留给下轮**:invariants.md 登记本波新测试(ingress 守卫/TCP demux/poll 部分批等→INV 映射需逐条核);
+  rr-core config.rs watch 语义文档已改;Java sdkVersion bump 留发版治理;perf 实验归档。
+
+### Session 2026-09-23(晚场)— 全项目全新 review(9 agent 并行;6 P0 实证;零代码改动)
+
+> 用户指令:"根据我们的目标再一次 review 整个项目,进一步的优化改进;忘记之前的分析结果,全新分析和探索"。
+> 完整报告:`.sisyphus/evidence/rr-fresh-review-2026-09-23.md`(含全部 file:line 证据与修复方向)。
+> 本地 main 领先 origin/main 4 个 commit;`v0.2.0` tag 已在 origin(确认推送完成)。
+
+- **6 个 P0(主会话逐行复核确认)**:① 日志投毒崩溃循环——unkeyed 客户端字节带 house magic + 畸形 body 在
+  apply 期 decode Err → sm worker 死 → RaftCore Fatal → rocks 下重启重放再死;入口无校验(dispatch.rs:90 直通,
+  service_adapter.rs:256/278,sm_adapter.rs:326);且批拆分对 ingestor 来源同样无条件生效。② TCP 传输 request_id
+  跨组碰撞 → 响应错投 → false matched 推进(tcp_transport.rs:344/370/217,池跨组共享、帧内 group_id 被丢弃)。
+  ③ `OutputTarget::RaftWrite` 幂等键 `"rr.output"+源组局部 seq` 跨源组碰撞 → 静默丢输出/Expired 锁死
+  (output_runner.rs:274)。④ `node-reset` 的 `rocks_lock_held` 恒 false——`--force` 可抹运行中节点的数据目录
+  (node_reset.rs:168-178)。⑤ Kafka `poll()` 错误路径丢已消费部分批 + supervisor 不重 seek → 当前 leader 任期
+  静默跳命令(backend.rs:327-334 + ingestor_runner.rs:429-431)。⑥ etcd watch 三出口一次性 break,无重连/恢复/
+  指标,JoinHandle 被丢——配置面永久失明且无信号(lib.rs:248-267/491)。
+- **P1 主题**:durability 长尾(membership sidecar 裸写非原子且 fail-open;stop_group 错误路径跳过契约性 close;
+  get_log_state 启动全 CF 扫描;save_if_newer 全量读解码挡 apply);etcd provider 仍在 route() 关键路径(每写
+  一次 probe RTT、probe 失败硬错、revision 键用集群全局值);rate limiter 高 rps 忙转 + per-caller 无兜底桶;
+  dispatch 路由错误泄漏 provider 内部 + 错标 NotFound;/ready 在 gRPC bind 失败时仍 200;批处理语义缺口
+  (重试双写放大/跨批乱序/max_buffered 按条不按字节/linger=0 反 Kafka 语义)。
+- **门禁 verdict**:现有门禁够 merge,**不够"批处理默认化"或发版**——批处理在 crash/soak/fuzz 下零覆盖
+  (soak 只有 keyed 写,--client-batching 组合是静默空转);external-broker job 绿得有名无实(etcd/kafka e2e
+  从不运行);fuzz corpus 无新格式;nightly 失败无人收信;invariants.md 行号漂移 lint 不可见。
+- **性能新假设(M3 最优先实证)**:30k 平台与多组 26k 平顶的疑似共同串行点 = **每 addr 单条 h2 连接**
+  (lib.rs:99;200 流=hyper 默认 max_concurrent_streams,恰=bench k)——L1 连接扇出 N∈{1,2,4,8} 实验 +
+  L2 流/帧上限一行级提升先行;L4 Bytes 化仍留 A-0017 窗口。
+- **部署高危**:根 Dockerfile 与 deploy/lab/Dockerfile 缺 `COPY vendor`(9134d87 只修了 perf 的)——HEAD 下
+  release 镜像 job 与本地 compose 栈无法构建。
+- **落地批次(待拍板)**:A=6 个 P0 修复(小改动+回归测试;apply-错误契约另起 ADR)/ B=P1 耐久可靠快赢 /
+  C=perf M3 实验 / D=门禁补全 / E=文档部署。优势面(信封纪律/SnapshotStore/IoBatcher close/G1–G7/错误脱敏/
+  INV 执法)复核确认保持。
 
 ### Session 2026-09-23 — client 批处理落地(100k 条件达成) + etcd 缓存 + A-0017 立项
 

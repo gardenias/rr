@@ -256,7 +256,9 @@ proptest! {
                     let miss = model.cache_miss(&ck);
 
                     let expected = model.expected_decision(&key);
-                    let actual = layer.decide(&key);
+                    // TYPE_POOL is far below MAX_IDEMPO_NAMESPACES, so the
+                    // namespace cap never trips inside this property.
+                    let actual = layer.decide(&key).expect("decide below the namespace cap");
 
                     // Property 4: exact dispatch parity.
                     assert_decision_parity(&actual, &expected, &ctx)?;
@@ -309,7 +311,9 @@ proptest! {
                     resp,
                 } => {
                     let key = make_key(*t, *id, *client);
-                    layer.record(&key, resp.clone());
+                    layer
+                        .record(&key, resp.clone())
+                        .expect("record below the namespace cap");
                     model.record(&key, resp.clone());
                 }
                 Op::SnapshotRestore => {

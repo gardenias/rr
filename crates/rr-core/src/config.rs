@@ -88,14 +88,16 @@ pub trait ConfigProvider: Send + Sync {
     ///   groups) into one channel, so there is NO global ordering
     ///   guarantee across those domains.
     /// - **Lag behavior differs per backend.** The in-memory backend
-    ///   (broadcast channel) silently DROPS events when a consumer lags —
-    ///   no error is signalled. The etcd backend (bounded mpsc, 256)
+    ///   (broadcast channel) DROPS events when a consumer lags — loudly:
+    ///   a `warn!` plus the `rr_config_mem_watch_lagged_total` counter.
+    ///   The etcd backend (bounded mpsc, 256)
     ///   applies backpressure instead: the watch loop stalls until the
     ///   consumer catches up. A consumer that must never miss a change
     ///   should periodically re-fetch the routing table to reconcile.
-    /// - **Disconnect.** If the backend connection drops, the stream may
-    ///   end or stall; consumers should treat stream termination as
-    ///   "re-fetch and re-subscribe".
+    /// - **Disconnect.** The etcd backend reconnects and resumes its
+    ///   watches automatically (with reconciliation after compaction);
+    ///   other backends may end or stall the stream — consumers should
+    ///   treat stream termination as "re-fetch and re-subscribe".
     async fn watch_changes(
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError>;

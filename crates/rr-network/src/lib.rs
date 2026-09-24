@@ -32,6 +32,17 @@ pub mod tcp_raft_server;
 /// RaftService is internal and mTLS-authenticated, so a generous cap is safe.
 pub const RAFT_MAX_DECODING_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 
+/// Decode ceiling for ClientService and AdminService (server side).
+///
+/// Client write payloads are bounded by the SDK's batching contract
+/// (`rr_client::BatchConfig::max_bytes`, default 1 MiB); 16 MiB leaves
+/// ample headroom for frame overhead and admin payloads while still
+/// rejecting pathological bodies before they are fully decoded.
+/// **Operators who raise `BatchConfig::max_bytes` beyond this cap must
+/// raise this ceiling as well**, or the server will reject oversized
+/// batches with `RESOURCE_EXHAUSTED` before they reach the dispatch layer.
+pub const CLIENT_MAX_DECODING_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 pub use audit::{ServiceLabel, AUDIT_TARGET};
 pub use auth::{attach_bearer_token, AuthConfig, BearerInterceptor};
 pub use channel_pool::ChannelPool;

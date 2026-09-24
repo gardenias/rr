@@ -51,7 +51,17 @@ pub struct NodeSection {
     pub listen_addr: Option<String>,
     pub data_dir: Option<PathBuf>,
     pub admin_port: Option<u16>,
+    /// Admin gRPC bind host (IP literal). Default `127.0.0.1` (loopback);
+    /// set `0.0.0.0` explicitly to expose the admin API cluster-wide.
+    pub admin_bind_host: Option<String>,
     pub metrics_port: Option<u16>,
+    /// Metrics/health HTTP bind host (IP literal). Default `127.0.0.1`;
+    /// set `0.0.0.0` to allow cross-host Prometheus scrapes.
+    pub metrics_bind_host: Option<String>,
+    /// gRPC server HTTP/2 max_concurrent_streams override (perf knob).
+    pub grpc_max_concurrent_streams: Option<u32>,
+    /// gRPC server HTTP/2 max frame size override in bytes (perf knob).
+    pub grpc_max_frame_size: Option<u32>,
     pub raft_tcp_port: Option<u16>,
     /// Openraft `LogsSinceLast(N)` snapshot trigger. Default 50_000.
     /// See ADR A-0008.
@@ -121,11 +131,11 @@ pub struct AuthSection {
 /// intentionally not configurable: throttling Raft destabilizes
 /// consensus.
 ///
-/// Per-caller fields (`per_caller_*`) enable exclusive-mode per-caller
-/// limits keyed on the bearer-token fingerprint. When set, each
-/// authenticated caller gets its own token bucket and the matching
-/// global `admin_rps`/`client_rps` is ignored. Unauthenticated requests
-/// fall through to the global bucket. See ADR A-0005.
+/// Per-caller fields (`per_caller_*`) enable per-caller limits keyed on
+/// the bearer-token fingerprint. When set, each authenticated caller gets
+/// its own token bucket; unauthenticated requests share the global bucket,
+/// so the matching global `admin_rps`/`client_rps` is REQUIRED (config
+/// validation rejects per-caller without it). See ADR A-0005.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitSection {
@@ -144,7 +154,15 @@ pub struct ResolvedConfig {
     pub listen_addr: String,
     pub data_dir: Option<PathBuf>,
     pub admin_port: Option<u16>,
+    /// Resolved admin gRPC bind host (defaults to loopback `127.0.0.1`).
+    pub admin_bind_host: String,
     pub metrics_port: Option<u16>,
+    /// Resolved metrics/health HTTP bind host (defaults to loopback).
+    pub metrics_bind_host: String,
+    /// Resolved gRPC HTTP/2 max_concurrent_streams override (None = tonic default).
+    pub grpc_max_concurrent_streams: Option<u32>,
+    /// Resolved gRPC HTTP/2 max frame size override, bytes (None = 16 KiB default).
+    pub grpc_max_frame_size: Option<u32>,
     pub raft_tcp_port: Option<u16>,
     pub raft_transport: RaftTransportKind,
     pub storage_backend: StorageBackend,
@@ -166,9 +184,10 @@ pub struct ResolvedConfig {
 
 /// Resolved rate-limit settings. All fields default to `None` = unlimited.
 ///
-/// Per-caller fields (`per_caller_*`), when set, switch the matching
-/// service into exclusive per-caller mode (one token bucket per
-/// authenticated caller). See ADR A-0005.
+/// Per-caller fields (`per_caller_*`), when set, give each authenticated
+/// caller its own token bucket; unauthenticated requests share the
+/// matching global bucket (`admin_rps` / `client_rps`, then required).
+/// See ADR A-0005.
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedRateLimit {
     pub admin_rps: Option<u32>,
@@ -206,11 +225,8 @@ pub enum StorageBackend {
 /// Selected durability policy string; converted to the actual enum at storage
 /// construction time (keeps this module free of the `rocks` feature gate).
 ///
-/// Names changed in v0.2.0:
-/// - `"balanced"` → `"replicated_only"` (canonical) — old name still parses
-///   with a deprecation warning.
-/// - `"fast"` → `"test_only"` (canonical) — old name still parses with a
-///   deprecation warning.
+/// The v0.2.x aliases `"balanced"` and `"fast"` were REMOVED in v0.3.0 —
+/// they now fail with a hard error naming the canonical values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityChoice {
     Strict,
@@ -260,7 +276,7 @@ impl ResolvedConfig {
             other => {
                 return Err(invalid(format!(
                     "invalid storage backend '{other}': expected 'mem' or 'rocks'"
-                )))
+                )));
             }
         };
 
@@ -273,26 +289,22 @@ impl ResolvedConfig {
             "strict" => DurabilityChoice::Strict,
             "replicated_only" => DurabilityChoice::ReplicatedOnly,
             "test_only" => DurabilityChoice::TestOnly,
-            "balanced" => {
-                tracing::warn!(
-                    "durability='balanced' is deprecated; rename to 'replicated_only' \
-                     (same on-disk behavior). The old name will be removed in v0.3.0."
-                );
-                DurabilityChoice::ReplicatedOnly
-            }
-            "fast" => {
-                tracing::warn!(
-                    "durability='fast' is deprecated; rename to 'test_only' (same \
-                     on-disk behavior). The old name will be removed in v0.3.0."
-                );
-                DurabilityChoice::TestOnly
+            "balanced" | "fast" => {
+                let canonical = if durability_str == "balanced" {
+                    "replicated_only"
+                } else {
+                    "test_only"
+                };
+                return Err(invalid(format!(
+                    "invalid durability '{durability_str}': the v0.2.x alias was removed in \
+                     v0.3.0 — use '{canonical}'"
+                )));
             }
             other => {
                 return Err(invalid(format!(
                     "invalid durability '{other}': expected 'strict', \
-                     'replicated_only', or 'test_only' (deprecated aliases: \
-                     'balanced' → 'replicated_only', 'fast' → 'test_only')"
-                )))
+                     'replicated_only', or 'test_only'"
+                )));
             }
         };
 
@@ -306,6 +318,18 @@ impl ResolvedConfig {
 
         let admin_port = args.admin_port.or(file.node.admin_port);
         let metrics_port = args.metrics_port.or(file.node.metrics_port);
+        let admin_bind_host = resolve_bind_host(
+            args.admin_bind_host.as_deref(),
+            file.node.admin_bind_host.as_deref(),
+            crate::config::DEFAULT_ADMIN_BIND_HOST,
+            "admin_bind_host",
+        )?;
+        let metrics_bind_host = resolve_bind_host(
+            args.metrics_bind_host.as_deref(),
+            file.node.metrics_bind_host.as_deref(),
+            crate::config::DEFAULT_METRICS_BIND_HOST,
+            "metrics_bind_host",
+        )?;
         let raft_tcp_port = args.raft_tcp_port.or(file.node.raft_tcp_port);
 
         let raft_transport = match args
@@ -319,7 +343,7 @@ impl ResolvedConfig {
             other => {
                 return Err(invalid(format!(
                     "invalid raft transport '{other}': expected 'grpc' or 'tcp'"
-                )))
+                )));
             }
         };
 
@@ -372,6 +396,17 @@ impl ResolvedConfig {
         };
         let allow_insecure = args.allow_insecure || file.node.allow_insecure.unwrap_or(false);
 
+        let grpc_max_concurrent_streams = args
+            .grpc_max_concurrent_streams
+            .or(file.node.grpc_max_concurrent_streams);
+        if grpc_max_concurrent_streams == Some(0) {
+            return Err(invalid("grpc_max_concurrent_streams must be >= 1"));
+        }
+        let grpc_max_frame_size = args.grpc_max_frame_size.or(file.node.grpc_max_frame_size);
+        if grpc_max_frame_size == Some(0) {
+            return Err(invalid("grpc_max_frame_size must be >= 1 (bytes)"));
+        }
+
         let snapshot_logs_since_last = args
             .snapshot_logs_since_last
             .or(file.node.snapshot_logs_since_last)
@@ -387,7 +422,11 @@ impl ResolvedConfig {
             listen_addr,
             data_dir,
             admin_port,
+            admin_bind_host,
             metrics_port,
+            metrics_bind_host,
+            grpc_max_concurrent_streams,
+            grpc_max_frame_size,
             raft_tcp_port,
             raft_transport,
             storage_backend,
@@ -499,6 +538,25 @@ fn parse_port_from_addr(addr: &str) -> Result<u16> {
         .map_err(|_| invalid(format!("listen_addr '{addr}' has invalid port")))
 }
 
+/// Resolve an admin/metrics bind host: CLI/env wins over the config file,
+/// default is loopback. The host must be an IP literal — it is combined
+/// with the port into a `SocketAddr` at startup, and a typo'd hostname
+/// would otherwise fail deep in `RrNode::start` with an opaque parse error.
+fn resolve_bind_host(
+    cli: Option<&str>,
+    file: Option<&str>,
+    default: &'static str,
+    field: &'static str,
+) -> Result<String> {
+    let host = cli.or(file).unwrap_or(default);
+    if host.parse::<std::net::IpAddr>().is_err() {
+        return Err(invalid(format!(
+            "{field} '{host}' is not a valid IP address literal"
+        )));
+    }
+    Ok(host.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +617,65 @@ mod tests {
         let resolved = ResolvedConfig::resolve(&args).unwrap();
         assert_eq!(resolved.node_id, 42);
         assert_eq!(resolved.listen_addr, "0.0.0.0:60000");
+    }
+
+    #[test]
+    fn bind_hosts_default_to_loopback() {
+        let args = ServeArgs {
+            log_level: "info".to_string(),
+            node_id: Some(1),
+            listen_addr: Some("0.0.0.0:51001".to_string()),
+            ..Default::default()
+        };
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.admin_bind_host, "127.0.0.1");
+        assert_eq!(resolved.metrics_bind_host, "127.0.0.1");
+    }
+
+    #[test]
+    fn bind_hosts_file_and_cli_precedence() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+            admin_bind_host = "0.0.0.0"
+            metrics_bind_host = "192.168.1.5"
+            "#,
+        );
+        let args = ServeArgs {
+            config: Some(f.path().to_path_buf()),
+            log_level: "info".to_string(),
+            ..Default::default()
+        };
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.admin_bind_host, "0.0.0.0");
+        assert_eq!(resolved.metrics_bind_host, "192.168.1.5");
+
+        // CLI wins over the file.
+        let args = ServeArgs {
+            config: Some(f.path().to_path_buf()),
+            log_level: "info".to_string(),
+            admin_bind_host: Some("10.0.0.2".to_string()),
+            metrics_bind_host: Some("::1".to_string()),
+            ..Default::default()
+        };
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.admin_bind_host, "10.0.0.2");
+        assert_eq!(resolved.metrics_bind_host, "::1");
+    }
+
+    #[test]
+    fn bind_host_rejects_non_ip_literal() {
+        let args = ServeArgs {
+            log_level: "info".to_string(),
+            node_id: Some(1),
+            listen_addr: Some("127.0.0.1:51001".to_string()),
+            admin_bind_host: Some("localhost".to_string()),
+            ..Default::default()
+        };
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(err.to_string().contains("admin_bind_host"), "got: {err}");
     }
 
     #[test]
@@ -633,7 +750,7 @@ mod tests {
     }
 
     #[test]
-    fn balanced_alias_resolves_to_replicated_only() {
+    fn balanced_alias_is_a_hard_error() {
         let f = write_toml(
             r#"
             [node]
@@ -645,15 +762,16 @@ mod tests {
             "#,
         );
         let args = args_with_config(f.path().to_path_buf());
-        let resolved = ResolvedConfig::resolve(&args).unwrap();
-        assert!(matches!(
-            resolved.durability,
-            DurabilityChoice::ReplicatedOnly
-        ));
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("replicated_only"),
+            "the removed alias must name its canonical replacement: {msg}"
+        );
     }
 
     #[test]
-    fn fast_alias_resolves_to_test_only() {
+    fn fast_alias_is_a_hard_error() {
         let f = write_toml(
             r#"
             [node]
@@ -665,8 +783,12 @@ mod tests {
             "#,
         );
         let args = args_with_config(f.path().to_path_buf());
-        let resolved = ResolvedConfig::resolve(&args).unwrap();
-        assert!(matches!(resolved.durability, DurabilityChoice::TestOnly));
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("test_only"),
+            "the removed alias must name its canonical replacement: {msg}"
+        );
     }
 
     #[test]

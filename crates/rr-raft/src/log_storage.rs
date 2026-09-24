@@ -33,8 +33,25 @@ type RrLogId = LogIdOf<RrTypeConfig>;
 /// Defensive mode is active when either:
 /// - The `defensive` cargo feature is compiled in, **or**
 /// - The environment variable `RR_STORE_DEFENSIVE` is set to `"on"`.
+///
+/// The env lookup is cached in a [`std::sync::OnceLock`] (first read wins):
+/// it previously ran on EVERY read/append — a hot-path syscall per log
+/// operation. Production behavior is thus fixed at first use. Test builds
+/// bypass the cache and read the variable live, because the defensive-mode
+/// tests flip `RR_STORE_DEFENSIVE` mid-process.
 fn is_defensive() -> bool {
-    cfg!(feature = "defensive") || std::env::var("RR_STORE_DEFENSIVE").as_deref() == Ok("on")
+    if cfg!(feature = "defensive") {
+        return true;
+    }
+    #[cfg(test)]
+    {
+        std::env::var("RR_STORE_DEFENSIVE").as_deref() == Ok("on")
+    }
+    #[cfg(not(test))]
+    {
+        static DEFENSIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *DEFENSIVE.get_or_init(|| std::env::var("RR_STORE_DEFENSIVE").as_deref() == Ok("on"))
+    }
 }
 /// Inner state of [`RrLogStorage`], protected by a shared `RwLock`.
 #[derive(Default)]

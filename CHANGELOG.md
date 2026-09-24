@@ -7,7 +7,245 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Added — 2026-09-23 full-review batch
+
+- **Ingress log-poison guard** (`rr_core::ingress::validate_client_payload`,
+  P0): unkeyed client payloads carrying a house magic prefix
+  (`\0rrENT01` / `\0rrBAT01`) are fully validated at the dispatch boundary
+  *before* propose; malformed or future-version frames are rejected with
+  `INVALID_ARGUMENT`. Previously such bytes committed to the log and then
+  failed the apply on every node — apply errors are group-fatal, so one
+  crafted (or buggy) client write wedged the whole Raft group, and a
+  durable log replayed the poison on every restart. The apply-side batch
+  split is additionally gated on raw client bytes only: framed entries
+  (ingestor-sourced, `offset = Some`) are never re-interpreted as batch
+  frames. New ADR: `A-0018` (apply-error contract, drafted).
+- **`StorageEngine::last_key_value`** (semver-minor, defaulted): reverse
+  tail fetch with native implementations in `MemStorage` and
+  `RocksStorage`; `RocksLogStorage::get_log_state` no longer materializes
+  the entire log CF at startup (was hundreds of MB transient on large
+  logs).
+- **`EtcdConfigProvider`**: `new_with_options(endpoints, cluster_id,
+  ConnectOptions)` (TLS/auth on the etcd plane), cluster-id charset
+  validation, watch reconnect loop with revision resume + compaction
+  reconcile, `WatchStreamGuard` (aborts watchers on drop), and a full
+  metrics surface (`rr_config_etcd_*`: probe duration, cache hits/misses,
+  rescans, stale serves, watch reconnects/events/compactions, bad keys,
+  fabricated groups).
+- **Batch codec hardening** (`rr-core`): `validate_batch_frame` (no-alloc
+  structural validation), overflow-checked cursor arithmetic (32-bit
+  safe), infallible slicing (no reachable `expect` on untrusted bytes),
+  and `encode_batch` now honestly panics on >u32::MAX counts/lengths
+  (previously silently truncated into a corrupt frame).
+- **rr-client batching knobs**: `BatchConfig::max_buffered_bytes` (default
+  32 MiB; backpressure is now byte-aware as well as entry-aware),
+  `NetworkError::InvalidConfig` variant (rr-core), per-partition flush
+  serialization, and `linger = 0`/sub-ms now flushes immediately
+  (Kafka-aligned; previously it disabled the timer and could park a lone
+  write forever).
+- **rr-admin**: `--admin-addr` flag (default: `--addr` host with
+  port+1000, matching the kv-store convention), 5s connect timeout, and a
+  real `flock`/`fcntl` probe for the RocksDB `LOCK` file in `node-reset`.
+- **soak/perf tooling**: `rr-perf-bench --soak-unkeyed-ratio` adds an
+  unkeyed write lane to the soak oracle (unique keys, verified by
+  linearizable Get), so `--client-batching` is actually exercised under
+  soak; the batching flag now hard-errors on soak configurations that
+  can't exercise it. `scripts/soak.sh` gains `CLIENT_BATCHING` /
+  `SOAK_UNKEYED_RATIO` / `SOAK_PORT_BASE` env knobs.
+- **fuzz**: new `fuzz_batch_frame_decode` / `fuzz_batch_frame_roundtrip`
+  targets + committed seed corpus (valid/empty/truncated/future-version).
+- **Java SDK**: `readLinearizable` / `readLinearizableSync` with
+  Rust-parity redirect semantics (follow `leader_info` immediately without
+  consuming a bootstrap slot), plus regression tests; fixed a latent bug
+  where typed failures (e.g. `IdempotencyExpiredException`) crossed the
+  CompletableFuture relay wrapped in `CompletionException` and were
+  wrongly retried.
+- **Idempotency namespace cap**: at most `MAX_IDEMPO_NAMESPACES` (1024)
+  distinct `request_type` namespaces per group; a new namespace beyond
+  the cap fails loudly with `RrError::IdempotencyNamespaceLimitExceeded`
+  (the watermark map is never evicted and enters every snapshot — unbounded
+  growth was a client-controlled memory amplifier).
+- **Deferred-response registry bounds**: parked deferred responders are
+  capped at 10 000 per group with `rr_raft_pending_deferred` gauge +
+  overflow/duplicate counters; overflow refuses the new write loudly
+  (previously unbounded, silently overwriting duplicates).
+
+### Fixed — 2026-09-23 full-review batch
+
+- **P0 — TCP raft transport cross-group response misdelivery**: request
+  ids were allocated per-network-instance starting at 1 while the
+  connection pool (and its `pending` map, keyed by request id alone) is
+  shared node-wide across groups — two groups replicating to the same
+  target could collide, overwrite each other's waiters, and deliver a
+  response to the wrong group's replication stream (false `matched`
+  advancement → failover data loss). Request ids are now pool-wide,
+  `pending` is keyed by `(group_id, request_id)` with the response frame's
+  group verified, and an insert collision loudly fails the displaced
+  waiter.
+- **P0 — `OutputTarget::RaftWrite` cross-group idempotency collision**:
+  the dedup key was `"rr.output"` + the per-source-group outbox sequence,
+  so two source groups writing one target group collided — the second
+  group's outputs were silently dropped (or permanently `Expired`-locked
+  after a restart). `request_type` is now namespaced per source group
+  (`rr.output.g<N>`); watermark monotonicity is preserved.
+- **P0 — `rr-admin node-reset` live-node guard was dead code**:
+  `rocks_lock_held` opened the LOCK file for writing and always returned
+  false (opening does not probe `fcntl`/`flock`), so `--force` could wipe
+  a *running* node's data dir. Both lock namespaces are now probed
+  (fail-closed on unexpected probe errors), with a regression test that
+  holds the flock and asserts refusal.
+- **P0 — Kafka `poll()` dropped its partial batch on error**: messages
+  already consumed (position advanced) were discarded when a later poll
+  item errored, and the supervisor retried without re-seeking — commands
+  were silently skipped for the rest of the leader tenure. The partial
+  batch is now delivered first; the error resurfaces on the next poll.
+- **P0 — etcd config-plane watch was one-shot**: any stream error/cancel
+  permanently killed a domain watcher (undetectably — no reconnect, no
+  resume, no metric, discarded `JoinHandle`). Watchers now reconnect with
+  backoff, resume from the last seen revision, reconcile on compaction,
+  and are aborted via the returned stream guard.
+- **P1 — watch-loop quorum guard bypass after provider pre-stripping**:
+  `MemConfigProvider::remove_node` now strips the node from group replica
+  lists (no dangling refs), which made the watch handler's shrink check
+  against the provider table a tautology — `NodeRemoved` could shrink a
+  group below quorum despite the A-0012 guard. The guard now measures the
+  current voter set from the **Raft membership** (source of truth).
+  `test_node_removed_quorum_guard` (INV-7) covers the regression.
+- **P1 — membership sidecar is now atomic + fsynced**: `sm-membership.bin`
+  was written with a bare `std::fs::write` (no tmp+rename, no fsync) while
+  being fail-open on read — a torn write recreated the zero-voter wedge
+  the sidecar exists to prevent. It now shares the SnapshotStore-grade
+  `atomic_write_enveloped` helper (tmp → fsync → rename → loud dir fsync).
+- **P1 — `stop_group` skipped the contractual log close on shutdown
+  error**: `raft.shutdown()` failing (exactly the RaftCore-fatal worst
+  case) returned before `log_storage.close()`, skipping the final flush.
+  Close is now attempted unconditionally and both errors surface.
+- **P1 — snapshot persist no longer stalls the apply loop**: the
+  monotonic guard compared against an in-memory `last_persisted_index`
+  instead of reading + bincode-decoding the entire previous snapshot per
+  build, and SnapshotStore IO moved off the sm worker onto
+  `spawn_blocking`.
+- **P1 — RocksDB storage fixes**: the `ReplicatedOnly` group-commit task
+  called `flush_wal(false)` (a no-op) and swallowed all errors — it now
+  fsyncs (`flush_wal(true)`) and counts failures
+  (`rr_storage_wal_flush_errors_total`); the block cache is one shared
+  `Arc<Cache>` as documented (was per-CF + an unused default ≈ 3× the
+  documented envelope; unnamed CFs previously fell back to the 8 MiB
+  default); RocksDB ENOSPC-class errors now map to
+  `io::ErrorKind::StorageFull` (previously flattened to `Other`,
+  unclassifiable upstream); `flush()` flushes every framework CF;
+  `MemStorage` divergences fixed (`Default` = `new()`, two-pass atomic
+  `write_batch`, `scan` with start > end returns empty instead of
+  panicking).
+- **P1 — dispatch error sanitization**: route failures leaked
+  config-provider internals (etcd endpoints, dial errors) to clients with
+  a misleading `NotFound` code — now `PartitionNotFound` maps to
+  `not_found` (id only) and everything else to sanitized `Unavailable`;
+  an ambiguous redirect (leader id known, address unknown) now maps to
+  `Unavailable` so clients retry instead of seeing an indistinguishable
+  empty failure.
+- **P1 — readiness truthfulness**: the gRPC and admin servers now bind
+  their listeners synchronously in `start()` — a bind failure (port in
+  use) fails startup instead of leaving `/ready` = 200 and health =
+  SERVING on a dead listener.
+- **P1 — rate limiter rework**: refill is elapsed-time batched (a
+  per-tick single permit busy-looped a core for rps ≳ 1000); per-caller
+  mode now requires/builds a global fallback bucket so unauthenticated
+  requests are no longer silently unlimited; refill/GC tasks are tracked
+  and aborted on drop.
+- **P1 — network-layer hardening**: TCP raft frames cap the
+  wire-controlled `payload_len` at `RAFT_MAX_DECODING_MESSAGE_SIZE`
+  before allocating (was a 4 GiB-per-connection DoS vector), per-
+  connection tasks are tracked `JoinSet`s (raft TCP + health HTTP),
+  `InstallSnapshot` streams into one buffer with an overall timeout and
+  terminal-`done` enforcement (was ≈2× memory, no deadline), and
+  AppendEntries/Vote now honor `RPCOption::soft_ttl()` (a half-open
+  connection can no longer wedge replication invisibly).
+- **P1 — runner lifecycle races**: `attach_ingestor` /
+  `attach_output_runner` / `start_metrics_ticker` / `start_learner_promoter`
+  re-check group existence after acquiring the group lock (no more
+  supervisors spawned onto a removed group); the ingestor parked arm no
+  longer hot-spins when its cancel sender is dropped; the 30s snapshot
+  refresh/seed waits and the output-runner backoff sleep are cancellable
+  (group stop no longer stalls for tens of seconds); the output runner no
+  longer tight-spins when `pending_outputs` errors while leader (classifies
+  GroupGone vs OutboxUnsupported and parks); the learner promoter promotes
+  all stable learners of a tick in ONE `change_membership` (previously the
+  second promotion demoted the first).
+- **P1 — `RaftGroupManager::write()` preserves the structured redirect**
+  (`RaftError::NotLeader { leader, leader_addr }`) instead of stringifying
+  it, so single writes populate `leader_info` for the SDK redirect cache
+  (only the batch path had this).
+- **P1 — rr-admin correctness**: REPL `put`/`delete` verify
+  `success`/`leader_info` instead of printing `OK` for unapplied follower
+  writes; failed admin mutations exit non-zero (automation no longer sees
+  success); `decommission` drives leader-drain off the *target's*
+  leadership regardless of the contacted node; backup hashes stream
+  (no whole-file memory load), fsync the archive, and restore is
+  tar-slip-safe (paths with `..`/root rejected) and verifies before
+  swapping into place.
+- **P1 — examples**: kv-store argument parsing exits with usage on
+  missing/malformed/unknown flags (was: panic or silent warn),
+  `--port > 64535` rejected (admin-port overflow), and `Increment` uses
+  `checked_add` (was debug-panic/release-wrap).
+- **P2 — misc**: `is_defensive()` env check cached (was per-log-op);
+  `RocksLogStorage` failure path closes the batcher explicitly (no
+  LOCK-hold on immediate retry); duplicate `start_group` fails cleanly
+  before any storage open; `local_read` on an unknown group returns
+  `GroupNotFound`; per-request traceparent extraction gated behind
+  `enabled!(DEBUG)`; Bearer scheme match is case-insensitive (RFC 7235);
+  ClientService/AdminService decoding caps documented against
+  `BatchConfig.max_bytes`; the deferred-apply `expect` on the apply path
+  is now a typed internal error.
+
+### Changed — 2026-09-23 full-review batch
+
+- **`DurabilityPolicy` deprecated aliases removed** (`Balanced` / `Fast`)
+  on schedule for the v0.3.0 breaking window — use `ReplicatedOnly` /
+  `TestOnly`.
+- **`MemConfigProvider` semantics**: `remove_node` strips dangling group
+  replicas (warn), `add_partition` with conflicting replicas overwrites
+  (warn), `remove_partition` garbage-collects the emptied group, and watch
+  lag drops are loud (`rr_config_mem_watch_lagged_total`).
+- **`EtcdConfigProvider` availability**: a failed revision probe now
+  serves the cached table with a warn (`rr_config_etcd_stale_serves_total`)
+  instead of failing every routing lookup while etcd is unreachable; the
+  cache is keyed on a prefix-scoped fingerprint (max `mod_revision` + key
+  count) instead of the cluster-wide store revision, so unrelated writes
+  in a shared etcd no longer invalidate it; rescans are single-flight.
+- **Kafka ingestor fail-closed on seek-above-high-watermark**
+  (`KafkaIngestorError::SeekAboveWatermark`): a persisted offset past the
+  topic end indicates a wrong/recreated topic — previously it logged and
+  continued, and `auto.offset.reset=earliest` then replayed the whole
+  topic. Offset arithmetic is overflow-checked (`OffsetOverflow`).
+- **rr-client unreleased batching semantics tightened**: linger ZERO =
+  immediate flush; per-partition in-flight-1 flush ordering; strict
+  response-count equality (mismatch fails all waiters loudly); per-waiter
+  error-kind preservation; `BatchConfig::validate` and sub-ms
+  `with_request_timeout` reject with `NetworkError::InvalidConfig`;
+  reactive APIs preflight the runtime with a typed error instead of
+  panicking; `RrClient::channel_pool()` deprecated (dead field).
+- **CI/gates**: heavy jobs carry `timeout-minutes`; per-job cargo cache
+  keys (feature sets no longer collide); the `external-broker` job
+  actually sets `RR_TEST_ETCD=1` (it was green-by-construction, running
+  nothing); nightly workflows (crash/fuzz/soak/formal) open a deduplicated
+  GitHub issue on failure instead of only uploading artifacts;
+  `bench-compare.sh` fails loudly on missing input; `release.yml` crate
+  publishing fails hard with retries (and documents that crates.io builds
+  don't carry the vendored openraft patch).
+
+### Performance — 2026-09-23 full-review batch
+
+- Zero per-request `String` on the etcd-backed routing hot path's failure
+  modes, single-flight rescans, and prefix-fingerprint probes (see Changed).
+- rr-client: the final retry attempt moves the payload instead of cloning
+  per attempt, group-id metric labels are interned per client, and
+  bootstrap addrs are borrowed instead of cloned per attempt.
+- Rocks log startup: `get_log_state` reverse-seek (see
+  `StorageEngine::last_key_value` above); snapshot persist moved off the
+  sm worker (see Fixed).
+
+
 
 - **Durable-artifact formats enveloped, no legacy fallback** (pre-adoption
   breaking change, 2026-09-23): `sm-snapshot.bin` (T1 `PersistentSnapshot`)

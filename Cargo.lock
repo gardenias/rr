@@ -3446,6 +3446,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "libc",
  "rr-core",
  "rr-network",
  "rustyline",
@@ -3456,6 +3457,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tonic 0.14.5",
+ "tracing",
  "walkdir",
 ]
 
@@ -3494,9 +3496,11 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures",
+ "metrics",
  "rr-core",
  "tokio",
  "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -3506,6 +3510,7 @@ dependencies = [
  "async-trait",
  "etcd-client",
  "futures",
+ "metrics",
  "rr-core",
  "serde",
  "serde_json",
@@ -3689,6 +3694,7 @@ name = "rr-storage"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "metrics",
  "proptest",
  "rocksdb",
  "rr-core",

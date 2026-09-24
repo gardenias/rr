@@ -76,7 +76,11 @@ impl Service for KvService {
                     .and_then(|v| std::str::from_utf8(v).ok())
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
-                let next = current + delta;
+                let next = current.checked_add(delta).ok_or_else(|| {
+                    RrError::Application(format!(
+                        "increment overflow on key '{key}': {current} + {delta} exceeds i64 range"
+                    ))
+                })?;
                 let encoded = next.to_string().into_bytes();
                 guard.insert(key, encoded.clone());
                 KvResponse::some(encoded)
@@ -207,6 +211,46 @@ mod tests {
         });
         let resp = decode_resp(svc.handle(get).await.unwrap());
         assert_eq!(resp.value, Some(b"16".to_vec()));
+    }
+
+    /// Regression: Increment must not wrap/panic on i64 overflow — it
+    /// returns a loud application error and leaves the value unchanged.
+    #[tokio::test]
+    async fn test_increment_overflow_returns_error() {
+        let svc = KvService::new();
+        let inc = encode_req(KvRequest::Increment {
+            key: "c".into(),
+            delta: i64::MAX,
+        });
+        svc.handle(inc).await.unwrap();
+
+        let over = encode_req(KvRequest::Increment {
+            key: "c".into(),
+            delta: 1,
+        });
+        let err = svc.handle(over).await.expect_err("overflow must error");
+        assert!(
+            matches!(err, RrError::Application(ref m) if m.contains("overflow")),
+            "expected application overflow error, got: {err}"
+        );
+
+        // Value unchanged, still usable.
+        let get = encode_req(KvRequest::Get { key: "c".into() });
+        let resp = decode_resp(svc.handle(get).await.unwrap());
+        assert_eq!(resp.value, Some(i64::MAX.to_string().into_bytes()));
+
+        // Underflow on the other end is rejected too.
+        let min = encode_req(KvRequest::Increment {
+            key: "lo".into(),
+            delta: i64::MIN,
+        });
+        svc.handle(min).await.unwrap();
+        let under = encode_req(KvRequest::Increment {
+            key: "lo".into(),
+            delta: -1,
+        });
+        let err = svc.handle(under).await.expect_err("underflow must error");
+        assert!(matches!(err, RrError::Application(_)));
     }
 
     #[tokio::test]

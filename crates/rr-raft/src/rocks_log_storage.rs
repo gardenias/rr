@@ -102,6 +102,21 @@ fn index_key(index: u64) -> Vec<u8> {
     index.to_be_bytes().to_vec()
 }
 
+/// Format at most the first 8 keys of an iterator, summarizing the remainder
+/// as "+N more" — the head-gap tripwire below must never dump an unbounded
+/// key vector into the logs.
+fn capped_keys(it: impl Iterator<Item = u64>) -> String {
+    const CAP: usize = 8;
+    let mut it = it;
+    let head: Vec<u64> = it.by_ref().take(CAP).collect();
+    let rest = it.count();
+    if rest == 0 {
+        format!("{head:?}")
+    } else {
+        format!("{head:?} (+{rest} more)")
+    }
+}
+
 fn range_start(bound: Bound<&u64>) -> Vec<u8> {
     match bound {
         Bound::Included(&i) => index_key(i),
@@ -128,6 +143,14 @@ fn range_end(bound: Bound<&u64>) -> Vec<u8> {
 /// An [`IoBatcher`] runs as a per-instance background task that accumulates
 /// concurrent `append()` calls and flushes them in a single `write_batch()`
 /// (group commit), dramatically increasing single-group write throughput.
+///
+/// # Single-writer contract
+///
+/// Mutating calls (`append` / `truncate_after` / `purge` / `save_vote`) are
+/// driven by exactly ONE writer — openraft's RaftCore. Clones obtained via
+/// [`RaftLogStorage::get_log_reader`] are **readers**: they share the pending
+/// overlay (below) so they observe entries appended through the writer, but
+/// driving writes through two handles of the same group is not supported.
 ///
 /// All clones share the `pending` overlay (see module docs), so reads through
 /// openraft's log reader (a clone) observe entries appended through any other
@@ -287,16 +310,16 @@ impl RocksLogStorage {
                 None => false,
             };
             if head_gap {
-                let overlay_keys: Vec<u64> = {
+                let overlay_keys = {
                     let pending = self.pending.lock().unwrap();
-                    pending.range(lo..hi).map(|(k, _)| *k).collect()
+                    capped_keys(pending.range(lo..hi).map(|(k, _)| *k))
                 };
-                let result_keys: Vec<u64> = result.iter().map(|e| e.log_id.index).collect();
+                let result_keys = capped_keys(result.iter().map(|e| e.log_id.index));
                 tracing::warn!(
                     lo,
                     hi,
-                    ?overlay_keys,
-                    ?result_keys,
+                    %overlay_keys,
+                    %result_keys,
                     "A-0015 head gap: log read missed the range head — \
                      submitted-⇒-visible ordering regressed"
                 );
@@ -344,18 +367,15 @@ impl RaftLogStorage<RrTypeConfig> for RocksLogStorage {
             .map(|b| de::<RrLogId>(&b))
             .transpose()?;
 
-        // Find the last log entry by scanning all keys in the log CF
-        let start = index_key(0);
-        let end = index_key(u64::MAX);
-        let pairs = self
+        // Reverse-fetch the last log entry: an O(1) seek instead of a full-CF
+        // scan (which materialized 50k+ entries × KiB payloads at every
+        // `Raft::new` just to read the tail).
+        let last_log_id = self
             .storage
-            .scan(CF_LOG, &start, &end)
+            .last_key_value(CF_LOG)
             .await
-            .map_err(to_read_err)?;
-
-        let last_log_id = pairs
-            .last()
-            .map(|(_, v)| de::<RrEntry>(v))
+            .map_err(to_read_err)?
+            .map(|(_, v)| de::<RrEntry>(&v))
             .transpose()?
             .map(|e| e.log_id)
             .or(last_purged);
@@ -771,6 +791,54 @@ mod tests {
         let state = s.get_log_state().await.unwrap();
         assert_eq!(state.last_purged_log_id, None);
         assert_eq!(state.last_log_id.unwrap().index, 2);
+    }
+
+    // ── 8b: get_log_state reverse-fetches the tail (no full-CF scan) ────────
+
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// Regression: startup must recover the correct `last_log_id` from a
+    /// large persisted log via `StorageEngine::last_key_value` (a full-CF
+    /// scan here used to materialize every entry at every `Raft::new`).
+    #[tokio::test]
+    async fn test_rocks_get_log_state_recovers_tail_of_large_log() {
+        const N: u64 = 5_000;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+
+        {
+            let mut s = RocksLogStorage::open(&path).unwrap();
+            // Payloads sized so a full scan would move real bytes (~0.5 MiB).
+            s.blocking_append(
+                (1..=N)
+                    .map(|i| make_data_entry(i, 1, vec![(i % 251) as u8; 100]))
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+            s.close().await.unwrap();
+        }
+
+        let mut s2 = RocksLogStorage::open(&path).unwrap();
+        let state = s2.get_log_state().await.unwrap();
+        assert_eq!(state.last_purged_log_id, None);
+        let last = state.last_log_id.expect("tail must be recovered");
+        assert_eq!(last.index, N);
+        assert_eq!(last.leader_id.term, 1);
+        s2.close().await.unwrap();
+    }
+
+    #[test]
+    fn test_capped_keys_bounds_tripwire_output() {
+        let few = capped_keys([1u64, 2, 3].into_iter());
+        assert_eq!(few, "[1, 2, 3]");
+
+        let many = capped_keys(0u64..100);
+        assert_eq!(
+            many, "[0, 1, 2, 3, 4, 5, 6, 7] (+92 more)",
+            "key dumps must be capped at 8 with a remainder note"
+        );
+
+        assert_eq!(capped_keys(std::iter::empty()), "[]");
     }
 
     // ── 9: vote persists across reopen ─────────────────────────────────────

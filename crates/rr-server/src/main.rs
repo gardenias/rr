@@ -225,6 +225,15 @@ async fn start_node(
     if let Some(port) = cfg.metrics_port {
         node_config = node_config.with_metrics_port(port);
     }
+    node_config = node_config
+        .with_admin_bind_host(cfg.admin_bind_host.clone())
+        .with_metrics_bind_host(cfg.metrics_bind_host.clone());
+    if let Some(n) = cfg.grpc_max_concurrent_streams {
+        node_config = node_config.with_grpc_max_concurrent_streams(n);
+    }
+    if let Some(n) = cfg.grpc_max_frame_size {
+        node_config = node_config.with_grpc_max_frame_size(n);
+    }
     if let Some(tls) = tls_config {
         node_config = node_config.with_tls(tls);
     }

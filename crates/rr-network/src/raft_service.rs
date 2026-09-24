@@ -10,6 +10,7 @@
 //! forwarding to the `Raft` handle, and bincode-encoding the response.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rr_core::types::GroupId;
 use tokio_stream::StreamExt;
@@ -30,6 +31,16 @@ use crate::proto::raft::{
 /// genuinely larger snapshots should refactor toward chunked apply
 /// (out of scope for this protection).
 pub const MAX_INSTALL_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024 * 1024;
+
+/// Overall timeout for receiving one `InstallSnapshot` chunk stream.
+///
+/// Mirrors the openraft `install_snapshot_timeout` (60 s, configured on
+/// `RaftNode` in rr-raft) that bounds the *sending* side; without a
+/// receive-side bound a stalled or trickling peer could pin a connection
+/// and its accumulated buffer indefinitely.
+const INSTALL_SNAPSHOT_RECV_TIMEOUT: Duration = Duration::from_secs(60);
+
+use crate::tracing::debug_traceparent;
 
 /// Trait for dispatching Raft RPCs to the correct group.
 ///
@@ -88,7 +99,7 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: tonic::Request<AppendEntriesRequest>,
     ) -> Result<tonic::Response<AppendEntriesResponse>, tonic::Status> {
-        let traceparent = crate::tracing::extract_traceparent(&request);
+        let traceparent = debug_traceparent!(&request);
         let req = request.into_inner();
         let group_id = req.group_id;
         tracing::debug!(
@@ -109,7 +120,7 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         &self,
         request: tonic::Request<VoteRequest>,
     ) -> Result<tonic::Response<VoteResponse>, tonic::Status> {
-        let traceparent = crate::tracing::extract_traceparent(&request);
+        let traceparent = debug_traceparent!(&request);
         let req = request.into_inner();
         let group_id = req.group_id;
         tracing::debug!(
@@ -128,61 +139,125 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         request: tonic::Request<tonic::Streaming<SnapshotChunk>>,
     ) -> Result<tonic::Response<SnapshotResponse>, tonic::Status> {
         let mut stream = request.into_inner();
-        let mut chunks: Vec<SnapshotChunk> = Vec::new();
-        let mut total_bytes: usize = 0;
+        let collected = receive_with_timeout(&mut stream, INSTALL_SNAPSHOT_RECV_TIMEOUT).await?;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?;
-            total_bytes = total_bytes.saturating_add(chunk.data.len());
-            if total_bytes > MAX_INSTALL_SNAPSHOT_BYTES {
-                tracing::error!(
-                    group_id = chunk.group_id,
-                    total_bytes,
-                    cap = MAX_INSTALL_SNAPSHOT_BYTES,
-                    "install_snapshot stream exceeded byte cap; aborting (DoS mitigation)"
-                );
-                return Err(tonic::Status::resource_exhausted(
-                    "install_snapshot stream exceeded server byte cap",
-                ));
-            }
-            chunks.push(chunk);
-        }
-
-        if chunks.is_empty() {
-            return Err(tonic::Status::invalid_argument(
-                "empty snapshot stream: no chunks received",
-            ));
-        }
-
-        let group_id = chunks[0].group_id;
         tracing::debug!(
-            group_id,
-            num_chunks = chunks.len(),
-            total_bytes,
+            group_id = collected.group_id,
+            num_chunks = collected.num_chunks,
+            total_bytes = collected.total_bytes,
             "install_snapshot RPC received"
         );
 
-        let final_chunk = chunks.iter().find(|c| c.done).ok_or_else(|| {
-            tonic::Status::invalid_argument("no final chunk (done=true) in snapshot stream")
-        })?;
-        let metadata = final_chunk.metadata.clone();
-
-        let mut data = Vec::with_capacity(total_bytes);
-        for chunk in &chunks {
-            data.extend_from_slice(&chunk.data);
-        }
-
         let payload = self
             .groups
-            .install_snapshot(group_id, metadata, data)
+            .install_snapshot(collected.group_id, collected.metadata, collected.data)
             .await?;
 
         Ok(tonic::Response::new(SnapshotResponse {
-            group_id,
+            group_id: collected.group_id,
             success: true,
             payload,
         }))
     }
+}
+
+/// Wrap [`collect_snapshot_stream`] in an overall receive timeout; on
+/// expiry the stream is dropped and the peer gets `DEADLINE_EXCEEDED`.
+async fn receive_with_timeout<S>(
+    stream: &mut S,
+    timeout: Duration,
+) -> Result<CollectedSnapshot, tonic::Status>
+where
+    S: tokio_stream::Stream<Item = Result<SnapshotChunk, tonic::Status>> + Unpin,
+{
+    match tokio::time::timeout(timeout, collect_snapshot_stream(stream)).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::error!(
+                timeout_secs = timeout.as_secs(),
+                "install_snapshot stream receive timed out; aborting (DoS mitigation)"
+            );
+            Err(tonic::Status::deadline_exceeded(
+                "install_snapshot stream timed out",
+            ))
+        }
+    }
+}
+
+/// A fully received `InstallSnapshot` stream.
+#[derive(Debug)]
+struct CollectedSnapshot {
+    group_id: GroupId,
+    metadata: Vec<u8>,
+    data: Vec<u8>,
+    num_chunks: usize,
+    total_bytes: usize,
+}
+
+/// Drain a `SnapshotChunk` stream into one contiguous buffer.
+///
+/// Chunks are appended to a single growing `Vec` as they arrive instead
+/// of being retained and concatenated at the end, so peak memory is ≈1×
+/// (not ≈2×) the snapshot size (modulo amortized-growth reallocation).
+/// The running total is capped at [`MAX_INSTALL_SNAPSHOT_BYTES`], and a
+/// chunk arriving after `done = true` is rejected — `done` is terminal.
+async fn collect_snapshot_stream<S>(stream: &mut S) -> Result<CollectedSnapshot, tonic::Status>
+where
+    S: tokio_stream::Stream<Item = Result<SnapshotChunk, tonic::Status>> + Unpin,
+{
+    let mut data: Vec<u8> = Vec::new();
+    let mut metadata: Option<Vec<u8>> = None;
+    let mut group_id: Option<GroupId> = None;
+    let mut num_chunks: usize = 0;
+    let mut total_bytes: usize = 0;
+    let mut done_seen = false;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| tonic::Status::internal(format!("stream error: {e}")))?;
+        if done_seen {
+            return Err(tonic::Status::invalid_argument(
+                "protocol violation: chunk received after done = true (done is terminal)",
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(chunk.data.len());
+        if total_bytes > MAX_INSTALL_SNAPSHOT_BYTES {
+            tracing::error!(
+                group_id = chunk.group_id,
+                total_bytes,
+                cap = MAX_INSTALL_SNAPSHOT_BYTES,
+                "install_snapshot stream exceeded byte cap; aborting (DoS mitigation)"
+            );
+            return Err(tonic::Status::resource_exhausted(
+                "install_snapshot stream exceeded server byte cap",
+            ));
+        }
+        group_id.get_or_insert(chunk.group_id);
+        data.extend_from_slice(&chunk.data);
+        num_chunks += 1;
+        if chunk.done {
+            done_seen = true;
+            metadata = Some(chunk.metadata);
+        }
+    }
+
+    // `group_id` is set by the first chunk, so a missing group_id means
+    // the stream was empty.
+    let Some(group_id) = group_id else {
+        return Err(tonic::Status::invalid_argument(
+            "empty snapshot stream: no chunks received",
+        ));
+    };
+    let metadata = metadata.ok_or_else(|| {
+        tonic::Status::invalid_argument("no final chunk (done=true) in snapshot stream")
+    })?;
+
+    Ok(CollectedSnapshot {
+        group_id,
+        metadata,
+        data,
+        num_chunks,
+        total_bytes,
+    })
 }
 #[cfg(test)]
 mod tests {
@@ -284,5 +359,77 @@ mod tests {
         assert_eq!(proto_resp.group_id, 42);
         assert!(proto_resp.success);
         assert_eq!(proto_resp.payload, test_payload);
+    }
+
+    fn chunk(group_id: u64, data: &[u8], done: bool, metadata: &[u8]) -> SnapshotChunk {
+        SnapshotChunk {
+            group_id,
+            offset: 0,
+            data: data.to_vec(),
+            done,
+            metadata: metadata.to_vec(),
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_snapshot_stream_concatenates_chunks_in_order() {
+        let mut stream = tokio_stream::iter(vec![
+            Ok(chunk(7, b"aa", false, &[])),
+            Ok(chunk(7, b"bb", false, &[])),
+            Ok(chunk(7, b"cc", true, b"meta")),
+        ]);
+        let collected = collect_snapshot_stream(&mut stream).await.unwrap();
+        assert_eq!(collected.group_id, 7);
+        assert_eq!(collected.data, b"aabbcc");
+        assert_eq!(collected.metadata, b"meta");
+        assert_eq!(collected.num_chunks, 3);
+        assert_eq!(collected.total_bytes, 6);
+    }
+
+    #[tokio::test]
+    async fn collect_snapshot_stream_rejects_chunk_after_done() {
+        // Regression: `done` must be terminal — a sender that keeps
+        // streaming after the final chunk can otherwise grow the retained
+        // buffer without bound within the 4 GiB cap.
+        let mut stream = tokio_stream::iter(vec![
+            Ok(chunk(7, b"aa", true, b"meta")),
+            Ok(chunk(7, b"late", false, &[])),
+        ]);
+        let err = collect_snapshot_stream(&mut stream).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            err.message().contains("done"),
+            "expected done-terminal error, got: {}",
+            err.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_snapshot_stream_rejects_empty_stream() {
+        let mut stream = tokio_stream::iter(Vec::<Result<SnapshotChunk, tonic::Status>>::new());
+        let err = collect_snapshot_stream(&mut stream).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("empty snapshot stream"));
+    }
+
+    // INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
+    #[tokio::test]
+    async fn collect_snapshot_stream_rejects_missing_done_chunk() {
+        let mut stream = tokio_stream::iter(vec![Ok(chunk(7, b"aa", false, &[]))]);
+        let err = collect_snapshot_stream(&mut stream).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("no final chunk"));
+    }
+
+    // INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
+    #[tokio::test]
+    async fn receive_with_timeout_aborts_stalled_stream() {
+        // Regression: a stalled peer stream must not pin the connection
+        // forever — the overall receive timeout bounds it.
+        let mut stream = tokio_stream::pending::<Result<SnapshotChunk, tonic::Status>>();
+        let err = receive_with_timeout(&mut stream, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::DeadlineExceeded);
     }
 }

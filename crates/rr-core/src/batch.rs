@@ -58,9 +58,11 @@ pub fn encode_batch(items: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_LEN + 4 * items.len() + total);
     out.extend_from_slice(&BATCH_FRAME_MAGIC);
     out.push(BATCH_FRAME_VERSION);
-    out.extend_from_slice(&(items.len() as u32).to_be_bytes());
+    let count = u32::try_from(items.len()).expect("batch item count exceeds u32::MAX");
+    out.extend_from_slice(&count.to_be_bytes());
     for item in items {
-        out.extend_from_slice(&(item.len() as u32).to_be_bytes());
+        let len = u32::try_from(item.len()).expect("batch item exceeds u32::MAX bytes");
+        out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(item);
     }
     out
@@ -72,6 +74,31 @@ pub fn encode_batch(items: &[Vec<u8>]) -> Vec<u8> {
 /// (truncated header, truncated item, trailing garbage) or carries a
 /// newer schema version than this build understands.
 pub fn decode_batch(bytes: &[u8]) -> Result<Option<Vec<Vec<u8>>>, RrError> {
+    let Some(spans) = parse_batch_frame(bytes)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        spans
+            .into_iter()
+            .map(|(s, e)| bytes[s..e].to_vec())
+            .collect(),
+    ))
+}
+
+/// Structural validation of a batch frame without materializing the items
+/// (no per-item allocation) — the ingress-validation hot path
+/// (`crate::ingress::validate_client_payload`). Return contract identical
+/// to [`decode_batch`]: `Ok(None)` = not a batch, `Ok(Some(()))` =
+/// well-formed, `Err` = malformed or future version.
+pub fn validate_batch_frame(bytes: &[u8]) -> Result<Option<()>, RrError> {
+    Ok(parse_batch_frame(bytes)?.map(|_| ()))
+}
+
+/// Parse the frame, returning the `(start, end)` spans of each item payload.
+/// All cursor arithmetic is overflow-checked so malformed length fields can
+/// never wrap (including 32-bit `usize` targets); slicing happens only after
+/// bounds are proven.
+fn parse_batch_frame(bytes: &[u8]) -> Result<Option<Vec<(usize, usize)>>, RrError> {
     if !is_batch_frame(bytes) {
         return Ok(None);
     }
@@ -89,27 +116,36 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Option<Vec<Vec<u8>>>, RrError> {
             "batch frame version {version} exceeds supported {BATCH_FRAME_VERSION} — upgrade the framework"
         )));
     }
-    let count = u32::from_be_bytes(bytes[9..13].try_into().expect("4 bytes")) as usize;
-    let mut items = Vec::with_capacity(count.min(1 << 16));
+    let count_bytes: [u8; 4] = bytes
+        .get(9..13)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| malformed("header truncated"))?;
+    let count = u32::from_be_bytes(count_bytes) as usize;
+    let mut spans = Vec::with_capacity(count.min(1 << 16));
     let mut cursor = HEADER_LEN;
     for _ in 0..count {
-        let end = cursor + 4;
-        if end > bytes.len() {
-            return Err(malformed("item length prefix truncated"));
-        }
-        let len = u32::from_be_bytes(bytes[cursor..end].try_into().expect("4 bytes")) as usize;
+        let end = cursor
+            .checked_add(4)
+            .ok_or_else(|| malformed("item length prefix offset overflow"))?;
+        let len_bytes: [u8; 4] = bytes
+            .get(cursor..end)
+            .and_then(|s| s.try_into().ok())
+            .ok_or_else(|| malformed("item length prefix truncated"))?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
         cursor = end;
-        let end = cursor + len;
+        let end = cursor
+            .checked_add(len)
+            .ok_or_else(|| malformed("item payload offset overflow"))?;
         if end > bytes.len() {
             return Err(malformed("item payload truncated"));
         }
-        items.push(bytes[cursor..end].to_vec());
+        spans.push((cursor, end));
         cursor = end;
     }
     if cursor != bytes.len() {
         return Err(malformed("trailing bytes after last item"));
     }
-    Ok(Some(items))
+    Ok(Some(spans))
 }
 
 #[cfg(test)]
@@ -166,5 +202,34 @@ mod tests {
             err.to_string().contains("version"),
             "error should name the version problem: {err}"
         );
+    }
+
+    #[test]
+    fn extreme_length_fields_error_instead_of_panicking() {
+        // count = 1, len = u32::MAX on a tiny buffer: must Err, never panic
+        // (cursor arithmetic is overflow-checked, also on 32-bit targets).
+        let mut frame = Vec::from(BATCH_FRAME_MAGIC);
+        frame.push(BATCH_FRAME_VERSION);
+        frame.extend_from_slice(&1u32.to_be_bytes());
+        frame.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(decode_batch(&frame).is_err());
+        assert!(validate_batch_frame(&frame).is_err());
+
+        // count = u32::MAX with no items at all: pre-allocation is capped,
+        // the first length prefix is already truncated.
+        let mut frame = Vec::from(BATCH_FRAME_MAGIC);
+        frame.push(BATCH_FRAME_VERSION);
+        frame.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(decode_batch(&frame).is_err());
+    }
+
+    #[test]
+    fn validate_batch_frame_mirrors_decode_contract() {
+        let good = encode_batch(&[vec![], b"abc".to_vec()]);
+        assert!(validate_batch_frame(&good).unwrap().is_some());
+        assert!(validate_batch_frame(b"plain").unwrap().is_none());
+        let mut bad = good.clone();
+        bad.pop();
+        assert!(validate_batch_frame(&bad).is_err());
     }
 }

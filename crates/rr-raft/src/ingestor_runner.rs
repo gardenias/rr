@@ -39,6 +39,9 @@
 //! C7): the offending message is neither proposed nor committed and the
 //! supervisor task exits with an error (same path as a `seed_offset`
 //! failure), leaving the poison message for an operator to handle.
+//! Framed-entry encode failures take the same fail-closed path: the poll
+//! position has already advanced, so skipping the message would silently
+//! drop it and violate at-least-once.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -235,8 +238,10 @@ async fn supervise(
 
         if !is_leader(&metrics_rx) {
             tokio::select! {
-                _ = cancel_rx.changed() => {
-                    if *cancel_rx.borrow() {
+                changed = cancel_rx.changed() => {
+                    // A dropped cancel SENDER errors changed() immediately and
+                    // forever — treat it as cancelled or this arm hot-spins.
+                    if changed.is_err() || *cancel_rx.borrow() {
                         debug!(group_id, "ingestor supervisor cancelled while waiting for leadership");
                         return Ok(());
                     }
@@ -252,7 +257,7 @@ async fn supervise(
         }
 
         info!(group_id, "ingestor became leader; seeking + polling");
-        if let Err(e) = seed_offset(&mgr, group_id, ingestor.as_mut()).await {
+        if let Err(e) = seed_offset(&mgr, group_id, ingestor.as_mut(), &mut cancel_rx).await {
             metrics::counter!(
                 "rr_ingestor_seed_failures_total",
                 "group_id" => group_id.to_string()
@@ -287,9 +292,19 @@ async fn seed_offset(
     mgr: &RaftGroupManager,
     group_id: GroupId,
     ingestor: &mut dyn DynCommandIngestor,
+    cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), RrError> {
-    refresh_snapshot_if_stale(mgr, group_id).await;
-    let snapshot_bytes = mgr.fetch_snapshot_bytes(group_id).await?;
+    refresh_snapshot_if_stale(mgr, group_id, cancel_rx).await;
+    // The snapshot fetch must not block stop_group for tens of seconds:
+    // race it against the cancel channel. On cancel we return without
+    // seeking — the poll loop's top-of-loop cancel check exits right after.
+    let snapshot_bytes = tokio::select! {
+        _ = cancel_rx.changed() => {
+            debug!(group_id, "ingestor supervisor cancelled while fetching snapshot bytes");
+            return Ok(());
+        }
+        r = mgr.fetch_snapshot_bytes(group_id) => r?,
+    };
     let offset = match snapshot_bytes
         .as_deref()
         .map(FramedSnapshot::decode)
@@ -320,8 +335,14 @@ async fn seed_offset(
 ///
 /// Errors are logged at debug and the supervisor proceeds with
 /// whatever snapshot already exists — non-blocking so a transient
-/// broker hiccup doesn't stall the leader's recovery.
-async fn refresh_snapshot_if_stale(mgr: &RaftGroupManager, group_id: GroupId) {
+/// broker hiccup doesn't stall the leader's recovery. Cancellation is
+/// checked between poll attempts so `stop_group` is never blocked for
+/// the full deadline.
+async fn refresh_snapshot_if_stale(
+    mgr: &RaftGroupManager,
+    group_id: GroupId,
+    cancel_rx: &mut watch::Receiver<bool>,
+) {
     let Some(raft) = mgr.get_raft(group_id).await else {
         return;
     };
@@ -366,7 +387,13 @@ async fn refresh_snapshot_if_stale(mgr: &RaftGroupManager, group_id: GroupId) {
             .increment(1);
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::select! {
+            _ = cancel_rx.changed() => {
+                debug!(group_id, "ingestor supervisor cancelled while waiting for snapshot refresh");
+                return;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
     }
     warn!(
         group_id,
@@ -488,8 +515,25 @@ async fn run_poll_loop(
             let bytes = match entry.encode() {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!(group_id, error = %e, "ingestor: framed entry encode failed; skipping batch");
-                    break;
+                    // Fail-closed like the C7 mapping path above: poll_bytes
+                    // already advanced the source position, so skipping the
+                    // message would silently drop it and violate
+                    // at-least-once. Exit instead and let the caller handle
+                    // the poisoned batch.
+                    tracing::error!(
+                        group_id,
+                        error = %e,
+                        "ingestor: framed entry encode failed; supervisor exiting fail-closed \
+                         without proposing or committing this message"
+                    );
+                    metrics::counter!(
+                        "rr_ingestor_encode_failures_total",
+                        "group_id" => group_id.to_string()
+                    )
+                    .increment(1);
+                    return Err(RrError::Application(format!(
+                        "ingestor framed entry encode failed: {e}"
+                    )));
                 }
             };
 
@@ -777,6 +821,33 @@ mod tests {
             "supervisor must exit promptly when group is missing"
         );
         handle.stop().await;
+    }
+
+    /// INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
+    /// A parked (non-leader) supervisor whose cancel SENDER is dropped
+    /// without being set must exit promptly — `changed()` errors forever in
+    /// that state and would otherwise hot-spin the parked arm.
+    #[tokio::test]
+    async fn parked_supervisor_exits_when_cancel_sender_dropped() {
+        let mgr = Arc::new(RaftGroupManager::new(1, echo_factory()));
+        mgr.start_group(1).await.unwrap();
+        // No init_cluster: the group never becomes leader, so the supervisor
+        // parks in the not-leader select arm.
+        let (ingestor, poll_called) = ScriptedIngestor::new(1);
+        let IngestorHandle { join, cancel } =
+            spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), None, 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !join.is_finished() && !poll_called.load(Ordering::SeqCst),
+            "supervisor should be parked (not leader yet)"
+        );
+
+        drop(cancel);
+        tokio::time::timeout(Duration::from_secs(2), join)
+            .await
+            .expect("parked supervisor must exit when the cancel sender is dropped")
+            .unwrap();
+        mgr.stop_group(1).await.unwrap();
     }
 
     struct SeedFailIngestor;

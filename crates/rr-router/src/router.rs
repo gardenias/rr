@@ -35,7 +35,10 @@ impl ShardRouter {
     /// the ConfigProvider is the single source of truth — no cached view is
     /// retained here). Providers holding the table in memory serve the
     /// snapshot as an `Arc` clone, so the hot path does no table copy.
-    #[instrument(skip(self))]
+    ///
+    /// Deliberately NOT `#[instrument]`ed: `route()` is the hottest path in
+    /// the data plane, and a per-call INFO span costs more than it tells
+    /// you. The `router.route.not_found` metric carries the signal.
     pub async fn route(&self, partition_id: PartitionId) -> Result<GroupId, RrError> {
         let table = self.config.routing_table_snapshot().await?;
 

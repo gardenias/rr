@@ -45,6 +45,14 @@ pub enum RaftTransport {
     },
 }
 
+/// Default bind host for the Admin gRPC service: loopback only. See
+/// [`NodeConfig::admin_bind_host`].
+pub const DEFAULT_ADMIN_BIND_HOST: &str = "127.0.0.1";
+
+/// Default bind host for the HTTP observability endpoints: loopback only.
+/// See [`NodeConfig::metrics_bind_host`].
+pub const DEFAULT_METRICS_BIND_HOST: &str = "127.0.0.1";
+
 /// Configuration for creating an [`RrNode`](super::node::RrNode).
 pub struct NodeConfig {
     /// Unique identifier for this node in the cluster.
@@ -93,6 +101,28 @@ pub struct NodeConfig {
     pub metrics_port: Option<u16>,
     /// Optional port for the Admin gRPC service. `None` = disabled.
     pub admin_port: Option<u16>,
+    /// Bind host for the Admin gRPC service. Defaults to loopback
+    /// (`127.0.0.1`) — the admin API exposes leadership transfer and
+    /// snapshot triggers, so wildcard bind must be an explicit choice
+    /// (`"0.0.0.0"` / `"::"`). Breaking change in v0.3.0: pre-v0.3.0 bound
+    /// `0.0.0.0` unconditionally.
+    pub admin_bind_host: String,
+    /// Bind host for the HTTP observability endpoints
+    /// (`/health` `/ready` `/metrics`). Defaults to loopback
+    /// (`127.0.0.1`) — `/metrics` exposes internal histograms without
+    /// auth. Set `"0.0.0.0"` to allow cross-host Prometheus scrapes.
+    /// Breaking change in v0.3.0: pre-v0.3.0 bound `0.0.0.0`
+    /// unconditionally.
+    pub metrics_bind_host: String,
+    /// Override the gRPC server's HTTP/2 `max_concurrent_streams` (tonic/
+    /// hyper default: 200). `None` keeps the library default. The cap is
+    /// per connection — raising it matters when many unbatched concurrent
+    /// requests share one client connection (100k roadmap M3).
+    pub grpc_max_concurrent_streams: Option<u32>,
+    /// Override the gRPC server's HTTP/2 max frame size in bytes
+    /// (default 16 KiB). Larger frames cut per-frame processing overhead
+    /// for large (batched) payloads. `None` keeps the library default.
+    pub grpc_max_frame_size: Option<u32>,
     /// TLS configuration for the main gRPC server (Client + Raft services)
     /// and the Admin gRPC server. `None` = plaintext gRPC (dev only).
     ///
@@ -181,6 +211,10 @@ impl NodeConfig {
             group_manager: None,
             metrics_port: None,
             admin_port: None,
+            admin_bind_host: DEFAULT_ADMIN_BIND_HOST.to_string(),
+            metrics_bind_host: DEFAULT_METRICS_BIND_HOST.to_string(),
+            grpc_max_concurrent_streams: None,
+            grpc_max_frame_size: None,
             tls_config: None,
             auth_config: AuthConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
@@ -234,6 +268,36 @@ impl NodeConfig {
         self
     }
 
+    /// Set the Admin gRPC bind host (default loopback — see
+    /// [`NodeConfig::admin_bind_host`]). Must be an IP literal; combined
+    /// with `admin_port` into the bind address at `start()`.
+    pub fn with_admin_bind_host(mut self, host: impl Into<String>) -> Self {
+        self.admin_bind_host = host.into();
+        self
+    }
+
+    /// Override the gRPC server's HTTP/2 `max_concurrent_streams`.
+    /// See [`Self::grpc_max_concurrent_streams`].
+    pub fn with_grpc_max_concurrent_streams(mut self, n: u32) -> Self {
+        self.grpc_max_concurrent_streams = Some(n);
+        self
+    }
+
+    /// Override the gRPC server's HTTP/2 max frame size (bytes).
+    /// See [`Self::grpc_max_frame_size`].
+    pub fn with_grpc_max_frame_size(mut self, n: u32) -> Self {
+        self.grpc_max_frame_size = Some(n);
+        self
+    }
+
+    /// Set the HTTP observability (`/health` `/ready` `/metrics`) bind
+    /// host (default loopback — see [`NodeConfig::metrics_bind_host`]).
+    /// Must be an IP literal; combined with `metrics_port` at `start()`.
+    pub fn with_metrics_bind_host(mut self, host: impl Into<String>) -> Self {
+        self.metrics_bind_host = host.into();
+        self
+    }
+
     /// Enable TLS on all gRPC endpoints hosted by this node (Client, Raft, Admin).
     pub fn with_tls(mut self, tls: TlsConfig) -> Self {
         self.tls_config = Some(tls);
@@ -276,6 +340,24 @@ impl NodeConfig {
             )));
         }
 
+        // Fail at config time (not first bind) when a bind host is not an
+        // IP literal — a typo'd host would otherwise surface as an opaque
+        // address-parse error deep in `start()`.
+        if self.admin_port.is_some() && self.admin_bind_host.parse::<std::net::IpAddr>().is_err() {
+            return Err(ConfigError::InvalidConfig(format!(
+                "admin_bind_host '{}' is not a valid IP address literal",
+                self.admin_bind_host
+            )));
+        }
+        if self.metrics_port.is_some()
+            && self.metrics_bind_host.parse::<std::net::IpAddr>().is_err()
+        {
+            return Err(ConfigError::InvalidConfig(format!(
+                "metrics_bind_host '{}' is not a valid IP address literal",
+                self.metrics_bind_host
+            )));
+        }
+
         if let Some(ref tls) = self.tls_config {
             if tls.cert_path.as_os_str().is_empty() || tls.key_path.as_os_str().is_empty() {
                 return Err(ConfigError::InvalidConfig(
@@ -283,6 +365,11 @@ impl NodeConfig {
                 ));
             }
         }
+
+        // Rate-limit field/combination rules (rps ceiling, per-caller
+        // requires the global fallback bucket) live next to the policy
+        // itself in rr-network.
+        self.rate_limit_config.validate()?;
 
         Ok(())
     }

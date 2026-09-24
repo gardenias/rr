@@ -83,6 +83,14 @@ impl StorageEngine for MemStorage {
         Ok(result)
     }
 
+    async fn last_key_value(&self, cf: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let guard = self.inner.read().await;
+        let cf_map = guard.get(cf).ok_or_else(|| StorageError::NotFound {
+            key: format!("cf:{cf}"),
+        })?;
+        Ok(cf_map.last_key_value().map(|(k, v)| (k.clone(), v.clone())))
+    }
+
     async fn write_batch(&self, ops: Vec<BatchOp>) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
         for op in ops {
@@ -160,6 +168,30 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, b"a".to_vec());
         assert_eq!(results[1].0, b"b".to_vec());
+    }
+
+    #[tokio::test]
+    async fn test_last_key_value() {
+        let storage = MemStorage::new();
+        assert_eq!(storage.last_key_value("state_machine").await.unwrap(), None);
+
+        storage.put("state_machine", b"b", b"2").await.unwrap();
+        storage.put("state_machine", b"a", b"1").await.unwrap();
+        storage.put("state_machine", b"c", b"3").await.unwrap();
+        assert_eq!(
+            storage.last_key_value("state_machine").await.unwrap(),
+            Some((b"c".to_vec(), b"3".to_vec()))
+        );
+
+        // Greatest key moves down after a delete of the tail.
+        storage.delete("state_machine", b"c").await.unwrap();
+        assert_eq!(
+            storage.last_key_value("state_machine").await.unwrap(),
+            Some((b"b".to_vec(), b"2".to_vec()))
+        );
+
+        let err = storage.last_key_value("nonexistent_cf").await.unwrap_err();
+        assert!(matches!(err, StorageError::NotFound { .. }));
     }
 
     #[tokio::test]

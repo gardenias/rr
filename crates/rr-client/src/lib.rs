@@ -31,6 +31,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 mod batch;
@@ -96,7 +97,14 @@ pub struct RrClient {
     /// starvation on servers. Channels are created lazily on first use and
     /// reused; a cached channel is evicted on `Code::Unavailable` so the
     /// next attempt redials.
-    channels: Arc<RwLock<HashMap<String, Channel>>>,
+    ///
+    /// Each addr maps to a Vec of `channel_fanout` connections (default 1)
+    /// round-robined via `channel_rr`: one H2 connection is one server-side
+    /// connection task, which is the serializer on unbatched
+    /// high-concurrency paths (100k roadmap M3).
+    channels: Arc<RwLock<HashMap<String, Vec<Channel>>>>,
+    channel_fanout: usize,
+    channel_rr: Arc<AtomicU64>,
     leader_cache: Arc<RwLock<HashMap<GroupId, (NodeId, String)>>>,
     retry_config: RetryConfig,
     tls_config: Option<TlsConfig>,
@@ -109,6 +117,10 @@ pub struct RrClient {
     /// `send_request` is its own RPC, byte-for-byte the v0.2.x path.
     /// See [`RrClientBuilder::with_batching`].
     batch: Option<Arc<BatchState>>,
+    /// Interned `group_id` metric labels — formatting `group_id.to_string()`
+    /// per request was measurable on the hot path; the group set is small
+    /// and stable, so format once per client and clone the cached `String`.
+    gid_labels: Arc<std::sync::RwLock<HashMap<GroupId, String>>>,
 }
 
 /// Builder for [`RrClient`] with optional TLS and bearer-token configuration.
@@ -133,6 +145,7 @@ pub struct RrClientBuilder {
     strict_security: bool,
     request_timeout_ms: Option<u64>,
     batch_config: Option<BatchConfig>,
+    channel_fanout: usize,
 }
 
 impl RrClientBuilder {
@@ -146,7 +159,19 @@ impl RrClientBuilder {
             strict_security: false,
             request_timeout_ms: None,
             batch_config: None,
+            channel_fanout: 1,
         }
+    }
+
+    /// Keep `n` H2 connections per server address and round-robin requests
+    /// across them. Default 1 — one connection per address (the v0.2.x
+    /// behavior). One connection = one server-side h2 connection task, which
+    /// is the throughput serializer on unbatched high-concurrency paths;
+    /// fan-out parallelizes it. Client batching (`with_batching`) already
+    /// multiplexes many writes per RPC and benefits less from fan-out.
+    pub fn with_channel_fanout(mut self, n: usize) -> Self {
+        self.channel_fanout = n;
+        self
     }
 
     /// Attach TLS / mTLS configuration. The connection scheme switches
@@ -181,6 +206,10 @@ impl RrClientBuilder {
     /// unbounded hang (safe under business-key idempotency — at-least-once +
     /// dedup, per A-0033). Set it for `respMode=full`-style callers that park
     /// on deferred responses. Omit to keep the default unbounded wait.
+    ///
+    /// `timeout` must be ≥ 1ms: shorter durations (including zero) truncate
+    /// to an instant 0ms timeout, so [`Self::build`] rejects them with
+    /// [`NetworkError::InvalidConfig`].
     pub fn with_request_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.request_timeout_ms = Some(timeout.as_millis() as u64);
         self
@@ -199,6 +228,21 @@ impl RrClientBuilder {
     /// flush as one Raft entry when `max_entries` / `max_bytes` is reached
     /// or `linger` elapses. Idempotency-keyed writes bypass the batcher.
     ///
+    /// # ⚠️ Retries amplify double-apply
+    ///
+    /// Unkeyed batches are NOT idempotent: if a flush is retried (leader
+    /// redirect, backoff, timeout), every item in the batch can be applied
+    /// twice server-side. Batch only workloads that are idempotent by
+    /// business key (upserts, last-write-wins); keyed writes
+    /// (`send_request_idempotent`) bypass the batcher and get
+    /// framework-level dedup instead.
+    ///
+    /// Flushes of one partition are serialized (`max.in.flight=1` analogue),
+    /// so per-partition commit order matches submission order. Dropping a
+    /// `send_request` future does not cancel the apply — the payload has
+    /// already joined a batch window and commits server-side; only the
+    /// response is lost.
+    ///
     /// Requires servers running a framework version whose apply path splits
     /// batch frames; against an older server the batch fails loudly (no fake
     /// success). Incompatible with services using deferred two-phase apply
@@ -213,12 +257,25 @@ impl RrClientBuilder {
     /// Returns `RrError::Network(NetworkError::ConnectionFailed)` if:
     /// - No bootstrap addresses were provided.
     /// - Strict security is on and a bearer token was set without TLS.
+    ///
+    /// Returns `RrError::Network(NetworkError::InvalidConfig)` if:
+    /// - `with_request_timeout` was given a sub-millisecond (or zero)
+    ///   duration, which would truncate to an instant 0ms timeout.
+    /// - The [`BatchConfig`] knobs fail [`BatchConfig::validate`].
     pub async fn build(self) -> Result<RrClient, RrError> {
         if self.bootstrap_addrs.is_empty() {
             return Err(RrError::Network(NetworkError::ConnectionFailed {
                 addr: "<none>".to_string(),
                 reason: "no bootstrap addresses provided".to_string(),
             }));
+        }
+
+        if self.request_timeout_ms == Some(0) {
+            return Err(RrError::Network(NetworkError::InvalidConfig(
+                "request timeout must be >= 1ms (shorter durations truncate to an \
+                 instant 0ms timeout)"
+                    .to_string(),
+            )));
         }
 
         let token_without_tls = self.bearer_token.is_some() && self.tls_config.is_none();
@@ -236,6 +293,12 @@ impl RrClientBuilder {
                  This is acceptable only for loopback / mTLS-elsewhere setups. \
                  In production, attach with_tls(...) or enable with_strict_security(true)."
             );
+        }
+
+        if self.channel_fanout == 0 {
+            return Err(RrError::Network(NetworkError::InvalidConfig(
+                "channel fanout must be >= 1".to_string(),
+            )));
         }
 
         if let Some(cfg) = &self.batch_config {
@@ -259,6 +322,9 @@ impl RrClientBuilder {
             bearer_token: self.bearer_token,
             request_timeout_ms: self.request_timeout_ms,
             batch: self.batch_config.map(|cfg| Arc::new(BatchState::new(cfg))),
+            gid_labels: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            channel_fanout: self.channel_fanout,
+            channel_rr: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -292,6 +358,12 @@ impl RrClient {
     }
 
     /// Returns a reference to the channel pool.
+    #[deprecated(
+        since = "0.3.0",
+        note = "dead API: dialing goes through the client's internal per-addr channel \
+                cache and this pool is never read; the getter will be removed in a \
+                future release"
+    )]
     pub fn channel_pool(&self) -> &ChannelPool {
         &self.channel_pool
     }
@@ -299,6 +371,25 @@ impl RrClient {
     /// Returns a reference to the retry configuration.
     pub fn retry_config(&self) -> &RetryConfig {
         &self.retry_config
+    }
+
+    /// Metric label for `group_id`, interned per client (the group set is
+    /// small and stable, so format once instead of per request).
+    fn gid_label(&self, group_id: GroupId) -> String {
+        if let Some(label) = self
+            .gid_labels
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&group_id)
+        {
+            return label.clone();
+        }
+        self.gid_labels
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(group_id)
+            .or_insert_with(|| group_id.to_string())
+            .clone()
     }
 
     /// Update the leader cache for a given group.
@@ -320,10 +411,11 @@ impl RrClient {
     }
 
     async fn connect_to_addr(&self, addr: &str) -> Result<ClientServiceClient<Channel>, RrError> {
-        // Cache hit: reuse the existing H2 channel (clone is cheap and shares
-        // the underlying connection).
-        if let Some(channel) = self.channels.read().await.get(addr) {
-            return Ok(ClientServiceClient::new(channel.clone()));
+        // Cache hit: reuse a cached H2 channel, round-robin across the
+        // fan-out set (fan-out 1 = the single shared connection).
+        if let Some(set) = self.channels.read().await.get(addr) {
+            let idx = (self.channel_rr.fetch_add(1, Ordering::Relaxed) as usize) % set.len();
+            return Ok(ClientServiceClient::new(set[idx].clone()));
         }
 
         let scheme = if self.tls_config.is_some() {
@@ -331,33 +423,36 @@ impl RrClient {
         } else {
             "http"
         };
-        let mut endpoint = Channel::from_shared(format!("{scheme}://{addr}")).map_err(|e| {
-            RrError::Network(NetworkError::ConnectionFailed {
-                addr: addr.to_string(),
-                reason: format!("invalid uri: {e}"),
-            })
-        })?;
-        if let Some(tls) = &self.tls_config {
-            let client_tls = tls.build_client_tls().map_err(RrError::Network)?;
-            endpoint = endpoint.tls_config(client_tls).map_err(|e| {
+        let mut set = Vec::with_capacity(self.channel_fanout);
+        for _ in 0..self.channel_fanout {
+            let mut endpoint = Channel::from_shared(format!("{scheme}://{addr}")).map_err(|e| {
                 RrError::Network(NetworkError::ConnectionFailed {
                     addr: addr.to_string(),
-                    reason: format!("tls config rejected by tonic: {e}"),
+                    reason: format!("invalid uri: {e}"),
                 })
             })?;
+            if let Some(tls) = &self.tls_config {
+                let client_tls = tls.build_client_tls().map_err(RrError::Network)?;
+                endpoint = endpoint.tls_config(client_tls).map_err(|e| {
+                    RrError::Network(NetworkError::ConnectionFailed {
+                        addr: addr.to_string(),
+                        reason: format!("tls config rejected by tonic: {e}"),
+                    })
+                })?;
+            }
+            let channel = endpoint.connect().await.map_err(|e| {
+                RrError::Network(NetworkError::ConnectionFailed {
+                    addr: addr.to_string(),
+                    reason: e.to_string(),
+                })
+            })?;
+            set.push(channel);
         }
-        let channel = endpoint.connect().await.map_err(|e| {
-            RrError::Network(NetworkError::ConnectionFailed {
-                addr: addr.to_string(),
-                reason: e.to_string(),
-            })
-        })?;
         // Concurrent first-dials race here; last writer wins, the dropped
-        // channel's connection closes — harmless.
-        self.channels
-            .write()
-            .await
-            .insert(addr.to_string(), channel.clone());
+        // channels' connections close — harmless.
+        let idx = (self.channel_rr.fetch_add(1, Ordering::Relaxed) as usize) % set.len();
+        let channel = set[idx].clone();
+        self.channels.write().await.insert(addr.to_string(), set);
         Ok(ClientServiceClient::new(channel))
     }
 
@@ -392,7 +487,9 @@ impl RrClient {
     /// With batching enabled ([`RrClientBuilder::with_batching`], off by
     /// default) the payload instead joins the partition's batch buffer and
     /// this future resolves with the item's own response once the batch
-    /// commits.
+    /// commits. Dropping this future does NOT cancel the apply — a buffered
+    /// payload still commits server-side via the detached flush task; only
+    /// the response is lost.
     #[instrument(skip(self, payload), fields(group_id, payload_len = payload.len()))]
     pub async fn send_request(
         &self,
@@ -415,27 +512,33 @@ impl RrClient {
         let max_attempts = self.retry_config.max_retries + 1;
         let mut bootstrap_index: usize = 0;
         let mut last_error: Option<RrError> = None;
+        let mut payload = payload;
 
         for attempt in 0..max_attempts {
-            let addr = self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
+            let addr = &self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()];
             bootstrap_index += 1;
 
+            // The final attempt moves the payload instead of cloning it.
             let request = ReadLocalRequest {
                 partition_id: group_id,
-                payload: payload.clone(),
+                payload: if attempt + 1 == max_attempts {
+                    std::mem::take(&mut payload)
+                } else {
+                    payload.clone()
+                },
             };
             let tonic_req = match self.build_request(request) {
                 Ok(req) => req,
                 Err(e) => return Err(e),
             };
 
-            match self.connect_to_addr(&addr).await {
+            match self.connect_to_addr(addr).await {
                 Ok(mut client) => match client.read_local(tonic_req).await {
                     Ok(resp) => return Ok(resp.into_inner().payload),
                     Err(e) => {
                         last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
                         if e.code() == tonic::Code::Unavailable {
-                            self.evict_channel(&addr).await;
+                            self.evict_channel(addr).await;
                         }
                         if attempt + 1 < max_attempts {
                             let delay = self
@@ -484,26 +587,34 @@ impl RrClient {
         let mut bootstrap_index: usize = 0;
         let mut redirect_addr: Option<String> = None;
         let mut last_error: Option<RrError> = None;
+        let mut payload = payload;
 
         for attempt in 0..max_attempts {
-            let addr = if let Some(a) = redirect_addr.take() {
-                a
-            } else {
-                let a = self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
-                bootstrap_index += 1;
-                a
+            let redirect = redirect_addr.take();
+            let addr: &str = match &redirect {
+                Some(a) => a,
+                None => {
+                    let a = &self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()];
+                    bootstrap_index += 1;
+                    a
+                }
             };
 
+            // The final attempt moves the payload instead of cloning it.
             let request = ReadLocalRequest {
                 partition_id: group_id,
-                payload: payload.clone(),
+                payload: if attempt + 1 == max_attempts {
+                    std::mem::take(&mut payload)
+                } else {
+                    payload.clone()
+                },
             };
             let tonic_req = match self.build_request(request) {
                 Ok(req) => req,
                 Err(e) => return Err(e),
             };
 
-            match self.connect_to_addr(&addr).await {
+            match self.connect_to_addr(addr).await {
                 Ok(mut client) => match client.read_linearizable(tonic_req).await {
                     Ok(resp) => {
                         let inner = resp.into_inner();
@@ -519,7 +630,7 @@ impl RrClient {
                     Err(e) => {
                         last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
                         if e.code() == tonic::Code::Unavailable {
-                            self.evict_channel(&addr).await;
+                            self.evict_channel(addr).await;
                         }
                         if attempt + 1 < max_attempts {
                             let delay = self
@@ -581,7 +692,11 @@ impl RrClient {
         let mut bootstrap_index: usize = 0;
         let mut last_error: Option<RrError> = None;
         let request_start = std::time::Instant::now();
-        let gid_label = group_id.to_string();
+        let gid_label = self.gid_label(group_id);
+        // Buffers are cloned per attempt only while a retry could still
+        // follow; the final attempt moves them instead.
+        let mut payload = payload;
+        let mut idem_key = idem_key;
 
         for attempt in 0..max_attempts {
             if attempt > 0 {
@@ -592,24 +707,26 @@ impl RrClient {
                 .increment(1);
             }
 
-            let addr = if let Some((_node_id, cached_addr)) = self.get_cached_leader(group_id).await
-            {
-                metrics::counter!(
-                    "rr_client_leader_cache_hits_total",
-                    "group_id" => gid_label.clone()
-                )
-                .increment(1);
-                cached_addr
-            } else {
-                metrics::counter!(
-                    "rr_client_leader_cache_misses_total",
-                    "group_id" => gid_label.clone()
-                )
-                .increment(1);
-                let addr =
-                    self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()].clone();
-                bootstrap_index += 1;
-                addr
+            let cached_leader = self.get_cached_leader(group_id).await;
+            let addr: &str = match &cached_leader {
+                Some((_node_id, cached_addr)) => {
+                    metrics::counter!(
+                        "rr_client_leader_cache_hits_total",
+                        "group_id" => gid_label.clone()
+                    )
+                    .increment(1);
+                    cached_addr
+                }
+                None => {
+                    metrics::counter!(
+                        "rr_client_leader_cache_misses_total",
+                        "group_id" => gid_label.clone()
+                    )
+                    .increment(1);
+                    let addr = &self.bootstrap_addrs[bootstrap_index % self.bootstrap_addrs.len()];
+                    bootstrap_index += 1;
+                    addr
+                }
             };
 
             tracing::debug!(
@@ -620,7 +737,7 @@ impl RrClient {
             );
 
             // Try to connect and send
-            let mut grpc_client = match self.connect_to_addr(&addr).await {
+            let mut grpc_client = match self.connect_to_addr(addr).await {
                 Ok(client) => client,
                 Err(e) => {
                     tracing::warn!(
@@ -644,10 +761,20 @@ impl RrClient {
                 }
             };
 
+            let last_attempt = attempt + 1 == max_attempts;
             let request = ClientRequest {
                 partition_id: group_id,
-                payload: payload.clone(),
-                idem_key: idem_key.clone().map(idem_key_to_proto),
+                payload: if last_attempt {
+                    std::mem::take(&mut payload)
+                } else {
+                    payload.clone()
+                },
+                idem_key: if last_attempt {
+                    idem_key.take()
+                } else {
+                    idem_key.clone()
+                }
+                .map(idem_key_to_proto),
             };
 
             let tonic_req = match self.build_request(request) {
@@ -773,7 +900,7 @@ impl RrClient {
                     );
                     self.remove_cached_leader(group_id).await;
                     if status.code() == tonic::Code::Unavailable {
-                        self.evict_channel(&addr).await;
+                        self.evict_channel(addr).await;
                     }
                     last_error = Some(RrError::Network(NetworkError::RpcFailed(
                         status.message().to_string(),
@@ -942,14 +1069,34 @@ impl RrClient {
 
     // ── Reactive interface (callback-driven) ──────────────────────────────────
 
+    /// Reactive-API preflight: `tokio::spawn` panics when there is no active
+    /// runtime — surface a typed error through the callback instead of
+    /// panicking on the calling thread. Mirrors [`Self::blocking_runtime_handle`]
+    /// (any runtime flavor is fine here — the spawned task just needs a
+    /// reactor).
+    fn reactive_runtime_preflight() -> Result<(), RrError> {
+        tokio::runtime::Handle::try_current().map_err(|_| {
+            RrError::Network(NetworkError::RpcFailed(
+                "reactive interface requires an active tokio runtime".into(),
+            ))
+        })?;
+        Ok(())
+    }
+
     /// Reactive write: fires the request and returns immediately.
     ///
     /// `callback` is invoked on a tokio worker thread when the response
-    /// (or error) arrives.  The calling context is never blocked.
+    /// (or error) arrives.  The calling context is never blocked. When
+    /// called without an active tokio runtime, the callback fires
+    /// synchronously with a typed error instead of panicking.
     pub fn send_request_reactive<F>(&self, group_id: GroupId, payload: Vec<u8>, callback: F)
     where
         F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
     {
+        if let Err(e) = Self::reactive_runtime_preflight() {
+            callback(Err(e));
+            return;
+        }
         let client = self.clone();
         tokio::spawn(async move {
             callback(client.send_request(group_id, payload).await);
@@ -966,6 +1113,10 @@ impl RrClient {
     ) where
         F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
     {
+        if let Err(e) = Self::reactive_runtime_preflight() {
+            callback(Err(e));
+            return;
+        }
         let client = self.clone();
         tokio::spawn(async move {
             callback(client.send_request_idempotent(group_id, payload, key).await);
@@ -977,6 +1128,10 @@ impl RrClient {
     where
         F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
     {
+        if let Err(e) = Self::reactive_runtime_preflight() {
+            callback(Err(e));
+            return;
+        }
         let client = self.clone();
         tokio::spawn(async move {
             callback(client.read(group_id, payload).await);
@@ -988,6 +1143,10 @@ impl RrClient {
     where
         F: FnOnce(Result<Vec<u8>, RrError>) + Send + 'static,
     {
+        if let Err(e) = Self::reactive_runtime_preflight() {
+            callback(Err(e));
+            return;
+        }
         let client = self.clone();
         tokio::spawn(async move {
             callback(client.read_linearizable(group_id, payload).await);
@@ -1426,6 +1585,102 @@ mod tests {
         );
     }
 
+    /// Without an active tokio runtime the reactive API must fire the
+    /// callback with a typed error instead of panicking inside
+    /// `tokio::spawn`.
+    #[test]
+    fn reactive_apis_outside_runtime_fire_typed_error_not_panic() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let client = rt
+            .block_on(RrClient::connect(vec!["localhost:1".to_string()]))
+            .expect("connect");
+        drop(rt);
+
+        let assert_typed_runtime_err = |result: Result<Vec<u8>, RrError>, api: &str| {
+            let err = result.expect_err("no-runtime call must surface an error");
+            assert!(
+                err.to_string().contains("tokio runtime"),
+                "{api}: error must state the runtime requirement, got: {err}"
+            );
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        client.send_request_reactive(1, b"ping".to_vec(), move |r| {
+            let _ = tx.send(r);
+        });
+        assert_typed_runtime_err(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("callback must fire synchronously"),
+            "send_request_reactive",
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        client.send_request_idempotent_reactive(
+            1,
+            b"ping".to_vec(),
+            rr_core::idempotency::IdempotencyKey::new("t", 1),
+            move |r| {
+                let _ = tx.send(r);
+            },
+        );
+        assert_typed_runtime_err(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("callback must fire synchronously"),
+            "send_request_idempotent_reactive",
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        client.read_reactive(1, b"q".to_vec(), move |r| {
+            let _ = tx.send(r);
+        });
+        assert_typed_runtime_err(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("callback must fire synchronously"),
+            "read_reactive",
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        client.read_linearizable_reactive(1, b"q".to_vec(), move |r| {
+            let _ = tx.send(r);
+        });
+        assert_typed_runtime_err(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("callback must fire synchronously"),
+            "read_linearizable_reactive",
+        );
+    }
+
+    /// Sub-millisecond (or zero) request timeouts truncate to an instant 0ms
+    /// timeout — `build` must reject them with a typed InvalidConfig error.
+    #[tokio::test]
+    async fn build_rejects_sub_millisecond_request_timeout() {
+        for timeout in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_micros(500),
+        ] {
+            let result = RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+                .with_request_timeout(timeout)
+                .build()
+                .await;
+            let Err(err) = result else {
+                panic!("sub-ms request timeout must be rejected: {timeout:?}");
+            };
+            assert!(
+                matches!(err, RrError::Network(NetworkError::InvalidConfig(_))),
+                "expected InvalidConfig, got: {err}"
+            );
+        }
+
+        RrClientBuilder::new(vec!["127.0.0.1:9000".to_string()])
+            .with_request_timeout(std::time::Duration::from_millis(1))
+            .build()
+            .await
+            .expect("1ms request timeout must be accepted");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reactive_multiple_callbacks_all_fire() {
         let client = RrClient::connect_with_config(
@@ -1578,7 +1833,10 @@ mod tests {
 
     /// Spawn the given service on an ephemeral localhost port; returns the
     /// dial address and the server task handle (aborted on test end).
-    async fn spawn_fake_client_service<S>(svc: S) -> (String, tokio::task::JoinHandle<()>)
+    /// Shared with the `batch` module's fake-transport scenarios.
+    pub(crate) async fn spawn_fake_client_service<S>(
+        svc: S,
+    ) -> (String, tokio::task::JoinHandle<()>)
     where
         S: ClientServiceTrait + Send + Sync + 'static,
     {

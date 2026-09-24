@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
@@ -25,11 +26,12 @@ import rr.client.ClientServiceGrpc;
  * <p>Provides three calling styles:
  *
  * <ul>
- *   <li><b>Reactive</b> ({@code sendRequest}, {@code read}, {@code getClusterInfo}) — returns
- *       {@link CompletableFuture} immediately; the gRPC I/O is driven by Netty's event loop so no
- *       thread is blocked while waiting for the response. Chain callbacks with
- *       {@code .thenAccept()} / {@code .thenApply()}.
- *   <li><b>Blocking</b> ({@code sendRequestSync}, {@code readSync}, {@code getClusterInfoSync}) —
+ *   <li><b>Reactive</b> ({@code sendRequest}, {@code read}, {@code readLinearizable}, {@code
+ *       getClusterInfo}) — returns {@link CompletableFuture} immediately; the gRPC I/O is driven
+ *       by Netty's event loop so no thread is blocked while waiting for the response. Chain
+ *       callbacks with {@code .thenAccept()} / {@code .thenApply()}.
+ *   <li><b>Blocking</b> ({@code sendRequestSync}, {@code readSync}, {@code readLinearizableSync},
+ *       {@code getClusterInfoSync}) —
  *       blocks the calling thread until the response arrives. Suitable for simple sequential
  *       programs or contexts where threading overhead does not matter.
  * </ul>
@@ -117,6 +119,28 @@ public final class RrClient implements AutoCloseable {
                         sample.stop(requestTimer(groupId, timerOutcome(ex))));
     }
 
+    /**
+     * Reactive linearizable read: the server confirms its leader commit index via a Raft
+     * ReadIndex round-trip and waits until the local state machine has applied through it
+     * before serving the read.
+     *
+     * <p>Redirects: if the contacted replica is not the leader, it replies with
+     * {@code leader_info} and this client retries against the indicated leader address
+     * within the same retry budget (mirrors the Rust {@code rr-client}
+     * {@code read_linearizable}). A present {@code leader_info} is always treated as a
+     * redirect, regardless of any payload on the same response.
+     *
+     * <p>Error mapping: redirect exhaustion surfaces as {@link RpcFailedException}
+     * ("follower redirected to leader"); transport failure surfaces as
+     * {@link NetworkException}.
+     */
+    public CompletableFuture<byte[]> readLinearizable(long groupId, byte[] payload) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        return readLinearizableAsync(groupId, payload, 0, 0, null)
+                .whenComplete((result, ex) ->
+                        sample.stop(requestTimer(groupId, timerOutcome(ex))));
+    }
+
     /** Reactive cluster-info fetch. Returns a {@link CompletableFuture} immediately. */
     public CompletableFuture<Client.ClusterInfo> getClusterInfo() {
         return clusterInfoAsync(0);
@@ -144,6 +168,11 @@ public final class RrClient implements AutoCloseable {
     /** Blocking stale read. See {@link #sendRequestSync}. */
     public byte[] readSync(long groupId, byte[] payload) {
         return blockOn(read(groupId, payload));
+    }
+
+    /** Blocking linearizable read. See {@link #readLinearizable} and {@link #sendRequestSync}. */
+    public byte[] readLinearizableSync(long groupId, byte[] payload) {
+        return blockOn(readLinearizable(groupId, payload));
     }
 
     /** Blocking cluster-info fetch. See {@link #sendRequestSync}. */
@@ -242,14 +271,15 @@ public final class RrClient implements AutoCloseable {
                             response.getPayload().toByteArray());
                 })
                 .exceptionallyCompose(ex -> {
-                    if (ex instanceof IdempotencyExpiredException) {
-                        return CompletableFuture.failedFuture(ex);
+                    Throwable cause = unwrapRelay(ex);
+                    if (cause instanceof IdempotencyExpiredException) {
+                        return CompletableFuture.failedFuture(cause);
                     }
                     removeCachedLeader(groupId);
                     if (attempt + 1 >= maxAttempts) {
-                        RuntimeException err = ex instanceof RrClientException
-                                ? (RrClientException) ex
-                                : new NetworkException(addr, "connection failed", ex);
+                        RuntimeException err = cause instanceof RrClientException
+                                ? (RrClientException) cause
+                                : new NetworkException(addr, "connection failed", cause);
                         return CompletableFuture.failedFuture(err);
                     }
                     return asyncDelay(attempt).thenCompose(__ ->
@@ -289,6 +319,78 @@ public final class RrClient implements AutoCloseable {
                     }
                     return asyncDelay(attempt).thenCompose(__ ->
                             readAsync(groupId, payload, attempt + 1, nextBootstrapIndex));
+                });
+    }
+
+    /**
+     * Linearizable read with retry. On a follower redirect ({@code leader_info} present) the
+     * next attempt dials the indicated leader immediately without backoff and without
+     * consuming a bootstrap slot; on transport error the next attempt round-robins the
+     * bootstrap addrs after exponential backoff. Both paths share the same attempt budget
+     * ({@code maxRetries + 1}), mirroring the Rust {@code read_linearizable} loop.
+     */
+    private CompletableFuture<byte[]> readLinearizableAsync(
+            long groupId, byte[] payload, int attempt, int bootstrapIndex, String redirectAddr) {
+
+        int maxAttempts = retryConfig.maxRetries() + 1;
+        if (attempt >= maxAttempts) {
+            return CompletableFuture.failedFuture(
+                    new RpcFailedException("<exhausted>", "max retries exhausted"));
+        }
+
+        final String addr;
+        final int nextBootstrapIndex;
+        if (redirectAddr != null) {
+            addr = redirectAddr;
+            nextBootstrapIndex = bootstrapIndex;
+        } else {
+            addr = bootstrapAddrs.get(bootstrapIndex % bootstrapAddrs.size());
+            nextBootstrapIndex = bootstrapIndex + 1;
+        }
+
+        Client.ReadLocalRequest req = Client.ReadLocalRequest.newBuilder()
+                .setPartitionId(groupId)
+                .setPayload(com.google.protobuf.ByteString.copyFrom(payload))
+                .build();
+
+        final ManagedChannel channel;
+        try {
+            channel = channelFor(addr);
+        } catch (RuntimeException e) {
+            // Channel wiring failure (e.g. TLS setup): retry immediately, no backoff.
+            if (attempt + 1 >= maxAttempts) {
+                return CompletableFuture.failedFuture(e);
+            }
+            return readLinearizableAsync(groupId, payload, attempt + 1, nextBootstrapIndex, null);
+        }
+
+        ListenableFuture<Client.ReadLocalResponse> grpcFuture =
+                ClientServiceGrpc.newFutureStub(channel).readLinearizable(req);
+
+        return fromListenableFuture(grpcFuture)
+                .thenCompose(resp -> {
+                    if (resp.hasLeaderInfo()) {
+                        if (attempt + 1 >= maxAttempts) {
+                            return CompletableFuture.failedFuture(new RpcFailedException(
+                                    addr, "follower redirected to leader"));
+                        }
+                        return readLinearizableAsync(groupId, payload, attempt + 1,
+                                nextBootstrapIndex, resp.getLeaderInfo().getAddr());
+                    }
+                    return CompletableFuture.completedFuture(resp.getPayload().toByteArray());
+                })
+                .exceptionallyCompose(ex -> {
+                    Throwable cause = unwrapRelay(ex);
+                    if (cause instanceof RrClientException) {
+                        return CompletableFuture.failedFuture(cause);
+                    }
+                    if (attempt + 1 >= maxAttempts) {
+                        return CompletableFuture.failedFuture(
+                                new NetworkException(addr, "linearizable read failed", cause));
+                    }
+                    return asyncDelay(attempt).thenCompose(__ ->
+                            readLinearizableAsync(
+                                    groupId, payload, attempt + 1, nextBootstrapIndex, null));
                 });
     }
 
@@ -333,6 +435,16 @@ public final class RrClient implements AutoCloseable {
             }
         }, Runnable::run);
         return cf;
+    }
+
+    /**
+     * Unwraps one {@link CompletionException} layer. Failures produced inside a
+     * {@code thenCompose}/{@code exceptionallyCompose} function (e.g. a typed
+     * {@code failedFuture}) cross the relay boundary wrapped in a CompletionException;
+     * guards must see the original typed exception.
+     */
+    private static Throwable unwrapRelay(Throwable ex) {
+        return ex instanceof CompletionException && ex.getCause() != null ? ex.getCause() : ex;
     }
 
     /** Non-blocking delay using a JDK scheduled executor — no thread is held during the wait. */

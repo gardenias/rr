@@ -18,6 +18,7 @@ use crate::proto::client::{
     ClientRequest, ClientResponse, ClusterInfo, Empty, GroupInfo, IdempotencyError as ProtoIdemErr,
     IdempotencyKey as ProtoIdemKey, LeaderInfo, ReadLocalRequest, ReadLocalResponse,
 };
+use crate::tracing::debug_traceparent;
 
 /// Result of submitting a client write request.
 ///
@@ -125,6 +126,33 @@ fn idem_err_to_proto(err: IdempotencyError) -> ProtoIdemErr {
     }
 }
 
+/// Render the dispatch's leader hint into proto `LeaderInfo`.
+///
+/// A redirect is only actionable when BOTH the leader's node id and its
+/// address are known: a `(Some(id), None)` pair means a leader exists but
+/// its address is not in this node's routing view. Dropping the hint and
+/// returning `leader_info = None` would let the client mistake the
+/// response for a plain failure instead of retrying via bootstrap — map
+/// that ambiguous case to a sanitized `Unavailable` instead.
+fn leader_info_or_unavailable(
+    leader_node_id: Option<u64>,
+    leader_addr: Option<String>,
+) -> Result<Option<LeaderInfo>, tonic::Status> {
+    match (leader_node_id, leader_addr) {
+        (Some(node_id), Some(addr)) => Ok(Some(LeaderInfo { node_id, addr })),
+        (None, _) => Ok(None),
+        (Some(node_id), None) => {
+            tracing::debug!(
+                leader_node_id = node_id,
+                "leader known but address unavailable; redirect dropped, client must retry via bootstrap"
+            );
+            Err(tonic::Status::unavailable(
+                "leader address unavailable; retry via bootstrap",
+            ))
+        }
+    }
+}
+
 /// gRPC service implementation that receives client RPCs and forwards them
 /// to the application layer via [`ClientDispatch`].
 pub struct ClientServiceImpl {
@@ -144,7 +172,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
         &self,
         request: tonic::Request<ClientRequest>,
     ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
-        let traceparent = crate::tracing::extract_traceparent(&request);
+        let traceparent = debug_traceparent!(&request);
         let req = request.into_inner();
         let idem_key = req.idem_key.map(proto_to_idem_key);
         tracing::debug!(
@@ -159,10 +187,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
             .submit_write(req.partition_id, req.payload, idem_key)
             .await?;
 
-        let leader_info = match (result.leader_node_id, result.leader_addr) {
-            (Some(node_id), Some(addr)) => Some(LeaderInfo { node_id, addr }),
-            _ => None,
-        };
+        let leader_info = leader_info_or_unavailable(result.leader_node_id, result.leader_addr)?;
 
         Ok(tonic::Response::new(ClientResponse {
             success: result.success,
@@ -176,7 +201,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
         &self,
         request: tonic::Request<Empty>,
     ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
-        let traceparent = crate::tracing::extract_traceparent(&request);
+        let traceparent = debug_traceparent!(&request);
         tracing::debug!(
             traceparent = traceparent.as_deref().unwrap_or(""),
             "get_cluster_info request received"
@@ -191,7 +216,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
         &self,
         request: tonic::Request<ReadLocalRequest>,
     ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
-        let traceparent = crate::tracing::extract_traceparent(&request);
+        let traceparent = debug_traceparent!(&request);
         let req = request.into_inner();
         tracing::debug!(
             partition_id = req.partition_id,
@@ -214,7 +239,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
         &self,
         request: tonic::Request<ReadLocalRequest>,
     ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
-        let traceparent = crate::tracing::extract_traceparent(&request);
+        let traceparent = debug_traceparent!(&request);
         let req = request.into_inner();
         tracing::debug!(
             partition_id = req.partition_id,
@@ -227,10 +252,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
             .submit_linearizable_read(req.partition_id, req.payload)
             .await?;
 
-        let leader_info = match (result.leader_node_id, result.leader_addr) {
-            (Some(node_id), Some(addr)) => Some(LeaderInfo { node_id, addr }),
-            _ => None,
-        };
+        let leader_info = leader_info_or_unavailable(result.leader_node_id, result.leader_addr)?;
 
         Ok(tonic::Response::new(ReadLocalResponse {
             payload: result.payload,
@@ -546,5 +568,77 @@ mod tests {
             .expect("follower dispatch should populate leader_info");
         assert_eq!(leader.node_id, 42);
         assert_eq!(leader.addr, "127.0.0.1:60042");
+    }
+
+    /// A dispatch that knows the leader's node id but not its address —
+    /// the ambiguous redirect case.
+    struct LeaderWithoutAddrDispatch;
+
+    #[async_trait::async_trait]
+    impl ClientDispatch for LeaderWithoutAddrDispatch {
+        async fn submit_write(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+            _: Option<IdempotencyKey>,
+        ) -> Result<ClientWriteResult, tonic::Status> {
+            Ok(ClientWriteResult {
+                success: false,
+                payload: vec![],
+                leader_node_id: Some(42),
+                leader_addr: None,
+                idem_error: None,
+            })
+        }
+        async fn submit_read(&self, _: u64, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn submit_linearizable_read(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+        ) -> Result<LinearizableReadResult, tonic::Status> {
+            Ok(LinearizableReadResult {
+                payload: vec![],
+                leader_node_id: Some(42),
+                leader_addr: None,
+            })
+        }
+        async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_request_ambiguous_redirect_maps_to_unavailable() {
+        // Regression: (leader_node_id = Some, leader_addr = None) used to
+        // surface as `leader_info = None`, indistinguishable from a plain
+        // failure — the client must instead get Unavailable and retry via
+        // bootstrap.
+        let svc = ClientServiceImpl::new(Arc::new(LeaderWithoutAddrDispatch));
+        let req = ClientRequest {
+            partition_id: 5,
+            payload: vec![],
+            idem_key: None,
+        };
+        let err = client_service_server::ClientService::request(&svc, tonic::Request::new(req))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    // INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
+    #[tokio::test]
+    async fn test_read_linearizable_ambiguous_redirect_maps_to_unavailable() {
+        let svc = ClientServiceImpl::new(Arc::new(LeaderWithoutAddrDispatch));
+        let req = ReadLocalRequest {
+            partition_id: 5,
+            payload: b"q".to_vec(),
+        };
+        let err =
+            client_service_server::ClientService::read_linearizable(&svc, tonic::Request::new(req))
+                .await
+                .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 }

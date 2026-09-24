@@ -36,11 +36,17 @@ pub const FRAMED_ENTRY_MAGIC: [u8; 8] = *b"\0rrENT01";
 /// Current envelope schema version. Bumped when [`FramedEntry`] adds a
 /// non-optional field or changes the semantics of an existing one.
 /// Decoders reject entries with `version > FRAMED_ENTRY_VERSION`
-/// rather than guess at an unknown layout. Existing optional fields
-/// can be added/extended within the same version because bincode
-/// preserves field-order positional encoding for additive `Option<…>`
-/// trailers (followers tolerate trailing bytes from future minor
-/// changes; non-optional adds force a version bump).
+/// rather than guess at an unknown layout.
+///
+/// Within one version, new OPTIONAL fields may be appended because bincode's
+/// field-order positional encoding lets an OLD reader decode a LONGER new
+/// payload by ignoring trailing bytes. The reverse direction fails: a NEW
+/// reader decoding an OLD (shorter) payload hits `UnexpectedEnd` during
+/// apply. Adding an optional field therefore requires a **two-phase
+/// rollout** — the field may only be WRITTEN once every node runs the binary
+/// that can decode it (deploy decoders first, enable writing second). If that
+/// discipline cannot be guaranteed, bump the version instead. Non-optional
+/// adds always force a version bump.
 ///
 /// Wire implementation detail — see [`FRAMED_ENTRY_MAGIC`].
 #[doc(hidden)]

@@ -35,8 +35,8 @@ use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{BufReader, BufWriter};
-use std::path::Path;
+use std::io::{BufReader, BufWriter, Write};
+use std::path::{Component, Path};
 use tar::{Archive, Builder};
 
 /// Backup format version. Increment when breaking changes land.
@@ -99,10 +99,19 @@ fn sha256_of_dir(dir: &Path) -> Result<String> {
             .to_string_lossy();
         hasher.update(rel.as_bytes());
         hasher.update(b"\0");
-        let bytes =
-            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(&bytes);
+        // Stream the file through the hasher (SST files can be GiB-scale;
+        // reading them whole would blow up rr-admin's RSS). The length
+        // prefix comes from metadata, not the buffered content.
+        let file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let len = file
+            .metadata()
+            .with_context(|| format!("failed to stat {}", path.display()))?
+            .len();
+        hasher.update(len.to_be_bytes());
+        let mut reader = BufReader::new(file);
+        std::io::copy(&mut reader, &mut hasher)
+            .with_context(|| format!("failed to read {}", path.display()))?;
     }
     Ok(hex::encode(hasher.finalize()))
 }
@@ -163,12 +172,26 @@ pub fn create_backup(
         .with_context(|| format!("failed to archive data_dir {}", data_dir.display()))?;
 
     let gz = tar.into_inner().context("failed to finalize tar archive")?;
-    gz.finish().context("failed to finalize gzip stream")?;
+    // gz.finish() hands back the BufWriter with buffered bytes still
+    // pending; dropping it would swallow flush errors, and nothing ever
+    // fsyncs. Do both explicitly so a successful return means the archive
+    // is durably on disk.
+    let mut writer = gz.finish().context("failed to finalize gzip stream")?;
+    writer.flush().context("failed to flush backup output")?;
+    writer
+        .get_ref()
+        .sync_all()
+        .context("failed to fsync backup output")?;
 
     Ok(metadata)
 }
 
 /// Restore a previously-created `.tar.gz` backup into `data_dir`.
+///
+/// The archive is unpacked into a sibling temporary directory first and
+/// the checksum is verified THERE; only on success is the verified
+/// directory renamed into place. On any failure `data_dir` is left
+/// untouched (as verified empty, or absent).
 ///
 /// # Arguments
 /// - `input`: the backup `.tar.gz` file
@@ -178,6 +201,10 @@ pub fn create_backup(
 /// - If `input` doesn't exist
 /// - If `data_dir` exists and is non-empty (refuse to clobber)
 /// - If metadata.json is missing or format_version is incompatible
+/// - If any tar entry escapes the data dir (tar-slip) or is not a
+///   regular file/directory (symlinks/hardlinks could escape via
+///   link targets; backups only ever contain files and dirs)
+/// - If the post-unpack SHA-256 does not match the metadata
 pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
     if !input.exists() {
         return Err(anyhow!("backup file does not exist: {}", input.display()));
@@ -193,8 +220,6 @@ pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
             ));
         }
     }
-    std::fs::create_dir_all(data_dir)
-        .with_context(|| format!("failed to create data_dir {}", data_dir.display()))?;
 
     let metadata = read_metadata(input)?;
     if metadata.format_version > BACKUP_FORMAT_VERSION {
@@ -204,6 +229,67 @@ pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
             BACKUP_FORMAT_VERSION
         ));
     }
+
+    // Unpack into a sibling temp dir, never directly into data_dir: a
+    // checksum mismatch (or malicious archive) must leave data_dir
+    // untouched. Sibling = same filesystem, so the final rename is atomic.
+    let parent = data_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let dir_name = data_dir
+        .file_name()
+        .ok_or_else(|| anyhow!("data_dir has no final component: {}", data_dir.display()))?;
+    let tmp_dir = parent.join(format!(
+        ".{}.rr-restore-tmp-{}",
+        dir_name.to_string_lossy(),
+        std::process::id()
+    ));
+    if tmp_dir.exists() {
+        // Leftover from a crashed earlier restore by this tool; safe to clear.
+        std::fs::remove_dir_all(&tmp_dir)
+            .with_context(|| format!("failed to clear stale temp dir {}", tmp_dir.display()))?;
+    }
+
+    let unpack_result = unpack_and_verify(input, &tmp_dir, data_dir, &metadata);
+    if let Err(e) = unpack_result {
+        // Best-effort cleanup of our own temp dir; loud on failure.
+        if let Err(cleanup) = std::fs::remove_dir_all(&tmp_dir) {
+            tracing::warn!(
+                "failed to remove temp dir {} after failed restore: {cleanup}",
+                tmp_dir.display()
+            );
+        }
+        return Err(e);
+    }
+
+    if data_dir.exists() {
+        // Verified empty above; remove_dir only succeeds on empty dirs.
+        std::fs::remove_dir(data_dir)
+            .with_context(|| format!("failed to clear empty data_dir {}", data_dir.display()))?;
+    }
+    std::fs::rename(&tmp_dir, data_dir).with_context(|| {
+        format!(
+            "failed to move verified restore {} into place at {}",
+            tmp_dir.display(),
+            data_dir.display()
+        )
+    })?;
+
+    Ok(metadata)
+}
+
+/// Unpack the `data/` subtree of `input` into `tmp_dir` and verify the
+/// SHA-256 checksum against `metadata`. `data_dir` is used only for
+/// error messages (it is the dir left untouched on failure).
+fn unpack_and_verify(
+    input: &Path,
+    tmp_dir: &Path,
+    data_dir: &Path,
+    metadata: &BackupMetadata,
+) -> Result<()> {
+    std::fs::create_dir_all(tmp_dir)
+        .with_context(|| format!("failed to create temp dir {}", tmp_dir.display()))?;
 
     let file = File::open(input)
         .with_context(|| format!("failed to open backup file {}", input.display()))?;
@@ -219,7 +305,36 @@ pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
         let Ok(rel) = path.strip_prefix("data") else {
             continue;
         };
-        let dst = data_dir.join(rel);
+        // Tar-slip guard: reject any entry that would escape the data dir.
+        if rel.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err(anyhow!(
+                "refusing to unpack tar entry with parent/root component \
+                 (tar-slip protection): {} — {} was left untouched",
+                path.display(),
+                data_dir.display()
+            ));
+        }
+        // Backups only contain regular files and directories; links could
+        // escape the temp dir via their targets, so reject them outright.
+        let entry_type = entry.header().entry_type();
+        if !matches!(
+            entry_type,
+            tar::EntryType::Regular | tar::EntryType::Directory
+        ) {
+            return Err(anyhow!(
+                "refusing to unpack tar entry of type {:?} (only files and dirs are \
+                 restorable): {} — {} was left untouched",
+                entry_type,
+                path.display(),
+                data_dir.display()
+            ));
+        }
+        let dst = tmp_dir.join(rel);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to mkdir {}", parent.display()))?;
@@ -230,17 +345,18 @@ pub fn restore_backup(input: &Path, data_dir: &Path) -> Result<BackupMetadata> {
     }
 
     if !metadata.data_sha256.is_empty() {
-        let actual = sha256_of_dir(data_dir).context("failed to verify data checksum")?;
+        let actual = sha256_of_dir(tmp_dir).context("failed to verify data checksum")?;
         if actual != metadata.data_sha256 {
             return Err(anyhow!(
-                "backup integrity check failed: expected SHA-256 {}, got {}",
+                "backup integrity check failed: expected SHA-256 {}, got {} — \
+                 {} was left untouched",
                 metadata.data_sha256,
-                actual
+                actual,
+                data_dir.display()
             ));
         }
     }
-
-    Ok(metadata)
+    Ok(())
 }
 
 /// Read just the `metadata.json` from a backup tarball without unpacking everything.
@@ -387,5 +503,145 @@ mod tests {
         let dst_path = dst.path().join("data");
         let err = restore_backup(&backup_path, &dst_path).unwrap_err();
         assert!(err.to_string().contains("newer than this tool supports"));
+    }
+
+    /// Build a tar.gz from raw (path, bytes) entries plus a metadata.json —
+    /// used to craft archives `create_backup` itself would never produce.
+    /// `evil_paths` are written into the header verbatim (bypassing the
+    /// tar builder's own `..` rejection) to simulate malicious archives.
+    fn build_raw_tarball(path: &Path, metadata: &BackupMetadata, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).unwrap();
+        let gz = GzEncoder::new(file, Compression::default());
+        let mut tar = Builder::new(gz);
+        let meta_json = serde_json::to_vec(metadata).unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_path("metadata.json").unwrap();
+        h.set_size(meta_json.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append(&h, &meta_json[..]).unwrap();
+        for (name, bytes) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o644);
+            // Raw name-field write: set_path() itself refuses `..`.
+            let name = name.as_bytes();
+            h.as_mut_bytes()[..name.len()].copy_from_slice(name);
+            h.set_cksum();
+            tar.append(&h, &bytes[..]).unwrap();
+        }
+        let gz = tar.into_inner().unwrap();
+        gz.finish().unwrap();
+    }
+
+    /// Tar-slip regression: an entry with a `..` component must be rejected
+    /// and the target dir must be left untouched (nothing unpacked).
+    #[test]
+    fn restore_rejects_tar_slip_entry() {
+        let out_dir = TempDir::new().unwrap();
+        let backup_path = out_dir.path().join("evil.tar.gz");
+        let meta = BackupMetadata::new(None, None); // no checksum field
+        build_raw_tarball(&backup_path, &meta, &[("data/../evil.txt", b"pwned")]);
+
+        let dst = TempDir::new().unwrap();
+        let data_dir = dst.path().join("data");
+        let err = restore_backup(&backup_path, &data_dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("tar-slip"),
+            "expected tar-slip rejection, got: {msg}"
+        );
+        assert!(msg.contains("left untouched"), "got: {msg}");
+        assert!(
+            !dst.path().join("evil.txt").exists(),
+            "slip payload must not escape the data dir"
+        );
+        assert!(!data_dir.exists(), "data_dir must be left untouched");
+    }
+
+    /// A symlink entry could escape via its link target; only regular files
+    /// and directories are restorable.
+    #[test]
+    fn restore_rejects_symlink_entries() {
+        let out_dir = TempDir::new().unwrap();
+        let backup_path = out_dir.path().join("link.tar.gz");
+        let meta = BackupMetadata::new(None, None);
+
+        let file = File::create(&backup_path).unwrap();
+        let gz = GzEncoder::new(file, Compression::default());
+        let mut tar = Builder::new(gz);
+        let meta_json = serde_json::to_vec(&meta).unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_path("metadata.json").unwrap();
+        h.set_size(meta_json.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append(&h, &meta_json[..]).unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_path("data/link").unwrap();
+        h.set_link_name("../../etc/passwd").unwrap();
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_cksum();
+        tar.append(&h, std::io::empty()).unwrap();
+        let gz = tar.into_inner().unwrap();
+        gz.finish().unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let data_dir = dst.path().join("data");
+        let err = restore_backup(&backup_path, &data_dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("only files and dirs"),
+            "expected entry-type rejection, got: {msg}"
+        );
+        assert!(!data_dir.exists(), "data_dir must be left untouched");
+    }
+
+    /// Checksum-mismatch regression: the unpacked temp dir must be removed
+    /// and the error must tell the operator the target dir was untouched.
+    #[test]
+    fn restore_checksum_mismatch_leaves_data_dir_untouched() {
+        let out_dir = TempDir::new().unwrap();
+        let backup_path = out_dir.path().join("bad.tar.gz");
+        let mut meta = BackupMetadata::new(None, None);
+        meta.data_sha256 = "0".repeat(64); // bogus digest
+        build_raw_tarball(&backup_path, &meta, &[("data/IDENTITY", b"node-1")]);
+
+        let dst = TempDir::new().unwrap();
+        let data_dir = dst.path().join("data");
+        let err = restore_backup(&backup_path, &data_dir).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("integrity check failed"),
+            "expected checksum failure, got: {msg}"
+        );
+        assert!(msg.contains("left untouched"), "got: {msg}");
+        assert!(!data_dir.exists(), "data_dir must be left untouched");
+        assert_eq!(
+            std::fs::read_dir(dst.path()).unwrap().count(),
+            0,
+            "temp dir must be cleaned up after a failed restore"
+        );
+    }
+
+    /// A pre-existing EMPTY data_dir is accepted (rename replaces it).
+    #[test]
+    fn restore_into_existing_empty_dir() {
+        let src = TempDir::new().unwrap();
+        populate_fake_data_dir(src.path()).unwrap();
+        let out_dir = TempDir::new().unwrap();
+        let backup_path = out_dir.path().join("backup.tar.gz");
+        create_backup(src.path(), &backup_path, None, None).unwrap();
+
+        let dst = TempDir::new().unwrap();
+        let data_dir = dst.path().join("data");
+        std::fs::create_dir(&data_dir).unwrap();
+        restore_backup(&backup_path, &data_dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(data_dir.join("IDENTITY")).unwrap(),
+            "node-1"
+        );
     }
 }

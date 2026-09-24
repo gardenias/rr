@@ -23,8 +23,8 @@ fn bench_idempotency_decide_record_1000(c: &mut Criterion) {
             for i in 0u64..1000 {
                 let key = make_key(i);
                 let decision = layer.decide(&key);
-                assert!(matches!(decision, IdempotencyDecision::New));
-                layer.record(&key, vec![42u8]);
+                assert!(matches!(decision, Ok(IdempotencyDecision::New)));
+                layer.record(&key, vec![42u8]).expect("record");
             }
         });
     });
@@ -34,7 +34,7 @@ fn bench_idempotency_decide_replay_1000(c: &mut Criterion) {
     let mut layer = IdempotencyLayer::new(2000);
     for i in 0u64..1000 {
         let key = make_key(i);
-        layer.record(&key, vec![42u8]);
+        layer.record(&key, vec![42u8]).expect("record");
     }
 
     c.bench_function("idempotency_decide_replay_1000", |b| {
@@ -42,7 +42,7 @@ fn bench_idempotency_decide_replay_1000(c: &mut Criterion) {
             for i in 0u64..1000 {
                 let key = make_key(i);
                 let decision = layer.decide(&key);
-                assert!(matches!(decision, IdempotencyDecision::Replay(_)));
+                assert!(matches!(decision, Ok(IdempotencyDecision::Replay(_))));
             }
         });
     });

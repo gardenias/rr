@@ -12,6 +12,8 @@ data:
     data_dir = "/var/lib/rr/data"
     admin_port = {{ .Values.ports.admin }}
     metrics_port = {{ .Values.ports.metrics }}
+    # Prometheus scrapes cross-pod (v0.3.0 defaults the HTTP server to loopback)
+    metrics_bind_host = "0.0.0.0"
 
     [storage]
     backend = "{{ .Values.storage.backend }}"

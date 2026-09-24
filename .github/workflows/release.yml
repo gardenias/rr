@@ -105,7 +105,7 @@ jobs:
           helm push "$CHART" "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts"
 
   cargo:
-    name: Publish rr-core to crates.io (opt-in)
+    name: Publish rr crates to crates.io (opt-in)
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' }}
     env:
@@ -119,7 +119,39 @@ jobs:
         if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
         run: |
           set -euo pipefail
+          # IMPORTANT: crates.io builds do NOT carry the vendored openraft
+          # patch — [patch.crates-io] path entries are workspace-local and are
+          # stripped from published manifests, so a crates.io build resolves
+          # the UNPATCHED openraft =0.10.0-alpha.34 from the registry.
+          # Consumers that need the rr-patched openraft must depend via
+          # git+tag instead (see the vendor/openraft membership note in the
+          # workspace Cargo.toml). Publish to crates.io only for consumers
+          # that are fine with the unpatched upstream openraft.
           for crate in rr-core rr-storage rr-config rr-network rr-router rr-raft rr-client rr-admin rr-server; do
             echo "==> publishing $crate"
-            cargo publish -p "$crate" --no-verify || echo "publish of $crate may already exist; continuing"
+            published=""
+            for attempt in 1 2 3; do
+              if out="$(cargo publish -p "$crate" --no-verify 2>&1)"; then
+                echo "$out"
+                published=1
+                break
+              fi
+              echo "$out"
+              # Idempotent re-runs: this version already uploaded = success.
+              if grep -qi "already exists" <<<"$out"; then
+                echo "$crate is already on crates.io at this version; continuing"
+                published=1
+                break
+              fi
+              echo "::warning::publish of $crate failed (attempt $attempt/3); retrying in 15s"
+              sleep 15
+            done
+            if [ -z "$published" ]; then
+              echo "::error::failed to publish $crate after 3 attempts — aborting release"
+              exit 1
+            fi
+            # crates.io's sparse index is eventually consistent: give the
+            # just-published crate time to become resolvable before the next
+            # crate in dependency order tries to publish against it.
+            sleep 15
           done

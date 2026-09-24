@@ -92,6 +92,21 @@ pub fn attach_tracestate<T>(request: &mut Request<T>, tracestate: &str) -> Resul
     Ok(())
 }
 
+/// Lazily extract the W3C `traceparent` for a DEBUG-level log field,
+/// skipping the `String` allocation entirely when no subscriber has
+/// DEBUG enabled (the common production case).
+macro_rules! debug_traceparent {
+    ($request:expr) => {
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            $crate::tracing::extract_traceparent($request)
+        } else {
+            None
+        }
+    };
+}
+
+pub(crate) use debug_traceparent;
+
 #[cfg(test)]
 mod tests {
     use super::*;

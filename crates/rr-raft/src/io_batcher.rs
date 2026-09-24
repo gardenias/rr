@@ -116,6 +116,11 @@ pub struct IoBatcherConfig {
     /// combined with the async tail, is the perf-lab W9 INV-1 trigger
     /// (2026-09-17). When the budget is exhausted, submitters await
     /// capacity: natural back-pressure into the Raft proposal pipeline.
+    ///
+    /// Memory note: worst-case in-flight memory is ≈ **2× this budget** —
+    /// while serialized `BatchOp` bytes sit in the batcher under the budget,
+    /// `RocksLogStorage`'s pending overlay holds the same entries a second
+    /// time as structured `Entry` values (see its module docs).
     pub max_inflight_bytes: usize,
 }
 

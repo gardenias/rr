@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: "--deny=warnings"
     strategy:
@@ -24,12 +25,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Per-job key: jobs sharing a key across different feature sets
+          # would keep evicting each other's fingerprints.
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
       - name: Build (default features)
         run: cargo build --workspace
 
   build-rocks:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: "--deny=warnings"
     strategy:
@@ -52,6 +56,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         rust: [stable]
@@ -69,12 +74,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
       - name: Test (default features)
         run: cargo test --workspace
 
   test-rocks:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         rust: [stable]
@@ -100,6 +106,7 @@ jobs:
 
   test-defensive:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         rust: [stable]
@@ -124,6 +131,7 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: "--deny=warnings"
     strategy:
@@ -140,7 +148,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
       - name: Clippy
         # rocks-gated code (rocks benches, rocks log storage, persistence tests) must be linted too.
         run: cargo clippy --workspace --all-targets --features rocks -- -D warnings
@@ -168,6 +176,7 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: "--deny=warnings"
     needs: [test]
@@ -199,6 +208,7 @@ jobs:
 
   bench:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Perf regression gate (R-7) — PROMOTED to blocking on 2026-09-22, after
     # the >=2-week non-blocking window (added 2026-09-06). Caveat: the window
     # was polluted by the CI-wide protoc outage, so the recorded false-positive
@@ -322,6 +332,7 @@ jobs:
 
   test-macos:
     runs-on: macos-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: "--deny=warnings"
     steps:
@@ -335,7 +346,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-macos-${{ hashFiles('**/Cargo.lock') }}
       - name: Test on macOS
         run: cargo test --workspace
 
@@ -343,7 +354,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "--deny=warnings"
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -361,14 +372,23 @@ jobs:
 
   external-broker:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       RUSTFLAGS: "--deny=warnings"
+      # Live-coverage switches (both test suites self-skip without them):
+      #   RR_TEST_ETCD=1           — rr-config-etcd e2e via testcontainers
+      #                              (ubuntu runners ship Docker; the test
+      #                              pulls quay.io/coreos/etcd:v3.5.13).
+      #   RR_TEST_KAFKA_BOOTSTRAP  — rr-ingestor-kafka e2e against the
+      #                              redpanda container started below.
+      RR_TEST_ETCD: "1"
+      RR_TEST_KAFKA_BOOTSTRAP: "localhost:9092"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install protoc + librdkafka C deps (etcd-client / rdkafka-sys build scripts)
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libcurl4-openssl-dev zlib1g-dev
+        # cmake: rdkafka's `cmake-build` feature compiles librdkafka from source.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler cmake libcurl4-openssl-dev zlib1g-dev
       - uses: actions/cache@v4
         with:
           path: |
@@ -376,5 +396,29 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-external-broker-${{ hashFiles('**/Cargo.lock') }}
-      - name: Run external broker tests (Kafka/etcd, opt-in)
-        run: cargo test --workspace -- --ignored
+      # Same image/flags as deploy/lab/docker-compose.yml, except the
+      # advertised listener is localhost (the tests run on the runner host,
+      # not inside the compose network). Pinned to the digest verified
+      # locally against these tests (v26.2.3); bump together with the lab.
+      - name: Start redpanda (Kafka API for the live ingestor tests)
+        run: |
+          docker run -d --name redpanda -p 9092:9092 \
+            docker.redpanda.com/redpandadata/redpanda@sha256:9e83cfa99278f30d0133271c26bf670cd69c94ffa6ba0b42830dd0c3bd9dcfd9 \
+            redpanda start --overprovisioned --smp=1 --memory=512M \
+            --reserve-memory=0M --node-id=0 --check=false \
+            --kafka-addr=0.0.0.0:9092 --advertise-kafka-addr=localhost:9092
+          for i in $(seq 1 60); do
+            if docker exec redpanda /usr/bin/rpk cluster info >/dev/null 2>&1; then
+              echo "redpanda healthy after ~$((i * 2))s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "redpanda never became healthy" >&2
+          docker logs redpanda >&2 || true
+          exit 1
+      - name: Run external broker tests (Kafka/etcd)
+        # rr-ingestor-kafka/rdkafka is required: the live-broker tests are
+        # feature-gated (`#![cfg(feature = "rdkafka")]`) — without it they
+        # don't even compile in and this job would be green-by-construction.
+        run: cargo test --workspace --features rr-ingestor-kafka/rdkafka -- --ignored

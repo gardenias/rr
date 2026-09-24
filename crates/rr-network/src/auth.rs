@@ -127,7 +127,7 @@ impl Interceptor for BearerInterceptor {
             .metadata()
             .get("authorization")
             .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
+            .and_then(strip_bearer_scheme);
 
         let outcome = (|| -> Result<(), &'static str> {
             let token = presented_token.ok_or("missing_credential")?;
@@ -156,6 +156,24 @@ impl Interceptor for BearerInterceptor {
                 Err(Status::unauthenticated("authentication failed"))
             }
         }
+    }
+}
+
+/// Strip the `Bearer` auth scheme from an `Authorization` header value,
+/// returning the token verbatim.
+///
+/// The scheme is matched **case-insensitively** per RFC 7235 §2.1
+/// ("`auth-scheme` is case-insensitive"), so `bearer x` and `BEARER x`
+/// are accepted alongside `Bearer x`. The token itself is NOT
+/// case-folded — credential comparison stays exact (and constant-time,
+/// see [`constant_time_eq`]). An empty token yields `None` (missing
+/// credential, not an invalid one).
+pub(crate) fn strip_bearer_scheme(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty() {
+        Some(token)
+    } else {
+        None
     }
 }
 
@@ -257,6 +275,39 @@ mod tests {
         assert!(interceptor
             .call(req_with_auth(Some("Bearer secret")))
             .is_ok());
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_per_rfc7235() {
+        // RFC 7235 §2.1: auth-scheme is case-insensitive. Any casing of
+        // "Bearer" must authenticate; the token comparison stays exact.
+        let mut interceptor = BearerInterceptor::new(ServiceLabel::Admin, "secret".into());
+        assert!(interceptor
+            .call(req_with_auth(Some("bearer secret")))
+            .is_ok());
+        assert!(interceptor
+            .call(req_with_auth(Some("BEARER secret")))
+            .is_ok());
+        assert!(interceptor
+            .call(req_with_auth(Some("BeArEr secret")))
+            .is_ok());
+        // Token casing is NOT folded — a differently-cased token fails.
+        let err = interceptor
+            .call(req_with_auth(Some("bearer Secret")))
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        // Wrong scheme still rejected regardless of casing.
+        let err = interceptor
+            .call(req_with_auth(Some("basic secret")))
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        // "Bearer" with no token at all → missing credential reject.
+        let err = interceptor.call(req_with_auth(Some("Bearer"))).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        let err = interceptor
+            .call(req_with_auth(Some("Bearer ")))
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 
     #[test]

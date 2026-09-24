@@ -13,6 +13,7 @@ use metrics::{counter, gauge};
 use tokio::sync::{watch, Mutex};
 use tracing::{info, instrument, warn};
 
+use openraft::type_config::async_runtime::WatchReceiver as _;
 use rr_core::config::{ConfigProvider, RoutingTableChange};
 use rr_core::error::{ConfigError, RrError};
 use rr_core::membership::membership_change_is_safe;
@@ -173,6 +174,31 @@ const LATENCY_HISTOGRAM_BUCKETS: &[f64] = &[
 const BATCH_ENTRIES_HISTOGRAM_BUCKETS: &[f64] =
     &[1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0];
 
+/// Build the accepted-connection stream for
+/// `tonic::transport::Server::serve_with_incoming_shutdown` from a
+/// **pre-bound** listener. Pre-binding in `start()` (instead of letting
+/// tonic bind inside the spawned serve task) makes a bind failure fail
+/// startup loudly — otherwise the node reports `/ready` 200 and gRPC
+/// health SERVING while the listener never came up (K8s would keep
+/// routing traffic into the void).
+///
+/// tonic's own `serve*` path defaults `TCP_NODELAY = true`, but
+/// `serve_with_incoming*` discards the server's TCP socket config, so
+/// nodelay is re-applied here on every accepted socket.
+fn listener_incoming(
+    listener: tokio::net::TcpListener,
+) -> impl futures::Stream<Item = std::io::Result<tokio::net::TcpStream>> + Send + 'static {
+    futures::stream::unfold(listener, |listener| async {
+        let item = listener.accept().await.map(|(stream, _)| {
+            if let Err(e) = stream.set_nodelay(true) {
+                warn!(error = %e, "failed to set TCP_NODELAY on inbound gRPC connection");
+            }
+            stream
+        });
+        Some((item, listener))
+    })
+}
+
 /// The main node lifecycle manager.
 ///
 /// Owns the [`RaftGroupManager`], [`ShardRouter`], and an optional gRPC server.
@@ -203,6 +229,16 @@ pub struct RrNode {
     admin_port: Option<u16>,
     /// Port for HTTP observability endpoints (/health /ready /metrics).
     metrics_port: Option<u16>,
+    /// Bind host for the admin gRPC service (default loopback).
+    admin_bind_host: String,
+    /// Bind host for the HTTP observability server (default loopback).
+    metrics_bind_host: String,
+    /// Optional HTTP/2 `max_concurrent_streams` override for the main gRPC
+    /// server (None = tonic/hyper default of 200).
+    grpc_max_concurrent_streams: Option<u32>,
+    /// Optional HTTP/2 max frame size override (bytes) for the main gRPC
+    /// server (None = 16 KiB default).
+    grpc_max_frame_size: Option<u32>,
     /// TLS config applied to all gRPC servers hosted by this node.
     tls_config: Option<rr_network::tls::TlsConfig>,
     /// Bearer-token auth policy. Empty = no auth (dev).
@@ -309,6 +345,10 @@ impl RrNode {
             http_handle: Mutex::new(None),
             admin_port: config.admin_port,
             metrics_port: config.metrics_port,
+            admin_bind_host: config.admin_bind_host,
+            metrics_bind_host: config.metrics_bind_host,
+            grpc_max_concurrent_streams: config.grpc_max_concurrent_streams,
+            grpc_max_frame_size: config.grpc_max_frame_size,
             tls_config: config.tls_config,
             auth_config: config.auth_config,
             rate_limit_config: config.rate_limit_config,
@@ -360,7 +400,12 @@ impl RrNode {
                         match cp.get_routing_table().await {
                             Ok(table) => {
                                 if let Some(meta) = table.groups.get(&group_id) {
-                                    if meta.replicas.contains(&node_id) {
+                                    // Typed pre-check: skip groups already running on
+                                    // this node instead of string-matching the
+                                    // start_group error text.
+                                    if meta.replicas.contains(&node_id)
+                                        && !gm.group_ids().await.contains(&group_id)
+                                    {
                                         match gm.start_group(group_id).await {
                                             Ok(()) => {
                                                 if let Err(e) =
@@ -376,8 +421,6 @@ impl RrNode {
                                                     "watch: started group on PartitionAdded"
                                                 );
                                             }
-                                            Err(e)
-                                                if e.to_string().contains("already exists") => {}
                                             Err(e) => warn!(
                                                 group_id,
                                                 "watch: failed to start group on PartitionAdded: {e}"
@@ -444,13 +487,32 @@ impl RrNode {
                                         // a deliberate shrink below quorum must
                                         // go through `change-membership
                                         // --force` / `node-reset`.
-                                        if new_members.len() < meta.replicas.len()
+                                        //
+                                        // The current voter set comes from the
+                                        // RAFT membership (the source of truth),
+                                        // not `meta.replicas`: providers may
+                                        // already have stripped the removed node
+                                        // (MemConfigProvider::remove_node does),
+                                        // which would make a provider-side
+                                        // shrink check a tautology and silently
+                                        // bypass the guard.
+                                        let current_voters = match gm.get_raft(group_id).await {
+                                            Some(raft) => raft
+                                                .metrics()
+                                                .borrow_watched()
+                                                .membership_config
+                                                .membership()
+                                                .voter_ids()
+                                                .count(),
+                                            None => continue, // group mid-teardown
+                                        };
+                                        if new_members.len() < current_voters
                                             && !membership_change_is_safe(new_members.len())
                                         {
                                             warn!(
                                                 group_id,
                                                 node_id = nid,
-                                                current_voters = meta.replicas.len(),
+                                                current_voters,
                                                 target_voters = new_members.len(),
                                                 "watch: refusing unsafe membership change on \
                                                  NodeRemoved (below quorum guard); group left \
@@ -482,24 +544,27 @@ impl RrNode {
                         info!(group_id, ?replicas, "watch: group membership changed");
                         if replicas.contains(&node_id) {
                             // This node is (now) in the group's replica set — start if needed.
-                            match gm.start_group(group_id).await {
-                                Ok(()) => {
-                                    if let Err(e) = gm.start_metrics_ticker(group_id).await {
-                                        warn!(
+                            // Typed pre-check instead of string-matching the
+                            // start_group "already exists" error text.
+                            if !gm.group_ids().await.contains(&group_id) {
+                                match gm.start_group(group_id).await {
+                                    Ok(()) => {
+                                        if let Err(e) = gm.start_metrics_ticker(group_id).await {
+                                            warn!(
+                                                group_id,
+                                                "watch: failed to start metrics ticker: {e}"
+                                            );
+                                        }
+                                        info!(
                                             group_id,
-                                            "watch: failed to start metrics ticker: {e}"
+                                            "watch: started group on GroupMembershipChanged"
                                         );
                                     }
-                                    info!(
+                                    Err(e) => warn!(
                                         group_id,
-                                        "watch: started group on GroupMembershipChanged"
-                                    );
+                                        "watch: failed to start group on GroupMembershipChanged: {e}"
+                                    ),
                                 }
-                                Err(e) if e.to_string().contains("already exists") => {}
-                                Err(e) => warn!(
-                                    group_id,
-                                    "watch: failed to start group on GroupMembershipChanged: {e}"
-                                ),
                             }
                         } else {
                             // This node is no longer a replica — stop the group if running.
@@ -529,7 +594,7 @@ impl RrNode {
         if let (Some(raft_lookup), Some(client_dispatch)) =
             (&self.raft_lookup, &self.client_dispatch)
         {
-            let addr = self.listen_addr.parse().map_err(|e| {
+            let addr: std::net::SocketAddr = self.listen_addr.parse().map_err(|e| {
                 RrError::Config(ConfigError::InvalidConfig(format!(
                     "invalid listen_addr '{}': {e}",
                     self.listen_addr
@@ -542,8 +607,14 @@ impl RrNode {
                 first: self.auth_config.client_interceptor(),
                 second: self.rate_limit_config.client_interceptor(),
             };
-            let client_svc = ClientServiceServer::with_interceptor(
-                ClientServiceImpl::new(client_dispatch.clone()),
+            // `with_interceptor` wraps the server without a way to set the
+            // decode ceiling, so build the InterceptedService explicitly.
+            // The client cap must cover `BatchConfig::max_bytes` (SDK side)
+            // plus frame overhead or the server rejects batched writes
+            // before they reach dispatch.
+            let client_svc = tonic::service::interceptor::InterceptedService::new(
+                ClientServiceServer::new(ClientServiceImpl::new(client_dispatch.clone()))
+                    .max_decoding_message_size(rr_network::CLIENT_MAX_DECODING_MESSAGE_SIZE),
                 client_chain,
             );
             if self.auth_config.client_required() {
@@ -557,6 +628,12 @@ impl RrNode {
 
             let mut shutdown_rx = self.shutdown_tx.subscribe();
             let mut builder = tonic::transport::Server::builder();
+            if let Some(n) = self.grpc_max_concurrent_streams {
+                builder = builder.max_concurrent_streams(n);
+            }
+            if let Some(n) = self.grpc_max_frame_size {
+                builder = builder.max_frame_size(n);
+            }
             if let Some(tls) = &self.tls_config {
                 let server_tls = tls.build_server_tls().map_err(|e| {
                     RrError::Config(ConfigError::InvalidConfig(format!("server tls: {e}")))
@@ -569,13 +646,24 @@ impl RrNode {
                 info!(%addr, "gRPC server TLS enabled");
             }
 
+            // Bind synchronously, before spawning the serve task: a bind
+            // failure must fail `start()` (and never flip /ready to 200)
+            // rather than warn inside a detached task while health reports
+            // SERVING.
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                RrError::Config(ConfigError::InvalidConfig(format!(
+                    "failed to bind gRPC listen_addr {addr}: {e}"
+                )))
+            })?;
+            let incoming = listener_incoming(listener);
+
             let handle = tokio::spawn(async move {
                 info!(%addr, "gRPC server starting");
                 let result = builder
                     .add_service(health_service)
                     .add_service(raft_svc)
                     .add_service(client_svc)
-                    .serve_with_shutdown(addr, async move {
+                    .serve_with_incoming_shutdown(incoming, async move {
                         let _ = shutdown_rx.changed().await;
                     })
                     .await;
@@ -603,24 +691,37 @@ impl RrNode {
 
         // ── 4. Start admin gRPC server (optional) ────────────────────────────
         if let Some(port) = self.admin_port {
-            let admin_addr: std::net::SocketAddr =
-                format!("0.0.0.0:{port}")
-                    .parse()
-                    .map_err(|e: std::net::AddrParseError| {
-                        RrError::Config(ConfigError::InvalidConfig(e.to_string()))
-                    })?;
+            if !self
+                .admin_bind_host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+            {
+                warn!(
+                    host = %self.admin_bind_host,
+                    port,
+                    "admin gRPC is binding a non-loopback address — the admin API can \
+                     transfer leadership and trigger snapshots; make sure the port is \
+                     protected by network policy (TLS + admin_token are separate gates)"
+                );
+            }
+            let admin_addr: std::net::SocketAddr = format!("{}:{port}", self.admin_bind_host)
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                    RrError::Config(ConfigError::InvalidConfig(e.to_string()))
+                })?;
 
             let admin_chain = rr_network::ChainedInterceptor {
                 first: self.auth_config.admin_interceptor(),
                 second: self.rate_limit_config.admin_interceptor(),
             };
-            let admin_svc = AdminServiceServer::with_interceptor(
-                AdminServiceImpl::new(
+            let admin_svc = tonic::service::interceptor::InterceptedService::new(
+                AdminServiceServer::new(AdminServiceImpl::new(
                     self.node_id,
                     self.listen_addr.clone(),
                     Arc::clone(&self.group_manager),
                     Arc::clone(&self.config_provider),
-                ),
+                ))
+                .max_decoding_message_size(rr_network::CLIENT_MAX_DECODING_MESSAGE_SIZE),
                 admin_chain,
             );
             if self.auth_config.admin_required() {
@@ -651,11 +752,23 @@ impl RrNode {
                 info!(%admin_addr, "admin gRPC server TLS enabled");
             }
 
+            // Pre-bind for the same reason as the main gRPC server above:
+            // startup must fail loudly instead of serving /ready 200 over a
+            // dead listener.
+            let admin_listener = tokio::net::TcpListener::bind(admin_addr)
+                .await
+                .map_err(|e| {
+                    RrError::Config(ConfigError::InvalidConfig(format!(
+                        "failed to bind admin gRPC addr {admin_addr}: {e}"
+                    )))
+                })?;
+            let admin_incoming = listener_incoming(admin_listener);
+
             let handle = tokio::spawn(async move {
                 info!(%admin_addr, "admin gRPC server starting");
                 let result = admin_builder
                     .add_service(admin_svc)
-                    .serve_with_shutdown(admin_addr, async move {
+                    .serve_with_incoming_shutdown(admin_incoming, async move {
                         let _ = shutdown_rx.changed().await;
                     })
                     .await;
@@ -671,12 +784,24 @@ impl RrNode {
         }
 
         if let (Some(port), Some(handle)) = (self.metrics_port, self.prom_handle.clone()) {
-            let addr: std::net::SocketAddr =
-                format!("0.0.0.0:{port}")
-                    .parse()
-                    .map_err(|e: std::net::AddrParseError| {
-                        RrError::Config(ConfigError::InvalidConfig(e.to_string()))
-                    })?;
+            if !self
+                .metrics_bind_host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+            {
+                warn!(
+                    host = %self.metrics_bind_host,
+                    port,
+                    "HTTP observability (/health /ready /metrics) is binding a non-loopback \
+                     address — /metrics is unauthenticated and exposes internal histograms; \
+                     make sure the port is protected by network policy"
+                );
+            }
+            let addr: std::net::SocketAddr = format!("{}:{port}", self.metrics_bind_host)
+                .parse()
+                .map_err(|e: std::net::AddrParseError| {
+                RrError::Config(ConfigError::InvalidConfig(e.to_string()))
+            })?;
             let shutdown_rx = self.shutdown_tx.subscribe();
             let http = spawn_http_server(addr, handle, self.readiness.clone(), shutdown_rx).await?;
             *self.http_handle.lock().await = Some(http);
@@ -1209,6 +1334,80 @@ mod tests {
             .expect("library users with no raft/admin should not be forced to TLS");
     }
 
+    // A gRPC bind failure must fail `start()` synchronously — /ready must
+    // never report 200 while the listener never came up (previously the
+    // failure surfaced only as a warn! inside the detached serve task).
+    #[tokio::test]
+    async fn test_node_start_fails_loudly_when_grpc_bind_fails() {
+        // Occupy the target port first.
+        let blocker = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = blocker.local_addr().unwrap().port();
+
+        let cfg = make_config(1, &format!("127.0.0.1:{port}"))
+            .with_raft_lookup(Arc::new(DummyRaftLookup))
+            .with_client_dispatch(Arc::new(DummyClientDispatch))
+            .with_allow_insecure(true);
+        let node = RrNode::new(cfg).unwrap();
+        let err = node
+            .start()
+            .await
+            .expect_err("bind conflict must fail start()");
+        assert!(
+            err.to_string().contains("failed to bind gRPC listen_addr"),
+            "expected bind error, got: {err}"
+        );
+        assert!(
+            !node.readiness.is_ready(),
+            "readiness must stay false after a failed start"
+        );
+        node.shutdown().await.unwrap();
+        drop(blocker);
+    }
+
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
+    #[test]
+    fn bind_hosts_default_to_loopback() {
+        let cfg = make_config(1, "127.0.0.1:50120");
+        assert_eq!(cfg.admin_bind_host, crate::config::DEFAULT_ADMIN_BIND_HOST);
+        assert_eq!(
+            cfg.metrics_bind_host,
+            crate::config::DEFAULT_METRICS_BIND_HOST
+        );
+        assert_eq!(cfg.admin_bind_host, "127.0.0.1");
+        assert_eq!(cfg.metrics_bind_host, "127.0.0.1");
+    }
+
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
+    #[test]
+    fn validate_admin_bind_host_must_be_ip_literal() {
+        let cfg = make_config(1, "127.0.0.1:50121")
+            .with_admin_port(9999)
+            .with_admin_bind_host("not-an-ip")
+            .with_allow_insecure(true);
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject a non-IP admin_bind_host");
+        assert!(
+            err.to_string().contains("admin_bind_host"),
+            "expected admin_bind_host error, got: {err}"
+        );
+    }
+
+    // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
+    #[test]
+    fn validate_metrics_bind_host_must_be_ip_literal() {
+        let cfg = make_config(1, "127.0.0.1:50122")
+            .with_metrics_port(9100)
+            .with_metrics_bind_host("not-an-ip");
+        let err = RrNode::new(cfg)
+            .err()
+            .expect("must reject a non-IP metrics_bind_host");
+        assert!(
+            err.to_string().contains("metrics_bind_host"),
+            "expected metrics_bind_host error, got: {err}"
+        );
+    }
+
     // INV-8: no ungated listeners in production config — all security gates pass or RrNode refuses to start.
     #[test]
     fn validate_security_aggregates_all_violations() {
@@ -1406,6 +1605,39 @@ mod tests {
         }
 
         assert!(node.group_manager().get_raft(30).await.is_some());
+        node.shutdown().await.unwrap();
+    }
+
+    // INV-6: after a routing-table update the old shard receives no new writes; the routing table is the single source of truth.
+    #[tokio::test]
+    async fn test_watch_loop_skips_duplicate_start_via_typed_precheck() {
+        // Regression: a duplicate start trigger (same membership re-fired)
+        // must be recognized by the typed `group_ids` pre-check — not by
+        // string-matching the `start_group` "already exists" error text.
+        let provider = Arc::new(MemConfigProvider::new());
+        provider
+            .add_partition(1, PartitionConfig::SingleId(1), 30, vec![1])
+            .await;
+
+        let config = NodeConfig::new(
+            1,
+            "127.0.0.1:50059".to_string(),
+            Arc::new(MemStorage::new()),
+            provider.clone() as Arc<dyn ConfigProvider>,
+            noop_factory(),
+        );
+        let node = RrNode::new(config).unwrap();
+        node.start().await.unwrap();
+        assert_eq!(node.group_manager().group_count().await, 1);
+
+        // Re-fire the same membership: the group is already running, so
+        // the watch loop must skip start_group via the pre-check. A
+        // duplicate start would attempt (and fail) a second registration.
+        provider.update_group_membership(30, vec![1]).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(node.group_manager().group_count().await, 1);
+        assert!(node.group_manager().get_raft(30).await.is_some());
+
         node.shutdown().await.unwrap();
     }
 }

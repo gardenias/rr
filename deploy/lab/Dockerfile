@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# vendor/openraft is a workspace member and the [patch.crates-io] target;
+# without it cargo refuses to load the workspace manifest at all.
+COPY vendor ./vendor
 COPY crates ./crates
 COPY tests ./tests
 COPY benches ./benches

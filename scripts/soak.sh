@@ -6,6 +6,7 @@
 #   scripts/soak.sh                      # 2h smoke (default SOAK_DURATION=7200)
 #   SOAK_DURATION=60 scripts/soak.sh     # quick local smoke
 #   SOAK_SEED=42 scripts/soak.sh         # replay the same fault schedule
+#   CLIENT_BATCHING=1 scripts/soak.sh    # exercise rr-client write batching
 #
 # Knobs (env):
 #   SOAK_DURATION          total load window, seconds        (default 7200)
@@ -13,6 +14,19 @@
 #   SOAK_FAULT_MEAN_SECS   mean interval between faults      (default 600)
 #   SOAK_SEED              fault-schedule seed (entropy if unset)
 #   SOAK_KEEP_STACK=1      don't compose down at the end (forensics)
+#   SOAK_PORT_BASE         host-side health/metrics port base; kv-N answers on
+#                          SOAK_PORT_BASE+N                    (default 9110,
+#                          i.e. the stock lab's 9111-9113). The lab compose
+#                          pins its project/container names and published
+#                          ports, so fully parallel runs additionally need
+#                          their own compose project + port mapping; this
+#                          knob only retargets soak.sh's curl checks.
+#   CLIENT_BATCHING=1      pass --client-batching to the load driver
+#                          (default off)
+#   SOAK_UNKEYED_RATIO     fraction of writes sent unkeyed (unique keys) —
+#                          the only traffic the batcher packs. Default 0;
+#                          with CLIENT_BATCHING=1 the default becomes 0.1
+#                          (rr-perf-bench hard-errors on batching + ratio 0).
 #
 # Oracle (all three must hold):
 #   1. no data loss     — ack-log replay via rr-perf-bench --oracle-only
@@ -37,6 +51,16 @@ DURATION=${SOAK_DURATION:-7200}
 RATE=${SOAK_RATE:-200}
 FAULT_MEAN=${SOAK_FAULT_MEAN_SECS:-600}
 SEED=${SOAK_SEED:-$RANDOM$RANDOM$RANDOM}
+PORT_BASE=${SOAK_PORT_BASE:-9110} # kv-N health/metrics = $((PORT_BASE + N))
+CLIENT_BATCHING=${CLIENT_BATCHING:-0}
+if [[ "$CLIENT_BATCHING" == "1" ]]; then
+  # Batching packs unkeyed writes only — default a nonzero unkeyed share so
+  # the run really exercises the batcher (rr-perf-bench fails hard on
+  # --client-batching combined with ratio 0).
+  UNKEYED_RATIO=${SOAK_UNKEYED_RATIO:-0.1}
+else
+  UNKEYED_RATIO=${SOAK_UNKEYED_RATIO:-0.0}
+fi
 TS=$(date +%Y%m%d-%H%M%S)
 RUN_DIR="target/soak/$TS"
 REPORT="docs/perf/soak/soak-report-$TS.md"
@@ -70,7 +94,7 @@ trap cleanup EXIT
 log "waiting for three healthy nodes…"
 for n in 1 2 3; do
   for i in $(seq 1 90); do
-    if curl -fsS "http://127.0.0.1:911$n/ready" >/dev/null 2>&1; then break; fi
+    if curl -fsS "http://127.0.0.1:$((PORT_BASE + n))/ready" >/dev/null 2>&1; then break; fi
     if (( i == 90 )); then fail "kv-$n never became ready"; fi
     sleep 2
   done
@@ -80,7 +104,11 @@ log "all nodes ready"
 # ── 2. load (in-network container: the cluster advertises kv-N:51001 as
 # redirect targets, so clients MUST live inside the compose network; the run
 # dir is bind-mounted for the journals) ─────────────────────────────────────
-log "starting load: rate=$RATE/s duration=${DURATION}s …"
+log "starting load: rate=$RATE/s duration=${DURATION}s batching=$CLIENT_BATCHING unkeyed-ratio=$UNKEYED_RATIO …"
+bench_extra=(--soak-unkeyed-ratio "$UNKEYED_RATIO")
+if [[ "$CLIENT_BATCHING" == "1" ]]; then
+  bench_extra+=(--client-batching)
+fi
 docker rm -f rr-soak-load >/dev/null 2>&1 || true
 $COMPOSE --profile bench run -d --name rr-soak-load \
   -v "$PWD/$RUN_DIR:/soak" \
@@ -89,6 +117,7 @@ $COMPOSE --profile bench run -d --name rr-soak-load \
   --scenario soak \
   --rate "$RATE" --duration-secs "$DURATION" \
   --ack-log /soak/ack-log.jsonl --metrics-log /soak/metrics.jsonl \
+  "${bench_extra[@]}" \
   --no-oracle >/dev/null
 
 # ── 3. seeded fault loop ────────────────────────────────────────────────────
@@ -161,7 +190,7 @@ log "load window done"
 log "waiting for nodes ready…"
 for n in 1 2 3; do
   for i in $(seq 1 45); do
-    curl -fsS "http://127.0.0.1:911$n/ready" >/dev/null 2>&1 && break
+    curl -fsS "http://127.0.0.1:$((PORT_BASE + n))/ready" >/dev/null 2>&1 && break
     sleep 2
   done
 done
@@ -171,7 +200,7 @@ idx=("?" "?" "?")
 for i in $(seq 1 30); do
   idx=()
   for n in 1 2 3; do
-    v=$(curl -fsS "http://127.0.0.1:911$n/metrics" 2>/dev/null | grep -E '^rr_raft_last_log_index{group_id="1"}' | head -1 | awk '{print $NF}' || echo "")
+    v=$(curl -fsS "http://127.0.0.1:$((PORT_BASE + n))/metrics" 2>/dev/null | grep -E '^rr_raft_last_log_index{group_id="1"}' | head -1 | awk '{print $NF}' || echo "")
     idx+=("${v:-?}")
   done
   if [[ "${idx[0]}" == "${idx[1]}" && "${idx[1]}" == "${idx[2]}" && "${idx[0]}" != "?" ]]; then
@@ -229,11 +258,14 @@ PYEOF
 acks=$(printf '%s' "$stats" | python3 -c 'import json,sys; print(json.load(sys.stdin)["acks"])')
 failed=$(printf '%s' "$stats" | python3 -c 'import json,sys; print(json.load(sys.stdin)["failed"])')
 faults=$(printf '%s' "$stats" | python3 -c 'import json,sys; print(json.load(sys.stdin)["faults"])')
+unkeyed_sent=$(grep -oE 'unkeyed_sent=[0-9]+' "$RUN_DIR/load.log" | tail -1 | cut -d= -f2 || true)
+oracle_unkeyed=$(grep -oE 'unkeyed [0-9]+\)' "$RUN_DIR/oracle.log" | tail -1 | tr -dc '0-9' || true)
 
 {
   echo "# Soak report — $TS (R-8 smoke)"
   echo
   echo "- duration: ${DURATION}s | rate: ${RATE}/s | seed: $SEED (replay: SOAK_SEED=$SEED)"
+  echo "- client batching: $CLIENT_BATCHING | unkeyed ratio: $UNKEYED_RATIO | unkeyed sent: ${unkeyed_sent:-0} | oracle unkeyed verified: ${oracle_unkeyed:-0}"
   echo "- acked writes: $acks | client-side failures (fault windows): $failed | injected faults: $faults"
   echo "- oracle 1 (no data loss): $(grep -oE '[0-9]+/[0-9]+ verified' "$RUN_DIR/oracle.log" | tail -1)"
   echo "- oracle 2 (no panic): panics=0, restarts=$restarts (injected kills=$kills)"

@@ -213,6 +213,139 @@ fn record_error(errors: &Mutex<Vec<String>>, msg: String) {
     }
 }
 
+/// Live counters for the batched lane; mirrored into the harness's
+/// count-bounds oracle (nothing acked lost, nothing applied that was never
+/// sent).
+#[derive(Default)]
+pub struct BatchLaneStats {
+    pub sent: AtomicU64,
+    pub acked: AtomicU64,
+    pub failed: AtomicU64,
+    /// Responses whose payload did not echo the request (never expected).
+    pub corrupted: AtomicU64,
+}
+
+/// A second write lane exercising **client-side batching** (unkeyed writes)
+/// under crash/failover — the crash/INV-1 coverage for the batch frame path
+/// (frame in the log, split-on-replay after restart). The echo service has
+/// no key→value read-back, so this lane is verified by count bounds rather
+/// than per-record replay.
+///
+/// The lane client runs `max_retries = 0`: a retried unkeyed batch can
+/// double-apply (documented semantics), which would break the oracle's
+/// upper bound. Kill windows therefore surface as plain `failed` writes —
+/// never acked, never owed.
+pub struct BatchLane {
+    stats: Arc<BatchLaneStats>,
+    stop: Arc<AtomicBool>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    errors: Arc<Mutex<Vec<String>>>,
+}
+
+impl BatchLane {
+    /// Start the lane at `ops_per_sec` submitted ops (each op is one batch
+    /// item). Builds its own batching client inside the spawned task.
+    pub fn start(addrs: Vec<String>, ops_per_sec: u32) -> Self {
+        let stats = Arc::new(BatchLaneStats::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let errors = Arc::new(Mutex::new(Vec::new()));
+
+        let task = {
+            let stats = Arc::clone(&stats);
+            let stop = Arc::clone(&stop);
+            let errors = Arc::clone(&errors);
+            tokio::spawn(async move {
+                let client = match rr_client::RrClientBuilder::new(addrs)
+                    .with_retry_config(RetryConfig {
+                        max_retries: 0,
+                        retry_delay_ms: 100,
+                    })
+                    .with_batching(rr_client::BatchConfig {
+                        max_entries: 16,
+                        max_bytes: 64 * 1024,
+                        linger: Duration::from_millis(5),
+                        ..rr_client::BatchConfig::default()
+                    })
+                    .build()
+                    .await
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        record_error(&errors, format!("batch lane client build failed: {e:#}"));
+                        return;
+                    }
+                };
+
+                let interval = Duration::from_secs_f64(1.0 / f64::from(ops_per_sec.max(1)));
+                let mut seq = 1u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let tick = Instant::now();
+                    let payload = format!("crash-batch-{seq:08}-{}", "b".repeat(24)).into_bytes();
+                    seq += 1;
+                    stats.sent.fetch_add(1, Ordering::Relaxed);
+                    match client.send_request(GROUP_ID, payload.clone()).await {
+                        Ok(resp) if resp == payload => {
+                            stats.acked.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(resp) => {
+                            // Positional response mapping returned another
+                            // item's bytes — batch framing regression.
+                            stats.corrupted.fetch_add(1, Ordering::Relaxed);
+                            record_error(
+                                &errors,
+                                format!(
+                                    "batch item {seq}: response mismatch ({} bytes)",
+                                    resp.len()
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            stats.failed.fetch_add(1, Ordering::Relaxed);
+                            record_error(&errors, format!("batch item {seq}: {e}"));
+                        }
+                    }
+                    let elapsed = tick.elapsed();
+                    if elapsed < interval {
+                        tokio::time::sleep(interval - elapsed).await;
+                    }
+                }
+            })
+        };
+
+        Self {
+            stats,
+            stop,
+            task: Some(task),
+            errors,
+        }
+    }
+
+    pub fn stats(&self) -> &Arc<BatchLaneStats> {
+        &self.stats
+    }
+
+    pub fn error_samples(&self) -> Vec<String> {
+        self.errors.lock().unwrap().clone()
+    }
+
+    pub async fn stop(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for BatchLane {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::COUNT_READ_QUERY;

@@ -85,7 +85,7 @@ impl RaftNode {
         );
 
         let log_storage = RrLogStorage::default();
-        let sm = RrStateMachine::new(state_machine);
+        let sm = RrStateMachine::new(state_machine).with_group_id(group_id);
         let network = network_factory;
 
         let raft = Raft::new(node_id, config, network, log_storage, sm)
@@ -194,27 +194,54 @@ impl RaftNode {
         // `with_snapshot_store` loads any persisted snapshot so OpenRaft's
         // startup `restore_from_snapshot` re-installs it; a present-but-
         // undecodable snapshot fails startup loudly rather than losing data.
-        let sm = RrStateMachine::new(state_machine)
+        let sm = match RrStateMachine::new(state_machine)
+            .with_group_id(group_id)
             .with_membership_sidecar(std::path::PathBuf::from(rocks_path).join("sm-membership.bin"))
             .with_snapshot_store(crate::snapshot_store::SnapshotStore::new(
                 std::path::PathBuf::from(rocks_path).join("sm-snapshot.bin"),
-            ))
-            .map_err(|e| {
-                RrError::Raft(RaftError::InitializationFailed {
+            )) {
+            Ok(sm) => sm,
+            Err(e) => {
+                // The batcher spawned by RocksLogStorage::open holds an
+                // Arc<RocksStorage> — and with it the RocksDB LOCK — until
+                // the worker drains. Close explicitly so a failed construct
+                // releases the LOCK promptly instead of depending on
+                // Arc-drop timing.
+                if let Err(close_err) = log_storage.close().await {
+                    tracing::warn!(
+                        error = %close_err,
+                        path = %rocks_path,
+                        "log storage close failed during startup cleanup"
+                    );
+                }
+                return Err(RrError::Raft(RaftError::InitializationFailed {
                     reason: format!(
                         "failed to load persisted snapshot at {rocks_path}/sm-snapshot.bin: {e}"
                     ),
-                })
-            })?;
+                }));
+            }
+        };
         let network = network_factory;
 
-        let raft = Raft::new(node_id, config, network, log_storage, sm)
-            .await
-            .map_err(|e| {
-                RrError::Raft(RaftError::InitializationFailed {
+        let raft = match Raft::new(node_id, config, network, log_storage, sm).await {
+            Ok(raft) => raft,
+            Err(e) => {
+                // Same cleanup as above: drain the batcher now so the RocksDB
+                // LOCK is released before we return the error.
+                if let Some(handle) = &log_storage_close {
+                    if let Err(close_err) = handle.close().await {
+                        tracing::warn!(
+                            error = %close_err,
+                            path = %rocks_path,
+                            "log storage close failed during startup cleanup"
+                        );
+                    }
+                }
+                return Err(RrError::Raft(RaftError::InitializationFailed {
                     reason: format!("openraft::Raft::new failed: {e}"),
-                })
-            })?;
+                }));
+            }
+        };
 
         Ok(Self {
             group_id,
@@ -385,5 +412,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(node.group_id, 3);
+    }
+
+    /// A failed construct must release the RocksDB LOCK promptly: the batcher
+    /// spawned by `RocksLogStorage::open` holds an `Arc<RocksStorage>` until
+    /// drained, so the error paths close it explicitly instead of relying on
+    /// Arc-drop timing.
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_failed_rocks_construct_releases_lock() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("db");
+        std::fs::create_dir_all(&path).unwrap();
+        // Corrupt the persisted snapshot: `with_snapshot_store` fails closed.
+        std::fs::write(path.join("sm-snapshot.bin"), b"not-a-snapshot-envelope").unwrap();
+
+        let (sm, _applied) = TestSM::new();
+        let result = RaftNode::new_with_rocks_factory(
+            1,
+            1,
+            Box::new(sm),
+            NoopNetworkFactory,
+            path.to_str().unwrap(),
+            100,
+        )
+        .await;
+        assert!(result.is_err(), "corrupt snapshot must fail construction");
+
+        // Without the explicit close on the error path, reopening would race
+        // the RocksDB LOCK held by the still-draining batcher worker.
+        let reopened = crate::rocks_log_storage::RocksLogStorage::open(path.to_str().unwrap())
+            .expect("reopen must succeed immediately after the failed construct");
+        reopened.close().await.unwrap();
     }
 }

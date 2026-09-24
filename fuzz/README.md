@@ -15,8 +15,25 @@ idempotence), catching "decode accepted but semantics drifted" bugs.
 | `fuzz_framed_entry_decode` | `rr_core::framed_entry::FramedEntry::decode` |
 | `fuzz_apply_outcome_decode` | `rr_core::idempotency::ApplyOutcome::decode` |
 | `fuzz_client_request_proto` | `<rr_network::proto::client::ClientRequest as prost::Message>::decode` |
+| `fuzz_batch_frame_decode` | `rr_core::batch::decode_batch` + `rr_core::batch::validate_batch_frame` |
 | `fuzz_framed_entry_roundtrip` | `FramedEntry` decode→encode→decode idempotence |
 | `fuzz_apply_outcome_roundtrip` | `ApplyOutcome` decode→encode→decode idempotence |
+| `fuzz_batch_frame_roundtrip` | `decode_batch`→`encode_batch`→`decode_batch` idempotence |
+
+## Not fuzzed here: the rr-raft on-disk envelopes (PST / MBR)
+
+rr-raft's two persisted envelopes — the snapshot store (`\0rrPST01`,
+`crates/rr-raft/src/snapshot_store.rs`) and the membership sidecar
+(`sm-membership.bin`, `\0rrMBR01`, `crates/rr-raft/src/sm_adapter.rs`) —
+compile fine without the `rocks` feature, so feature-gating is NOT the
+blocker. The blocker is visibility: `SnapshotStore::load` is `pub(crate)`
+and `membership_envelope_body` is private, and the only public entry point
+(`RrStateMachine::with_snapshot_store`) does real disk I/O per call — a
+poor fuzz harness. Adding `fuzz_snapshot_store_decode` /
+`fuzz_membership_sidecar_decode` targets first needs rr-raft to expose
+pure `&[u8] -> Result<…>` envelope decoders (a one-line visibility change
+per module); tracked as a follow-up so this crate stays dependency-light
+(rr-core + rr-network only).
 
 ## Prerequisites
 
@@ -36,10 +53,12 @@ cargo +nightly fuzz run fuzz_framed_snapshot_decode
 # Time-bounded (recommended for CI):
 cargo +nightly fuzz run fuzz_framed_snapshot_decode -- -max_total_time=60
 
-# All six targets, 30s each:
+# All eight targets, 30s each:
 for target in fuzz_framed_snapshot_decode fuzz_framed_entry_decode \
               fuzz_apply_outcome_decode fuzz_client_request_proto \
-              fuzz_framed_entry_roundtrip fuzz_apply_outcome_roundtrip; do
+              fuzz_batch_frame_decode \
+              fuzz_framed_entry_roundtrip fuzz_apply_outcome_roundtrip \
+              fuzz_batch_frame_roundtrip; do
     cargo +nightly fuzz run "$target" -- -max_total_time=30 || exit 1
 done
 ```
@@ -78,9 +97,12 @@ used elsewhere in the repo is unavailable to this crate.)
 
 ## CI integration
 
-`.github/workflows/fuzz-nightly.yml` runs all six targets for 15 minutes
-each on a nightly toolchain, daily at 03:23 UTC + `workflow_dispatch`.
+`.github/workflows/fuzz-nightly.yml` runs all eight targets for 15 minutes
+each on a nightly toolchain, daily at 03:23 UTC + `workflow_dispatch`,
+with cargo-fuzz pinned to the 0.12 series for reproducibility.
 It is informational (not a PR gate): on a crash the reproducer is
-minimized with `cargo fuzz tmin` and archived via
-`actions/upload-artifact`. A PR-level smoke was deliberately omitted to
-keep noise down; revisit after the nightly signal proves stable.
+minimized with `cargo fuzz tmin`, archived via
+`actions/upload-artifact`, and a `nightly-failure` issue is auto-filed
+(one open issue per target; repeat failures comment). A PR-level smoke
+was deliberately omitted to keep noise down; revisit after the nightly
+signal proves stable.

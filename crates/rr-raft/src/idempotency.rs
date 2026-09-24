@@ -40,6 +40,12 @@
 //! Watermark advancement happens in `record`, not `decide`, so out-of-order
 //! ID submissions don't accidentally Expire valid IDs.
 //!
+//! The watermark map is capped at [`MAX_IDEMPO_NAMESPACES`] distinct
+//! `request_type` namespaces: it is never evicted and is captured into every
+//! snapshot, and `request_type` is client-controlled, so unbounded growth
+//! would be a memory/snapshot-size amplifier. A NEW namespace beyond the cap
+//! fails loudly with [`RrError::IdempotencyNamespaceLimitExceeded`].
+//!
 //! # Persistence
 //!
 //! [`capture`](IdempotencyLayer::capture) / [`restore`](IdempotencyLayer::restore)
@@ -66,6 +72,15 @@ use rr_core::idempotency::{IdempotencyDecision, IdempotencyKey};
 /// - per-entry response size (cache memory ≈ capacity × avg response
 ///   bytes).
 pub const DEFAULT_IDEMPOTENCY_CACHE_SIZE: usize = 10_000;
+
+/// Hard cap on the number of distinct `request_type` namespaces one group's
+/// watermark map will track. `request_type` is client-controlled and
+/// watermark entries are NEVER evicted — and are captured into every
+/// snapshot — so without a cap a client could grow per-group memory and
+/// snapshot size without bound. A NEW namespace beyond the cap fails loudly
+/// with [`RrError::IdempotencyNamespaceLimitExceeded`]; already-tracked
+/// namespaces are unaffected.
+pub const MAX_IDEMPO_NAMESPACES: usize = 1024;
 
 /// Cache key: `(request_type, request_id)`. Deliberately excludes
 /// `client_id` so multiple `client_id`s reusing the same identity hit
@@ -104,42 +119,71 @@ impl IdempotencyLayer {
     ///
     /// `&mut self` because LRU cache lookups bump recency. See module
     /// docs for the four-way dispatch logic.
-    pub fn decide(&mut self, key: &IdempotencyKey) -> IdempotencyDecision {
+    ///
+    /// Fails with [`RrError::IdempotencyNamespaceLimitExceeded`] when the
+    /// key would open a NEW `request_type` namespace beyond
+    /// [`MAX_IDEMPO_NAMESPACES`] — the check runs here, before the caller
+    /// invokes the user service, so a rejected request never produces
+    /// side effects.
+    pub fn decide(&mut self, key: &IdempotencyKey) -> Result<IdempotencyDecision, RrError> {
         let cache_key = (key.request_type.clone(), key.request_id);
         if let Some((cached_client_id, response)) = self.cache.get(&cache_key) {
             if cached_client_id != &key.client_id {
-                return IdempotencyDecision::Collision {
+                return Ok(IdempotencyDecision::Collision {
                     cached_client_id: cached_client_id.clone(),
                     incoming_client_id: key.client_id.clone(),
                     cached_response: response.clone(),
-                };
+                });
             }
-            return IdempotencyDecision::Replay(response.clone());
+            return Ok(IdempotencyDecision::Replay(response.clone()));
         }
 
         if let Some(watermark) = self.watermarks.get(&key.request_type).copied() {
             if key.request_id <= watermark {
-                return IdempotencyDecision::Expired {
+                return Ok(IdempotencyDecision::Expired {
                     request_type: key.request_type.clone(),
                     request_id: key.request_id,
                     watermark,
-                };
+                });
             }
         }
 
-        IdempotencyDecision::New
+        self.check_namespace_allowed(&key.request_type)?;
+        Ok(IdempotencyDecision::New)
+    }
+
+    /// Guard shared by [`decide`](Self::decide) and [`record`](Self::record):
+    /// a brand-new namespace is accepted only below [`MAX_IDEMPO_NAMESPACES`].
+    fn check_namespace_allowed(&self, request_type: &str) -> Result<(), RrError> {
+        if !self.watermarks.contains_key(request_type)
+            && self.watermarks.len() >= MAX_IDEMPO_NAMESPACES
+        {
+            return Err(RrError::IdempotencyNamespaceLimitExceeded {
+                request_type: request_type.to_string(),
+                namespaces: self.watermarks.len(),
+                max: MAX_IDEMPO_NAMESPACES,
+            });
+        }
+        Ok(())
     }
 
     /// Record a response after the user service has produced it. Updates
     /// the watermark to `max(current, key.request_id)` and inserts the
     /// response into the LRU cache.
-    pub fn record(&mut self, key: &IdempotencyKey, response: Vec<u8>) {
+    ///
+    /// Fails with [`RrError::IdempotencyNamespaceLimitExceeded`] when the
+    /// key belongs to a NEW namespace and the cap is reached — the same
+    /// guard as [`decide`](Self::decide), repeated here so direct callers
+    /// cannot bypass the cap.
+    pub fn record(&mut self, key: &IdempotencyKey, response: Vec<u8>) -> Result<(), RrError> {
+        self.check_namespace_allowed(&key.request_type)?;
         let entry = self.watermarks.entry(key.request_type.clone()).or_insert(0);
         if key.request_id > *entry {
             *entry = key.request_id;
         }
         let cache_key = (key.request_type.clone(), key.request_id);
         self.cache.put(cache_key, (key.client_id.clone(), response));
+        Ok(())
     }
 
     /// Capture the current layer state into the framework-snapshot
@@ -236,7 +280,7 @@ mod tests {
     fn fresh_key_decides_new() {
         let mut layer = IdempotencyLayer::new(10);
         assert!(matches!(
-            layer.decide(&key("transfer", 1)),
+            layer.decide(&key("transfer", 1)).unwrap(),
             IdempotencyDecision::New
         ));
     }
@@ -246,8 +290,8 @@ mod tests {
     fn recorded_key_replays() {
         let mut layer = IdempotencyLayer::new(10);
         let k = key("transfer", 1);
-        layer.record(&k, b"response-bytes".to_vec());
-        match layer.decide(&k) {
+        layer.record(&k, b"response-bytes".to_vec()).unwrap();
+        match layer.decide(&k).unwrap() {
             IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"response-bytes"),
             other => panic!("expected Replay, got {other:?}"),
         }
@@ -257,9 +301,9 @@ mod tests {
     fn collision_detected_when_client_id_differs() {
         let mut layer = IdempotencyLayer::new(10);
         let original = key_with_client("transfer", 1, "alice");
-        layer.record(&original, b"alice-response".to_vec());
+        layer.record(&original, b"alice-response".to_vec()).unwrap();
         let retry = key_with_client("transfer", 1, "bob");
-        match layer.decide(&retry) {
+        match layer.decide(&retry).unwrap() {
             IdempotencyDecision::Collision {
                 cached_client_id,
                 incoming_client_id,
@@ -277,10 +321,10 @@ mod tests {
     #[test]
     fn expired_when_below_watermark_and_evicted() {
         let mut layer = IdempotencyLayer::new(2);
-        layer.record(&key("transfer", 1), vec![1]);
-        layer.record(&key("transfer", 2), vec![2]);
-        layer.record(&key("transfer", 3), vec![3]);
-        match layer.decide(&key("transfer", 1)) {
+        layer.record(&key("transfer", 1), vec![1]).unwrap();
+        layer.record(&key("transfer", 2), vec![2]).unwrap();
+        layer.record(&key("transfer", 3), vec![3]).unwrap();
+        match layer.decide(&key("transfer", 1)).unwrap() {
             IdempotencyDecision::Expired {
                 request_type,
                 request_id,
@@ -297,10 +341,14 @@ mod tests {
     #[test]
     fn out_of_order_record_below_watermark_is_still_cached() {
         let mut layer = IdempotencyLayer::new(10);
-        layer.record(&key("transfer", 10), b"resp10".to_vec());
-        layer.record(&key("transfer", 5), b"resp5".to_vec());
+        layer
+            .record(&key("transfer", 10), b"resp10".to_vec())
+            .unwrap();
+        layer
+            .record(&key("transfer", 5), b"resp5".to_vec())
+            .unwrap();
         assert_eq!(layer.watermark_for("transfer"), Some(10));
-        match layer.decide(&key("transfer", 5)) {
+        match layer.decide(&key("transfer", 5)).unwrap() {
             IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"resp5"),
             other => panic!("expected Replay (still cached), got {other:?}"),
         }
@@ -309,11 +357,11 @@ mod tests {
     #[test]
     fn distinct_request_types_have_independent_watermarks() {
         let mut layer = IdempotencyLayer::new(10);
-        layer.record(&key("transfer", 100), vec![]);
+        layer.record(&key("transfer", 100), vec![]).unwrap();
         assert_eq!(layer.watermark_for("transfer"), Some(100));
         assert_eq!(layer.watermark_for("create_user"), None);
         assert!(matches!(
-            layer.decide(&key("create_user", 1)),
+            layer.decide(&key("create_user", 1)).unwrap(),
             IdempotencyDecision::New
         ));
     }
@@ -322,9 +370,15 @@ mod tests {
     #[test]
     fn capture_restore_roundtrip_preserves_replay_behaviour() {
         let mut original = IdempotencyLayer::new(10);
-        original.record(&key("transfer", 1), b"r1".to_vec());
-        original.record(&key("transfer", 2), b"r2".to_vec());
-        original.record(&key("create_user", 100), b"u100".to_vec());
+        original
+            .record(&key("transfer", 1), b"r1".to_vec())
+            .unwrap();
+        original
+            .record(&key("transfer", 2), b"r2".to_vec())
+            .unwrap();
+        original
+            .record(&key("create_user", 100), b"u100".to_vec())
+            .unwrap();
 
         let captured = original.capture().unwrap();
         let mut restored = IdempotencyLayer::new(10);
@@ -332,11 +386,11 @@ mod tests {
 
         assert_eq!(restored.watermark_for("transfer"), Some(2));
         assert_eq!(restored.watermark_for("create_user"), Some(100));
-        match restored.decide(&key("transfer", 1)) {
+        match restored.decide(&key("transfer", 1)).unwrap() {
             IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"r1"),
             other => panic!("expected Replay after restore, got {other:?}"),
         }
-        match restored.decide(&key("create_user", 100)) {
+        match restored.decide(&key("create_user", 100)).unwrap() {
             IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"u100"),
             other => panic!("expected Replay after restore, got {other:?}"),
         }
@@ -345,7 +399,7 @@ mod tests {
     #[test]
     fn restore_of_empty_state_leaves_layer_untouched() {
         let mut layer = IdempotencyLayer::new(10);
-        layer.record(&key("transfer", 5), vec![]);
+        layer.record(&key("transfer", 5), vec![]).unwrap();
         let empty = IdempotencyState::default();
         layer.restore(empty).unwrap();
         assert_eq!(layer.watermark_for("transfer"), Some(5));
@@ -355,26 +409,32 @@ mod tests {
     #[test]
     fn restore_replaces_existing_cache_entries_not_merge() {
         let mut original = IdempotencyLayer::new(10);
-        original.record(&key("a", 1), b"snapshot-resp".to_vec());
+        original
+            .record(&key("a", 1), b"snapshot-resp".to_vec())
+            .unwrap();
         let captured = original.capture().unwrap();
 
         let mut layer = IdempotencyLayer::new(10);
-        layer.record(&key("a", 99), b"pre-restore-resp".to_vec());
-        layer.record(&key("b", 7), b"another-pre-restore".to_vec());
+        layer
+            .record(&key("a", 99), b"pre-restore-resp".to_vec())
+            .unwrap();
+        layer
+            .record(&key("b", 7), b"another-pre-restore".to_vec())
+            .unwrap();
         layer.restore(captured).unwrap();
 
-        match layer.decide(&key("a", 1)) {
+        match layer.decide(&key("a", 1)).unwrap() {
             IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"snapshot-resp"),
             other => panic!("expected captured key in cache, got {other:?}"),
         }
-        match layer.decide(&key("a", 99)) {
+        match layer.decide(&key("a", 99)).unwrap() {
             IdempotencyDecision::New => {}
             other => panic!(
                 "post-restore the pre-existing key 99 must be gone (replace-not-merge); \
                  got {other:?}"
             ),
         }
-        match layer.decide(&key("b", 7)) {
+        match layer.decide(&key("b", 7)).unwrap() {
             IdempotencyDecision::New => {}
             other => panic!(
                 "post-restore pre-existing key in different request_type must be gone; \
@@ -387,7 +447,7 @@ mod tests {
     #[test]
     fn first_request_id_zero_is_new_not_expired() {
         let mut layer = IdempotencyLayer::new(10);
-        match layer.decide(&key("kafka_topic", 0)) {
+        match layer.decide(&key("kafka_topic", 0)).unwrap() {
             IdempotencyDecision::New => {}
             other => panic!(
                 "request_id 0 with no prior record must be New, not {other:?} \
@@ -400,8 +460,8 @@ mod tests {
     fn replayed_request_id_zero_after_record_is_replay() {
         let mut layer = IdempotencyLayer::new(10);
         let k = key("kafka_topic", 0);
-        layer.record(&k, b"first-response".to_vec());
-        match layer.decide(&k) {
+        layer.record(&k, b"first-response".to_vec()).unwrap();
+        match layer.decide(&k).unwrap() {
             IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"first-response"),
             other => panic!("expected Replay for re-applied id=0, got {other:?}"),
         }
@@ -410,10 +470,10 @@ mod tests {
     #[test]
     fn evicted_request_id_zero_after_record_is_expired() {
         let mut layer = IdempotencyLayer::new(2);
-        layer.record(&key("kafka", 0), vec![]);
-        layer.record(&key("kafka", 1), vec![]);
-        layer.record(&key("kafka", 2), vec![]);
-        match layer.decide(&key("kafka", 0)) {
+        layer.record(&key("kafka", 0), vec![]).unwrap();
+        layer.record(&key("kafka", 1), vec![]).unwrap();
+        layer.record(&key("kafka", 2), vec![]).unwrap();
+        match layer.decide(&key("kafka", 0)).unwrap() {
             IdempotencyDecision::Expired { watermark, .. } => assert_eq!(watermark, 2),
             other => panic!("expected Expired for evicted id=0, got {other:?}"),
         }
@@ -423,9 +483,71 @@ mod tests {
     fn cache_len_reports_size() {
         let mut layer = IdempotencyLayer::new(100);
         assert_eq!(layer.cache_len(), 0);
-        layer.record(&key("a", 1), vec![]);
-        layer.record(&key("a", 2), vec![]);
-        layer.record(&key("b", 1), vec![]);
+        layer.record(&key("a", 1), vec![]).unwrap();
+        layer.record(&key("a", 2), vec![]).unwrap();
+        layer.record(&key("b", 1), vec![]).unwrap();
         assert_eq!(layer.cache_len(), 3);
+    }
+
+    // Namespace cap: `request_type` is client-controlled and watermarks are
+    // never evicted, so growth beyond MAX_IDEMPO_NAMESPACES must fail loudly.
+    // INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
+    #[test]
+    fn new_namespace_beyond_cap_is_rejected_loudly() {
+        let mut layer = IdempotencyLayer::new(10);
+        for i in 0..MAX_IDEMPO_NAMESPACES {
+            let rt = format!("ns-{i}");
+            layer.record(&key(&rt, 0), vec![]).unwrap();
+        }
+
+        let err = layer
+            .decide(&key("one-namespace-too-many", 1))
+            .expect_err("a new namespace beyond the cap must be rejected");
+        match err {
+            RrError::IdempotencyNamespaceLimitExceeded {
+                request_type,
+                namespaces,
+                max,
+            } => {
+                assert_eq!(request_type, "one-namespace-too-many");
+                assert_eq!(namespaces, MAX_IDEMPO_NAMESPACES);
+                assert_eq!(max, MAX_IDEMPO_NAMESPACES);
+            }
+            other => panic!("expected IdempotencyNamespaceLimitExceeded, got {other:?}"),
+        }
+
+        let err = layer
+            .record(&key("one-namespace-too-many", 1), vec![])
+            .expect_err("record must enforce the cap for direct callers");
+        assert!(matches!(
+            err,
+            RrError::IdempotencyNamespaceLimitExceeded { .. }
+        ));
+    }
+
+    // Namespace cap: already-tracked namespaces keep working at the cap —
+    // decide (Replay/Expired/New-above-watermark) and record are unaffected.
+    #[test]
+    fn cap_does_not_affect_existing_namespaces() {
+        let mut layer = IdempotencyLayer::new(4);
+        for i in 0..MAX_IDEMPO_NAMESPACES {
+            let rt = format!("ns-{i}");
+            layer.record(&key(&rt, 0), vec![]).unwrap();
+        }
+        layer.record(&key("ns-0", 1), b"r1".to_vec()).unwrap();
+
+        // Replay on an existing namespace works at the cap.
+        match layer.decide(&key("ns-0", 1)).unwrap() {
+            IdempotencyDecision::Replay(bytes) => assert_eq!(bytes, b"r1"),
+            other => panic!("expected Replay at the cap, got {other:?}"),
+        }
+        // New id above the watermark in an existing namespace works.
+        assert!(matches!(
+            layer.decide(&key("ns-0", 2)).unwrap(),
+            IdempotencyDecision::New
+        ));
+        // record within an existing namespace works.
+        layer.record(&key("ns-1", 5), vec![]).unwrap();
+        assert_eq!(layer.watermark_for("ns-1"), Some(5));
     }
 }

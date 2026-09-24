@@ -78,6 +78,10 @@
 //! - `--bootstrap`              — Initialize Raft membership (run on exactly one node).
 //! - `--demo`                   — Run KV demo writes and exit (default when no args given).
 //!
+//! Invalid arguments (unknown flags, missing or malformed values) print a
+//! usage message and exit with code 2. `--port` must be ≤ 64535 so the
+//! admin port (PORT + 1000) fits a u16.
+//!
 //! # Architecture
 //!
 //! Each node is an `RrNode` with:
@@ -184,68 +188,83 @@ impl CliConfig {
             match args[i].as_str() {
                 "--node-id" => {
                     i += 1;
-                    node_id = args[i].parse().expect("--node-id must be a u64");
+                    node_id = parse_flag_value(&args, i, "--node-id");
                 }
                 "--port" => {
                     i += 1;
-                    port = args[i].parse().expect("--port must be a u16");
+                    port = parse_flag_value(&args, i, "--port");
                 }
                 "--listen-addr" => {
                     i += 1;
-                    listen_addr = args[i].clone();
+                    listen_addr = flag_value(&args, i, "--listen-addr").to_string();
                 }
                 "--peers" => {
                     i += 1;
-                    peers = args[i].split(',').map(|s| s.trim().to_string()).collect();
+                    peers = flag_value(&args, i, "--peers")
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect();
                 }
                 "--metrics-port" => {
                     i += 1;
-                    metrics_port = Some(args[i].parse().expect("--metrics-port must be a u16"));
+                    metrics_port = Some(parse_flag_value(&args, i, "--metrics-port"));
                 }
                 "--kafka-brokers" => {
                     i += 1;
-                    kafka_brokers =
-                        Some(args[i].split(',').map(|s| s.trim().to_string()).collect());
+                    kafka_brokers = Some(
+                        flag_value(&args, i, "--kafka-brokers")
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .collect(),
+                    );
                 }
                 "--kafka-topic-prefix" => {
                     i += 1;
-                    kafka_topic_prefix = args[i].clone();
+                    kafka_topic_prefix = flag_value(&args, i, "--kafka-topic-prefix").to_string();
                 }
                 "--data-dir" => {
                     i += 1;
-                    data_dir = Some(args[i].clone());
+                    data_dir = Some(flag_value(&args, i, "--data-dir").to_string());
                 }
                 "--tls-cert" => {
                     i += 1;
-                    tls_cert = Some(args[i].clone());
+                    tls_cert = Some(flag_value(&args, i, "--tls-cert").to_string());
                 }
                 "--tls-key" => {
                     i += 1;
-                    tls_key = Some(args[i].clone());
+                    tls_key = Some(flag_value(&args, i, "--tls-key").to_string());
                 }
                 "--tls-ca" => {
                     i += 1;
-                    tls_ca = Some(args[i].clone());
+                    tls_ca = Some(flag_value(&args, i, "--tls-ca").to_string());
                 }
                 "--tls-domain" => {
                     i += 1;
-                    tls_domain = Some(args[i].clone());
+                    tls_domain = Some(flag_value(&args, i, "--tls-domain").to_string());
                 }
                 "--snapshot-logs-since-last" => {
                     i += 1;
-                    snapshot_logs_since_last = Some(
-                        args[i]
-                            .parse()
-                            .expect("--snapshot-logs-since-last must be a u64"),
-                    );
+                    snapshot_logs_since_last =
+                        Some(parse_flag_value(&args, i, "--snapshot-logs-since-last"));
                 }
                 "--bootstrap" => bootstrap = true,
                 "--demo" => demo = true,
                 other => {
-                    tracing::warn!("Unknown argument: {other}");
+                    eprintln!("error: unknown argument '{other}'");
+                    usage();
                 }
             }
             i += 1;
+        }
+
+        // The admin API is served on PORT + 1000; reject ports where that
+        // would overflow u16 instead of wrapping/panicking deep in startup.
+        if port > 64535 {
+            eprintln!(
+                "error: --port {port} is too large: the admin port is PORT + 1000 \
+                 and must fit a u16 (max --port 64535)"
+            );
+            usage();
         }
 
         Self {
@@ -266,6 +285,43 @@ impl CliConfig {
             demo,
         }
     }
+}
+
+/// Print usage and exit with the conventional CLI misuse code (2).
+fn usage() -> ! {
+    eprintln!(
+        "Usage: kv-store [--node-id N] [--port PORT] [--listen-addr HOST] \
+         [--peers ID@ADDR,...] [--metrics-port PORT] [--kafka-brokers A,...] \
+         [--kafka-topic-prefix P] [--data-dir PATH] \
+         [--tls-cert PATH --tls-key PATH --tls-ca PATH [--tls-domain NAME]] \
+         [--snapshot-logs-since-last N] [--bootstrap] [--demo]"
+    );
+    std::process::exit(2);
+}
+
+/// Return the value following the flag at position `i`, or exit(2) with
+/// usage when the flag is the last argument (missing value).
+fn flag_value<'a>(args: &'a [String], i: usize, flag: &str) -> &'a str {
+    match args.get(i) {
+        Some(v) => v,
+        None => {
+            eprintln!("error: {flag} requires a value");
+            usage();
+        }
+    }
+}
+
+/// Parse a numeric flag value, exiting with usage on malformed input
+/// (instead of panicking).
+fn parse_flag_value<T: std::str::FromStr>(args: &[String], i: usize, flag: &str) -> T {
+    let v = flag_value(args, i, flag);
+    v.parse().unwrap_or_else(|_| {
+        eprintln!(
+            "error: {flag} expects {}, got '{v}'",
+            std::any::type_name::<T>()
+        );
+        usage();
+    })
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────

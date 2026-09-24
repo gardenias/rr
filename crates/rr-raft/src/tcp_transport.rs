@@ -45,7 +45,7 @@ fn to_unreachable<E: std::fmt::Display>(e: E) -> RPCError<RrTypeConfig> {
 struct DecodedFrame {
     msg_type: u8,
     request_id: u64,
-    _group_id: u64,
+    group_id: u64,
     payload: Vec<u8>,
 }
 
@@ -106,7 +106,7 @@ where
     Ok(DecodedFrame {
         msg_type,
         request_id,
-        _group_id: group_id,
+        group_id,
         payload,
     })
 }
@@ -122,10 +122,19 @@ impl<T: AsyncRead + AsyncWrite + ?Sized> AsyncIo for T {}
 
 type BoxedIo = Box<dyn AsyncIo + Send + Unpin>;
 
+/// Pending-RPC waiters keyed by `(group_id, request_id)`.
+///
+/// The connection pool is shared node-wide across groups, so keying on
+/// `request_id` alone would let two groups sharing one connection overwrite
+/// each other's waiter and misdeliver responses. The response frame carries
+/// the request's group id and the reader matches on the full pair — a frame
+/// naming any other group never satisfies the waiter.
+type PendingKey = (u64, u64);
+
 /// Single TCP connection with background reader/writer tasks.
 pub struct TcpConn {
     writer_tx: mpsc::Sender<(u64, Vec<u8>)>,
-    pending: Arc<DashMap<u64, oneshot::Sender<TcpResponseFrame>>>,
+    pending: Arc<DashMap<PendingKey, oneshot::Sender<TcpResponseFrame>>>,
     _reader: JoinHandle<()>,
     _writer: JoinHandle<()>,
 }
@@ -159,7 +168,7 @@ impl TcpConn {
 
         let (mut reader, mut writer) = tokio::io::split(io);
         let (writer_tx, mut writer_rx) = mpsc::channel::<(u64, Vec<u8>)>(256);
-        let pending: Arc<DashMap<u64, oneshot::Sender<TcpResponseFrame>>> =
+        let pending: Arc<DashMap<PendingKey, oneshot::Sender<TcpResponseFrame>>> =
             Arc::new(DashMap::new());
 
         let pending_for_reader = Arc::clone(&pending);
@@ -168,16 +177,29 @@ impl TcpConn {
             loop {
                 match read_frame(&mut reader).await {
                     Ok(frame) => {
-                        if let Some((_, tx)) = pending_for_reader.remove(&frame.request_id) {
+                        let key: PendingKey = (frame.group_id, frame.request_id);
+                        if let Some((_, tx)) = pending_for_reader.remove(&key) {
                             let _ = tx.send(TcpResponseFrame {
                                 msg_type: frame.msg_type,
                                 payload: frame.payload,
                             });
+                        } else {
+                            // No waiter for this (group, id): either a late
+                            // response after the soft-ttl timeout fired, or a
+                            // peer misdelivering frames. Never deliver it to
+                            // an unrelated waiter.
+                            tracing::warn!(
+                                group_id = frame.group_id,
+                                request_id = frame.request_id,
+                                msg_type = frame.msg_type,
+                                "tcp raft: unmatched response frame; dropping"
+                            );
                         }
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "tcp raft reader loop ended");
-                        let keys: Vec<u64> = pending_for_reader.iter().map(|e| *e.key()).collect();
+                        let keys: Vec<PendingKey> =
+                            pending_for_reader.iter().map(|e| *e.key()).collect();
                         for key in keys {
                             pending_for_reader.remove(&key);
                         }
@@ -194,7 +216,8 @@ impl TcpConn {
             while let Some((request_id, frame_bytes)) = writer_rx.recv().await {
                 if let Err(e) = writer.write_all(&frame_bytes).await {
                     tracing::debug!(error = %e, request_id, "tcp raft writer write failed");
-                    let keys: Vec<u64> = pending_for_writer.iter().map(|e| *e.key()).collect();
+                    let keys: Vec<PendingKey> =
+                        pending_for_writer.iter().map(|e| *e.key()).collect();
                     for key in keys {
                         pending_for_writer.remove(&key);
                     }
@@ -212,12 +235,28 @@ impl TcpConn {
         })
     }
 
-    async fn request(&self, request_id: u64, frame_bytes: Vec<u8>) -> io::Result<TcpResponseFrame> {
+    async fn request(
+        &self,
+        group_id: u64,
+        request_id: u64,
+        frame_bytes: Vec<u8>,
+    ) -> io::Result<TcpResponseFrame> {
         let (tx, rx) = oneshot::channel();
-        self.pending.insert(request_id, tx);
+        let key: PendingKey = (group_id, request_id);
+        // Pool-allocated ids make a duplicate insert unreachable; if one ever
+        // happens the displaced waiter must fail loudly instead of silently
+        // hanging or receiving the other request's response.
+        if let Some(displaced) = self.pending.insert(key, tx) {
+            tracing::warn!(
+                group_id,
+                request_id,
+                "tcp raft: duplicate pending request id; failing the displaced waiter"
+            );
+            drop(displaced);
+        }
 
         if let Err(e) = self.writer_tx.send((request_id, frame_bytes)).await {
-            self.pending.remove(&request_id);
+            self.pending.remove(&key);
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 format!("tcp writer channel closed: {e}"),
@@ -238,6 +277,11 @@ impl TcpConn {
 pub struct TcpConnectionPool {
     conns: Arc<DashMap<(NodeId, u8), Arc<TcpConn>>>,
     max_per_node: u8,
+    /// Node-wide request-id allocator. The pool (and therefore its
+    /// connections) is shared by every group on this node, so ids must be
+    /// allocated here — not per network instance — to guarantee uniqueness
+    /// on each connection.
+    request_seq: Arc<AtomicU64>,
 }
 
 impl Default for TcpConnectionPool {
@@ -251,11 +295,17 @@ impl TcpConnectionPool {
         Self {
             conns: Arc::new(DashMap::new()),
             max_per_node: max_per_node.max(1),
+            request_seq: Arc::new(AtomicU64::new(1)),
         }
     }
 
     pub fn max_per_node(&self) -> u8 {
         self.max_per_node
+    }
+
+    /// Allocate the next pool-wide unique request id.
+    fn next_request_id(&self) -> u64 {
+        self.request_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn remove_conn(&self, node_id: NodeId, slot: u8) {
@@ -341,7 +391,6 @@ impl RaftNetworkFactory<RrTypeConfig> for TcpRaftNetworkFactory {
             group_id: self.group_id,
             tcp_pool: Arc::clone(&self.tcp_pool),
             tls: self.tls.clone().map(Arc::new),
-            request_seq: Arc::new(AtomicU64::new(1)),
             grpc,
         }
     }
@@ -355,7 +404,6 @@ pub struct TcpRaftNetwork {
     group_id: u64,
     tcp_pool: Arc<TcpConnectionPool>,
     tls: Option<Arc<TlsPaths>>,
-    request_seq: Arc<AtomicU64>,
     grpc: GrpcRaftNetwork,
 }
 
@@ -365,8 +413,9 @@ impl TcpRaftNetwork {
         req_type: u8,
         resp_type: u8,
         payload: Vec<u8>,
+        soft_ttl: std::time::Duration,
     ) -> Result<Vec<u8>, RPCError<RrTypeConfig>> {
-        let request_id = self.request_seq.fetch_add(1, Ordering::Relaxed);
+        let request_id = self.tcp_pool.next_request_id();
         let slot = (request_id % self.tcp_pool.max_per_node() as u64) as u8;
 
         let conn = self
@@ -376,10 +425,33 @@ impl TcpRaftNetwork {
             .map_err(to_unreachable)?;
 
         let frame = encode_frame(req_type, request_id, self.group_id, &payload);
-        let response = conn.request(request_id, frame).await.map_err(|e| {
-            self.tcp_pool.remove_conn(self.target, slot);
-            to_unreachable(e)
-        })?;
+        // Enforce the RPC's soft TTL: openraft delegates this to the
+        // transport, and without it a half-open connection (peer alive enough
+        // to keep TCP open but never answering) would wedge replication until
+        // the hard TTL. On timeout the connection is evicted so the next RPC
+        // reconnects instead of piling onto the wedged one.
+        let response =
+            match tokio::time::timeout(soft_ttl, conn.request(self.group_id, request_id, frame))
+                .await
+            {
+                Ok(r) => r.map_err(|e| {
+                    self.tcp_pool.remove_conn(self.target, slot);
+                    to_unreachable(e)
+                })?,
+                Err(_elapsed) => {
+                    self.tcp_pool.remove_conn(self.target, slot);
+                    tracing::warn!(
+                        target = self.target,
+                        tcp_addr = %self.target_tcp_addr,
+                        req_type,
+                        ttl_ms = soft_ttl.as_millis() as u64,
+                        "tcp raft rpc timed out (soft_ttl); evicting connection"
+                    );
+                    return Err(to_unreachable(format!(
+                        "tcp raft rpc type={req_type:#x} timed out after {soft_ttl:?}"
+                    )));
+                }
+            };
 
         if response.msg_type != resp_type {
             return Err(to_unreachable(format!(
@@ -398,12 +470,12 @@ impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<RrTypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<AppendEntriesResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
             .map_err(to_unreachable)?;
         let resp_payload = self
-            .rpc_roundtrip(MSG_AE_REQ, MSG_AE_RESP, payload)
+            .rpc_roundtrip(MSG_AE_REQ, MSG_AE_RESP, payload, option.soft_ttl())
             .await
             .map_err(|e| {
                 tracing::debug!(
@@ -425,12 +497,12 @@ impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
     async fn vote(
         &mut self,
         rpc: VoteRequest<RrTypeConfig>,
-        _option: RPCOption,
+        option: RPCOption,
     ) -> Result<VoteResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
         let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
             .map_err(to_unreachable)?;
         let resp_payload = self
-            .rpc_roundtrip(MSG_VOTE_REQ, MSG_VOTE_RESP, payload)
+            .rpc_roundtrip(MSG_VOTE_REQ, MSG_VOTE_RESP, payload, option.soft_ttl())
             .await
             .map_err(|e| {
                 tracing::debug!(
@@ -555,7 +627,7 @@ mod tests {
         let frame = recv.await.unwrap();
         assert_eq!(frame.msg_type, MSG_AE_REQ);
         assert_eq!(frame.request_id, 7);
-        assert_eq!(frame._group_id, 9);
+        assert_eq!(frame.group_id, 9);
         assert_eq!(frame.payload, payload);
     }
 
@@ -563,5 +635,137 @@ mod tests {
     fn derive_tcp_addr_adds_offset() {
         let addr = derive_tcp_addr("127.0.0.1:51001", 4).unwrap();
         assert_eq!(addr, "127.0.0.1:51005");
+    }
+
+    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    #[test]
+    fn pool_allocates_unique_request_ids() {
+        let pool = TcpConnectionPool::new(8);
+        let a = pool.next_request_id();
+        let b = pool.next_request_id();
+        assert_ne!(
+            a, b,
+            "pool-wide ids must never collide on a shared connection"
+        );
+        // Cloned pools share the allocator (the pool is Clone + shared node-wide).
+        let clone = pool.clone();
+        let c = clone.next_request_id();
+        assert!(c > b);
+    }
+
+    /// Test server: echoes every frame back with the request's
+    /// `(request_id, group_id)` and payload, msg_type forced to
+    /// `MSG_AE_RESP`. `flip_group` simulates a misdelivering peer.
+    async fn spawn_echo_server(flip_group: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                tokio::spawn(async move {
+                    let (mut r, mut w) = stream.into_split();
+                    while let Ok(frame) = read_frame(&mut r).await {
+                        let group_id = if flip_group {
+                            frame.group_id.wrapping_add(1)
+                        } else {
+                            frame.group_id
+                        };
+                        let resp =
+                            encode_frame(MSG_AE_RESP, frame.request_id, group_id, &frame.payload);
+                        if w.write_all(&resp).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// Two groups sharing one pooled connection (max_per_node = 1) must get
+    /// distinct request ids, no pending-overwrite, and no misdelivery.
+    #[tokio::test]
+    async fn concurrent_groups_share_connection_without_overwrite_or_misdelivery() {
+        let addr = spawn_echo_server(false).await;
+        let pool = TcpConnectionPool::new(1);
+        let target = 2u64;
+
+        let conn_a = pool.get_or_connect(target, 0, &addr, None).await.unwrap();
+        let conn_b = pool.get_or_connect(target, 0, &addr, None).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&conn_a, &conn_b),
+            "max_per_node=1 must put both groups on ONE shared connection"
+        );
+
+        let group_a = 11u64;
+        let group_b = 22u64;
+        let payload_a = b"group-a-payload".to_vec();
+        let payload_b = b"group-b-payload".to_vec();
+
+        // Interleave: register A's waiter, then B's, then let both responses
+        // race back over the same socket.
+        let id_a = pool.next_request_id();
+        let frame_a = encode_frame(MSG_AE_REQ, id_a, group_a, &payload_a);
+        let req_a = conn_a.request(group_a, id_a, frame_a);
+        tokio::task::yield_now().await;
+        let id_b = pool.next_request_id();
+        let frame_b = encode_frame(MSG_AE_REQ, id_b, group_b, &payload_b);
+        let req_b = conn_b.request(group_b, id_b, frame_b);
+
+        let (resp_a, resp_b) = tokio::join!(req_a, req_b);
+        let resp_a = resp_a.expect("group A request failed");
+        let resp_b = resp_b.expect("group B request failed");
+        assert_eq!(resp_a.msg_type, MSG_AE_RESP);
+        assert_eq!(resp_b.msg_type, MSG_AE_RESP);
+        assert_eq!(resp_a.payload, payload_a, "group A got the wrong response");
+        assert_eq!(resp_b.payload, payload_b, "group B got the wrong response");
+    }
+
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// A response frame carrying a foreign group id must never satisfy the
+    /// pending waiter — the request stays outstanding (real timeouts come
+    /// from the soft-ttl wrapper) rather than completing with another
+    /// group's bytes.
+    #[tokio::test]
+    async fn response_with_wrong_group_is_not_delivered() {
+        let addr = spawn_echo_server(true).await;
+        let pool = TcpConnectionPool::new(1);
+        let conn = pool.get_or_connect(2, 0, &addr, None).await.unwrap();
+
+        let id = pool.next_request_id();
+        let frame = encode_frame(MSG_AE_REQ, id, 11, b"x");
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            conn.request(11, id, frame),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "a response naming a different group must not satisfy the waiter"
+        );
+    }
+
+    /// Inserting a second waiter under the same (group, id) key must fail
+    /// the displaced waiter loudly instead of silently replacing it.
+    #[tokio::test]
+    async fn duplicate_pending_insert_fails_displaced_waiter() {
+        let addr = spawn_echo_server(false).await;
+        let pool = TcpConnectionPool::new(1);
+        let conn = pool.get_or_connect(2, 0, &addr, None).await.unwrap();
+
+        let key: PendingKey = (7, 42);
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, _rx2) = oneshot::channel();
+        assert!(conn.pending.insert(key, tx1).is_none());
+        let displaced = conn.pending.insert(key, tx2);
+        drop(displaced);
+        assert!(
+            rx1.await.is_err(),
+            "the displaced waiter must observe a failure (sender dropped)"
+        );
     }
 }

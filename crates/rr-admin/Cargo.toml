@@ -21,6 +21,12 @@ walkdir = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 sha2 = "0.10"
 hex = "0.4"
+tracing.workspace = true
+
+# Live-node guard for `node-reset`: probes the RocksDB LOCK file via
+# flock/fcntl (see node_reset::rocks_lock_held). Unix-only.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true

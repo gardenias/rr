@@ -98,6 +98,21 @@ Besides `send_request` for writes, `RrClient` offers two read APIs:
 
 ## 写批处理 / Client Write Batching（opt-in）
 
+:::warning 未发布特性 / Unreleased — 随 v0.3.0 落地 / lands in v0.3.0
+客户端批处理**尚未发布**：当前 release（v0.2.x）不包含该 API，且即使发布后也**默认关闭**。
+重试语义须知：批处理只承载**不带幂等键**的写，批次在客户端重试（leader 重定向、网络抖动）
+时可能被**重复应用**——unkeyed 写不具备幂等性。因此它只适用于按业务键天然幂等的工作负载；
+需要恰好一次语义的写请使用 `send_request_idempotent`（始终绕过批处理）。
+
+Client batching is **unreleased** (lands in v0.3.0): current releases (v0.2.x)
+do not carry this API, and it stays **off by default** once shipped. Retry
+semantics: batches carry only **unkeyed** writes, so a retried batch (leader
+redirect, network flake) can be **applied twice** — unkeyed writes are
+non-idempotent. It suits workloads that are idempotent by business key; writes
+needing exactly-once semantics must use `send_request_idempotent` (which
+always bypasses the batcher).
+:::
+
 `RrClientBuilder::with_batching(BatchConfig)` 开启 Kafka-producer 式写批处理（**默认关闭**）。
 开启后，未带幂等键的 `send_request` 先按 partition 进入客户端缓冲，满足任一条件即整批
 作为**一条 Raft entry** 提交：攒够 `max_entries` 条、或累计 `max_bytes` 字节、或首条入队后
@@ -118,7 +133,7 @@ let client = RrClientBuilder::new(addrs)
 
 - 收益（S2 k=200、128B、64 条/批、linger 1ms 实测）：**175.2k TPS vs ~29k（6×）**，p99 2.4ms。
 - 代价：串行写要付 linger（S1 p50 161µs → ~3.1ms）。**延迟敏感的串行写场景请保持关闭**。
-- 兼容性：需要服务端框架带批帧拆分（本版本起）；对旧服务端开启会在首个批次响亮报错
+- 兼容性：需要服务端框架带批帧拆分（v0.3.0 起）；对旧服务端开启会在首个批次响亮报错
   （绝不假成功）。与 A-0033 deferred（两阶段）apply 的服务不兼容。
 - 背压：缓冲总量超过 `max_buffered` 时 `send_request` 立即返回错误，由调用方降速/重试。
 

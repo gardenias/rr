@@ -19,7 +19,11 @@ use rr_core::storage::{BatchOp, StorageEngine};
 pub struct CfOptions {
     /// Write buffer size in MiB. Overrides [`RocksConfig::write_buffer_size_mb`] for this CF.
     pub write_buffer_size_mb: Option<u64>,
-    /// Block cache size in MiB. Overrides [`RocksConfig::block_cache_size_mb`] for this CF.
+    /// Block cache size in MiB. When set, this CF gets a **private** LRU
+    /// cache of this size INSTEAD of a share of the global
+    /// [`RocksConfig::block_cache_size_mb`] cache — the knob exists to
+    /// isolate one CF's cache budget, and it adds to total memory rather
+    /// than carving out of the shared cache.
     pub block_cache_size_mb: Option<u64>,
     /// Compression type. Overrides [`RocksConfig::compression`] for this CF.
     pub compression: Option<DBCompressionType>,
@@ -33,15 +37,9 @@ pub struct CfOptions {
 /// on power failure (and have replication + external backup as
 /// compensating controls). See ADR A-0002 §Contract 4.
 ///
-/// Names changed in v0.3.0:
-/// - `Balanced` → [`ReplicatedOnly`](Self::ReplicatedOnly) (clearer intent
-///   — only safe with multi-node replication)
-/// - `Fast` → [`TestOnly`](Self::TestOnly) (clearer intent — never use in
-///   production)
-///
-/// The old names remain as `#[deprecated]` aliases for one minor version;
-/// they map to the new variants with the same on-disk behavior. They are
-/// removed in v0.3.0 — update your code to the new names before then.
+/// Names changed in v0.3.0 (breaking window): the deprecated `Balanced` and
+/// `Fast` aliases were removed — use [`ReplicatedOnly`](Self::ReplicatedOnly)
+/// and [`TestOnly`](Self::TestOnly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityPolicy {
     /// **Production default.** Every committed write issues an `fsync` on
@@ -75,20 +73,6 @@ pub enum DurabilityPolicy {
     /// Only appropriate for tests and throwaway / cache workloads. Never
     /// use in production.
     TestOnly,
-    /// Deprecated alias for [`ReplicatedOnly`](Self::ReplicatedOnly). Same
-    /// on-disk behavior; kept for one minor version to ease migration.
-    #[deprecated(
-        since = "0.2.0",
-        note = "renamed to `ReplicatedOnly`; will be removed in v0.3.0"
-    )]
-    Balanced,
-    /// Deprecated alias for [`TestOnly`](Self::TestOnly). Same on-disk
-    /// behavior; kept for one minor version to ease migration.
-    #[deprecated(
-        since = "0.2.0",
-        note = "renamed to `TestOnly`; will be removed in v0.3.0"
-    )]
-    Fast,
 }
 
 impl DurabilityPolicy {
@@ -101,15 +85,11 @@ impl DurabilityPolicy {
 
     /// Apply this policy to an `Options` (controls SST sync behavior).
     fn apply_to_db_options(self, opts: &mut Options) {
-        #[allow(deprecated)]
         match self {
             DurabilityPolicy::Strict => {
                 opts.set_use_fsync(true);
             }
-            DurabilityPolicy::ReplicatedOnly
-            | DurabilityPolicy::TestOnly
-            | DurabilityPolicy::Balanced
-            | DurabilityPolicy::Fast => {
+            DurabilityPolicy::ReplicatedOnly | DurabilityPolicy::TestOnly => {
                 // Default: fdatasync or OS-buffer only
             }
         }
@@ -119,15 +99,14 @@ impl DurabilityPolicy {
     /// This is called on every write; constructing is cheap.
     fn write_options(self) -> WriteOptions {
         let mut opts = WriteOptions::default();
-        #[allow(deprecated)]
         match self {
             DurabilityPolicy::Strict => {
                 opts.set_sync(true);
             }
-            DurabilityPolicy::ReplicatedOnly | DurabilityPolicy::Balanced => {
+            DurabilityPolicy::ReplicatedOnly => {
                 // Default: WAL is written but not synced.
             }
-            DurabilityPolicy::TestOnly | DurabilityPolicy::Fast => {
+            DurabilityPolicy::TestOnly => {
                 opts.disable_wal(true);
             }
         }
@@ -135,14 +114,12 @@ impl DurabilityPolicy {
     }
 
     /// Human-readable name for the policy, used in startup warnings and
-    /// metrics labels. Old aliases collapse onto their new canonical name
-    /// so dashboards stay stable across the rename.
+    /// metrics labels.
     fn canonical_name(self) -> &'static str {
-        #[allow(deprecated)]
         match self {
             DurabilityPolicy::Strict => "strict",
-            DurabilityPolicy::ReplicatedOnly | DurabilityPolicy::Balanced => "replicated_only",
-            DurabilityPolicy::TestOnly | DurabilityPolicy::Fast => "test_only",
+            DurabilityPolicy::ReplicatedOnly => "replicated_only",
+            DurabilityPolicy::TestOnly => "test_only",
         }
     }
 }
@@ -159,7 +136,10 @@ impl DurabilityPolicy {
 /// contract. See [`DurabilityPolicy`] for details.
 #[derive(Debug, Clone)]
 pub struct RocksConfig {
-    /// Size of the shared LRU block cache in megabytes.
+    /// Size of the block cache in megabytes: ONE LRU cache built at `open()`
+    /// and shared by every column family (including the DB-level default).
+    /// A CF with [`CfOptions::block_cache_size_mb`] set gets a private cache
+    /// ON TOP of this one instead of sharing.
     pub block_cache_size_mb: usize,
     /// Size of each memtable (write buffer) in megabytes.
     pub write_buffer_size_mb: usize,
@@ -230,6 +210,25 @@ impl RocksConfig {
     }
 }
 
+/// Map a RocksDB error onto a `StorageError`, preserving the actionable
+/// `ErrorKind`: a full disk surfaces as [`std::io::ErrorKind::StorageFull`]
+/// (the same kind the fault-injecting storage injects for ENOSPC — see
+/// rr-core `storage_fault.rs`), everything else as `Other`. RocksDB flattens
+/// its status codes into the message text, so the ENOSPC classes are matched
+/// textually.
+fn map_rocks_err(e: rocksdb::Error) -> StorageError {
+    map_rocks_err_msg(e.to_string())
+}
+
+fn map_rocks_err_msg(msg: String) -> StorageError {
+    let kind = if msg.contains("No space left") || msg.contains("ENOSPC") {
+        std::io::ErrorKind::StorageFull
+    } else {
+        std::io::ErrorKind::Other
+    };
+    StorageError::Io(std::io::Error::new(kind, msg))
+}
+
 /// A persistent storage engine backed by RocksDB.
 ///
 /// Wraps a RocksDB instance with standard column families for Raft:
@@ -240,6 +239,12 @@ pub struct RocksStorage {
     db: Arc<DB>,
     durability: DurabilityPolicy,
     group_commit: Option<GroupCommitHandle>,
+    /// Column families opened at `open()` plus any later `create_cf()`.
+    /// Tracked because `DB::flush()` alone only flushes the `default` CF —
+    /// [`StorageEngine::flush`] walks this list instead. `lock().unwrap()`
+    /// is deliberate: writers are rare (`create_cf`), sections are tiny, and
+    /// poisoning can only follow an internal panic — fail-closed.
+    cf_names: std::sync::RwLock<Vec<String>>,
 }
 
 /// Handle for a background group-commit task.
@@ -256,7 +261,11 @@ impl Drop for GroupCommitHandle {
     }
 }
 
-fn build_cf_options(base_config: &RocksConfig, overrides: Option<&CfOptions>) -> Options {
+fn build_cf_options(
+    base_config: &RocksConfig,
+    overrides: Option<&CfOptions>,
+    shared_cache: &Cache,
+) -> Options {
     let mut opts = Options::default();
     opts.set_write_buffer_size(base_config.write_buffer_size_mb * 1024 * 1024);
     opts.set_max_write_buffer_number(base_config.max_write_buffer_number);
@@ -265,13 +274,13 @@ fn build_cf_options(base_config: &RocksConfig, overrides: Option<&CfOptions>) ->
     opts.set_level_zero_slowdown_writes_trigger(base_config.level_zero_slowdown_trigger);
     opts.set_level_zero_stop_writes_trigger(base_config.level_zero_stop_trigger);
 
-    let block_cache_size_mb = overrides
-        .and_then(|o| o.block_cache_size_mb)
-        .map(|mb| mb as usize)
-        .unwrap_or(base_config.block_cache_size_mb);
-    let cache = Cache::new_lru_cache(block_cache_size_mb * 1024 * 1024);
     let mut bb_opts = BlockBasedOptions::default();
-    bb_opts.set_block_cache(&cache);
+    match overrides.and_then(|o| o.block_cache_size_mb) {
+        // Per-CF override: a PRIVATE cache for this CF (see
+        // `CfOptions::block_cache_size_mb`), deliberately not the shared one.
+        Some(mb) => bb_opts.set_block_cache(&Cache::new_lru_cache(mb as usize * 1024 * 1024)),
+        None => bb_opts.set_block_cache(shared_cache),
+    }
     opts.set_block_based_table_factory(&bb_opts);
 
     if let Some(overrides) = overrides {
@@ -281,12 +290,6 @@ fn build_cf_options(base_config: &RocksConfig, overrides: Option<&CfOptions>) ->
         if let Some(compression) = overrides.compression {
             opts.set_compression_type(compression);
         }
-        if let Some(block_cache_size_mb) = overrides.block_cache_size_mb {
-            let cache = Cache::new_lru_cache(block_cache_size_mb as usize * 1024 * 1024);
-            let mut bb_opts = BlockBasedOptions::default();
-            bb_opts.set_block_cache(&cache);
-            opts.set_block_based_table_factory(&bb_opts);
-        }
     }
 
     opts
@@ -294,6 +297,12 @@ fn build_cf_options(base_config: &RocksConfig, overrides: Option<&CfOptions>) ->
 
 impl RocksStorage {
     /// Spawn a background group-commit task that periodically flushes the WAL.
+    ///
+    /// The flush is `flush_wal(true)` (a real fsync: `flush_wal(false)` is a
+    /// no-op with the default `manual_wal_flush=false`). Failures are loud:
+    /// warn + the `rr_storage_wal_flush_errors_total` counter, and the task
+    /// keeps running so a transient error does not silently end durability
+    /// maintenance.
     pub fn spawn_group_commit(&self, interval_ms: u64) -> GroupCommitHandle {
         let db = Arc::clone(&self.db);
         let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
@@ -304,13 +313,22 @@ impl RocksStorage {
                 tokio::select! {
                     _ = &mut cancel_rx => break,
                     _ = ticker.tick() => {
-                        let _ = tokio::task::spawn_blocking({
+                        let result = tokio::task::spawn_blocking({
                             let db = Arc::clone(&db);
-                            move || {
-                                let _ = db.flush_wal(false);
-                            }
+                            move || db.flush_wal(true)
                         })
                         .await;
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                metrics::counter!("rr_storage_wal_flush_errors_total").increment(1);
+                                tracing::warn!(error = %e, "group-commit WAL flush failed");
+                            }
+                            Err(e) => {
+                                metrics::counter!("rr_storage_wal_flush_errors_total").increment(1);
+                                tracing::warn!(error = %e, "group-commit WAL flush task failed");
+                            }
+                        }
                     }
                 }
             }
@@ -357,42 +375,53 @@ impl RocksStorage {
         opts.set_level_zero_stop_writes_trigger(config.level_zero_stop_trigger);
         durability.apply_to_db_options(&mut opts);
 
-        let cache = Cache::new_lru_cache(config.block_cache_size_mb * 1024 * 1024);
+        // ONE block cache per database, shared by every column family
+        // (rust-rocksdb's `Cache` is internally Arc-refcounted, so every
+        // `set_block_cache` below references the same cache). Before this,
+        // each CF built its own cache sized at the global knob — total cache
+        // memory was ~(1 + #CFs) × the documented budget.
+        let shared_cache = Cache::new_lru_cache(config.block_cache_size_mb * 1024 * 1024);
         let mut bb_opts = BlockBasedOptions::default();
-        bb_opts.set_block_cache(&cache);
+        bb_opts.set_block_cache(&shared_cache);
         opts.set_block_based_table_factory(&bb_opts);
 
         let cf_descriptors: Vec<ColumnFamilyDescriptor> = cfs
             .iter()
             .map(|name| {
                 let cf_opts = match *name {
-                    "raft_log" => build_cf_options(&config, config.raft_log_cf.as_ref()),
-                    "state_machine" => build_cf_options(&config, config.state_machine_cf.as_ref()),
-                    _ => Options::default(),
+                    "raft_log" => {
+                        build_cf_options(&config, config.raft_log_cf.as_ref(), &shared_cache)
+                    }
+                    "state_machine" => {
+                        build_cf_options(&config, config.state_machine_cf.as_ref(), &shared_cache)
+                    }
+                    _ => build_cf_options(&config, None, &shared_cache),
                 };
                 ColumnFamilyDescriptor::new(*name, cf_opts)
             })
             .collect();
 
-        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)
-            .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
+        let db = DB::open_cf_descriptors(&opts, path, cf_descriptors).map_err(map_rocks_err)?;
 
         let mut storage = Self {
             db: Arc::new(db),
             durability,
             group_commit: None,
+            cf_names: std::sync::RwLock::new(cfs.iter().map(|s| s.to_string()).collect()),
         };
 
-        #[allow(deprecated)]
-        let should_spawn_group_commit = matches!(
-            durability,
-            DurabilityPolicy::ReplicatedOnly | DurabilityPolicy::Balanced
-        );
-
         if let Some(interval_ms) = config.group_commit_interval_ms {
-            if should_spawn_group_commit {
+            if durability == DurabilityPolicy::ReplicatedOnly {
                 let group_commit = storage.spawn_group_commit(interval_ms);
                 storage.group_commit = Some(group_commit);
+            } else {
+                tracing::warn!(
+                    interval_ms,
+                    policy = durability.canonical_name(),
+                    "group_commit_interval_ms is ignored: background WAL group-commit only \
+                     applies to DurabilityPolicy::ReplicatedOnly (Strict fsyncs every write; \
+                     TestOnly disables the WAL)"
+                );
             }
         }
 
@@ -450,7 +479,7 @@ impl StorageEngine for RocksStorage {
             })?;
             let write_opts = durability.write_options();
             db.put_cf_opt(&handle, &key, &value, &write_opts)
-                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
+                .map_err(map_rocks_err)
         })
         .await
         .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
@@ -464,8 +493,7 @@ impl StorageEngine for RocksStorage {
             let handle = db.cf_handle(&cf).ok_or_else(|| StorageError::NotFound {
                 key: format!("cf:{cf}"),
             })?;
-            db.get_cf(&handle, &key)
-                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
+            db.get_cf(&handle, &key).map_err(map_rocks_err)
         })
         .await
         .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
@@ -482,7 +510,7 @@ impl StorageEngine for RocksStorage {
             })?;
             let write_opts = durability.write_options();
             db.delete_cf_opt(&handle, &key, &write_opts)
-                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
+                .map_err(map_rocks_err)
         })
         .await
         .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
@@ -511,11 +539,32 @@ impl StorageEngine for RocksStorage {
             );
             let mut results = Vec::new();
             for item in iter {
-                let (k, v) =
-                    item.map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
+                let (k, v) = item.map_err(map_rocks_err)?;
                 results.push((k.to_vec(), v.to_vec()));
             }
             Ok(results)
+        })
+        .await
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
+    }
+
+    async fn last_key_value(&self, cf: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>, StorageError> {
+        let db = Arc::clone(&self.db);
+        let cf = cf.to_string();
+        tokio::task::spawn_blocking(move || {
+            let handle = db.cf_handle(&cf).ok_or_else(|| StorageError::NotFound {
+                key: format!("cf:{cf}"),
+            })?;
+            // Reverse seek: position at the end of the CF and read one item —
+            // O(1)-ish instead of the trait default's full-CF scan.
+            let mut iter = db.iterator_cf_opt(&handle, ReadOptions::default(), IteratorMode::End);
+            match iter.next() {
+                None => Ok(None),
+                Some(item) => {
+                    let (k, v) = item.map_err(map_rocks_err)?;
+                    Ok(Some((k.to_vec(), v.to_vec())))
+                }
+            }
         })
         .await
         .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
@@ -543,8 +592,7 @@ impl StorageEngine for RocksStorage {
                 }
             }
             let write_opts = durability.write_options();
-            db.write_opt(batch, &write_opts)
-                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
+            db.write_opt(batch, &write_opts).map_err(map_rocks_err)
         })
         .await
         .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
@@ -552,9 +600,17 @@ impl StorageEngine for RocksStorage {
 
     async fn flush(&self) -> Result<(), StorageError> {
         let db = Arc::clone(&self.db);
+        let names = self.cf_names.read().unwrap().clone();
         tokio::task::spawn_blocking(move || {
-            db.flush()
-                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
+            // Flush every known CF's memtable — `DB::flush()` alone would
+            // only flush the `default` CF (see the trait doc).
+            for name in &names {
+                let handle = db.cf_handle(name).ok_or_else(|| StorageError::NotFound {
+                    key: format!("cf:{name}"),
+                })?;
+                db.flush_cf(&handle).map_err(map_rocks_err)?;
+            }
+            Ok(())
         })
         .await
         .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
@@ -563,13 +619,16 @@ impl StorageEngine for RocksStorage {
     async fn create_cf(&self, name: &str) -> Result<(), StorageError> {
         let db = Arc::clone(&self.db);
         let name = name.to_string();
-        tokio::task::spawn_blocking(move || {
-            let opts = Options::default();
-            db.create_cf(&name, &opts)
-                .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))
+        let created = tokio::task::spawn_blocking({
+            let name = name.clone();
+            move || {
+                let opts = Options::default();
+                db.create_cf(&name, &opts).map_err(map_rocks_err)
+            }
         })
         .await
-        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?
+        .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
+        created.map(|()| self.cf_names.write().unwrap().push(name))
     }
 }
 
@@ -613,7 +672,112 @@ mod tests {
     #[test]
     fn build_cf_options_without_overrides_inherits_global() {
         let config = RocksConfig::default();
-        let _opts = build_cf_options(&config, None);
+        let shared_cache = Cache::new_lru_cache(config.block_cache_size_mb * 1024 * 1024);
+        let _opts = build_cf_options(&config, None, &shared_cache);
+    }
+
+    #[test]
+    fn map_rocks_err_msg_marks_enospc_as_storage_full() {
+        for msg in [
+            "IO error: No space left on device",
+            "IO error: while appending to file: ENOSPC",
+        ] {
+            match map_rocks_err_msg(msg.to_string()) {
+                StorageError::Io(e) => assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::StorageFull,
+                    "ENOSPC-class RocksDB errors must keep the StorageFull kind \
+                     (FaultInjectingStorage's contract): {msg}"
+                ),
+                other => panic!("expected StorageError::Io, got {other:?}"),
+            }
+        }
+        // Unrelated errors stay Other.
+        match map_rocks_err_msg("Corruption: bad CRC".to_string()) {
+            StorageError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::Other),
+            other => panic!("expected StorageError::Io, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_last_key_value_reverse_fetch() {
+        let (storage, _tmp) = open_test_db();
+        assert_eq!(storage.last_key_value("raft_log").await.unwrap(), None);
+
+        storage.put("raft_log", b"log_1", b"e1").await.unwrap();
+        storage.put("raft_log", b"log_3", b"e3").await.unwrap();
+        storage.put("raft_log", b"log_2", b"e2").await.unwrap();
+        assert_eq!(
+            storage.last_key_value("raft_log").await.unwrap(),
+            Some((b"log_3".to_vec(), b"e3".to_vec()))
+        );
+
+        storage.delete("raft_log", b"log_3").await.unwrap();
+        assert_eq!(
+            storage.last_key_value("raft_log").await.unwrap(),
+            Some((b"log_2".to_vec(), b"e2".to_vec()))
+        );
+
+        let err = storage.last_key_value("nonexistent_cf").await.unwrap_err();
+        assert!(matches!(err, StorageError::NotFound { .. }));
+    }
+
+    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    #[tokio::test]
+    async fn test_flush_covers_every_cf() {
+        let (storage, _tmp) = open_test_db();
+        storage.put("raft_log", b"k", b"v1").await.unwrap();
+        storage.put("state_machine", b"k", b"v2").await.unwrap();
+        storage.put("metadata", b"k", b"v3").await.unwrap();
+        storage.create_cf("extra_cf").await.unwrap();
+        storage.put("extra_cf", b"k", b"v4").await.unwrap();
+
+        // Must not error on any tracked CF (a `DB::flush()`-only
+        // implementation would leave non-default CF memtables unflushed).
+        storage.flush().await.unwrap();
+
+        // Data stays readable after the all-CF flush, including the
+        // runtime-created CF the tracker learned about via create_cf.
+        for (cf, want) in [
+            ("raft_log", b"v1"),
+            ("state_machine", b"v2"),
+            ("metadata", b"v3"),
+            ("extra_cf", b"v4"),
+        ] {
+            assert_eq!(
+                storage.get(cf, b"k").await.unwrap().as_deref(),
+                Some(want.as_slice())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_group_commit_interval_ignored_outside_replicated_only() {
+        let tmp = TempDir::new().unwrap();
+        let config = RocksConfig {
+            durability: DurabilityPolicy::Strict,
+            group_commit_interval_ms: Some(10),
+            ..RocksConfig::for_testing()
+        };
+        let storage = RocksStorage::open(tmp.path().to_str().unwrap(), vec!["raft_log"], config)
+            .expect("should open");
+        assert!(
+            storage.group_commit.is_none(),
+            "group-commit task must not spawn under Strict (it would be a no-op fsync loop)"
+        );
+
+        let tmp2 = TempDir::new().unwrap();
+        let config = RocksConfig {
+            durability: DurabilityPolicy::ReplicatedOnly,
+            group_commit_interval_ms: Some(10),
+            ..RocksConfig::for_testing()
+        };
+        let storage = RocksStorage::open(tmp2.path().to_str().unwrap(), vec!["raft_log"], config)
+            .expect("should open");
+        assert!(
+            storage.group_commit.is_some(),
+            "group-commit task must spawn under ReplicatedOnly when configured"
+        );
     }
 
     #[tokio::test]
@@ -905,19 +1069,13 @@ mod tests {
     }
 
     #[test]
-    fn test_deprecated_aliases_have_same_canonical_name() {
-        #[allow(deprecated)]
-        {
-            assert_eq!(
-                DurabilityPolicy::Balanced.canonical_name(),
-                DurabilityPolicy::ReplicatedOnly.canonical_name()
-            );
-            assert_eq!(
-                DurabilityPolicy::Fast.canonical_name(),
-                DurabilityPolicy::TestOnly.canonical_name()
-            );
-        }
+    fn test_canonical_names() {
         assert_eq!(DurabilityPolicy::Strict.canonical_name(), "strict");
+        assert_eq!(
+            DurabilityPolicy::ReplicatedOnly.canonical_name(),
+            "replicated_only"
+        );
+        assert_eq!(DurabilityPolicy::TestOnly.canonical_name(), "test_only");
     }
 
     #[test]
@@ -925,11 +1083,6 @@ mod tests {
         assert!(DurabilityPolicy::Strict.is_strict());
         assert!(!DurabilityPolicy::ReplicatedOnly.is_strict());
         assert!(!DurabilityPolicy::TestOnly.is_strict());
-        #[allow(deprecated)]
-        {
-            assert!(!DurabilityPolicy::Balanced.is_strict());
-            assert!(!DurabilityPolicy::Fast.is_strict());
-        }
     }
 
     #[tokio::test]

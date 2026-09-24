@@ -99,6 +99,8 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
 | 5 | `crates/rr-raft/src/group_manager.rs:405-417` | `stop_group` 等待 `in_flight_writes` 归零后才 shutdown raft |
 | 6 | `crates/rr-server/src/main.rs` `with_raft_log_dir` | 生产接线(ADR A-0016):`--storage rocks` 时 raft log 落盘 `{data_dir}/raft-log/{group_id}`——默认部署形态的 durable log 自此成立 |
 | 7 | `crates/rr-raft/src/io_batcher.rs` `acquire_bytes`/`max_inflight_bytes` | 在途未落盘字节预算(默认 64 MiB):submit 前先取信号量许可,permit 随批次持有到 flush 完成才释放——异步尾部有界,背压进入提案管线(断"无界积压→OOM 重启波"链,W9 flake 2026-09-17) |
+| 8 | `crates/rr-core/src/ingress.rs:29` `validate_client_payload`;调用点 `crates/rr-server/src/dispatch.rs:98`(submit_write)与 `crates/rr-raft/src/group_manager.rs:826`(write)/`:887`(write_batch) | propose 前拒绝带 house magic 的畸形/未来版本帧(INVALID_ARGUMENT)——毒丸条目进不了 Raft log(2026-09-23 批次 A,review P0①;apply 侧错误契约见 ADR A-0018) |
+| 9 | `crates/rr-raft/src/tcp_transport.rs:125-132`、`:245-256` 响应 demux(池级单调 request_id `:307-309` + (group_id, request_id) 二元键 + 撞号响亮化) | 错组响应不投递、撞号响亮化——false matched 推进路径消除(review P0②) |
 
 ### 现有测试
 
@@ -151,7 +153,30 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   三件套 oracle —— ack-log 探针回放(同幂等键异值 Put + linearizable Get 读回原始值)、
   节点日志零 panic、lag 收敛;`SOAK_SEED` 复现故障序列。2026-09-10 本地 60s/90s smoke
   全绿,且两个负面对照实测命中(伪造未写记录 → INV-1 VIOLATION;篡改 hash →
-  hash-mismatch 报错);2h+ 绿由 nightly 累积。
+  hash-mismatch 报错);2h+ 绿由 nightly 累积。2026-09-23 批次 D:soak 新增 unkeyed
+  道(`--soak-unkeyed-ratio`,oracle 走线性一致读验证)+ 批处理×soak 空转组合硬错。
+- `crates/rr-core/src/ingress.rs` `magicless_payloads_pass_untouched`(:43)、
+  `well_formed_batch_frame_passes`(:51)、`malformed_batch_frame_is_rejected`(:58)、
+  `future_batch_version_is_rejected`(:66)、`malformed_framed_entry_is_rejected`(:74)
+  —— 2026-09-23 批次 A ingress 校验器:无 magic 负载原样透传;合法批帧通过;
+  畸形批帧/未来版本/畸形 FramedEntry 拒绝(日志投毒崩溃循环修复的单元层,ADR A-0018)
+- `crates/rr-server/src/dispatch.rs` `test_dispatch_rejects_malformed_house_magic_payload`(:478)
+  —— propose 前拒绝带 house magic 的畸形负载(INVALID_ARGUMENT),毒丸条目永远进不了 Raft log
+- `crates/rr-raft/src/group_manager.rs` `test_write_batch_rejects_malformed_frame_before_propose`(:1607)、
+  `test_write_rejects_malformed_framework_frame`(:1582) —— write / write_batch 两条入口同源校验
+- `crates/rr-raft/src/tcp_transport.rs` `pool_allocates_unique_request_ids`(:642)、
+  `response_with_wrong_group_is_not_delivered`(:734)、
+  `concurrent_groups_share_connection_without_overwrite_or_misdelivery`(:692)
+  —— 池级单调 request_id + (group,id) 二元 demux:错组响应绝不投递、跨组共享连接不串号,
+  消除 false matched 推进(=已提交数据被截断)的复制面路径
+- `crates/rr-storage/src/rocks.rs` `test_flush_covers_every_cf`(:727)
+  —— flush 覆盖全部 CF,任何 CF 的持久状态都不被遗漏
+- `crates/rr-raft/src/rocks_log_storage.rs` `test_rocks_get_log_state_recovers_tail_of_large_log`(:803)
+  —— 大日志下 get_log_state 恢复锚点正确(原全 CF 扫描的 O(1) 化,结果等价性回归)
+- `crates/rr-raft/src/sm_adapter.rs` `test_membership_sidecar_torn_tmp_does_not_resurrect`(:1012)
+  —— membership sidecar 原子写:torn tmp 不复活陈旧 membership,已提交 membership 的恢复锚点完整
+- `crates/rr-admin/src/node_reset.rs` `refuses_when_lock_file_is_flock_held`(:402)
+  —— node-reset 真 fcntl/flock 双探测 fail-closed:运行中节点的数据目录不可被 --force 抹除
 
 ### 已知缺口
 
@@ -218,6 +243,21 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   闸门由 completion 数修正为 submission 数(hook 引入后不致窗口失效)。回归测试见上方
   "现有测试" R-4 条目组;终证:`tests/crash` scenario A(SIGTERM)+ scenario B
   (10 轮 SIGKILL,3266/3266 oracle 全活,节点日志零 panic、零 head-gap 告警)。
+- **【2026-09-23 fresh review P0① → 批次 A】日志投毒崩溃循环**:unkeyed 客户端字节带
+  house magic + 畸形 body 在 apply 期 decode Err → sm worker 死 → RaftCore Fatal,rocks
+  下重启重放再死(证据 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)。
+
+  **✅ 已闭环(2026-09-23)**:`rr_core::ingress::validate_client_payload` 入口校验 + apply
+  侧批拆分 gate 限定 raw client bytes;apply 错误契约见 ADR A-0018
+  (`.sisyphus/adr/A-0018-apply-error-contract.md`)。
+- **【2026-09-23 fresh review P0② → 批次 A】TCP 传输 request_id 跨组碰撞** → 响应错投
+  → false matched 推进(证据 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)。
+
+  **✅ 已闭环(2026-09-23)**:池级单调 request_id + (group,id) 二元 demux + 撞号响亮化。
+- **【2026-09-23 fresh review P0④ → 批次 A】node-reset 的 `rocks_lock_held` 恒 false**,
+  `--force` 可抹运行中节点的数据目录(证据 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)。
+
+  **✅ 已闭环(2026-09-23)**:真 fcntl/flock 双探测 fail-closed。
 
 ## INV-2 Linearizable Read — 线性一致读
 
@@ -271,6 +311,9 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   `read_local` 历史单独记录不送检)
 - `tests/integration/src/lib.rs` `test_concurrent_writes_under_chaos_linearizability`
   (E5 计数断言保留为回归兜底,记录的写历史同时送 checker——INV-2 的写侧压力面)
+- `crates/rr-network/src/client_service.rs` `test_read_linearizable_ambiguous_redirect_maps_to_unavailable`(:632)
+  —— 歧义 leader 线索映射为 UNAVAILABLE,绝不按错误目标作答(2026-09-23 批次 B
+  错误脱敏/改码的线性一致读侧)
 
 ### 已知缺口
 
@@ -325,6 +368,8 @@ at-least-once 重投),用户可见的 `Service::handle()` 效果**恰好发生�
 | 4 | `crates/rr-raft/src/service_adapter.rs:291-348` | `apply_keyed`:Replay 不调用用户 service;New 才执行并 `record` |
 | 5 | `crates/rr-raft/src/service_adapter.rs:375-401`、`:403-456` | 幂等层状态随 `FramedSnapshot` 快照/恢复,跨重启保持 |
 | 6 | `crates/rr-raft/src/ingestor_runner.rs:203-213` | seed 失败 = supervisor 退出 + 显式错误,无静默 replay-from-earliest |
+| 7 | `crates/rr-raft/src/service_adapter.rs:288-292` | apply 批拆分 gate:批拆分仅对 raw client bytes 生效;FramedEntry/ingestor 条目 verbatim apply(review P0① 伴随) |
+| 8 | `crates/rr-ingestor-kafka/src/backend.rs:397-414` | poll 错误臂:poll 错误前先交付已消费部分批——当前 leader 任期不静默跳命令(review P0⑤) |
 
 ### 现有测试
 
@@ -345,6 +390,20 @@ at-least-once 重投),用户可见的 `Service::handle()` 效果**恰好发生�
 - 形式化(R-2):`formal/tla/OffsetExactlyOnce.tla`(TLC 小模型 558 态零反例,2026-09-10;
   exactly-once apply / 响应归属 / watermark 语义 / 无虚假 Expired;植入的 clamp-to-0
   反例被 TLC 抓到——`formal/tla/bugs/OffsetClampBug.tla`)
+- `crates/rr-ingestor-kafka/src/mock.rs` `fail_next_poll_after_returns_partial_batch_then_errors`(:243)、
+  `fail_next_poll_after_more_than_queued_returns_all_then_errors`(:272)
+  —— poll 错误臂先交付已消费部分批:当前 leader 任期不静默跳命令(review P0⑤ 修复,
+  Mock 注入 seam)
+- `crates/rr-raft/src/service_adapter.rs` `apply_ingestor_entry_with_batch_magic_payload_applies_verbatim`(:1392)、
+  `apply_framed_entry_does_not_split_inner_batch_payload`(:1432)
+  —— apply 侧批拆分仅对 raw client bytes 生效;FramedEntry/ingestor 条目 verbatim apply,
+  keyed/摄入路径语义不被批格式干扰
+- `crates/rr-raft/src/ingestor_runner.rs` `parked_supervisor_exits_when_cancel_sender_dropped`(:831)
+  —— supervisor 停驻后随 cancel 通道关闭退出,无僵尸 poll
+- `crates/rr-raft/src/idempotency.rs` `new_namespace_beyond_cap_is_rejected_loudly`(:496)
+  —— 幂等命名空间上限(1024)响亮拒绝,fail-closed 边界语义的扩展
+- `crates/rr-server/src/dispatch.rs` `test_dispatch_keyed_payload_bypasses_ingress_validation`(:506)
+  —— keyed 负载结构性绕开 ingress 校验(FramedEntry 在 apply 侧解码校验),登记以钉住该结构前提
 
 ### 已知缺口
 
@@ -366,6 +425,11 @@ at-least-once 重投),用户可见的 `Service::handle()` 效果**恰好发生�
   (`rr-ingestor-kafka/src/lib.rs:135`/`:160`)。
 - **附属观察(非 review 条目)**:review Oracle Q5 建议依赖审计"offset→request_id 映射是否
   住错层"(rr-raft 核心不应出现 Kafka/offset 概念),随 WS-4 一并评估。
+- **【2026-09-23 fresh review P0⑤ → 批次 A】Kafka `poll()` 错误路径丢已消费部分批 +
+  supervisor 不重 seek** → 当前 leader 任期静默跳命令(证据
+  `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)。
+
+  **✅ 已闭环(2026-09-23)**:错误臂先交付部分批(+Mock 注入 seam 回归)。
 
 ## INV-4 At-Least-Once Output — 输出至少一次投递
 
@@ -405,6 +469,7 @@ apply,就**最终会被投递**到目标(Raft 写/Kafka 发布):投递失败按�
 | 3 | `crates/rr-raft/src/output_runner.rs:248-250` | 失败退避重试,无丢弃分支;"永不下线"目标以 30s 封顶退避无限重试 |
 | 4 | `crates/rr-raft/src/service_adapter.rs:152-158` | `pending_outputs` = `seq > sent_watermark`,语义单一 |
 | 5 | `crates/rr-raft/src/service_adapter.rs:387-398`、`:420-432` | outbox 状态入/出 `FramedSnapshot.framework_state.outbox` |
+| 6 | `crates/rr-raft/src/output_runner.rs:379-388` | RaftWrite 幂等键派生(`raft_write_idem_key`):`rr.output.g<N>` 按源组命名空间化——跨源组 seq 碰撞消除(review P0③) |
 
 ### 现有测试
 
@@ -415,6 +480,12 @@ apply,就**最终会被投递**到目标(Raft 写/Kafka 发布):投递失败按�
   `:985` `snapshot_restore_roundtrip_preserves_outbox_state`
 - 形式化(R-2):`formal/tla/OutputWatermark.tla`(TLC 小模型 280k 态零反例,2026-09-10;
   无幻影推进 / 保序游标 / 切换重复窗口显式允许;性质↔实现映射见 formal/tla/README.md)
+- `crates/rr-raft/src/output_runner.rs` `raft_write_idem_key_is_namespaced_per_source_group`(:540)
+  —— RaftWrite 幂等键按源组命名空间化(`rr.output.g<N>`),跨源组 seq 碰撞消除(review P0③)
+- `crates/rr-raft/src/output_runner.rs` `run_send_loop_reports_outbox_unsupported`(:652)、
+  `run_send_loop_parks_when_group_stopped`(:680)、`send_backoff_is_cancellable_via_stop`(:707)
+  —— 组不支持 outbox 响亮上报;组停后 runner 停驻不自旋;退避可经 stop 取消
+  (生命周期竞态修复组)
 
 ### 已知缺口
 
@@ -425,6 +496,10 @@ apply,就**最终会被投递**到目标(Raft 写/Kafka 发布):投递失败按�
   - `pending_outputs` 失败(组不支持 outbox)时 runner 仅 `warn!` 后 `return`
     (`output_runner.rs:171-176`)——该组 output 将停止投递直至下次成为 leader 重入循环;
     属"显式降级"而非静默丢弃,但无 metric 之外的告警通道。
+- **【2026-09-23 fresh review P0③ → 批次 A】`OutputTarget::RaftWrite` 幂等键跨源组碰撞**
+  → 静默丢输出/Expired 锁死(证据 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)。
+
+  **✅ 已闭环(2026-09-23)**:幂等键按源组命名空间化。
 
 ## INV-5 Snapshot Consistency — 快照一致性
 
@@ -474,6 +549,14 @@ index 的状态一致(相关契约经 openraft 源码级核对,见 ADR A-0002)�
 - `tests/integration/src/lib.rs:1430` `test_snapshot_catchup`(落后 follower 经快照追平)
 - `tests/crash/src/scenarios.rs` `scenario_c_snapshot_purge_kill`(快照/清理周期下的 SIGKILL:
   持久化 SM 快照 + 未清理日志尾部合成恢复,落后过清理界线的节点经快照安装追平)
+- `crates/rr-raft/src/snapshot_store.rs` `save_if_newer_refuses_stale_write_from_cache_alone`(:562)、
+  `save_if_newer_unseeded_handle_falls_back_to_disk`(:603)、
+  `atomic_write_enveloped_round_trip_and_tmp_cleanup`(:521)
+  —— 快照守卫 `last_persisted_index`:陈旧快照写入拒绝、未播种句柄回退磁盘判定、
+  信封原子写 round-trip + tmp 清理
+- `crates/rr-network/src/raft_service.rs` `collect_snapshot_stream_rejects_missing_done_chunk`(:417)、
+  `receive_with_timeout_aborts_stalled_stream`(:426)
+  —— InstallSnapshot 接收侧:缺 done 块拒绝、停滞流整体超时应答(单缓冲 + 总超时 + done 终止)
 
 ### 已知缺口
 
@@ -527,6 +610,7 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
 | 2 | `crates/rr-server/src/dispatch.rs`(`submit_write`) | 写提交前强制路由;group 不存在即失败,无旁路 |
 | 3 | `crates/rr-server/src/node.rs:374-412` | 成员变化驱动 start/stop group,使节点上运行的 group 集合收敛于路由表 |
 | 4 | `crates/rr-server/src/dispatch.rs:115-122` | 非 leader 仅重定向,不在本地强制提交 |
+| 5 | `crates/rr-config-etcd/src/lib.rs:836-897`(`watch_domain_forever` 重连/续接;内层消费循环 `run_watch_loop` `:349`) | watch 断线指数退避重连 + 从 last-seen revision 续接 + compaction 对账 + WatchStreamGuard abort-on-drop——配置面不存在永久失明路径(review P0⑥) |
 
 ### 现有测试
 
@@ -543,6 +627,16 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
 - 形式化(R-2):`formal/tla/RoutingTableSwitch.tla`(TLC 零反例,2026-09-10;Mem 整表快照与
   etcd 按 key 增量两种 watch 语义各一份 cfg;路由由视图唯一决定 / 收敛后无旧路由 /
   watch 传播最终收敛)
+- `crates/rr-config-etcd/src/lib.rs` `watch_backoff_doubles_and_caps`(:1165)、
+  `next_start_revision_resumes_after_last_seen`(:1155)、
+  `watch_stream_guard_aborts_tasks_on_drop`(:1342)、`diff_tables_groups_changed_and_removed`(:1253)
+  —— etcd watch 断线指数退避重连、从 last-seen revision 续接无缺口、guard abort-on-drop
+  无泄漏、revision 探针变更检测(review P0⑥)
+- `crates/rr-config/src/mem.rs` `test_watch_lagged_consumer_recovers_after_dropped_events`(:586)、
+  `test_remove_node_strips_dangling_replicas`(:548)
+  —— mem provider:滞后消费者丢事件后恢复、remove_node 剥除悬挂 replicas(表完整性)
+- `crates/rr-server/src/node.rs` `test_watch_loop_skips_duplicate_start_via_typed_precheck`(:1613)
+  —— watch loop 重复事件不重复 start_group
 
 ### 已知缺口
 
@@ -571,6 +665,12 @@ ConfigProvider 中的路由表为**单一事实源**,不存在第二份缓存视
   (`tests/integration/src/lib.rs:2488`、`:2538`),属于 review P1 记录的 sleep/固定端口 flaky
   模式,根治方向见可靠性专项 R-3(确定性仿真)与 R-6(router 变迁 proptest)。
   **(2026-08-29 状态确认:仍 open,归 R-3/R-6;A-0013 只闭环 `GroupMeta.leader` 抽象,不涉及切换窗口语义。)**
+- **【2026-09-23 fresh review P0⑥ → 批次 A】etcd watch 三出口一次性 break,无重连/恢复/指标,
+  JoinHandle 被丢** —— 配置面永久失明且无信号(证据
+  `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)。
+
+  **✅ 已闭环(2026-09-23)**:重连/恢复/compaction 对账 + WatchStreamGuard abort-on-drop +
+  `rr_config_etcd_*` 指标族。
 
 ## INV-7 Membership Safety — 成员变更不丢 quorum
 
@@ -686,6 +786,7 @@ gRPC 平面的五个 gate 全部通过才允许 `RrNode` 构造成功;`allow_ins
 | 3 | `crates/rr-server/src/config_file.rs:946-980`(测试) | auth 环境变量未设置/为空 → fail-closed |
 | 4 | `crates/rr-network/src/auth.rs:116` | Bearer token 校验拦截器 |
 | 5 | `crates/rr-server/src/node.rs:452-462` | gRPC server TLS 装配 |
+| 6 | `crates/rr-server/src/node.rs:262`(`RrNode::new` 首步 `config.validate()`)→ `crates/rr-server/src/config.rs:346-359` | `metrics_bind_host`/`admin_bind_host` 默认 loopback(`config.rs:50`/`:54`)、非 IP 字面量拒绝——可观测/admin 平面默认不暴露(2026-09-23 批次 B) |
 
 ### 现有测试
 
@@ -697,6 +798,13 @@ gRPC 平面的五个 gate 全部通过才允许 `RrNode` 构造成功;`allow_ins
 - `tests/integration/src/tls_auth_e2e.rs:226` `tls_mtls_bearer_auth_e2e_matrix`(TLS/mTLS/bearer 端到端矩阵)
 - `crates/rr-network/src/auth.rs` 单元测试(缺/错 token 拒绝、报错不区分失败模式 `:266` 等)
 - `crates/rr-server/src/config_file.rs:946-980` fail-closed 测试组
+- `crates/rr-server/src/node.rs` `bind_hosts_default_to_loopback`(:1369)、
+  `validate_metrics_bind_host_must_be_ip_literal`(:1398)、
+  `validate_admin_bind_host_must_be_ip_literal`(:1382)
+  —— `metrics_bind_host`/`admin_bind_host` 默认 loopback、非 IP 字面量拒绝
+  (2026-09-23 批次 B,部分闭环 P2 缺口)
+- `crates/rr-network/src/rate_limit.rs` `per_caller_config_limits_unauthenticated_via_global_fallback`(:876)
+  —— per-caller 限流对未认证调用方强制走全局兜底桶(运行时强制链)
 
 ### 已知缺口
 
@@ -719,6 +827,9 @@ gRPC 平面的五个 gate 全部通过才允许 `RrNode` 构造成功;`allow_ins
   `crates/rr-server/src/health.rs:192-214` 的请求分发无任何鉴权;绑定地址由
   `metrics_port` 决定(`node.rs:565-573`),无 loopback 限制。修复方向:至少默认绑 loopback
   + 文档警示。**(2026-08-29 状态确认:仍 open,归 0.2.1 backlog。)**
+  **(2026-09-23 部分闭环,批次 B)**:`metrics_bind_host`/`admin_bind_host` 落地——默认
+  loopback 绑定 + 非 IP 字面量拒绝(部署制品显式 `0.0.0.0`,见 deploy/helm 与 deploy/k8s
+  配置),即"修复方向"的 loopback 半段已闭环;明文无 auth 半段仍 open(0.2.1 backlog)。
 - **【review P1 → RC 并行项】audit 配对不完整**:`TriggerSnapshot` 无 started、
   `DrainNode` 无 finished、`reset_ingestor_offset` 无 started;**ClientService mutation 完全
   无 audit**(`crates/rr-server/src/admin.rs:223`/`:358`/`:602-647` 等处)。安全事件的
@@ -756,9 +867,16 @@ gRPC 平面的五个 gate 全部通过才允许 `RrNode` 构造成功;`allow_ins
 | 路由切换无 fence/epoch,测试依赖固定 sleep | P1(sleep/flaky)关联 | INV-6 | R-3(确定性仿真)/ R-6(proptest) | 可靠性专项 |
 | /metrics /ready 明文无 auth | P2 | INV-8 | 0.2.1 backlog | — |
 | outbox 缺集群级换主续投端到端测试 | 无(review 未列) | INV-4 | R-4 / R-8 | 可靠性专项 |
+| 日志投毒崩溃循环(apply decode Err → sm worker 死)(✅ 已闭环 2026-09-23:ingress 校验 + apply 批拆分 gate) | fresh-review P0① | INV-1 | 批次 A | ADR A-0018 |
+| TCP request_id 跨组碰撞 → false matched(✅ 已闭环 2026-09-23:池级 id + (group,id) demux) | fresh-review P0② | INV-1 | 批次 A | — |
+| `OutputTarget::RaftWrite` 幂等键跨源组碰撞(✅ 已闭环 2026-09-23:`rr.output.g<N>` 命名空间) | fresh-review P0③ | INV-4 | 批次 A | — |
+| node-reset `rocks_lock_held` 恒 false(✅ 已闭环 2026-09-23:真 flock/fcntl 双探测 fail-closed) | fresh-review P0④ | INV-1 | 批次 A | — |
+| Kafka poll 错误臂丢部分批(✅ 已闭环 2026-09-23:错误前先交付部分批) | fresh-review P0⑤ | INV-3 | 批次 A | — |
+| etcd watch 无重连/恢复(✅ 已闭环 2026-09-23:重连 + revision 续接 + guard + 指标) | fresh-review P0⑥ | INV-6 | 批次 A | — |
 
 修复工作流定义见 `.sisyphus/plans/rr-v0.2.0-release-roadmap.md`(WS-1~WS-8)与
-`.sisyphus/plans/rr-reliability-program.md`(R-1~R-8)。
+`.sisyphus/plans/rr-reliability-program.md`(R-1~R-8);`fresh-review` 指 2026-09-23 全量复审
+(`.sisyphus/evidence/rr-fresh-review-2026-09-23.md`),批次 A–E 为其修复落地波次。
 
 ## 后续方向:不变量执法
 

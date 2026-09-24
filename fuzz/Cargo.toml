@@ -75,3 +75,17 @@ path = "fuzz_targets/fuzz_apply_outcome_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_batch_frame_decode"
+path = "fuzz_targets/fuzz_batch_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_batch_frame_roundtrip"
+path = "fuzz_targets/fuzz_batch_frame_roundtrip.rs"
+test = false
+doc = false
+bench = false

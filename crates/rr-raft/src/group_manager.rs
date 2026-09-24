@@ -193,6 +193,15 @@ impl RaftGroupManager {
     /// RocksDB at `{base_path}/{group_id}` when set, in-memory otherwise.
     #[instrument(skip(self))]
     pub async fn start_group(&self, group_id: GroupId) -> Result<(), RrError> {
+        // Fast path: refuse a duplicate start BEFORE building/opening any
+        // storage, so a double-start never opens the live group's log
+        // directory a second time. `register_node` keeps the authoritative
+        // entry-based race guard for concurrent starters.
+        if self.groups.contains_key(&group_id) {
+            return Err(RrError::Application(format!(
+                "group {group_id} already exists"
+            )));
+        }
         let sm = (self.sm_factory)(group_id);
         let ctrl = sm.ingestor_offset_control();
         let read = sm.read_handle();
@@ -499,18 +508,21 @@ impl RaftGroupManager {
             hook.on_shutdown().await;
         }
 
-        raft.shutdown()
+        let shutdown_result = raft
+            .shutdown()
             .await
-            .map_err(|e| RrError::Application(e.to_string()))?;
+            .map_err(|e| RrError::Application(e.to_string()));
 
         // ADR A-0011 C3: the append source (RaftCore) is stopped; now drain
         // the sink. `close()` waits for the batcher's final fsync and for
-        // every pending completion callback to be answered.
+        // every pending completion callback to be answered. Attempted
+        // UNCONDITIONALLY — a failed shutdown must not skip the final flush —
+        // and the shutdown error is still the one returned when both fail.
         #[cfg(feature = "rocks")]
-        {
+        let close_result = {
             let log_storage_close = state.lock().await.node.log_storage_close.clone();
-            if let Some(log_storage) = log_storage_close {
-                log_storage.close().await.map_err(|e| {
+            match log_storage_close {
+                Some(log_storage) => log_storage.close().await.map_err(|e| {
                     tracing::error!(
                         group_id,
                         error = %e,
@@ -519,9 +531,14 @@ impl RaftGroupManager {
                     RrError::Application(format!(
                         "stop_group({group_id}): log storage close failed: {e}"
                     ))
-                })?;
+                }),
+                None => Ok(()),
             }
-        }
+        };
+        #[cfg(not(feature = "rocks"))]
+        let close_result: Result<(), RrError> = Ok(());
+
+        shutdown_result.and(close_result)?;
 
         info!(group_id, node_id = self.node_id, "stopped raft group");
         let node_id = self.node_id;
@@ -621,6 +638,13 @@ impl RaftGroupManager {
             .map(|entry| Arc::clone(entry.value()))
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
         let mut guard = state.lock().await;
+        // stop_group removes the group from the map BEFORE locking its
+        // GroupState; the Arc fetched above may belong to a group being torn
+        // down right now. Re-check membership under the lock so a supervisor
+        // is never spawned onto a removed group.
+        if !self.groups.contains_key(&group_id) {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
         if guard.ingestor_handle.is_some() {
             return Err(RrError::Application(format!(
                 "ingestor already attached to group {group_id}"
@@ -653,6 +677,11 @@ impl RaftGroupManager {
             .map(|entry| Arc::clone(entry.value()))
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
         let mut guard = state.lock().await;
+        // See attach_ingestor_inner: re-check membership under the GroupState
+        // lock so a runner is never spawned onto a group stop_group removed.
+        if !self.groups.contains_key(&group_id) {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
         if guard.output_handle.is_some() {
             return Err(RrError::Application(format!(
                 "output runner already attached to group {group_id}"
@@ -680,6 +709,11 @@ impl RaftGroupManager {
             .map(|entry| Arc::clone(entry.value()))
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
         let mut guard = state.lock().await;
+        // See attach_ingestor_inner: re-check membership under the GroupState
+        // lock so a ticker is never spawned onto a group stop_group removed.
+        if !self.groups.contains_key(&group_id) {
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
         if guard.metrics_ticker_handle.is_some() {
             return Ok(());
         }
@@ -709,13 +743,28 @@ impl RaftGroupManager {
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
         let prev = {
             let mut guard = state.lock().await;
+            // See attach_ingestor_inner: re-check membership under the
+            // GroupState lock so a promoter is never spawned onto a group
+            // stop_group removed.
+            if !self.groups.contains_key(&group_id) {
+                return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+            }
             guard.learner_promoter_handle.take()
         };
         if let Some(prev) = prev {
             prev.stop().await;
         }
         let handle = crate::learner_promoter::spawn_for_group(self.clone(), group_id, config);
-        state.lock().await.learner_promoter_handle = Some(handle);
+        let mut guard = state.lock().await;
+        if !self.groups.contains_key(&group_id) {
+            // The group was removed while the previous promoter was stopping;
+            // shut the freshly spawned promoter down instead of leaking it
+            // onto a dead group.
+            drop(guard);
+            handle.stop().await;
+            return Err(RrError::Raft(RaftError::GroupNotFound { group_id }));
+        }
+        guard.learner_promoter_handle = Some(handle);
         info!(group_id, "started learner-promoter");
         Ok(())
     }
@@ -765,18 +814,34 @@ impl RaftGroupManager {
 
     /// Propose a client write to the Raft group, recording proposal duration
     /// and updating Raft gauge metrics on success.
+    ///
+    /// The payload is validated against the framework envelope magics
+    /// (`rr_core::ingress::validate_client_payload`) before propose: a
+    /// payload that collides with a magic but is malformed (or carries a
+    /// future schema version) is rejected with [`RrError::Codec`] — such
+    /// bytes would fail apply deterministically on every node and kill the
+    /// group (log poison).
     #[instrument(skip(self, payload))]
     pub async fn write(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, RrError> {
+        rr_core::ingress::validate_client_payload(&payload)?;
         let (raft, _guard) = self
             .get_raft_for_write(group_id)
             .await
             .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
 
         let start = Instant::now();
-        let result = raft
-            .client_write(payload.into())
-            .await
-            .map_err(|e| RrError::Application(e.to_string()))?;
+        // Mirror write_batch: a follower-served write must surface the
+        // leader redirect (leader id + addr), not a stringified op-error
+        // that the dispatch layer cannot turn into `leader_info`.
+        let result = raft.client_write(payload.into()).await.map_err(|e| {
+            if let Some(fwd) = e.forward_to_leader() {
+                return RrError::Raft(RaftError::NotLeader {
+                    leader: fwd.leader_id,
+                    leader_addr: fwd.leader_node.as_ref().map(|n| n.addr.clone()),
+                });
+            }
+            RrError::Application(e.to_string())
+        })?;
 
         let gid = group_id.to_string();
         histogram!("rr_proposal_duration_seconds", "group_id" => gid.clone(), "source" => "client")
@@ -801,6 +866,10 @@ impl RaftGroupManager {
     ///
     /// Returns state-machine responses in the same order as input payloads.
     /// Uses OpenRaft `client_write_many()` to reduce per-entry Raft round trips.
+    ///
+    /// Every payload passes the same ingress validation as [`Self::write`];
+    /// the first malformed framework frame rejects the whole call with
+    /// [`RrError::Codec`] and nothing is proposed.
     #[instrument(skip(self, payloads))]
     pub async fn write_batch(
         &self,
@@ -809,6 +878,13 @@ impl RaftGroupManager {
     ) -> Result<Vec<Vec<u8>>, RrError> {
         if payloads.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Framework-encoded entries (e.g. the ingestor's `FramedEntry`
+        // bytes) are well-formed by construction and pass; the check is a
+        // prefix comparison for plain payloads.
+        for payload in &payloads {
+            rr_core::ingress::validate_client_payload(payload)?;
         }
 
         let (raft, _guard) = self
@@ -868,11 +944,7 @@ impl RaftGroupManager {
             .groups
             .get(&group_id)
             .map(|entry| Arc::clone(entry.value()))
-            .ok_or_else(|| {
-                RrError::Application(format!(
-                    "group {group_id} state machine does not support local read"
-                ))
-            })?;
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
         let read_handle = state.lock().await.read_handle.clone().ok_or_else(|| {
             RrError::Application(format!(
                 "group {group_id} state machine does not support local read"
@@ -1501,6 +1573,121 @@ mod tests {
         // Write should succeed and record metrics without panic
         let result = mgr.write(1, vec![1, 2, 3]).await;
         assert!(result.is_ok(), "write failed: {:?}", result.err());
+    }
+
+    // P0-1: malformed framework frames are rejected before propose — they
+    // would fail apply deterministically on every node and kill the group.
+    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    #[tokio::test]
+    async fn test_write_rejects_malformed_framework_frame() {
+        let mgr = RaftGroupManager::new(1, noop_factory());
+
+        let mut bad_batch = Vec::from(rr_core::batch::BATCH_FRAME_MAGIC);
+        bad_batch.extend_from_slice(b"garbage");
+        let err = mgr.write(1, bad_batch).await.unwrap_err();
+        assert!(
+            matches!(err, RrError::Codec(_)),
+            "expected Codec rejection for a malformed batch frame, got: {err}"
+        );
+
+        let mut bad_entry = Vec::from(rr_core::framed_entry::FRAMED_ENTRY_MAGIC);
+        bad_entry.extend_from_slice(b"not bincode");
+        let err = mgr.write(1, bad_entry).await.unwrap_err();
+        assert!(
+            matches!(err, RrError::Codec(_)),
+            "expected Codec rejection for a malformed framed entry, got: {err}"
+        );
+    }
+
+    // P0-1: write_batch applies the same guard to every payload before any
+    // propose; well-formed framework envelopes (the ingestor's shape) pass
+    // validation and fail later on group lookup, not on the guard.
+    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    #[tokio::test]
+    async fn test_write_batch_rejects_malformed_frame_before_propose() {
+        let mgr = RaftGroupManager::new(1, noop_factory());
+
+        let good = b"plain payload".to_vec();
+        let mut bad = Vec::from(rr_core::batch::BATCH_FRAME_MAGIC);
+        bad.extend_from_slice(b"garbage");
+        let err = mgr.write_batch(1, vec![good, bad]).await.unwrap_err();
+        assert!(
+            matches!(err, RrError::Codec(_)),
+            "expected Codec rejection when any payload is malformed, got: {err}"
+        );
+
+        let framed = rr_core::framed_entry::FramedEntry::from_payload(b"x".to_vec())
+            .with_offset(vec![1])
+            .encode()
+            .unwrap();
+        let err = mgr.write_batch(1, vec![framed]).await.unwrap_err();
+        assert!(
+            matches!(err, RrError::Raft(RaftError::GroupNotFound { .. })),
+            "well-formed framed entries must pass ingress validation, got: {err}"
+        );
+    }
+
+    /// Unknown-group local reads must be `GroupNotFound`, not the misleading
+    /// "does not support local read" application error.
+    #[tokio::test]
+    async fn test_local_read_unknown_group_returns_group_not_found() {
+        let mgr = RaftGroupManager::new(1, noop_factory());
+        let err = mgr.local_read(99, vec![1]).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RrError::Raft(RaftError::GroupNotFound { group_id: 99 })
+            ),
+            "expected GroupNotFound for an unknown group, got: {err}"
+        );
+
+        // ... while a KNOWN group without a read handle keeps the
+        // "does not support local read" application error.
+        mgr.start_group(1).await.unwrap();
+        let err = mgr.local_read(1, vec![1]).await.unwrap_err();
+        assert!(
+            err.to_string().contains("does not support local read"),
+            "expected the unsupported-read error for a NoopSM group, got: {err}"
+        );
+        mgr.stop_group(1).await.unwrap();
+    }
+
+    /// A write landing on a non-leader (here: a started-but-uninitialized
+    /// group) must surface as `RaftError::NotLeader` carrying the redirect
+    /// fields — mirroring `write_batch` — not as a stringified op-error.
+    #[tokio::test]
+    async fn test_write_on_non_leader_surfaces_not_leader_redirect() {
+        let mgr = RaftGroupManager::new(1, noop_factory());
+        mgr.start_group(1).await.unwrap();
+        let err = mgr.write(1, vec![1, 2, 3]).await.unwrap_err();
+        match err {
+            RrError::Raft(RaftError::NotLeader {
+                leader,
+                leader_addr,
+            }) => {
+                assert!(
+                    leader.is_none() && leader_addr.is_none(),
+                    "an uninitialized group knows no leader; got id={leader:?} addr={leader_addr:?}"
+                );
+            }
+            other => panic!("expected NotLeader redirect, got: {other:?}"),
+        }
+        mgr.stop_group(1).await.unwrap();
+    }
+
+    /// Duplicate `start_group` must be refused before any storage is opened
+    /// (the early contains_key guard), not only by the register-node race
+    /// guard after the node was built.
+    #[tokio::test]
+    async fn test_start_group_duplicate_refused_before_storage_open() {
+        let mgr = RaftGroupManager::new(1, noop_factory());
+        mgr.start_group(7).await.unwrap();
+        let err = mgr.start_group(7).await.unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "expected 'already exists', got: {err}"
+        );
+        mgr.stop_group(7).await.unwrap();
     }
 
     // ── R-2 / A-0033: deferred (two-phase) response ──────────────────────

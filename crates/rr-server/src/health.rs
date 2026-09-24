@@ -29,7 +29,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -121,6 +121,12 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Per-connection serving timeout for the HTTP/1 observability sockets.
+/// Bounds slowloris-style clients that open a connection and trickle (or
+/// never finish) a request; a normal `/health` `/ready` `/metrics`
+/// exchange completes in milliseconds.
+const HTTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Spawn the HTTP observability server. Returns a `JoinHandle` the caller
 /// must own and, on shutdown, wake via `shutdown_rx`.
 pub async fn spawn_http_server(
@@ -134,7 +140,14 @@ pub async fn spawn_http_server(
             "failed to bind HTTP observability port {addr}: {e}"
         )))
     })?;
-    spawn_http_server_inner(listener, prom_handle, readiness, shutdown_rx).await
+    spawn_http_server_inner(
+        listener,
+        prom_handle,
+        readiness,
+        shutdown_rx,
+        HTTP_CONNECTION_TIMEOUT,
+    )
+    .await
 }
 
 async fn spawn_http_server_inner(
@@ -142,6 +155,7 @@ async fn spawn_http_server_inner(
     prom_handle: PrometheusHandle,
     readiness: ReadinessFlag,
     mut shutdown_rx: watch::Receiver<bool>,
+    conn_timeout: Duration,
 ) -> Result<tokio::task::JoinHandle<()>, RrError> {
     let addr = listener.local_addr().map_err(|e| {
         RrError::Config(ConfigError::InvalidConfig(format!(
@@ -151,6 +165,10 @@ async fn spawn_http_server_inner(
     info!(%addr, "HTTP observability server listening (/health /ready /metrics)");
 
     let handle = tokio::spawn(async move {
+        // Per-connection tasks are tracked in a JoinSet — no
+        // fire-and-forget: shutdown aborts live connections, and finished
+        // tasks are reaped so the set stays bounded under churn.
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
@@ -168,23 +186,36 @@ async fn spawn_http_server_inner(
                     let io = TokioIo::new(stream);
                     let ph = prom_handle.clone();
                     let rf = readiness.clone();
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         let service = hyper::service::service_fn(move |req| {
                             handle_request(req, ph.clone(), rf.clone())
                         });
-                        if let Err(err) = hyper::server::conn::http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                        {
-                            // Don't spam on normal client disconnects.
-                            if !is_benign_hyper_error(&err) {
-                                warn!("hyper connection error: {err}");
+                        let serving = hyper::server::conn::http1::Builder::new()
+                            .serve_connection(io, service);
+                        match tokio::time::timeout(conn_timeout, serving).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                // Don't spam on normal client disconnects.
+                                if !is_benign_hyper_error(&err) {
+                                    warn!("hyper connection error: {err}");
+                                }
+                            }
+                            Err(_) => {
+                                warn!(%addr, "HTTP connection exceeded serving timeout; closing (slowloris mitigation)");
                             }
                         }
                     });
+                    while let Some(outcome) = connections.try_join_next() {
+                        if let Err(e) = outcome {
+                            warn!(%addr, error = %e, "HTTP connection task failed");
+                        }
+                    }
                 }
             }
         }
+        // Dropping the JoinSet aborts any in-flight connections; they are
+        // short-lived probe/scrape requests, so this cannot hang shutdown.
+        connections.abort_all();
     });
     Ok(handle)
 }
@@ -199,14 +230,12 @@ async fn handle_request(
         (&hyper::Method::GET, "/ready") => ready_response(&readiness),
         (&hyper::Method::GET, "/metrics") => {
             let body = prom_handle.render();
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(
-                    hyper::header::CONTENT_TYPE,
-                    "text/plain; version=0.0.4; charset=utf-8",
-                )
-                .body(Full::new(Bytes::from(body)))
-                .expect("valid response")
+            let mut resp = Response::new(Full::new(Bytes::from(body)));
+            resp.headers_mut().insert(
+                hyper::header::CONTENT_TYPE,
+                hyper::header::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+            );
+            resp
         }
         _ => text_response(StatusCode::NOT_FOUND, "not found\n"),
     };
@@ -215,30 +244,33 @@ async fn handle_request(
 
 fn ready_response(readiness: &ReadinessFlag) -> Response<Full<Bytes>> {
     let state = readiness.snapshot();
-    let status = if state.ready {
+    let body = serde_json::to_vec(&state).unwrap_or_else(|_| {
+        br#"{"ready":false,"reason":"json_encode_failed","since_unix_secs":0}"#.to_vec()
+    });
+    // Infallible construction: status/headers are set on a live Response
+    // rather than via the fallible builder, so a response-construction
+    // bug can never panic the connection task.
+    let mut resp = Response::new(Full::new(Bytes::from(body)));
+    *resp.status_mut() = if state.ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let body = serde_json::to_vec(&state).unwrap_or_else(|_| {
-        br#"{"ready":false,"reason":"json_encode_failed","since_unix_secs":0}"#.to_vec()
-    });
-    Response::builder()
-        .status(status)
-        .header(
-            hyper::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )
-        .body(Full::new(Bytes::from(body)))
-        .expect("valid response")
+    resp.headers_mut().insert(
+        hyper::header::CONTENT_TYPE,
+        hyper::header::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    resp
 }
 
 fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(status)
-        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Full::new(Bytes::from(body.to_string())))
-        .expect("valid response")
+    let mut resp = Response::new(Full::new(Bytes::from(body.to_string())));
+    *resp.status_mut() = status;
+    resp.headers_mut().insert(
+        hyper::header::CONTENT_TYPE,
+        hyper::header::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp
 }
 
 fn is_benign_hyper_error(err: &hyper::Error) -> bool {
@@ -413,9 +445,15 @@ mod tests {
         let readiness = ReadinessFlag::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
-            .await
-            .unwrap();
+        let _handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            HTTP_CONNECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let (status, _headers, body) = http_get(port, "/health").await;
         assert_eq!(status, 200);
@@ -432,9 +470,15 @@ mod tests {
         let readiness = ReadinessFlag::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
-            .await
-            .unwrap();
+        let _handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            HTTP_CONNECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let (status, _headers, body) = http_get(port, "/ready").await;
         assert_eq!(status, 503);
@@ -454,9 +498,15 @@ mod tests {
         readiness.set(true);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
-            .await
-            .unwrap();
+        let _handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            HTTP_CONNECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let (status, _headers, body) = http_get(port, "/ready").await;
         assert_eq!(status, 200);
@@ -475,9 +525,15 @@ mod tests {
         let readiness = ReadinessFlag::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
-            .await
-            .unwrap();
+        let _handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            HTTP_CONNECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let (_status, _headers, body) = http_get(port, "/ready").await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -497,9 +553,15 @@ mod tests {
         let readiness = ReadinessFlag::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
-            .await
-            .unwrap();
+        let _handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            HTTP_CONNECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let (status, headers, _body) = http_get(port, "/metrics").await;
         assert_eq!(status, 200);
@@ -519,9 +581,15 @@ mod tests {
         let readiness = ReadinessFlag::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let _handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
-            .await
-            .unwrap();
+        let _handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            HTTP_CONNECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let (status, _headers, body) = http_get(port, "/xyz").await;
         assert_eq!(status, 404);
@@ -538,9 +606,15 @@ mod tests {
         let readiness = ReadinessFlag::new();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let handle = spawn_http_server_inner(listener, test_prom_handle(), readiness, shutdown_rx)
-            .await
-            .unwrap();
+        let handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            HTTP_CONNECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
 
         let (status, _, _) = http_get(port, "/health").await;
         assert_eq!(status, 200);
@@ -549,5 +623,82 @@ mod tests {
 
         let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
         assert!(result.is_ok(), "server should stop within 2 seconds");
+    }
+
+    #[tokio::test]
+    async fn http_stalled_connection_is_closed_after_serving_timeout() {
+        // Regression: an accepted connection previously had no serving
+        // timeout — a client that trickles a partial request (slowloris)
+        // pinned a task forever.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let _handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap();
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // A partial request: hyper waits for the rest of the headers.
+        stream.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut buf = [0u8; 16];
+        let n = stream.read(&mut buf).await.unwrap_or(0);
+        assert_eq!(n, 0, "server must close the stalled connection");
+
+        let _ = shutdown_tx.send(true);
+    }
+
+    #[tokio::test]
+    async fn http_open_connections_are_aborted_on_shutdown() {
+        // Regression: per-connection tasks were detached, so shutdown left
+        // stalled connections open. With the tracked JoinSet, dropping the
+        // accept loop aborts them even with a long serving timeout.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let readiness = ReadinessFlag::new();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let handle = spawn_http_server_inner(
+            listener,
+            test_prom_handle(),
+            readiness,
+            shutdown_rx,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream.write_all(b"GET /health HTTP/1.1\r\n").await.unwrap();
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("server should stop within 2 seconds")
+            .unwrap();
+
+        // The aborted connection task drops the socket: the client reads EOF.
+        let read = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut buf = [0u8; 16];
+            stream.read(&mut buf).await.unwrap_or(0)
+        })
+        .await
+        .expect("connection must close promptly after shutdown");
+        assert_eq!(read, 0, "stalled connection must be closed on shutdown");
     }
 }

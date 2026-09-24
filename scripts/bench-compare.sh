@@ -8,15 +8,17 @@
 # Usage: cargo bench --workspace --features rr-benches/rocks -- --baseline main | tee bench-output.txt
 #        scripts/bench-compare.sh bench-output.txt
 #
-# Exit code is 1 when at least one benchmark exceeds the fail threshold; the
-# caller decides whether that blocks (the CI bench job runs continue-on-error
-# while the gate collects noise data — see .sisyphus/plans/rr-reliability-program.md R-7).
+# Exit codes: 0 = pass (incl. warnings), 1 = regression above the fail
+# threshold, 2 = usage error (missing/empty input — a lost bench log must
+# fail loudly, never read as "no regressions"). Exit 1 blocks the CI bench
+# job, which has been a BLOCKING gate since 2026-09-22 (see the `bench` job
+# comment in .github/workflows/ci.yml).
 set -euo pipefail
 
 INPUT="${1:?usage: bench-compare.sh <criterion-output-file>}"
 if [[ ! -s "$INPUT" ]]; then
-    echo "bench-compare: $INPUT missing or empty — no comparison performed"
-    exit 0
+    echo "bench-compare: $INPUT missing or empty — no comparison performed" >&2
+    exit 2
 fi
 
 # Criterion 0.5 prints per benchmark group:

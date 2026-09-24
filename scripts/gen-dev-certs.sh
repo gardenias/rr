@@ -82,12 +82,30 @@ done
 
 rm -f ca.srl
 
-chmod 600 ./*.key
-chmod 644 ./*.pem
+# nullglob + count guards: a bare unmatched glob is passed literally to
+# chmod/ls and fails under set -e (no keys on disk, e.g. NODE_COUNT=0 with
+# a pem-only reused dir). The expansions stay inside the `if`s because an
+# empty-array expansion is itself an unbound-variable error under set -u
+# on bash < 4.4.
+shopt -s nullglob
+keys=(./*.key)
+pems=(./*.pem)
+shopt -u nullglob
+if ((${#keys[@]} > 0)); then
+  chmod 600 "${keys[@]}"
+fi
+if ((${#pems[@]} > 0)); then
+  chmod 644 "${pems[@]}"
+fi
 
 echo
 echo "Done. Certs in $(pwd):"
-ls -1 ./*.pem ./*.key
+if ((${#pems[@]} > 0)); then
+  ls -1 "${pems[@]}"
+fi
+if ((${#keys[@]} > 0)); then
+  ls -1 "${keys[@]}"
+fi
 echo
 echo "Example rr-server invocation (node 1):"
 echo "  rr-server serve \\"

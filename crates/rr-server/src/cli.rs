@@ -68,9 +68,35 @@ pub struct ServeArgs {
     #[arg(long = "admin-port", env = "RR_ADMIN_PORT")]
     pub admin_port: Option<u16>,
 
+    /// Admin gRPC bind host (IP literal). Defaults to `127.0.0.1` — the admin
+    /// API can transfer leadership and trigger snapshots, so exposing it
+    /// cluster-wide requires an explicit `0.0.0.0` here.
+    #[arg(long = "admin-bind-host", env = "RR_ADMIN_BIND_HOST")]
+    pub admin_bind_host: Option<String>,
+
     /// Prometheus `/metrics` HTTP bind port. Omit to disable.
     #[arg(long = "metrics-port", env = "RR_METRICS_PORT")]
     pub metrics_port: Option<u16>,
+
+    /// Metrics/health HTTP bind host (IP literal). Defaults to `127.0.0.1` —
+    /// `/metrics` is unauthenticated and exposes internal histograms. Set
+    /// `0.0.0.0` to allow cross-host Prometheus scrapes.
+    #[arg(long = "metrics-bind-host", env = "RR_METRICS_BIND_HOST")]
+    pub metrics_bind_host: Option<String>,
+
+    /// Override the gRPC server's HTTP/2 max_concurrent_streams (tonic/hyper
+    /// default: 200). Perf-tuning knob; raise for unbatched high-concurrency
+    /// client paths.
+    #[arg(
+        long = "grpc-max-concurrent-streams",
+        env = "RR_GRPC_MAX_CONCURRENT_STREAMS"
+    )]
+    pub grpc_max_concurrent_streams: Option<u32>,
+
+    /// Override the gRPC server's HTTP/2 max frame size in bytes (default
+    /// 16384). Perf-tuning knob for large (batched) payloads.
+    #[arg(long = "grpc-max-frame-size", env = "RR_GRPC_MAX_FRAME_SIZE")]
+    pub grpc_max_frame_size: Option<u32>,
 
     /// Internal Raft transport for AppendEntries/Vote: `grpc` (default) or `tcp`.
     /// `tcp` is a plaintext frame protocol with no TLS and no peer
@@ -141,17 +167,17 @@ pub struct ServeArgs {
     #[arg(long = "rate-limit-burst", env = "RR_RATE_LIMIT_BURST")]
     pub rate_limit_burst: Option<u32>,
 
-    /// Per-caller rps limit for AdminService (exclusive mode). When set, each
-    /// authenticated caller gets its own token bucket and the global
-    /// `--admin-rps` is ignored. Unauthenticated requests fall back to the
-    /// global bucket. See ADR A-0005.
+    /// Per-caller rps limit for AdminService. When set, each authenticated
+    /// caller gets its own token bucket; unauthenticated requests share the
+    /// global `--admin-rps` bucket, which then becomes REQUIRED (validation
+    /// rejects per-caller without the global fallback). See ADR A-0005.
     #[arg(long = "per-caller-admin-rps", env = "RR_PER_CALLER_ADMIN_RPS")]
     pub per_caller_admin_rps: Option<u32>,
 
-    /// Per-caller rps limit for ClientService (exclusive mode). When set, each
-    /// authenticated caller gets its own token bucket and the global
-    /// `--client-rps` is ignored. Unauthenticated requests fall back to the
-    /// global bucket. See ADR A-0005.
+    /// Per-caller rps limit for ClientService. When set, each authenticated
+    /// caller gets its own token bucket; unauthenticated requests share the
+    /// global `--client-rps` bucket, which then becomes REQUIRED (validation
+    /// rejects per-caller without the global fallback). See ADR A-0005.
     #[arg(long = "per-caller-client-rps", env = "RR_PER_CALLER_CLIENT_RPS")]
     pub per_caller_client_rps: Option<u32>,
 

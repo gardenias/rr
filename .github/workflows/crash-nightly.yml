@@ -23,6 +23,7 @@ on:
 
 permissions:
   contents: read
+  issues: write # the on-failure step opens/comments on the tracking issue
 
 jobs:
   crash-recovery:
@@ -52,9 +53,9 @@ jobs:
       - name: Build node binary + harness (rocks)
         run: cargo build -p crash-tests --features rocks
 
-      # Serial: the two scenarios share the port probe space and both spawn
-      # real processes. --nocapture keeps the seed + kill-schedule lines in
-      # the CI log.
+      # Serial: the three scenarios (A SIGTERM / B SIGKILL / C snapshot-purge)
+      # share the port probe space and all spawn real processes. --nocapture
+      # keeps the seed + kill-schedule lines in the CI log.
       - name: Run crash scenarios (10 rounds)
         env:
           CRASH_ROUNDS: "10"
@@ -71,3 +72,29 @@ jobs:
           path: target/crash-tests/
           if-no-files-found: ignore
           retention-days: 30
+
+      # Auto-file (or append to) a tracking issue — uploaded artifacts alone
+      # get lost in the runs list. Dedupe: one open issue per workflow;
+      # repeat failures comment on it instead of opening duplicates.
+      - name: Open/update tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          label="nightly-failure"
+          key="${{ github.workflow }}"
+          title="[nightly] $key failed — $(date +%F)"
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh label create "$label" --color db6d6d \
+            --description "Automated nightly workflow failure tracker" --force >/dev/null 2>&1 || true
+          existing="$(gh issue list --state open --label "$label" \
+            --search "\"$key\" in:title" --json number --jq ".[0].number")"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --body "Failed again on $(date +%F): $url"
+            echo "commented on existing issue #$existing"
+          else
+            body="$(printf 'Scheduled crash-recovery run failed.\n\nRun: %s\n\nThe fault log (with the CRASH_SEED for exact replay) and per-node logs are attached to the run as artifacts. Reproduce locally:\n\n    CRASH_SEED=<seed> cargo test -p crash-tests --features rocks -- --test-threads=1 --nocapture\n\nClose this issue once the failure is triaged.' "$url")"
+            gh issue create --label "$label" --title "$title" --body "$body"
+            echo "issue created"
+          fi

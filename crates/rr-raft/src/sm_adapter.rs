@@ -17,10 +17,13 @@ use openraft::StoredMembership;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 
+use rr_core::deferred::CorrelationId;
 use rr_core::deferred::DeferredApply;
 use rr_core::state_machine::StateMachine;
 use rr_core::types::ApplyContext;
+use rr_core::types::GroupId;
 
+use crate::snapshot_store::atomic_write_enveloped;
 use crate::snapshot_store::PersistentSnapshot;
 use crate::snapshot_store::SnapshotStore;
 use crate::type_config::RrTypeConfig;
@@ -31,6 +34,44 @@ pub(crate) const MEMBERSHIP_SIDECAR_MAGIC: [u8; 8] = *b"\0rrMBR01";
 
 /// Current schema version of the membership-sidecar envelope.
 pub(crate) const MEMBERSHIP_SIDECAR_VERSION: u8 = 1;
+
+/// Upper bound on parked deferred (`DeferredApply::Pending`) client
+/// responders. Each parked responder holds a live `client_write` open, so an
+/// unbounded registry is an unbounded memory + hang surface when a service
+/// pends entries without ever completing them. On overflow the NEW responder
+/// is dropped (not parked): the vendored openraft patch turns the dropped
+/// response channel into an error for THAT `client_write`
+/// (`raft_inner.rs::recv_msg`), which the client retries — while
+/// already-parked responses stay completable.
+const MAX_PENDING_DEFERRED: usize = 10_000;
+
+/// Admission decision for a newly parked deferred responder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredAdmission {
+    /// Park the responder under its correlation id.
+    Admit,
+    /// Correlation id already parked: the overwrite displaces (drops) the OLD
+    /// responder, erroring its `client_write`. Loud via warn + metric.
+    AdmitDisplacingDuplicate,
+    /// Registry at cap: drop the NEW responder, erroring its `client_write`.
+    RejectOverflow,
+}
+
+/// Pure admission policy for `pending_deferred` (extracted for testability;
+/// see the cap/duplicate regression tests).
+///
+/// Duplicates are checked BEFORE the cap: overwriting an existing id does not
+/// grow the registry, so a full registry must still admit the displacement —
+/// otherwise the completable old entry AND the new one would both be lost.
+fn admit_deferred(len: usize, is_duplicate: bool, cap: usize) -> DeferredAdmission {
+    if is_duplicate {
+        DeferredAdmission::AdmitDisplacingDuplicate
+    } else if len >= cap {
+        DeferredAdmission::RejectOverflow
+    } else {
+        DeferredAdmission::Admit
+    }
+}
 
 /// Strip and validate the membership-sidecar envelope. Returns a static
 /// reason string on any mismatch — the caller logs it and starts empty
@@ -76,10 +117,15 @@ pub struct RrStateMachine {
     /// a later `DeferredApply::Complete`. In-memory only (a parked responder
     /// is a live client wait); dropped on stop/restart, which errors the held
     /// `client_write` so the client retries — it is never snapshotted.
-    pending_deferred: std::collections::HashMap<
-        rr_core::deferred::CorrelationId,
-        openraft::storage::ApplyResponder<RrTypeConfig>,
-    >,
+    /// Bounded by [`MAX_PENDING_DEFERRED`]; gauge `rr_raft_pending_deferred`.
+    pending_deferred:
+        std::collections::HashMap<CorrelationId, openraft::storage::ApplyResponder<RrTypeConfig>>,
+    /// Cap for `pending_deferred` — a field (not the constant directly) so
+    /// tests can exercise overflow with a small value.
+    max_pending_deferred: usize,
+    /// Raft group id, attached via [`Self::with_group_id`] for the `group_id`
+    /// metric label. `None` in tests that build the adapter directly.
+    group_id: Option<GroupId>,
 }
 
 impl RrStateMachine {
@@ -95,6 +141,26 @@ impl RrStateMachine {
             membership_sidecar: None,
             snapshot_store: None,
             pending_deferred: std::collections::HashMap::new(),
+            max_pending_deferred: MAX_PENDING_DEFERRED,
+            group_id: None,
+        }
+    }
+
+    /// Attach the Raft group id for metric labels (`rr_raft_pending_deferred`).
+    pub fn with_group_id(mut self, group_id: GroupId) -> Self {
+        self.group_id = Some(group_id);
+        self
+    }
+
+    /// Emit the `rr_raft_pending_deferred` gauge for the current registry
+    /// depth (labeled with the group id when attached).
+    fn emit_pending_deferred_gauge(&self) {
+        let depth = self.pending_deferred.len() as f64;
+        match self.group_id {
+            Some(g) => {
+                metrics::gauge!("rr_raft_pending_deferred", "group_id" => g.to_string()).set(depth)
+            }
+            None => metrics::gauge!("rr_raft_pending_deferred").set(depth),
         }
     }
 
@@ -158,6 +224,11 @@ impl RrStateMachine {
 
     /// Best-effort sidecar write; a failure must never fail the raft apply
     /// path (membership changes are rare and the file is tiny).
+    ///
+    /// The write is atomic ([`atomic_write_enveloped`]: tmp → fsync → rename
+    /// → loud dir fsync), mirroring `SnapshotStore::save`: a torn write here
+    /// would fail-OPEN to empty membership on the next start — recreating
+    /// the zero-voter wedge this sidecar exists to prevent.
     fn persist_membership(&self) {
         let Some(path) = &self.membership_sidecar else {
             return;
@@ -171,12 +242,13 @@ impl RrStateMachine {
                     return;
                 }
             };
-        let mut bytes = Vec::with_capacity(MEMBERSHIP_SIDECAR_MAGIC.len() + 1 + body.len());
-        bytes.extend_from_slice(&MEMBERSHIP_SIDECAR_MAGIC);
-        bytes.push(MEMBERSHIP_SIDECAR_VERSION);
-        bytes.extend_from_slice(&body);
-        if let Err(e) = std::fs::write(path, bytes) {
-            tracing::warn!(error = %e, "membership sidecar write failed");
+        if let Err(e) = atomic_write_enveloped(
+            path,
+            &MEMBERSHIP_SIDECAR_MAGIC,
+            MEMBERSHIP_SIDECAR_VERSION,
+            &body,
+        ) {
+            tracing::warn!(error = %e, path = %path.display(), "membership sidecar write failed");
         }
     }
 
@@ -218,7 +290,16 @@ impl RrStateMachine {
     /// purge the covered log prefix — the unpurged log remains the durable
     /// copy and the snapshot is retried later. Uses a monotonic guard so a
     /// stale snapshot never overwrites a newer persisted one.
-    fn persist_snapshot(
+    ///
+    /// The store IO (encode + write + fsync × 2 + rename) is synchronous
+    /// `std::fs`, but it runs on openraft's state-machine worker — doing it
+    /// inline would stall the whole apply pipeline behind the disk (with the
+    /// default 50k-entry snapshot policy this fires ~2×/s). It is therefore
+    /// offloaded to `spawn_blocking`. Correctness note: openraft serializes
+    /// snapshot builds and installs per group (the sm worker is
+    /// single-threaded per group), so no two offloaded saves race the same
+    /// store, and the monotonic guard inside `save_if_newer` covers the rest.
+    async fn persist_snapshot(
         &self,
         last_applied: Option<LogIdOf<RrTypeConfig>>,
         last_membership: &StoredMembershipOf<RrTypeConfig>,
@@ -232,7 +313,11 @@ impl RrStateMachine {
             last_membership: last_membership.clone(),
             data: data.to_vec(),
         };
-        store.save_if_newer(&snap).map(|_written| ())
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || store.save_if_newer(&snap))
+            .await
+            .map_err(|e| io::Error::other(format!("snapshot persist task failed: {e}")))?
+            .map(|_written| ())
     }
 
     /// Fallible snapshot capture shared by both openraft entry points
@@ -256,7 +341,8 @@ impl RrStateMachine {
 
         // Persist first (no-op on the in-memory path). Only after this
         // succeeds is it safe for OpenRaft to purge the covered log prefix.
-        self.persist_snapshot(self.last_applied, &self.last_membership, &data)?;
+        self.persist_snapshot(self.last_applied, &self.last_membership, &data)
+            .await?;
 
         self.snapshot_bytes = data.clone();
         self.snapshot_meta = Some(SnapshotMeta {
@@ -336,7 +422,48 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
                             // response. On a follower (no responder) there is
                             // nothing to park.
                             if let Some(r) = responder.take() {
-                                self.pending_deferred.insert(correlation_id, r);
+                                match admit_deferred(
+                                    self.pending_deferred.len(),
+                                    self.pending_deferred.contains_key(&correlation_id),
+                                    self.max_pending_deferred,
+                                ) {
+                                    DeferredAdmission::Admit => {
+                                        self.pending_deferred.insert(correlation_id, r);
+                                    }
+                                    DeferredAdmission::AdmitDisplacingDuplicate => {
+                                        // The insert displaces (drops) the OLD
+                                        // responder, erroring its
+                                        // `client_write` — a duplicate
+                                        // correlation id is a service-side bug
+                                        // and must be loud, not silent.
+                                        metrics::counter!(
+                                            "rr_raft_pending_deferred_duplicate_total"
+                                        )
+                                        .increment(1);
+                                        tracing::warn!(
+                                            correlation_id,
+                                            "duplicate deferred correlation id: displacing the \
+                                             parked responder (its client_write errors; the client \
+                                             retries)"
+                                        );
+                                        self.pending_deferred.insert(correlation_id, r);
+                                    }
+                                    DeferredAdmission::RejectOverflow => {
+                                        metrics::counter!(
+                                            "rr_raft_pending_deferred_overflow_total"
+                                        )
+                                        .increment(1);
+                                        tracing::warn!(
+                                            correlation_id,
+                                            cap = self.max_pending_deferred,
+                                            "pending_deferred cap reached: dropping the new \
+                                             responder (its client_write errors; the client \
+                                             retries)"
+                                        );
+                                        drop(r);
+                                    }
+                                }
+                                self.emit_pending_deferred_gauge();
                             }
                         }
                         DeferredApply::Complete {
@@ -350,6 +477,7 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
                                     r.send(completion.response.into());
                                 }
                             }
+                            self.emit_pending_deferred_gauge();
                             if let Some(r) = responder.take() {
                                 r.send(response.into());
                             }
@@ -413,7 +541,8 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         // not durable first, a restart after that purge would lose the covered
         // state. Fail-closed: a persist error aborts the install, leaving the
         // SM untouched and the log retained so replication can retry.
-        self.persist_snapshot(meta.last_log_id, &meta.last_membership, &data)?;
+        self.persist_snapshot(meta.last_log_id, &meta.last_membership, &data)
+            .await?;
 
         self.inner
             .restore(&data)
@@ -874,6 +1003,54 @@ mod tests {
         );
     }
 
+    /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    /// A torn `*.tmp` sibling from a crashed sidecar write must not
+    /// resurrect: the adapter starts empty (fail-open by decision), and the
+    /// next apply's atomic write renames over the leftover tmp, producing a
+    /// decodable live file.
+    #[tokio::test]
+    async fn test_membership_sidecar_torn_tmp_does_not_resurrect() {
+        use openraft::Membership;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sm-membership.bin");
+        let mut tmp = sidecar.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        std::fs::write(&tmp, b"torn-partial-membership-write").unwrap();
+
+        let mut sm = RrStateMachine::new(Box::new(VecSM { state: vec![] }))
+            .with_membership_sidecar(sidecar.clone());
+        let (_, membership) = sm.applied_state().await.unwrap();
+        assert_eq!(
+            membership.membership().nodes().count(),
+            0,
+            "a torn tmp must never be read as membership"
+        );
+
+        // A membership apply atomically writes the sidecar (tmp → fsync →
+        // rename), consuming the leftover tmp.
+        let entry = Entry {
+            log_id: LogId::new(CommittedLeaderId::new(1, 1), 0),
+            payload: EntryPayload::Membership(Membership::new_with_defaults(
+                vec![std::collections::BTreeSet::from([1u64, 2])],
+                vec![],
+            )),
+        };
+        apply_entries(&mut sm, vec![entry]).await;
+        assert!(sidecar.exists());
+        assert!(
+            !tmp.exists(),
+            "the atomic rename must consume the leftover tmp"
+        );
+
+        // The written file decodes through the envelope reader on "restart".
+        let mut restarted =
+            RrStateMachine::new(Box::new(VecSM { state: vec![] })).with_membership_sidecar(sidecar);
+        let (_, restored) = restarted.applied_state().await.unwrap();
+        assert_eq!(restored.membership().nodes().count(), 2);
+    }
+
     // ── T1 / R-P0: durable snapshot store ────────────────────────────────
 
     use crate::snapshot_store::SnapshotStore;
@@ -1017,5 +1194,226 @@ mod tests {
             &[ApplyContext::new(5, 1), ApplyContext::new(6, 1)],
             "each applied entry's log index + term must reach the state machine"
         );
+    }
+
+    // ── R-2 / A-0033: pending_deferred admission (cap + duplicate) ────────
+
+    use super::admit_deferred;
+
+    #[test]
+    fn admit_deferred_policy_cap_and_duplicate() {
+        use super::DeferredAdmission::*;
+        // Below cap, fresh id → admit.
+        assert_eq!(admit_deferred(0, false, 2), Admit);
+        assert_eq!(admit_deferred(1, false, 2), Admit);
+        // At cap, fresh id → reject (the NEW responder is dropped).
+        assert_eq!(admit_deferred(2, false, 2), RejectOverflow);
+        assert_eq!(admit_deferred(100, false, 2), RejectOverflow);
+        // Duplicate id displaces even at/over the cap: the overwrite does not
+        // grow the registry, and rejecting would strand the completable old
+        // entry.
+        assert_eq!(admit_deferred(2, true, 2), AdmitDisplacingDuplicate);
+        assert_eq!(admit_deferred(0, true, 2), AdmitDisplacingDuplicate);
+    }
+
+    /// State machine interpreting a tiny byte protocol:
+    /// `b"P" + id:u64be` → `DeferredApply::Pending { id }`;
+    /// `b"C" + ids:u64be…` → `DeferredApply::Complete` for those ids;
+    /// anything else → immediate echo.
+    struct DeferredSM;
+
+    #[async_trait::async_trait]
+    impl StateMachine for DeferredSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
+            Ok(entry.to_vec())
+        }
+        async fn apply_deferred(
+            &mut self,
+            entry: &[u8],
+            _ctx: ApplyContext,
+        ) -> Result<rr_core::deferred::DeferredApply, RrError> {
+            use rr_core::deferred::{CompletedResponse, DeferredApply};
+            match entry.first() {
+                Some(b'P') => Ok(DeferredApply::Pending {
+                    correlation_id: u64::from_be_bytes(entry[1..9].try_into().unwrap()),
+                }),
+                Some(b'C') => Ok(DeferredApply::Complete {
+                    completions: entry[1..]
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|c| CompletedResponse {
+                            correlation_id: u64::from_be_bytes(*c),
+                            response: b"done".to_vec(),
+                        })
+                        .collect(),
+                    response: b"ok".to_vec(),
+                }),
+                _ => Ok(DeferredApply::Immediate(entry.to_vec())),
+            }
+        }
+        async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
+            Ok(vec![])
+        }
+        async fn restore(&mut self, _snapshot: &[u8]) -> Result<(), RrError> {
+            Ok(())
+        }
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+    }
+
+    fn pending_payload(id: u64) -> Vec<u8> {
+        let mut v = vec![b'P'];
+        v.extend_from_slice(&id.to_be_bytes());
+        v
+    }
+
+    fn complete_payload(ids: &[u64]) -> Vec<u8> {
+        let mut v = vec![b'C'];
+        for id in ids {
+            v.extend_from_slice(&id.to_be_bytes());
+        }
+        v
+    }
+
+    /// Spin up a single-node in-memory Raft cluster around a `DeferredSM`
+    /// adapter with the given `pending_deferred` cap.
+    async fn deferred_single_node_raft(cap: usize) -> openraft::Raft<RrTypeConfig, RrStateMachine> {
+        use openraft::{BasicNode, Config, Raft};
+        use std::collections::BTreeMap;
+
+        let config = std::sync::Arc::new(
+            Config {
+                heartbeat_interval: 50,
+                election_timeout_min: 150,
+                election_timeout_max: 300,
+                enable_pre_vote: Some(true),
+                ..Default::default()
+            }
+            .validate()
+            .unwrap(),
+        );
+        let mut sm = RrStateMachine::new(Box::new(DeferredSM));
+        sm.max_pending_deferred = cap;
+        let raft = Raft::new(
+            1,
+            config,
+            crate::raft_node::NoopNetworkFactory,
+            crate::log_storage::RrLogStorage::default(),
+            sm,
+        )
+        .await
+        .expect("raft new");
+        raft.initialize(BTreeMap::from([(
+            1u64,
+            BasicNode {
+                addr: String::new(),
+            },
+        )]))
+        .await
+        .expect("initialize");
+        raft.wait(None)
+            .state(openraft::ServerState::Leader, "single-node leader")
+            .await
+            .expect("leader elected");
+        raft
+    }
+
+    /// The applied-index baseline right after election (the initialize
+    /// membership entry), so tests can wait for exactly their own writes.
+    async fn applied_baseline(raft: &openraft::Raft<RrTypeConfig, RrStateMachine>) -> u64 {
+        use openraft::async_runtime::watch::WatchReceiver;
+        let m = raft.metrics().borrow_watched().clone();
+        m.last_applied.map(|l| l.index).unwrap_or(0)
+    }
+
+    /// Overflowing the `pending_deferred` cap drops the NEW responder: its
+    /// `client_write` errors (the vendored openraft dropped-responder patch,
+    /// `raft_inner.rs::recv_msg`), while already-parked responders stay
+    /// completable — regression test for the unbounded/silent registry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_pending_deferred_overflow_errors_newest_write() {
+        let raft = deferred_single_node_raft(2).await;
+        let base = applied_baseline(&raft).await;
+
+        let write = |payload: Vec<u8>| {
+            let raft = raft.clone();
+            tokio::spawn(async move { raft.client_write(payload.into()).await })
+        };
+
+        // Three deferred writes against a cap of 2: the two that land first
+        // park, the third overflows and is dropped.
+        let a = write(pending_payload(1));
+        let b = write(pending_payload(2));
+        let c = write(pending_payload(3));
+        raft.wait(None)
+            .applied_index_at_least(Some(base + 3), "three deferred writes applied")
+            .await
+            .unwrap();
+
+        // Complete everything parked; the completer itself answers "ok".
+        let d = write(complete_payload(&[1, 2, 3]));
+        let d_resp = d.await.expect("join").expect("complete write");
+        assert_eq!(d_resp.data.0, b"ok");
+
+        let (mut oks, mut errs) = (0, 0);
+        for h in [a, b, c] {
+            match h.await.unwrap() {
+                Ok(resp) => {
+                    assert_eq!(resp.data.0, b"done", "parked write completes via Complete");
+                    oks += 1;
+                }
+                Err(_) => errs += 1,
+            }
+        }
+        assert_eq!(
+            (oks, errs),
+            (2, 1),
+            "cap=2 with 3 deferred writes: two stay completable, the overflowed one errors"
+        );
+        raft.shutdown().await.unwrap();
+    }
+
+    /// A duplicate correlation id overwrites the parked responder: the
+    /// displaced one's `client_write` errors loudly instead of hanging
+    /// silently, and the newer one remains completable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_pending_deferred_duplicate_id_displaces_old_responder() {
+        let raft = deferred_single_node_raft(10).await;
+        let base = applied_baseline(&raft).await;
+
+        let write = |payload: Vec<u8>| {
+            let raft = raft.clone();
+            tokio::spawn(async move { raft.client_write(payload.into()).await })
+        };
+
+        let a = write(pending_payload(7));
+        let b = write(pending_payload(7)); // duplicate correlation id
+        raft.wait(None)
+            .applied_index_at_least(Some(base + 2), "duplicate deferred writes applied")
+            .await
+            .unwrap();
+
+        let d = write(complete_payload(&[7]));
+        let d_resp = d.await.expect("join").expect("complete write");
+        assert_eq!(d_resp.data.0, b"ok");
+
+        let (mut oks, mut errs) = (0, 0);
+        for h in [a, b] {
+            match h.await.unwrap() {
+                Ok(resp) => {
+                    assert_eq!(resp.data.0, b"done");
+                    oks += 1;
+                }
+                Err(_) => errs += 1,
+            }
+        }
+        assert_eq!(
+            (oks, errs),
+            (1, 1),
+            "duplicate correlation id: the displaced responder errors, the parked one completes"
+        );
+        raft.shutdown().await.unwrap();
     }
 }

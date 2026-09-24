@@ -2,6 +2,17 @@
 //! fixed-rate keyed idempotent writes + periodic linearizable-read probes +
 //! an fdatasync'd ack log + a post-load loss oracle.
 //!
+//! ## Unkeyed lane (`--soak-unkeyed-ratio`)
+//!
+//! Keyed writes bypass client-side batching by design (rr-client batches
+//! unkeyed writes only), so a keyed-only soak silently never exercises
+//! `--client-batching`. With `unkeyed_ratio > 0` a deterministic share of
+//! the schedule goes out UNKEYED under unique keys (`u:<client>:<seq>`) —
+//! the traffic the batcher actually packs. The oracle verifies those
+//! records by linearizable `Get` alone (there is no idempotency identity
+//! to replay); they are counted separately (`unkeyed_sent` /
+//! `unkeyed_verified`) so the weaker check is visible, never silent.
+//!
 //! # The oracle
 //!
 //! Every acknowledged write lands in the ack log (`request_id`, value hash).
@@ -68,6 +79,15 @@ const PROBE_KEY: &str = "soak:probe";
 /// reads back exactly that write).
 fn key_for(request_id: u64) -> String {
     format!("soak:{request_id:08}")
+}
+
+/// Unique key for unkeyed write `seq` (`u:<client>:<seq>`). Unkeyed writes
+/// carry no idempotency identity, so the oracle cannot replay-probe them;
+/// a fresh key per write makes survival directly checkable by linearizable
+/// `Get`, and client retries can only rewrite the same value to the same
+/// key (Put is naturally idempotent at the KV level).
+fn unkeyed_key_for(seq: u64) -> String {
+    format!("u:{CLIENT_ID}:{seq}")
 }
 
 /// Deterministic original value for `request_id`.
@@ -151,11 +171,29 @@ pub struct AckRecord {
     pub request_id: u64,
     /// Writer lane (idempotency namespace shard). `0` is the legacy
     /// single-lane namespace; pre-lanes ack logs deserialize as lane 0.
+    /// Meaningless for `kind = unkeyed` records (no namespace to replay).
     #[serde(default)]
     pub lane: u32,
     pub key: String,
     pub value_hash: String,
     pub ts_ms: u64,
+    /// Keyed (idempotent, replay-probeable) vs unkeyed (batching lane,
+    /// Get-verified only). Pre-unkeyed ack logs deserialize as `keyed`.
+    #[serde(default)]
+    pub kind: AckKind,
+}
+
+/// Which write lane produced an ack record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AckKind {
+    /// Keyed idempotent write: oracle replay-probes under the same key.
+    #[default]
+    Keyed,
+    /// Unkeyed write (the `--client-batching` lane): no idempotency
+    /// identity exists, so the oracle verifies survival by linearizable
+    /// `Get` only — never a replay probe (it would apply a duplicate).
+    Unkeyed,
 }
 
 /// Idempotency namespace for a lane. Lane 0 keeps the legacy bare namespace so
@@ -269,6 +307,10 @@ pub struct SoakConfig {
     /// RPC hangs the whole soak (W9 smoke, 2026-09-10). A timed-out op counts
     /// as failed; the load loop continues.
     pub op_timeout: Duration,
+    /// Fraction of scheduled writes sent unkeyed (0.0–1.0, default 0.0 =
+    /// keyed-only, legacy behavior). Unkeyed writes are the only soak
+    /// traffic `--client-batching` packs; see module docs.
+    pub unkeyed_ratio: f64,
 }
 
 /// Counters shared with the final report.
@@ -279,6 +321,9 @@ pub struct SoakStats {
     pub failed: AtomicU64,
     pub reads_ok: AtomicU64,
     pub reads_failed: AtomicU64,
+    /// Subset of `sent`/`acked` that went out unkeyed (batching lane).
+    pub unkeyed_sent: AtomicU64,
+    pub unkeyed_acked: AtomicU64,
 }
 
 /// Outcome of a soak run (load + optional oracle).
@@ -294,6 +339,13 @@ pub struct SoakSummary {
     pub failed: u64,
     pub reads_ok: u64,
     pub reads_failed: u64,
+    /// Unkeyed writes sent (subset of `sent`; 0 unless the load ran with
+    /// `--soak-unkeyed-ratio > 0`).
+    #[serde(default)]
+    pub unkeyed_sent: u64,
+    /// Unkeyed writes acked (subset of `acked`).
+    #[serde(default)]
+    pub unkeyed_acked: u64,
     pub ack_log_records: usize,
     /// Wall-clock start of the load window (post-warmup); `None` in
     /// oracle-only mode (no load ran). Aligns with the Prom window (§5.2.6).
@@ -309,13 +361,17 @@ pub struct SoakSummary {
 #[derive(Serialize)]
 pub struct OracleSummary {
     pub checked: usize,
-    /// All records that passed verification (replay-verified + survival-only).
+    /// All records that passed verification (replay-verified + survival-only
+    /// + unkeyed).
     pub verified: usize,
     /// Subset verified by the full two-step replay probe (cache-resident).
     pub replay_verified: usize,
     /// Subset past the LRU cache window: probe skipped (it would re-apply),
     /// survival proven by linearizable Get of the original value.
     pub survival_only: usize,
+    /// Unkeyed-lane records verified by linearizable Get (no replay probe
+    /// exists for unkeyed writes — see module docs).
+    pub unkeyed_verified: usize,
     pub sampled_from: usize,
     pub elapsed_secs: f64,
 }
@@ -367,75 +423,168 @@ struct LaneCtx {
     payload_size: usize,
 }
 
-/// One lane's serial keyed-writer: receives request ids, writes them in order
-/// (the idempotency contract's per-namespace monotonicity), forwards acks to
-/// the journal writer.
-async fn lane_worker(lane: u32, mut rx: tokio::sync::mpsc::Receiver<u64>, ctx: LaneCtx) {
+/// One scheduled write. Keyed ids and unkeyed seqs are independent
+/// sequences, so the keyed per-lane monotonicity contract is unaffected by
+/// the unkeyed share (and ratio 0.0 reproduces the legacy keyed schedule
+/// exactly).
+#[derive(Debug, Clone, Copy)]
+enum LaneOp {
+    Keyed(u64),
+    Unkeyed(u64),
+}
+
+/// One lane's serial writer: receives ops, writes them in order (keyed ops
+/// keep the idempotency contract's per-namespace monotonicity), forwards
+/// acks to the journal writer.
+async fn lane_worker(lane: u32, mut rx: tokio::sync::mpsc::Receiver<LaneOp>, ctx: LaneCtx) {
     let namespace = namespace_for(lane);
-    while let Some(request_id) = rx.recv().await {
+    while let Some(op) = rx.recv().await {
         let tick = Instant::now();
-        let value = value_for(request_id, ctx.payload_size);
-        let put = encode_req(&KvRequest::Put {
-            key: key_for(request_id),
-            value: value.clone(),
-        });
-        let key = IdempotencyKey::with_client_id(namespace.clone(), request_id, CLIENT_ID);
-        let write = tokio::time::timeout(
-            ctx.op_timeout,
-            ctx.client.send_request_idempotent(PARTITION_ID, put, key),
-        )
-        .await;
-        match write {
-            Ok(Ok(resp)) => {
-                // The Put response shape is fixed (value: None); a decodable
-                // response proves the apply path ran.
-                match decode_resp(&resp) {
-                    Ok(_) => {
-                        ctx.stats.acked.fetch_add(1, Ordering::Relaxed);
-                        ctx.latencies.record(tick.elapsed(), true);
-                        if ctx
-                            .ack_tx
-                            .send(AckRecord {
-                                request_id,
-                                lane,
-                                key: key_for(request_id),
-                                value_hash: value_hash(&value),
-                                ts_ms: now_ms(),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            tracing::error!("ack writer gone — lane {lane} stopping");
-                            return;
+        match op {
+            LaneOp::Keyed(request_id) => {
+                let value = value_for(request_id, ctx.payload_size);
+                let put = encode_req(&KvRequest::Put {
+                    key: key_for(request_id),
+                    value: value.clone(),
+                });
+                let key = IdempotencyKey::with_client_id(namespace.clone(), request_id, CLIENT_ID);
+                let write = tokio::time::timeout(
+                    ctx.op_timeout,
+                    ctx.client.send_request_idempotent(PARTITION_ID, put, key),
+                )
+                .await;
+                match write {
+                    Ok(Ok(resp)) => {
+                        // The Put response shape is fixed (value: None); a decodable
+                        // response proves the apply path ran.
+                        match decode_resp(&resp) {
+                            Ok(_) => {
+                                ctx.stats.acked.fetch_add(1, Ordering::Relaxed);
+                                ctx.latencies.record(tick.elapsed(), true);
+                                if ctx
+                                    .ack_tx
+                                    .send(AckRecord {
+                                        request_id,
+                                        lane,
+                                        key: key_for(request_id),
+                                        value_hash: value_hash(&value),
+                                        ts_ms: now_ms(),
+                                        kind: AckKind::Keyed,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::error!("ack writer gone — lane {lane} stopping");
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                                ctx.latencies.record(tick.elapsed(), false);
+                                tracing::warn!(request_id, error = %e, "soak write response undecodable");
+                            }
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
+                        // Expected during fault windows: not acked, nothing owed.
                         ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
                         ctx.latencies.record(tick.elapsed(), false);
-                        tracing::warn!(request_id, error = %e, "soak write response undecodable");
+                        static LOGGED: AtomicU64 = AtomicU64::new(0);
+                        if LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
+                            tracing::warn!(request_id, error = %e, "soak write failed (sampled)");
+                        }
+                    }
+                    Err(_) => {
+                        // Op deadline exceeded (a wedged RPC mid-transfer): counts as
+                        // failed — never acked — and the loop continues.
+                        ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                        ctx.latencies.record(tick.elapsed(), false);
+                        static LOGGED_TO: AtomicU64 = AtomicU64::new(0);
+                        if LOGGED_TO.fetch_add(1, Ordering::Relaxed) < 5 {
+                            tracing::warn!(request_id, "soak write op deadline exceeded (sampled)");
+                        }
                     }
                 }
             }
-            Ok(Err(e)) => {
-                // Expected during fault windows: not acked, nothing owed.
-                ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
-                ctx.latencies.record(tick.elapsed(), false);
-                static LOGGED: AtomicU64 = AtomicU64::new(0);
-                if LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
-                    tracing::warn!(request_id, error = %e, "soak write failed (sampled)");
-                }
-            }
-            Err(_) => {
-                // Op deadline exceeded (a wedged RPC mid-transfer): counts as
-                // failed — never acked — and the loop continues.
-                ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
-                ctx.latencies.record(tick.elapsed(), false);
-                static LOGGED_TO: AtomicU64 = AtomicU64::new(0);
-                if LOGGED_TO.fetch_add(1, Ordering::Relaxed) < 5 {
-                    tracing::warn!(request_id, "soak write op deadline exceeded (sampled)");
+            LaneOp::Unkeyed(seq) => {
+                let value = value_for(seq, ctx.payload_size);
+                let key = unkeyed_key_for(seq);
+                let put = encode_req(&KvRequest::Put {
+                    key: key.clone(),
+                    value: value.clone(),
+                });
+                // Plain `send_request`: with `--client-batching` on, this is
+                // the call that joins the partition's batch buffer.
+                let write = tokio::time::timeout(
+                    ctx.op_timeout,
+                    ctx.client.send_request(PARTITION_ID, put),
+                )
+                .await;
+                match write {
+                    Ok(Ok(resp)) => match decode_resp(&resp) {
+                        Ok(_) => {
+                            ctx.stats.acked.fetch_add(1, Ordering::Relaxed);
+                            ctx.stats.unkeyed_acked.fetch_add(1, Ordering::Relaxed);
+                            ctx.latencies.record(tick.elapsed(), true);
+                            if ctx
+                                .ack_tx
+                                .send(AckRecord {
+                                    request_id: seq,
+                                    lane,
+                                    key,
+                                    value_hash: value_hash(&value),
+                                    ts_ms: now_ms(),
+                                    kind: AckKind::Unkeyed,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                tracing::error!("ack writer gone — lane {lane} stopping");
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                            ctx.latencies.record(tick.elapsed(), false);
+                            tracing::warn!(seq, error = %e, "soak unkeyed write response undecodable");
+                        }
+                    },
+                    Ok(Err(e)) => {
+                        // Expected during fault windows: not acked, nothing owed.
+                        ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                        ctx.latencies.record(tick.elapsed(), false);
+                        static LOGGED: AtomicU64 = AtomicU64::new(0);
+                        if LOGGED.fetch_add(1, Ordering::Relaxed) < 5 {
+                            tracing::warn!(seq, error = %e, "soak unkeyed write failed (sampled)");
+                        }
+                    }
+                    Err(_) => {
+                        ctx.stats.failed.fetch_add(1, Ordering::Relaxed);
+                        ctx.latencies.record(tick.elapsed(), false);
+                        static LOGGED_TO: AtomicU64 = AtomicU64::new(0);
+                        if LOGGED_TO.fetch_add(1, Ordering::Relaxed) < 5 {
+                            tracing::warn!(
+                                seq,
+                                "soak unkeyed write op deadline exceeded (sampled)"
+                            );
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+/// Deterministic keyed/unkeyed split: accrue `ratio` credit per scheduled
+/// op; every full credit spends on one unkeyed write. Evenly spread, no
+/// RNG — ratio 0.0 never spends (legacy keyed-only schedule unchanged).
+fn spend_unkeyed_credit(credit: &mut f64, ratio: f64) -> bool {
+    *credit += ratio;
+    if *credit >= 1.0 {
+        *credit -= 1.0;
+        true
+    } else {
+        false
     }
 }
 
@@ -454,6 +603,8 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
     let mut next_probe = started + cfg.read_probe_interval;
     let mut next_metrics = started + cfg.metrics_interval;
     let mut request_id = 0u64;
+    let mut unkeyed_seq = 0u64;
+    let mut unkeyed_credit = 0.0f64;
     let mut last_metrics_acked = 0u64;
     let mut last_metrics_at = started;
 
@@ -498,10 +649,21 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
 
     let mut scheduled = started;
     while Instant::now() < deadline {
-        request_id += 1;
         stats.sent.fetch_add(1, Ordering::Relaxed);
-        let lane = (request_id % u64::from(lanes)) as usize;
-        if lane_txs[lane].send(request_id).await.is_err() {
+        let op = if spend_unkeyed_credit(&mut unkeyed_credit, cfg.unkeyed_ratio) {
+            unkeyed_seq += 1;
+            stats.unkeyed_sent.fetch_add(1, Ordering::Relaxed);
+            LaneOp::Unkeyed(unkeyed_seq)
+        } else {
+            request_id += 1;
+            LaneOp::Keyed(request_id)
+        };
+        let seq = match op {
+            LaneOp::Keyed(id) => id,
+            LaneOp::Unkeyed(seq) => seq,
+        };
+        let lane = (seq % u64::from(lanes)) as usize;
+        if lane_txs[lane].send(op).await.is_err() {
             anyhow::bail!("lane {lane} died mid-run — run is invalid");
         }
 
@@ -612,6 +774,8 @@ pub async fn run_soak_load(client: SharedClient, cfg: &SoakConfig) -> Result<Soa
         failed: stats.failed.load(Ordering::Relaxed),
         reads_ok: stats.reads_ok.load(Ordering::Relaxed),
         reads_failed: stats.reads_failed.load(Ordering::Relaxed),
+        unkeyed_sent: stats.unkeyed_sent.load(Ordering::Relaxed),
+        unkeyed_acked: stats.unkeyed_acked.load(Ordering::Relaxed),
         ack_log_records: records,
         started_unix_secs: Some(started_wall_unix),
         server_side: None,
@@ -665,6 +829,7 @@ pub async fn run_oracle(client: SharedClient, cfg: &SoakConfig) -> Result<Oracle
     let started = Instant::now();
     let mut replay_verified = 0usize;
     let mut survival_only = 0usize;
+    let mut unkeyed_verified = 0usize;
 
     for (i, record) in sample.iter().enumerate() {
         match verify_one(&client, record, cfg.payload_size, cfg.op_timeout)
@@ -678,8 +843,9 @@ pub async fn run_oracle(client: SharedClient, cfg: &SoakConfig) -> Result<Oracle
             })? {
             VerifyOutcome::ReplayVerified => replay_verified += 1,
             VerifyOutcome::SurvivalOnly => survival_only += 1,
+            VerifyOutcome::UnkeyedVerified => unkeyed_verified += 1,
         }
-        let verified = replay_verified + survival_only;
+        let verified = replay_verified + survival_only + unkeyed_verified;
         if verified.is_multiple_of(500) {
             eprintln!(
                 "[soak-oracle] {}/{} verified ({:?})",
@@ -699,9 +865,10 @@ pub async fn run_oracle(client: SharedClient, cfg: &SoakConfig) -> Result<Oracle
 
     Ok(OracleSummary {
         checked: sample.len(),
-        verified: replay_verified + survival_only,
+        verified: replay_verified + survival_only + unkeyed_verified,
         replay_verified,
         survival_only,
+        unkeyed_verified,
         sampled_from: records.len(),
         elapsed_secs: started.elapsed().as_secs_f64(),
     })
@@ -714,6 +881,8 @@ enum VerifyOutcome {
     ReplayVerified,
     /// Past the LRU window: probe skipped, Get returned the original.
     SurvivalOnly,
+    /// Unkeyed record: no replay probe exists; Get returned the original.
+    UnkeyedVerified,
 }
 
 async fn verify_one(
@@ -730,6 +899,30 @@ async fn verify_one(
          ack log corrupted or value format drifted",
         record.value_hash
     );
+
+    // Unkeyed writes carry no idempotency identity, so there is nothing to
+    // replay-probe; survival is proven directly by reading the unique key
+    // back. (A probe Put would be a NEW write of the same value to the same
+    // key — harmless, but it would prove nothing extra.)
+    if record.kind == AckKind::Unkeyed {
+        let get = encode_req(&KvRequest::Get {
+            key: record.key.clone(),
+        });
+        let resp = tokio::time::timeout(op_timeout, client.read_linearizable(PARTITION_ID, get))
+            .await
+            .map_err(|_| anyhow::anyhow!("oracle Get op deadline exceeded"))?
+            .context("oracle Get failed after client retries")?;
+        let got = decode_resp(&resp)?.value;
+        anyhow::ensure!(
+            got.as_deref() == Some(original.as_slice()),
+            "INV-1 VIOLATION: acknowledged unkeyed write {} does not read back its original \
+             value (got {} bytes{:?}) — the entry did not survive",
+            record.request_id,
+            got.as_ref().map(|v| v.len()).unwrap_or(0),
+            got.as_ref().map(|v| &v[..v.len().min(16)])
+        );
+        return Ok(VerifyOutcome::UnkeyedVerified);
+    }
 
     // 1. Probe Put under the same idempotency key: while cache-resident the
     //    layer must answer from its cache (the state machine never sees the
@@ -798,6 +991,64 @@ mod tests {
     }
 
     #[test]
+    fn unkeyed_keys_are_unique_and_distinct_from_keyed() {
+        assert_eq!(unkeyed_key_for(7), format!("u:{CLIENT_ID}:7"));
+        assert_ne!(unkeyed_key_for(7), unkeyed_key_for(8));
+        // Never collides with the keyed namespace, even at the same seq.
+        assert_ne!(unkeyed_key_for(7), key_for(7));
+    }
+
+    #[test]
+    fn unkeyed_credit_split_is_deterministic() {
+        // ratio 0.0: legacy behavior — never unkeyed, no drift from f64 dust.
+        let mut credit = 0.0;
+        assert!((0..1000).all(|_| !spend_unkeyed_credit(&mut credit, 0.0)));
+
+        // ratio 1.0: every op unkeyed.
+        let mut credit = 0.0;
+        assert!((0..100).all(|_| spend_unkeyed_credit(&mut credit, 1.0)));
+
+        // ratio 0.25: exactly every 4th op.
+        let mut credit = 0.0;
+        let marks: Vec<bool> = (0..8)
+            .map(|_| spend_unkeyed_credit(&mut credit, 0.25))
+            .collect();
+        assert_eq!(
+            marks,
+            [false, false, false, true, false, false, false, true]
+        );
+
+        // ratio 0.5: alternating.
+        let mut credit = 0.0;
+        let marks: Vec<bool> = (0..4)
+            .map(|_| spend_unkeyed_credit(&mut credit, 0.5))
+            .collect();
+        assert_eq!(marks, [false, true, false, true]);
+    }
+
+    #[test]
+    fn ack_record_kind_survives_json_and_defaults_to_keyed() {
+        // Pre-unkeyed ack logs (no `kind` field) deserialize as Keyed.
+        let legacy =
+            r#"{"request_id":7,"lane":0,"key":"soak:00000007","value_hash":"x","ts_ms":1}"#;
+        let record: AckRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(record.kind, AckKind::Keyed);
+
+        let unkeyed = AckRecord {
+            request_id: 3,
+            lane: 1,
+            key: unkeyed_key_for(3),
+            value_hash: value_hash(&value_for(3, 32)),
+            ts_ms: 2,
+            kind: AckKind::Unkeyed,
+        };
+        let round: AckRecord =
+            serde_json::from_str(&serde_json::to_string(&unkeyed).unwrap()).unwrap();
+        assert_eq!(round.kind, AckKind::Unkeyed);
+        assert_eq!(round.key, unkeyed.key);
+    }
+
+    #[test]
     fn hash_is_stable() {
         assert_eq!(value_hash(b""), "cbf29ce484222325");
         assert_eq!(value_hash(b"a"), "af63dc4c8601ec8c");
@@ -841,13 +1092,24 @@ mod tests {
                     key: key_for(i),
                     value_hash: value_hash(&value_for(i, 32)),
                     ts_ms: now_ms(),
+                    kind: AckKind::Keyed,
                 })
                 .unwrap();
             }
+            j.append(&AckRecord {
+                request_id: 1,
+                lane: 0,
+                key: unkeyed_key_for(1),
+                value_hash: value_hash(&value_for(1, 32)),
+                ts_ms: now_ms(),
+                kind: AckKind::Unkeyed,
+            })
+            .unwrap();
         }
         let records = read_ack_log(&path).unwrap();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 4);
         assert_eq!(records[2].request_id, 3);
+        assert_eq!(records[3].kind, AckKind::Unkeyed);
     }
 
     #[test]
@@ -859,6 +1121,7 @@ mod tests {
                 key: key_for(i),
                 value_hash: String::new(),
                 ts_ms: 0,
+                kind: AckKind::Keyed,
             })
             .collect();
         let sample = sample_records(&records, 1000);
