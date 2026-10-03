@@ -142,7 +142,22 @@ async fn run(args: Args) -> Result<()> {
     let service = CountService {
         applied: Arc::clone(&applied_count),
     };
-    let state_machine = ServiceStateMachineAdapter::new(GROUP_ID, service);
+    // The replay oracle proves survival through the idempotency cache, so its
+    // LRU capacity must far exceed the scenario's total write count: the 10k
+    // production default was overflowed by nightly-scale runs (50 writes/s ×
+    // 10 rounds on a slow runner → tens of thousands of applied ids), evicting
+    // entries the oracle still needed and failing the run on Expired
+    // false-alarms. 200k covers 50 writes/s for over an hour; the env knob
+    // exists to force the Expired path in a quick local sanity check.
+    let idempotency_cache_size = std::env::var("CRASH_IDEMPOTENCY_CACHE_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(200_000);
+    let state_machine = ServiceStateMachineAdapter::with_idempotency_capacity(
+        GROUP_ID,
+        service,
+        idempotency_cache_size,
+    );
 
     // ── Raft node: rocks log (strict durability) + production gRPC networking
     let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());

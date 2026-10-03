@@ -46,11 +46,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
 
-      # Pin within the 0.12 series: installing from HEAD makes the nightly
+      # Pin an exact release: installing from HEAD makes the nightly
       # unreproducible (a breaking cargo-fuzz release would fail every
-      # target leg at once). Bump deliberately.
+      # target leg at once), and a partial version ("0.12") is rejected by
+      # current cargo's version parser. 0.13.2 is the version validated
+      # against this corpus locally. Bump deliberately.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked --version 0.12
+        run: cargo install cargo-fuzz --locked --version 0.13.2
 
       # Committed seed corpus lives in fuzz/corpus/<target>/ (cargo-fuzz
       # default convention); cargo fuzz picks it up automatically.

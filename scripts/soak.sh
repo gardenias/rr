@@ -93,7 +93,14 @@ if [[ "${SOAK_WITH_OBSERVABILITY:-0}" == "1" ]]; then
   SERVICES+=(prometheus grafana)
 fi
 $COMPOSE down -v >/dev/null 2>&1 || true
-$COMPOSE up -d --build "${SERVICES[@]}"
+if ! $COMPOSE up -d --build "${SERVICES[@]}"; then
+  # Forensics BEFORE the teardown trap wipes the stack: a node that dies
+  # during startup (bad flag, missing env, crash) otherwise leaves no logs
+  # behind and the failure is undebuggable from artifacts alone.
+  $COMPOSE logs --no-color kv-1 kv-2 kv-3 >"$RUN_DIR/compose-up.log" 2>&1 || true
+  tail -40 "$RUN_DIR/compose-up.log" || true
+  fail "lab stack failed to start (see $RUN_DIR/compose-up.log)"
+fi
 
 cleanup() {
   if [[ "${SOAK_KEEP_STACK:-0}" != "1" ]]; then

@@ -59,6 +59,9 @@ jobs:
       - name: Run crash scenarios (10 rounds)
         env:
           CRASH_ROUNDS: "10"
+          # Debug node binaries on a 2-core runner: 10 rounds of full-log
+          # replays need >10 min (harness default is 600 s per scenario).
+          CRASH_SCENARIO_TIMEOUT_SECS: "1800"
           RR_CRASH_NODE_BIN: ${{ github.workspace }}/target/debug/rr-crash-node
         run: >
           cargo test -p crash-tests --features rocks

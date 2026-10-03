@@ -13,9 +13,10 @@
 //!   write was lost. INV-1 violated; the scenario fails with the offending
 //!   request id.
 //! - **`IdempotencyExpired`** → the watermark advanced past the key but the
-//!   cached response is gone. Not expected at this scale (LRU capacity
-//!   10 000 ≫ run size); treated as a failure because survival can no longer
-//!   be proven.
+//!   cached response is gone. The crash node runs with a 200 000-entry LRU
+//!   (default; `CRASH_IDEMPOTENCY_CACHE_SIZE`) so this stays ≪ run size and
+//!   Expired remains a genuine anomaly — treated as a failure because
+//!   survival can no longer be proven.
 //!
 //! This is strictly stronger than comparing `last_log_index` against acked
 //! indices (the in-process test's oracle): it validates the full chain
@@ -33,10 +34,23 @@ use crate::cluster::GROUP_ID;
 use crate::journal::{AckRecord, Journal};
 use crate::{payload_for, payload_hash, probe_payload_for, CLIENT_ID};
 
-/// Hard ceiling for one full ack-log replay. Without it, a wedged cluster
+/// Floor for one full ack-log replay. Without a ceiling, a wedged cluster
 /// (e.g. a raft core that died mid-run) makes the scenario hang until the
 /// outer test timeout; with it, the failure is fast and says why.
-const ORACLE_TIMEOUT: Duration = Duration::from_secs(120);
+const ORACLE_TIMEOUT_FLOOR: Duration = Duration::from_secs(120);
+
+/// Per-record replay budget: every record costs one idempotent probe RPC,
+/// and slow CI runners (debug node binaries) sustain ~90 probes/s, so
+/// 25 ms per record is ~2× headroom over the worst observed pace.
+const ORACLE_PER_RECORD: Duration = Duration::from_millis(25);
+
+/// The ceiling scales with the ack log: a fixed timeout misdiagnoses a
+/// big-but-healthy replay as a wedged cluster once the log outgrows
+/// `ORACLE_TIMEOUT_FLOOR` × probe rate (nightly scenario B passes 10k
+/// records — >110 s at CI pace — by round 8).
+fn oracle_timeout(records: usize) -> Duration {
+    ORACLE_TIMEOUT_FLOOR.max(ORACLE_PER_RECORD * records as u32 + Duration::from_secs(60))
+}
 
 /// Outcome of a full ack-log replay.
 pub struct OracleReport {
@@ -95,10 +109,13 @@ pub async fn verify_applied_count_bounds(
 /// Fails (Err) on the first lost/corrupted/unverifiable write — the message
 /// carries the request id and the evidence class for the post-mortem.
 pub async fn replay_ack_log(client: &RrClient, ack_log_path: &Path) -> Result<OracleReport> {
-    match tokio::time::timeout(ORACLE_TIMEOUT, replay_inner(client, ack_log_path)).await {
+    let records: Vec<AckRecord> = Journal::read_all(ack_log_path)
+        .with_context(|| format!("read ack log {}", ack_log_path.display()))?;
+    let timeout = oracle_timeout(records.len());
+    match tokio::time::timeout(timeout, replay_inner(client, records)).await {
         Ok(res) => res,
         Err(_) => bail!(
-            "oracle replay exceeded {ORACLE_TIMEOUT:?} — cluster wedged mid-replay; \
+            "oracle replay exceeded {timeout:?} — cluster wedged mid-replay; \
              check node logs for raft-core panics (a recurrence of the \
              debug-build `entries_stream` read-after-submit assert would mean \
              the RocksLogStorage pending overlay regressed — see ADR A-0015)"
@@ -106,9 +123,7 @@ pub async fn replay_ack_log(client: &RrClient, ack_log_path: &Path) -> Result<Or
     }
 }
 
-async fn replay_inner(client: &RrClient, ack_log_path: &Path) -> Result<OracleReport> {
-    let records: Vec<AckRecord> = Journal::read_all(ack_log_path)
-        .with_context(|| format!("read ack log {}", ack_log_path.display()))?;
+async fn replay_inner(client: &RrClient, records: Vec<AckRecord>) -> Result<OracleReport> {
     let started = Instant::now();
     let mut verified = 0usize;
 
@@ -167,5 +182,23 @@ async fn verify_one(client: &RrClient, record: &AckRecord) -> Result<()> {
              watermark survived but the cached response is gone — cannot prove survival"
         ),
         Err(e) => bail!("oracle probe failed after client retries: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{oracle_timeout, ORACLE_TIMEOUT_FLOOR};
+
+    #[test]
+    fn oracle_timeout_has_floor_for_small_logs() {
+        assert_eq!(oracle_timeout(0), ORACLE_TIMEOUT_FLOOR);
+        assert_eq!(oracle_timeout(500), ORACLE_TIMEOUT_FLOOR);
+    }
+
+    #[test]
+    fn oracle_timeout_scales_past_floor() {
+        // 10k records (nightly scenario B scale): 10000 × 25ms + 60s = 310s.
+        assert_eq!(oracle_timeout(10_000), std::time::Duration::from_secs(310));
+        assert!(oracle_timeout(100_000) > oracle_timeout(10_000));
     }
 }

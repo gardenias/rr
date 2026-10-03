@@ -2,4 +2,6 @@
 .gitnexus
 /dev-certs
 .DS_Store
+.idea/
+.playwright-mcp/
 

@@ -35,7 +35,12 @@ mod rocks_scenarios {
 
     /// Hard ceiling for one scenario. On expiry the test panics and the
     /// cluster's Drop guard reaps all children — no stray processes.
-    const SCENARIO_TIMEOUT: Duration = Duration::from_secs(600);
+    /// Env-tunable (`CRASH_SCENARIO_TIMEOUT_SECS`): nightly scenario B on a
+    /// slow runner (debug node binaries) needs >10 min for 10 rounds of
+    /// full-log replays — the oracle replays the whole ack log every round.
+    fn scenario_timeout() -> Duration {
+        Duration::from_secs(u64::from(env_u32("CRASH_SCENARIO_TIMEOUT_SECS", 600)))
+    }
 
     /// One planned kill: which node, how far into the round (wall-clock).
     /// Drawn from the seeded RNG before the round starts, so a `CRASH_SEED`
@@ -251,9 +256,9 @@ mod rocks_scenarios {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn scenario_a_graceful_sigterm() {
         let _guard = SCENARIO_LOCK.lock().await;
-        tokio::time::timeout(SCENARIO_TIMEOUT, scenario_a_body())
+        tokio::time::timeout(scenario_timeout(), scenario_a_body())
             .await
-            .expect("scenario A exceeded its 10-minute ceiling")
+            .expect("scenario A exceeded its time ceiling")
             .unwrap();
     }
 
@@ -339,9 +344,9 @@ mod rocks_scenarios {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn scenario_b_sigkill() {
         let _guard = SCENARIO_LOCK.lock().await;
-        tokio::time::timeout(SCENARIO_TIMEOUT, scenario_b_body())
+        tokio::time::timeout(scenario_timeout(), scenario_b_body())
             .await
-            .expect("scenario B exceeded its 10-minute ceiling")
+            .expect("scenario B exceeded its time ceiling")
             .unwrap();
     }
 
@@ -452,9 +457,9 @@ mod rocks_scenarios {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn scenario_c_snapshot_purge_kill() {
         let _guard = SCENARIO_LOCK.lock().await;
-        tokio::time::timeout(SCENARIO_TIMEOUT, scenario_c_body())
+        tokio::time::timeout(scenario_timeout(), scenario_c_body())
             .await
-            .expect("scenario C exceeded its 10-minute ceiling")
+            .expect("scenario C exceeded its time ceiling")
             .unwrap();
     }
 
