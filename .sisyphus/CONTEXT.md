@@ -5,7 +5,8 @@
 > `.sisyphus/notepads/<phase>/{decisions,learnings,problems}.md`.
 > Forward-looking design decisions live in `.sisyphus/adr/A-NNNN-*.md`.
 
-**Last updated**: 2026-09-24（**A–E 波次+收尾已 commit & push(`d65f74e`,130 文件,gitnexus 索引刷新 7821 节点);批处理开启态 crash/fuzz/soak 三门禁本地实证全绿;远端 CI 幻影事故,cron 重试已挂**）
+**Last updated**: 2026-10-04（**幻影事故解除后首轮三 nightly 全灭的 triage+修复已 commit(`0bf2e9b`)；10 个跟踪 issue 已回；待 push 后 scheduled run 复核**）
+> 前情 2026-09-24（**A–E 波次+收尾已 commit & push(`d65f74e`,130 文件,gitnexus 索引刷新 7821 节点);批处理开启态 crash/fuzz/soak 三门禁本地实证全绿;远端 CI 幻影事故,cron 重试已挂**）
 > 前情 2026-09-23 深夜场（**review 批次 A–E 全部落地（89+ 文件,门禁全绿）;批次 C 收官:连接扇出实证 2.4×,批+扇出 121.2k TPS;未 commit,待用户决策**）
 > 前情 2026-09-23 晚场（**全项目全新 review:9 agent 并行全新分析,6 个 P0 全部实证到行;报告 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`**）
 > 前情 2026-09-23 早场（**100k 目标条件达成:client 批处理 175.2k TPS(6×,默认关);etcd revision 探针缓存;A-0017 Service Bytes 化立项**）
@@ -29,6 +30,41 @@ rr 是 Rust 写的分布式 Multi-Raft 共识框架：openraft `= 0.10.0-alpha.3
 **11 个 crate**（core / storage / config / config-etcd / raft / network / router / server / client / admin /
 **ingestor-kafka**），**5 个 example**（counter, kv-store, kv-store-kafka, otel-client, etcd-config-quickstart），
 完整的集成测试 + chaos framework + Docusaurus 文档站 + drop-in Prometheus/Grafana 套件。
+
+### Session 2026-10-04 — 幻影事故解除后首轮 nightly 全灭 triage + 修复(用户:"继续 3&2")
+
+> 承接 09-24 "下轮候选"中的 nightly 累积。三个 nightly 的根因互相独立且全部在
+> harness/CI/部署制品层面,**零产品代码缺陷**。修复已 commit(`0bf2e9b`,69 文件),
+> 10 个自动跟踪 issue(#1-#10)已回 triage 结论,留开待 scheduled run 复核转绿后关闭。
+
+- **环境态变更**:① GitHub Actions 幻影事故 ~10-01 解除(run 真实执行),但 Crash/
+  Fuzz/Soak 三个 nightly 自 10-01 起连续全红;② 本地 Docker 仍缺 `rust:1.98-bookworm`/
+  `debian:bookworm-slim`,Docker soak/perf-lab 路径继续受阻(按约定不拉取);
+  ③ 上轮挂的 CI 重试 cron 随旧会话消亡,不再需要——CI 已按 schedule 自跑。
+- **Fuzz Nightly 全灭(8/8 leg × install 30s 秒败)**:`cargo install cargo-fuzz
+  --locked --version 0.12` 被当前 cargo 版本解析器拒绝(部分版本号)——与 fuzz
+  本身无关。修复:钉死 `0.13.2`(09-24 本地 81M runs 验证过的版本)。
+- **Soak Nightly(13m 败于容器 bring-up)**:lab compose 给 kv-store 传了
+  `--metrics-bind-host 0.0.0.0`(d65f74e 批次 E 为 rr-server 旋钮补的),kv-store
+  手卷 CLI 不认识 → "unknown argument" 秒退 → "kv-1 is unhealthy"。本地被缺镜像
+  掩盖(host-path soak 不走 compose)。修复:lab/lab-chaos/perf 三栈全部移除
+  (kv-store metrics 本就绑 0.0.0.0);soak.sh 补 bring-up 失败时 compose logs 取证。
+  **注意:prod-perf.sh 的 perf-lab 在 HEAD 同样因此被断**,镜像可得后需复核。
+- **Crash Nightly(round 8 oracle 败)**:慢 runner(debug 节点二进制)下 keyed id
+  空间涨过 10k LRU 容量(watermark=11974),重放 oracle 需要的旧条目被逐出 →
+  Expired 硬判死。修复:rr-crash-node 默认 200k 缓存(`CRASH_IDEMPOTENCY_CACHE_SIZE`
+  可调,小值可强制 Expired 路径做 sanity);oracle 超时按 ack 日志规模缩放
+  (120s 地板 + 25ms/条;CI 速率 ~90 probes/s,10k+ 条会突破原固定 120s);
+  scenario 上限 env 化(`CRASH_SCENARIO_TIMEOUT_SECS`,nightly 设 1800)。
+- **本地验证**:crash harness 13/13(A+B+C 含批道,corrupted=0 ×3;小缓存负面对照
+  精确命中 Expired 报错);fmt/clippy -D warnings;fuzz 双 batch 语料 cmin 后
+  13.4M runs 零 crash(命名种子全保留,cmin 仅去重新发现)。
+- **清理(用户选项 3)**:5 个 smoke prod 归档(0917×2 W9 取证对 + 0921×3 三连绿)
+  按既定"不入库"约定删除(证据已蒸馏进 CONTEXT/roadmap);fuzz 新语料 59 个入库;
+  `.idea/`/`.playwright-mcp/` 入 .gitignore。
+- **遗留**:① push + scheduled nightly 复核(或 workflow_dispatch 立即验证)待用户
+  拍板;② 复核转绿后关闭 #1-#10;③ Docker soak/perf-lab 复跑仍待镜像;
+  ④ `BatchConfig::ordered` 旋钮与 A-0018 评审(v0.3.0 kickoff)不变。
 
 ### Session 2026-09-24 — review 落地波收尾:invariants.md 登记 + 门禁复验
 

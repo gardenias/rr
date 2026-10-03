@@ -131,12 +131,13 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
   **oracle 5000/5000**(replay 1232 + survival 3275 + **unkeyed 493**,线性一致读验证),
   lag 60s 内收敛(last_log_index=35954 三节点一致),零 panic。
 
-证据边界(如实记录):Docker soak 路径因本机缺 `rust:1.98-bookworm` 等基础镜像且
-registry 不可达受阻——`soak.sh` 已改为只拉起其 oracle 实际使用的 kv 服务
+证据边界(如实记录,2026-10-04 刷新):Docker soak 路径因本机缺 `rust:1.98-bookworm`
+等基础镜像且 registry 不可达受阻——`soak.sh` 已改为只拉起其 oracle 实际使用的 kv 服务
 (`SOAK_WITH_OBSERVABILITY=1` 恢复 prom/grafana),Docker 跑通仍待镜像可得;
-远端 GitHub Actions 自 ~09-21 起处于幻影事故(全部 run 零步骤秒败、日志
-BlobNotFound,githubstatus 误报 operational),crash/fuzz/soak nightly 的批处理
-覆盖累积与 semver-checks 裁决均待事故解除。
+远端幻影事故 ~10-01 解除,但首轮真实 nightly 全灭:三个根因互相独立且全部在
+harness/CI/制品层面(fuzz 安装版本解析、lab compose 传入 kv-store 不认识的 flag、
+crash oracle 的 10k LRU 容量假设被慢 runner 规模突破),修复见 `0bf2e9b`;
+crash/fuzz/soak nightly 的批处理覆盖累积待修复后 scheduled run 复核。
 转正式剩余项:跨批顺序串行化的吞吐代价评估(见 M3 节 ordered 旋钮决策点,
 v0.3.0 kickoff)+ nightly 累积;之后评估是否对特定 profile 默认开启
 (串行延迟代价 161µs→3.1ms,默认关维持不变)。
