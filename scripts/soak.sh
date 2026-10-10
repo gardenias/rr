@@ -70,6 +70,12 @@ REPORT="docs/perf/soak/soak-report-$TS.md"
 COMPOSE="docker compose -f deploy/lab/docker-compose.yml"
 NET="rrlab_rrlab"
 mkdir -p "$RUN_DIR" "$(dirname "$REPORT")"
+# The bench/oracle containers run as non-root (deploy/lab/Dockerfile USER
+# rr:rr) and write ack-log/metrics journals into the bind-mounted /soak —
+# the default 0755 root-owned-ish mode fails with EACCES on the runner
+# ("create journal /soak/metrics.jsonl: Permission denied", soak-nightly
+# run 38042126854). This is CI-local scratch space, so open it up.
+chmod 0777 "$RUN_DIR"
 
 log() { printf '[soak %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 fail() { log "SOAK FAIL: $*"; exit 1; }
