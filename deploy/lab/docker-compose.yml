@@ -23,7 +23,9 @@ x-kv-common: &kv-common
   image: rr-lab:dev
   networks: [rrlab]
   # All nodes use the same internal ports; identity comes from the hostname.
-  # Admin gRPC = port+1000 = 52001; metrics/HTTP = 9100.
+  # Admin gRPC = port+1000 = 52001; metrics/HTTP = 9100. Metrics/HTTP must
+  # bind 0.0.0.0 (--metrics-bind-host) — the rr-server default is loopback,
+  # which leaves host-published ports and Prometheus scrapes unreachable.
   environment:
     RUST_LOG: "info"
   deploy:
@@ -54,6 +56,8 @@ services:
       - "0.0.0.0"
       - "--metrics-port"
       - "9100"
+      - "--metrics-bind-host"
+      - "0.0.0.0"
       - "--peers"
       - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
       - "--kafka-brokers"
@@ -79,6 +83,8 @@ services:
       - "0.0.0.0"
       - "--metrics-port"
       - "9100"
+      - "--metrics-bind-host"
+      - "0.0.0.0"
       - "--peers"
       - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
       - "--kafka-brokers"
@@ -106,6 +112,8 @@ services:
       - "0.0.0.0"
       - "--metrics-port"
       - "9100"
+      - "--metrics-bind-host"
+      - "0.0.0.0"
       - "--peers"
       - "1@kv-1:51001,2@kv-2:51001,3@kv-3:51001"
       - "--kafka-brokers"

@@ -53,6 +53,10 @@
 //!   (must include this node). Empty means single-node roster.
 //! - `--metrics-port <PORT>`    — Also serve /health, /ready and Prometheus /metrics
 //!   over HTTP on this port. Off by default.
+//! - `--metrics-bind-host <IP>` — Bind host for the metrics/HTTP endpoints.
+//!   Defaults to 127.0.0.1 (loopback only, mirroring rr-server's
+//!   `metrics_bind_host` default). Set 0.0.0.0 in containers so published
+//!   ports and cross-container Prometheus scrapes can reach it.
 //! - `--kafka-brokers <A,...>`  — Comma-separated bootstrap brokers; consumes group 1's
 //!   command topic with framework-managed exactly-once apply.
 //!   Requires a binary built with `--features rdkafka`.
@@ -130,6 +134,7 @@ struct CliConfig {
     listen_addr: String,
     peers: Vec<String>,
     metrics_port: Option<u16>,
+    metrics_bind_host: Option<String>,
     kafka_brokers: Option<Vec<String>>,
     kafka_topic_prefix: String,
     data_dir: Option<String>,
@@ -154,6 +159,7 @@ impl CliConfig {
                 listen_addr: "127.0.0.1".to_string(),
                 peers: vec![],
                 metrics_port: None,
+                metrics_bind_host: None,
                 kafka_brokers: None,
                 kafka_topic_prefix: "input_".to_string(),
                 data_dir: None,
@@ -172,6 +178,7 @@ impl CliConfig {
         let mut listen_addr = "127.0.0.1".to_string();
         let mut peers: Vec<String> = vec![];
         let mut metrics_port: Option<u16> = None;
+        let mut metrics_bind_host: Option<String> = None;
         let mut kafka_brokers: Option<Vec<String>> = None;
         let mut kafka_topic_prefix = "input_".to_string();
         let mut data_dir: Option<String> = None;
@@ -208,6 +215,11 @@ impl CliConfig {
                 "--metrics-port" => {
                     i += 1;
                     metrics_port = Some(parse_flag_value(&args, i, "--metrics-port"));
+                }
+                "--metrics-bind-host" => {
+                    i += 1;
+                    metrics_bind_host =
+                        Some(flag_value(&args, i, "--metrics-bind-host").to_string());
                 }
                 "--kafka-brokers" => {
                     i += 1;
@@ -273,6 +285,7 @@ impl CliConfig {
             listen_addr,
             peers,
             metrics_port,
+            metrics_bind_host,
             kafka_brokers,
             kafka_topic_prefix,
             data_dir,
@@ -291,8 +304,8 @@ impl CliConfig {
 fn usage() -> ! {
     eprintln!(
         "Usage: kv-store [--node-id N] [--port PORT] [--listen-addr HOST] \
-         [--peers ID@ADDR,...] [--metrics-port PORT] [--kafka-brokers A,...] \
-         [--kafka-topic-prefix P] [--data-dir PATH] \
+         [--peers ID@ADDR,...] [--metrics-port PORT] [--metrics-bind-host IP] \
+         [--kafka-brokers A,...] [--kafka-topic-prefix P] [--data-dir PATH] \
          [--tls-cert PATH --tls-key PATH --tls-ca PATH [--tls-domain NAME]] \
          [--snapshot-logs-since-last N] [--bootstrap] [--demo]"
     );
@@ -521,6 +534,15 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         Some(port) => config.with_metrics_port(port),
         None => config,
     };
+    // Container runs need the metrics/HTTP server on 0.0.0.0: the compose
+    // healthcheck passes either way (it probes loopback from inside), but
+    // published ports and cross-container scrapes only reach a wildcard
+    // bind. rr-server's default is loopback — kv-store must opt out
+    // explicitly for the lab stacks.
+    let config = match &cli.metrics_bind_host {
+        Some(host) => config.with_metrics_bind_host(host.clone()),
+        None => config,
+    };
     // W7 snapshot-pressure runs lower the trigger (e.g. 5k) to make snapshot
     // cost visible in the time series; default keeps 50k (ADR A-0008).
     let config = match cli.snapshot_logs_since_last {
@@ -535,8 +557,9 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         cli.node_id, roster[&cli.node_id]
     );
     if let Some(port) = cli.metrics_port {
+        let host = cli.metrics_bind_host.as_deref().unwrap_or("127.0.0.1");
         info!(
-            "Node {} serving /health /ready /metrics on 0.0.0.0:{port}",
+            "Node {} serving /health /ready /metrics on {host}:{port}",
             cli.node_id
         );
     }

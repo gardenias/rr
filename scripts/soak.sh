@@ -113,7 +113,15 @@ log "waiting for three healthy nodes…"
 for n in 1 2 3; do
   for i in $(seq 1 90); do
     if curl -fsS "http://127.0.0.1:$((PORT_BASE + n))/ready" >/dev/null 2>&1; then break; fi
-    if (( i == 90 )); then fail "kv-$n never became ready"; fi
+    if (( i == 90 )); then
+      # Same forensics as the up-failure path: the teardown trap wipes the
+      # stack, and a node that is compose-Healthy but unreachable on its
+      # published port (e.g. metrics bound to loopback in the container)
+      # otherwise leaves no evidence behind.
+      $COMPOSE logs --no-color kv-1 kv-2 kv-3 >"$RUN_DIR/compose-up.log" 2>&1 || true
+      tail -40 "$RUN_DIR/compose-up.log" || true
+      fail "kv-$n never became ready (see $RUN_DIR/compose-up.log)"
+    fi
     sleep 2
   done
 done
