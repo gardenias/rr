@@ -256,19 +256,16 @@ impl ApplyOutcome {
                 )),
             ));
         }
-        let (decoded, _) =
-            bincode::serde::decode_from_slice(&bytes[2..], bincode::config::standard()).map_err(
-                |e| {
-                    metrics::counter!(
-                        "rr_framing_decode_failures_total",
-                        "kind" => "apply_outcome_body"
-                    )
-                    .increment(1);
-                    crate::error::RrError::Codec(crate::error::CodecError::DeserializeFailed(
-                        format!("apply outcome decode failed: {e}"),
-                    ))
-                },
-            )?;
+        let (decoded, _) = crate::bounded_decode::decode_entry_body(&bytes[2..]).map_err(|e| {
+            metrics::counter!(
+                "rr_framing_decode_failures_total",
+                "kind" => "apply_outcome_body"
+            )
+            .increment(1);
+            crate::error::RrError::Codec(crate::error::CodecError::DeserializeFailed(format!(
+                "apply outcome decode failed: {e}"
+            )))
+        })?;
         Ok(decoded)
     }
 }
@@ -276,6 +273,27 @@ impl ApplyOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_length_claim_is_rejected_without_oom() {
+        // Same family as the fuzz-nightly 2026-10-10 FramedEntry OOM:
+        // a Success(Vec<u8>) claiming u64::MAX bytes in 11 bytes of input.
+        let bytes: [u8; 12] = [
+            APPLY_OUTCOME_TAG,
+            APPLY_OUTCOME_VERSION,
+            0x00, // variant 0 = Success
+            0xfd,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xff,
+            0xff, // varint u64::MAX length
+        ];
+        assert!(ApplyOutcome::decode(&bytes).is_err());
+    }
 
     #[test]
     fn key_equality_ignores_client_id() {

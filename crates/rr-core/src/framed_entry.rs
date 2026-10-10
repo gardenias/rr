@@ -111,6 +111,11 @@ impl FramedEntry {
     ///   `version > FRAMED_ENTRY_VERSION` (failing-loud here prevents
     ///   silent state corruption from a future-version peer or a
     ///   bit-flipped log entry).
+    ///
+    /// Decode is bounded: any container whose claimed length would push
+    /// the body past [`crate::bounded_decode::MAX_ENTRY_BODY`] is rejected
+    /// before bincode allocates for the claim (a corrupt log entry must
+    /// not turn into a multi-gibibyte allocation on the apply path).
     pub fn decode(bytes: &[u8]) -> Result<Option<Self>, RrError> {
         if bytes.len() < FRAMED_ENTRY_MAGIC.len() {
             return Ok(None);
@@ -120,17 +125,16 @@ impl FramedEntry {
         }
         let body = &bytes[FRAMED_ENTRY_MAGIC.len()..];
         let (framed, _) =
-            bincode::serde::decode_from_slice::<FramedEntry, _>(body, bincode::config::standard())
-                .map_err(|e| {
-                    metrics::counter!(
-                        "rr_framing_decode_failures_total",
-                        "kind" => "framed_entry_body"
-                    )
-                    .increment(1);
-                    RrError::Codec(CodecError::DeserializeFailed(format!(
-                        "framed entry decode failed: {e}"
-                    )))
-                })?;
+            crate::bounded_decode::decode_entry_body::<FramedEntry>(body).map_err(|e| {
+                metrics::counter!(
+                    "rr_framing_decode_failures_total",
+                    "kind" => "framed_entry_body"
+                )
+                .increment(1);
+                RrError::Codec(CodecError::DeserializeFailed(format!(
+                    "framed entry decode failed: {e}"
+                )))
+            })?;
         if framed.version > FRAMED_ENTRY_VERSION {
             metrics::counter!(
                 "rr_framing_decode_failures_total",
@@ -205,6 +209,23 @@ mod tests {
         assert_ne!(
             FRAMED_ENTRY_MAGIC,
             crate::framed_snapshot::FRAMED_SNAPSHOT_MAGIC
+        );
+    }
+
+    #[test]
+    fn hostile_length_claim_is_rejected_without_oom() {
+        // Fuzz-nightly 2026-10-10 reproducer (base64 AHJyRU5UMDEoAAH8AAAyo2E=):
+        // magic + 9-byte body claiming a ~2.55 GiB string length. Before the
+        // decode bound this drove bincode into a multi-GiB calloc (OOM abort);
+        // it must now fail fast with a plain decode error.
+        let bytes: [u8; 17] = [
+            0x00, 0x72, 0x72, 0x45, 0x4e, 0x54, 0x30, 0x31, 0x28, 0x00, 0x01, 0xfc, 0x00, 0x00,
+            0x32, 0xa3, 0x61,
+        ];
+        let err = FramedEntry::decode(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("framed entry decode failed"),
+            "expected decode failure, got: {err}"
         );
     }
 

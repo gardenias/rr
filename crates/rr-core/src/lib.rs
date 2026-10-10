@@ -45,6 +45,7 @@
 //! ```
 
 pub mod batch;
+mod bounded_decode;
 pub mod codec;
 pub mod config;
 pub mod deferred;

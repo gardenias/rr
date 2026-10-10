@@ -164,20 +164,17 @@ impl FramedSnapshot {
             return Ok(None);
         }
         let body = &bytes[FRAMED_SNAPSHOT_MAGIC.len()..];
-        let (framed, _) = bincode::serde::decode_from_slice::<FramedSnapshot, _>(
-            body,
-            bincode::config::standard(),
-        )
-        .map_err(|e| {
-            metrics::counter!(
-                "rr_framing_decode_failures_total",
-                "kind" => "framed_snapshot_body"
-            )
-            .increment(1);
-            RrError::Codec(CodecError::DeserializeFailed(format!(
-                "framed snapshot decode failed: {e}"
-            )))
-        })?;
+        let (framed, _) = crate::bounded_decode::decode_snapshot_body::<FramedSnapshot>(body)
+            .map_err(|e| {
+                metrics::counter!(
+                    "rr_framing_decode_failures_total",
+                    "kind" => "framed_snapshot_body"
+                )
+                .increment(1);
+                RrError::Codec(CodecError::DeserializeFailed(format!(
+                    "framed snapshot decode failed: {e}"
+                )))
+            })?;
         if framed.version > FRAMED_SNAPSHOT_VERSION {
             metrics::counter!(
                 "rr_framing_decode_failures_total",
@@ -196,6 +193,20 @@ impl FramedSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostile_length_claim_is_rejected_without_oom() {
+        // Same failure family as the fuzz-nightly 2026-10-10 FramedEntry
+        // OOM: three None options, then a user_snapshot Vec claiming
+        // u64::MAX bytes. Must fail fast, not allocate.
+        let mut bytes = Vec::from(FRAMED_SNAPSHOT_MAGIC);
+        bytes.extend_from_slice(&[
+            0x01, // version
+            0x00, 0x00, 0x00, // idempotency/ingestor/outbox = None
+            0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // varint u64::MAX length
+        ]);
+        assert!(FramedSnapshot::decode(&bytes).is_err());
+    }
 
     #[test]
     fn empty_user_snapshot_roundtrip() {
