@@ -244,6 +244,12 @@ done
 log "converged: last_log_index=${idx[0]}"
 
 # ── 6. oracle 1: ack-log replay (no data loss) ──────────────────────────────
+# Capture node logs BEFORE the oracle: an INV-1 failure exits via `fail`
+# before the §7 capture, and node logs are the only evidence for *why* an
+# acked write vanished (soak-nightly run 38045591646 lost them this way).
+for n in 1 2 3; do
+  docker logs "kv-$n" >"$RUN_DIR/node$n.log" 2>&1 || true
+done
 log "running ack-log oracle…"
 set +e
 $COMPOSE --profile bench run --rm \
