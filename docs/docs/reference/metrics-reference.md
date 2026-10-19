@@ -413,8 +413,9 @@ how often the connection pool detects and recovers from stale connections.
 ---
 
 Total requests at the server's client-protocol boundary, with `op` for the operation
-kind and `outcome` for the result (`redirect` = not leader, leader address returned to
-the client). `rate()` gives TPS by operation type.
+kind and `outcome` for the result (`redirect` = not leader; the client gets the leader
+address when known, or a retriable `Unavailable` when the node is mid-election and
+cannot name one). `rate()` gives TPS by operation type.
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |

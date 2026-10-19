@@ -290,14 +290,22 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
 |---|---|---|
 | 1 | `crates/rr-raft/src/group_manager.rs:810` | 强制走 openraft `ReadPolicy::ReadIndex`,不存在绕过一致性检查的"快路径" |
 | 2 | `crates/rr-raft/src/group_manager.rs:825` | `await_ready` 保证读到的不旧于 ReadIndex 返回的 commit index |
-| 3 | `crates/rr-server/src/dispatch.rs:166-173` | 非 leader 必须回 `leader_info` 重定向而非错误/陈旧数据 |
-| 4 | `crates/rr-network/src/client_service.rs:95-99`(trait 契约) | `submit_linearizable_read` 的 doc 契约:非 leader 必须回填 `leader_*` |
+| 3 | `crates/rr-server/src/dispatch.rs:241-267` | 非 leader 回 `LinearizableReadResult::NotLeader`(无 payload 可伪造);leader 未知时由 gRPC 层映射为可重试 `Unavailable`,禁止摊平成空 payload 假成功(soak-nightly 38045591646 复盘) |
+| 4 | `crates/rr-network/src/client_service.rs:101-124`(trait 契约) | `submit_linearizable_read` 的 doc 契约:非 leader 必须返回 `NotLeader` 变体;`(None, None)` 由 gRPC 层报 `Unavailable` 而非 hint-less 响应 |
 
 ### 现有测试
 
 - `crates/rr-network/src/client_service.rs:486` `test_read_linearizable_routes_to_submit_linearizable_read`
 - `crates/rr-network/src/client_service.rs:539` `test_read_linearizable_surfaces_leader_redirect_to_proto`
   (follower → `leader_info` 重定向直通 proto 层)
+- `crates/rr-network/src/client_service.rs` `test_read_linearizable_leader_unknown_maps_to_unavailable`
+  (leader 未知的 follower → 可重试 `Unavailable`,不再摊平成空 payload 假成功;soak-nightly
+  38045591646 回归)
+- `crates/rr-server/src/dispatch.rs` `test_dispatch_linearizable_read_leader_unknown_is_not_served`
+  (dispatch 层对 leader-unknown 只回报裸 `NotLeader`,无伪造 payload)
+- `crates/rr-client/src/lib.rs` `test_read_linearizable_no_fake_success_when_leader_unknown` /
+  `test_read_linearizable_converges_once_leader_is_known`
+  (SDK 对 leader-unknown 的 `Unavailable` 回退 bootstrap 轮询重试,耗尽报错,绝不假成功)
 - `tests/integration/src/lib.rs` `test_read_linearizable_redirect_from_follower`
   (3 节点真集群:SDK 仅指向已知 follower,经 `leader_info` 重定向在 leader 收敛读成功)
 - `tests/integration/src/linearizability.rs` `checker_minimizes_violation_to_conflicting_pair`

@@ -38,16 +38,30 @@ pub struct ClientWriteResult {
 
 /// Result of submitting a linearizable read request.
 ///
-/// On the leader (or any node that successfully ran a ReadIndex
-/// round-trip locally), `payload` carries the read result and
-/// `leader_*` are `None`. When the contacted node is a follower,
-/// `payload` is empty and `leader_*` identify the leader so the SDK
-/// can redirect (mirrors the write-path `ClientWriteResult`).
+/// The two outcomes are mutually exclusive by construction: a read is
+/// either *served* — the contacted node confirmed leadership via a
+/// ReadIndex round-trip and the payload carries the state-machine
+/// response — or *not served* because the contacted node is not the
+/// leader, in which case there is no payload to return (mirrors the
+/// write-path `ClientWriteResult` redirect). Carrying the payload only in
+/// the `Served` variant makes the historical fake-success shape — a
+/// not-leader read flattened into an empty payload with no leader hint —
+/// unrepresentable (soak-nightly run 38045591646 follow-up).
 #[derive(Debug, Clone)]
-pub struct LinearizableReadResult {
-    pub payload: Vec<u8>,
-    pub leader_node_id: Option<u64>,
-    pub leader_addr: Option<String>,
+pub enum LinearizableReadResult {
+    /// The contacted node ran the ReadIndex round-trip and served the read
+    /// from its local state machine; carries the response bytes (which may
+    /// legitimately be empty, e.g. a read of a missing key).
+    Served(Vec<u8>),
+    /// The contacted node is not the leader. `leader_*` identify the
+    /// leader when known so the SDK can redirect; `(None, None)` means the
+    /// node is mid-election and cannot point anywhere — the gRPC layer maps
+    /// that to a retriable `Unavailable` so the SDK falls back to bootstrap
+    /// polling instead of acknowledging bytes that were never read.
+    NotLeader {
+        leader_node_id: Option<u64>,
+        leader_addr: Option<String>,
+    },
 }
 
 /// Trait for dispatching client RPCs to the application layer.
@@ -94,10 +108,14 @@ pub trait ClientDispatch: Send + Sync {
     /// round-trip plus apply-await.
     ///
     /// If the contacted node is not the leader, the implementation
-    /// MUST return a [`LinearizableReadResult`] with `leader_*`
-    /// populated (and `payload` empty) so the gRPC layer can issue a
-    /// redirect. Returning a generic error would lose the leader hint
-    /// and force the SDK to round-robin blindly.
+    /// MUST return [`LinearizableReadResult::NotLeader`], populating
+    /// `leader_*` when the leader is known so the gRPC layer can issue
+    /// a redirect. When the leader is unknown (election window) the
+    /// gRPC layer maps the result to a retriable `Unavailable` and the
+    /// SDK falls back to bootstrap polling. Returning a generic error
+    /// for a known leader would lose the hint and force the SDK to
+    /// round-robin blindly; returning a served payload for a read that
+    /// never ran would be a fake success.
     async fn submit_linearizable_read(
         &self,
         partition_id: u64,
@@ -134,6 +152,12 @@ fn idem_err_to_proto(err: IdempotencyError) -> ProtoIdemErr {
 /// returning `leader_info = None` would let the client mistake the
 /// response for a plain failure instead of retrying via bootstrap — map
 /// that ambiguous case to a sanitized `Unavailable` instead.
+///
+/// `(None, _)` yields `Ok(None)`: legitimate for the write path (a
+/// successful write carries no hint) and for a *served* read. Callers
+/// handling a not-leader result must treat the `None` outcome as
+/// "leader unknown" and fail with a retriable error rather than emit a
+/// hint-less response (see `read_linearizable`).
 fn leader_info_or_unavailable(
     leader_node_id: Option<u64>,
     leader_addr: Option<String>,
@@ -252,12 +276,36 @@ impl client_service_server::ClientService for ClientServiceImpl {
             .submit_linearizable_read(req.partition_id, req.payload)
             .await?;
 
-        let leader_info = leader_info_or_unavailable(result.leader_node_id, result.leader_addr)?;
-
-        Ok(tonic::Response::new(ReadLocalResponse {
-            payload: result.payload,
-            leader_info,
-        }))
+        match result {
+            LinearizableReadResult::Served(payload) => {
+                Ok(tonic::Response::new(ReadLocalResponse {
+                    payload,
+                    leader_info: None,
+                }))
+            }
+            LinearizableReadResult::NotLeader {
+                leader_node_id,
+                leader_addr,
+            } => {
+                // A not-leader read has no payload — the only honest
+                // outcomes are an actionable redirect or a retriable error.
+                // `leader_info = None` here (follower mid-election, leader
+                // unknown) must NOT be emitted as a hint-less response: the
+                // SDK would read it as a successful empty read, acknowledging
+                // bytes that never went through consensus (soak-nightly run
+                // 38045591646 follow-up). Map it to Unavailable so the SDK
+                // retries via bootstrap, mirroring the write path's
+                // success=false-without-leader-info handling.
+                let leader_info = leader_info_or_unavailable(leader_node_id, leader_addr)?
+                    .ok_or_else(|| {
+                        tonic::Status::unavailable("leader unknown; retry via bootstrap")
+                    })?;
+                Ok(tonic::Response::new(ReadLocalResponse {
+                    payload: vec![],
+                    leader_info: Some(leader_info),
+                }))
+            }
+        }
     }
 }
 
@@ -334,11 +382,7 @@ mod tests {
             _partition_id: u64,
             _payload: Vec<u8>,
         ) -> Result<LinearizableReadResult, tonic::Status> {
-            Ok(LinearizableReadResult {
-                payload: vec![],
-                leader_node_id: None,
-                leader_addr: None,
-            })
+            Ok(LinearizableReadResult::Served(vec![]))
         }
 
         async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
@@ -475,11 +519,7 @@ mod tests {
         ) -> Result<LinearizableReadResult, tonic::Status> {
             payload.extend_from_slice(b"-lin");
             payload.extend_from_slice(&partition_id.to_le_bytes());
-            Ok(LinearizableReadResult {
-                payload,
-                leader_node_id: None,
-                leader_addr: None,
-            })
+            Ok(LinearizableReadResult::Served(payload))
         }
 
         async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
@@ -538,8 +578,7 @@ mod tests {
             _: u64,
             _: Vec<u8>,
         ) -> Result<LinearizableReadResult, tonic::Status> {
-            Ok(LinearizableReadResult {
-                payload: vec![],
+            Ok(LinearizableReadResult::NotLeader {
                 leader_node_id: Some(42),
                 leader_addr: Some("127.0.0.1:60042".to_string()),
             })
@@ -598,8 +637,7 @@ mod tests {
             _: u64,
             _: Vec<u8>,
         ) -> Result<LinearizableReadResult, tonic::Status> {
-            Ok(LinearizableReadResult {
-                payload: vec![],
+            Ok(LinearizableReadResult::NotLeader {
                 leader_node_id: Some(42),
                 leader_addr: None,
             })
@@ -640,5 +678,63 @@ mod tests {
                 .await
                 .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    /// A dispatch mid-election: not the leader and no known leader —
+    /// the `(None, None)` redirect-less case.
+    struct LeaderUnknownReadDispatch;
+
+    #[async_trait::async_trait]
+    impl ClientDispatch for LeaderUnknownReadDispatch {
+        async fn submit_write(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+            _: Option<IdempotencyKey>,
+        ) -> Result<ClientWriteResult, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn submit_read(&self, _: u64, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+        async fn submit_linearizable_read(
+            &self,
+            _: u64,
+            _: Vec<u8>,
+        ) -> Result<LinearizableReadResult, tonic::Status> {
+            Ok(LinearizableReadResult::NotLeader {
+                leader_node_id: None,
+                leader_addr: None,
+            })
+        }
+        async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {
+            Err(tonic::Status::unimplemented(""))
+        }
+    }
+
+    // INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
+    // Regression (soak-nightly run 38045591646 follow-up): a follower that
+    // does not know the leader must NOT be flattened into
+    // `payload=[] + leader_info=None` — indistinguishable from a successful
+    // empty read, so the SDK would acknowledge bytes that never went through
+    // consensus. The gRPC layer maps "leader unknown" to a retriable
+    // Unavailable instead (mirrors the write path's success=false handling).
+    #[tokio::test]
+    async fn test_read_linearizable_leader_unknown_maps_to_unavailable() {
+        let svc = ClientServiceImpl::new(Arc::new(LeaderUnknownReadDispatch));
+        let req = ReadLocalRequest {
+            partition_id: 5,
+            payload: b"q".to_vec(),
+        };
+        let err =
+            client_service_server::ClientService::read_linearizable(&svc, tonic::Request::new(req))
+                .await
+                .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert!(
+            err.message().contains("leader unknown"),
+            "error should tell the client to retry via bootstrap, got: {}",
+            err.message()
+        );
     }
 }

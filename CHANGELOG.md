@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-10-20 soak INV-1 defense-in-depth
+
+- **Read-path fake success** (soak-nightly run 38045591646 follow-up):
+  a follower mid-election answered `ReadLinearizable` with
+  `NotLeader{None, None}`, which the dispatch layer flattened into
+  `payload=[] + leader_info=None` — indistinguishable from a successful
+  empty read, so SDKs acknowledged bytes that never went through
+  consensus. `LinearizableReadResult` is now an enum
+  (`Served(payload)` / `NotLeader { leader_node_id, leader_addr }`) so a
+  not-leader read has no payload to fake; the gRPC layer maps
+  leader-unknown to a retriable `UNAVAILABLE` ("leader unknown; retry via
+  bootstrap"), and `RrClient::read_linearizable` falls back to bootstrap
+  polling with backoff (exhaustion reports an `RpcFailed` carrying the
+  Unavailable cause). The Java SDK already retries `UNAVAILABLE` via
+  bootstrap, so it inherits the fix server-side.
+- **`scripts/soak.sh` gates**: (i) convergence magnitude check — after
+  the three nodes agree on `last_log_index`, a keyed-only unbatched run
+  (`CLIENT_BATCHING=0`, `SOAK_UNKEYED_RATIO=0`) must additionally satisfy
+  `last_log_index >= acked` (final `metrics.jsonl` record), so a cluster
+  that converged by *erasing* committed entries now fails instead of
+  passing (incident shape: converged at 392176 with 1,434,247 acked);
+  other traffic shapes degrade to warn. (ii) availability SLO gate —
+  more than `SOAK_ZERO_TPS_MAX_WINDOWS` (default 10 ≈ 50 min at the
+  300s metrics interval) consecutive zero-`window_tps` records ending
+  well before load end fails the run; the 101-minute silent wedge in
+  rounds 10–11 of run 38045591646 would have tripped this.
+
 ### Added — 2026-09-23 full-review batch
 
 - **Ingress log-poison guard** (`rr_core::ingress::validate_client_payload`,

@@ -483,8 +483,10 @@ impl ClientDispatch for HarnessDispatch {
             Ok(l) => l,
             Err(ref e) => {
                 if let Some(fwd) = e.forward_to_leader() {
-                    return Ok(LinearizableReadResult {
-                        payload: vec![],
+                    // Bare not-leader signal: no payload is fabricated; an
+                    // unknown leader (None, None) surfaces as a retriable
+                    // Unavailable at the gRPC layer.
+                    return Ok(LinearizableReadResult::NotLeader {
                         leader_node_id: fwd.leader_id,
                         leader_addr: fwd.leader_node.as_ref().map(|n| n.addr.clone()),
                     });
@@ -497,11 +499,9 @@ impl ClientDispatch for HarnessDispatch {
             .await
             .map_err(|_| tonic::Status::internal("linearizable read not ready"))?;
         let count = *self.applied_count.lock().unwrap();
-        Ok(LinearizableReadResult {
-            payload: count.to_string().into_bytes(),
-            leader_node_id: None,
-            leader_addr: None,
-        })
+        Ok(LinearizableReadResult::Served(
+            count.to_string().into_bytes(),
+        ))
     }
 
     async fn get_cluster_info(&self) -> Result<Vec<GroupInfo>, tonic::Status> {

@@ -238,19 +238,23 @@ impl ClientDispatch for ClientDispatchImpl {
             .linearizable_read(group_id, payload)
             .await
         {
-            Ok(bytes) => Ok(LinearizableReadResult {
-                payload: bytes,
-                leader_node_id: None,
-                leader_addr: None,
-            }),
+            Ok(bytes) => Ok(LinearizableReadResult::Served(bytes)),
             Err(RrError::Raft(RaftError::NotLeader {
                 leader,
                 leader_addr,
-            })) => Ok(LinearizableReadResult {
-                payload: vec![],
-                leader_node_id: leader,
-                leader_addr,
-            }),
+            })) => {
+                // Not the leader: there is no read result, so there is
+                // nothing to put in a payload — return the bare redirect
+                // signal. When the follower is mid-election both fields are
+                // `None` and the gRPC layer maps that to a retriable
+                // Unavailable; fabricating an empty payload here would let
+                // the client acknowledge bytes that never went through
+                // consensus (soak-nightly run 38045591646 follow-up).
+                Ok(LinearizableReadResult::NotLeader {
+                    leader_node_id: leader,
+                    leader_addr,
+                })
+            }
             Err(e) => {
                 tracing::error!(
                     partition_id,
@@ -262,8 +266,8 @@ impl ClientDispatch for ClientDispatchImpl {
             }
         };
         let outcome = match &result {
-            Ok(r) if r.leader_node_id.is_some() => "redirect",
-            Ok(_) => "success",
+            Ok(LinearizableReadResult::NotLeader { .. }) => "redirect",
+            Ok(LinearizableReadResult::Served(_)) => "success",
             Err(_) => "error",
         };
         record_request_metrics(self.group_label(group_id), "lin_read", start, outcome);
@@ -527,6 +531,38 @@ mod tests {
             Ok(r) => assert!(!r.success),
             Err(s) => assert_ne!(s.code(), tonic::Code::InvalidArgument),
         }
+    }
+
+    // Regression (soak-nightly run 38045591646 follow-up): a group whose
+    // raft instance is up but has no known leader (never initialized /
+    // mid-election) must surface the bare NotLeader signal — dispatch must
+    // NOT fabricate an empty-payload success, which the client would
+    // acknowledge as bytes read without any consensus check.
+    // INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
+    #[tokio::test]
+    async fn test_dispatch_linearizable_read_leader_unknown_is_not_served() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        let config = Arc::new(MemConfigProvider::default());
+        config
+            .add_partition(7, PartitionConfig::SingleId(7), 1, vec![1])
+            .await;
+        let router = Arc::new(ShardRouter::new(config));
+        let dispatch = ClientDispatchImpl::new(Arc::clone(&mgr), router);
+
+        // The group was never initialized, so no leader exists anywhere:
+        // openraft answers ForwardToLeader::empty() → NotLeader{None, None}.
+        let result = dispatch.submit_linearizable_read(7, vec![1]).await.unwrap();
+        assert!(
+            matches!(
+                result,
+                LinearizableReadResult::NotLeader {
+                    leader_node_id: None,
+                    leader_addr: None
+                }
+            ),
+            "leader-unknown read must surface bare NotLeader, got: {result:?}"
+        );
     }
 
     #[tokio::test]

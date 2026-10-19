@@ -567,10 +567,19 @@ impl RrClient {
     /// Server-side flow (per ADR A-0009): the contacted replica calls
     /// openraft `ReadPolicy::ReadIndex`. If that replica is the leader,
     /// it confirms its commit index, awaits local apply, and serves the
-    /// read directly. If it is a follower, openraft returns
-    /// `ForwardToLeader`; the server flattens this into a
+    /// read directly. If it is a follower that knows the leader, the
+    /// server flattens openraft's `ForwardToLeader` into a
     /// `ReadLocalResponse.leader_info` redirect (mirrors the write
     /// path) and this SDK retries against the leader's address.
+    ///
+    /// A follower that does NOT know the leader (election window) instead
+    /// answers `Unavailable` — never a hint-less empty payload — so the
+    /// SDK treats it as transient: the cached channel is evicted and the
+    /// next attempt falls back to bootstrap round-robin, mirroring the
+    /// write path's `success=false`-without-`leader_info` handling.
+    /// `Ok(payload)` is therefore only ever returned when a node actually
+    /// served the read through a consensus round-trip (soak-nightly run
+    /// 38045591646 follow-up).
     ///
     /// Retry semantics: on transport failure, round-robin bootstrap
     /// addrs. On a follower redirect (`leader_info` present), dial the
@@ -1918,5 +1927,181 @@ mod tests {
         server.abort();
 
         assert_eq!(result, b"applied".to_vec());
+    }
+
+    // ── Read-path fake-success regression (leader-unknown window) ──────
+    //
+    // Read-path twin of the write-path tests above. A follower mid-election
+    // answers `read_linearizable` with `Unavailable` (never a hint-less
+    // empty payload — that shape is no longer producible server-side). The
+    // client must treat it as retryable bootstrap polling; returning
+    // `Ok(vec![])` here would acknowledge bytes that never went through
+    // consensus (soak-nightly run 38045591646 follow-up).
+
+    /// Fake node whose linearizable read always answers "leader unknown"
+    /// the way the fixed server does: a retriable `Unavailable`.
+    #[derive(Default)]
+    struct ReadLeaderUnknownService {
+        hits: Arc<AtomicUsize>,
+    }
+
+    /// Fake node whose linearizable read answers "leader unknown" for the
+    /// first `unknown_for` requests, then serves the read as a healthy
+    /// leader.
+    struct ReadLeaderAppearsService {
+        hits: Arc<AtomicUsize>,
+        unknown_for: usize,
+        payload: Vec<u8>,
+    }
+
+    #[tonic::async_trait]
+    impl ClientServiceTrait for ReadLeaderUnknownService {
+        async fn request(
+            &self,
+            _request: tonic::Request<ClientRequest>,
+        ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_local(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_linearizable(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Err(tonic::Status::unavailable(
+                "leader unknown; retry via bootstrap",
+            ))
+        }
+
+        async fn get_cluster_info(
+            &self,
+            _request: tonic::Request<Empty>,
+        ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
+            Ok(tonic::Response::new(ClusterInfo { groups: vec![] }))
+        }
+    }
+
+    #[tonic::async_trait]
+    impl ClientServiceTrait for ReadLeaderAppearsService {
+        async fn request(
+            &self,
+            _request: tonic::Request<ClientRequest>,
+        ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_local(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_linearizable(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            let hit = self.hits.fetch_add(1, Ordering::SeqCst);
+            if hit < self.unknown_for {
+                Err(tonic::Status::unavailable(
+                    "leader unknown; retry via bootstrap",
+                ))
+            } else {
+                Ok(tonic::Response::new(ReadLocalResponse {
+                    payload: self.payload.clone(),
+                    leader_info: None,
+                }))
+            }
+        }
+
+        async fn get_cluster_info(
+            &self,
+            _request: tonic::Request<Empty>,
+        ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
+            Ok(tonic::Response::new(ClusterInfo { groups: vec![] }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_linearizable_no_fake_success_when_leader_unknown() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let svc = ReadLeaderUnknownService {
+            hits: Arc::clone(&hits),
+        };
+        let (addr, server) = spawn_fake_client_service(svc).await;
+
+        let client = RrClient::connect_with_config(
+            vec![addr],
+            RetryConfig {
+                max_retries: 2,
+                retry_delay_ms: 5,
+            },
+        )
+        .await
+        .expect("connect");
+
+        let result = client.read_linearizable(1, b"q".to_vec()).await;
+        server.abort();
+
+        let Err(err) = result else {
+            panic!("leader-unknown read must NOT silently succeed with empty bytes");
+        };
+        // Unlike the write path (whose leader-unknown signal is in-band and
+        // surfaces as a typed NotLeader), the read path's signal is the
+        // server's retriable Unavailable status, so exhaustion reports an
+        // RpcFailed wrapping it — the underlying cause must survive in the
+        // message.
+        assert!(
+            matches!(err, RrError::Network(NetworkError::RpcFailed(_))),
+            "expected RpcFailed after retries exhausted, got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("leader unknown") || msg.contains("Unavailable"),
+            "the leader-unknown cause must survive into the final error, got: {msg}"
+        );
+        // max_attempts = max_retries + 1 = 3: the client must keep polling
+        // the bootstrap list instead of giving up (or fake-succeeding) on
+        // the first "leader unknown" reply.
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            3,
+            "client must retry via bootstrap polling until attempts run out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_linearizable_converges_once_leader_is_known() {
+        let svc = ReadLeaderAppearsService {
+            hits: Arc::new(AtomicUsize::new(0)),
+            unknown_for: 2,
+            payload: b"served".to_vec(),
+        };
+        let (addr, server) = spawn_fake_client_service(svc).await;
+
+        let client = RrClient::connect_with_config(
+            vec![addr],
+            RetryConfig {
+                max_retries: 4,
+                retry_delay_ms: 5,
+            },
+        )
+        .await
+        .expect("connect");
+
+        let result = client
+            .read_linearizable(1, b"q".to_vec())
+            .await
+            .expect("must succeed once the node knows a leader");
+        server.abort();
+
+        assert_eq!(result, b"served".to_vec());
     }
 }
