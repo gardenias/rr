@@ -181,6 +181,41 @@ where
 
         debug_assert!(since >= self.state.last_purged_log_id().next_index());
 
+        // rr patch #4 (2026-10-19, committed-truncate guard): truncating into
+        // the committed segment is silent data loss, not a recoverable
+        // conflict — refuse it loudly instead of erasing committed entries.
+        //
+        // Fail-stop argument: under legal raft a committed entry never needs
+        // to be deleted. Leader completeness guarantees every leader holds
+        // all committed entries, so a legitimate replication stream never
+        // conflicts with them: `has_log_id` masks every id at or below
+        // `local_committed` as matching, `ensure_log_consecutive` therefore
+        // only truncates strictly above committed, and `install_full_snapshot`
+        // truncates at exactly `local_committed().next_index()`. A request to
+        // delete index <= committed can only mean election safety has already
+        // been breached upstream (soak run 38045591646: wedged replication
+        // froze a node's log, adv-mode vote override let it win an election
+        // with a short log, the committed cursor was pushed down by LogIOId
+        // order, and `truncate_logs` then physically erased ~1M committed,
+        // client-ACKed entries, 392177..=1434246). Continuing past this point
+        // only widens divergence between replicas and turns a detectable
+        // breach into silent amputation of committed data — so panic before
+        // mutating any in-memory or on-disk state.
+        if let Some(committed) = self.state.local_committed() {
+            assert!(
+                since > committed.index(),
+                "truncate_logs({}) would delete committed log entries: \
+                 local_committed: {}, last_log_id: {}, last_purged: {}, \
+                 leader_vote: {}, local vote: {}",
+                since,
+                committed,
+                self.state.last_log_id().display(),
+                self.state.last_purged_log_id().display(),
+                self.leader_vote,
+                self.state.vote_ref(),
+            );
+        }
+
         if self.state.get_log_id(since).is_none() {
             tracing::debug!("skip truncating absent log at index {}", since);
             return;

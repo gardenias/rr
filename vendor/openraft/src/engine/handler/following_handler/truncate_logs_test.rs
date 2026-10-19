@@ -205,6 +205,56 @@ fn test_truncate_logs_since_8() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// rr patch #4 (2026-10-19, committed-truncate guard): a truncate request at
+/// or below `local_committed` means election safety was breached upstream;
+/// the node must fail-stop (panic) instead of silently erasing committed
+/// entries. Legal tail truncation strictly above committed is unaffected.
+#[test]
+#[should_panic(expected = "would delete committed log entries")]
+fn test_truncate_logs_at_committed_panics() {
+    let mut eng = eng();
+    // Commit up to index 5, inside leader (4,1)'s range 4..=6.
+    eng.state.apply_progress_mut().accept(log_id(4, 1, 5));
+
+    // since == committed.index(): would delete the committed entry itself.
+    eng.following_handler().truncate_logs(5);
+}
+
+#[test]
+#[should_panic(expected = "would delete committed log entries")]
+fn test_truncate_logs_below_committed_panics() {
+    let mut eng = eng();
+    eng.state.apply_progress_mut().accept(log_id(4, 1, 5));
+
+    // since < committed.index(): would erase a whole committed segment,
+    // the shape of the soak run 38045591646 mass erasure.
+    eng.following_handler().truncate_logs(2);
+}
+
+#[test]
+fn test_truncate_logs_above_committed_is_allowed() -> anyhow::Result<()> {
+    let mut eng = eng();
+    eng.state.apply_progress_mut().accept(log_id(4, 1, 5));
+
+    // since == committed.next_index(): only uncommitted tail is removed.
+    eng.following_handler().truncate_logs(6);
+
+    assert_eq!(Some(&log_id(4, 1, 5)), eng.state.last_log_id());
+    assert_eq!(None, eng.state.log_ids.purged());
+    assert_eq!(
+        &[log_id(2, 1, 3), log_id(4, 1, 5)],
+        eng.state.log_ids.key_log_ids()
+    );
+    assert_eq!(
+        vec![Command::TruncateLog {
+            after: Some(log_id(4, 1, 5))
+        }],
+        eng.output.take_commands()
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_truncate_logs_revert_effective_membership() -> anyhow::Result<()> {
     let mut eng = eng();

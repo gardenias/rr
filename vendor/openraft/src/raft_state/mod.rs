@@ -347,8 +347,50 @@ where
     /// safe from truncation. Only then are these entries safe to apply to the state machine.
     ///
     /// This method updates the committed log id only if the input is greater than the current
-    /// value.
+    /// value, and never lets the committed **index** move backwards (rr patch #5, see below).
     pub(crate) fn update_local_committed(&mut self, committed: &Option<LogIdOf<C>>) {
+        // rr patch #5 (2026-10-19, committed index regression guard): the
+        // local committed index never regresses.
+        //
+        // `LogId` ordering is lexicographic on `(leader_id, index)`, so a
+        // commit reported by a higher-vote leader at a LOWER index compares
+        // "greater" than the current committed and would be adopted below,
+        // depressing the apply ceiling. This is the committed-cursor
+        // down-press in soak run 38045591646: an illegitimate short-log
+        // leader (adv-mode vote override) reported leader_commit at index
+        // 392176 and followers adopted it over their committed
+        // (…,1434247) — unmasking 392177..=1434246 from the `has_log_id`
+        // committed mask, after which conflict truncation physically erased
+        // ~1.04M committed, client-ACKed entries.
+        //
+        // Rejecting an index regression cannot block a legitimate update:
+        // by leader completeness a legally elected leader's log contains
+        // every committed entry, so a genuine commit — a quorum grant on
+        // the leader (`try_commit_quorum_accepted`) or a leader_commit
+        // notification on a follower (`update_committed`) — always carries
+        // an index >= the locally committed one. An index regression
+        // therefore always evidences an upstream election-safety breach;
+        // keep the cursor and let the committed-truncate guard (rr patch
+        // #4) fail-stop if the bogus leader goes on to conflict with the
+        // committed suffix. Same-index and same-vote updates keep the
+        // original lexicographic comparison.
+        //
+        // Snapshot installation does not pass through here: it advances
+        // `apply_progress` directly in
+        // `following_handler::install_full_snapshot`, which already asserts
+        // `snap_last_log_id.index() > committed.index()`.
+        if let (Some(new), Some(current)) = (committed.as_ref(), self.local_committed())
+            && new.index() < current.index()
+        {
+            tracing::warn!(
+                "{}: reject committed index regression: new: {}, current: {}",
+                func_name!(),
+                new,
+                current,
+            );
+            return;
+        }
+
         if committed.as_ref() > self.local_committed() {
             // Safe unwrap(): committed > self.committed(), implies it cannot be None
             self.apply_progress_mut().accept(committed.clone().unwrap());

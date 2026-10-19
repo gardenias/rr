@@ -621,6 +621,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `flush_barrier()` first, restoring "vote flushed ⟹ prior log IO
   flushed". New test `test_save_vote_waits_for_pending_appends`
   (registered under INV-1).
+- **Vendored openraft patch #4 — committed-truncate fail-stop guard**
+  (soak run 38045591646 defense in depth, 2026-10-19):
+  `following_handler::truncate_logs` (the sole producer of
+  `Command::TruncateLog`) previously guarded its floor with a
+  debug-only assertion, so a replication stream that conflicted inside
+  the committed segment would silently erase committed entries in
+  release builds. It now asserts — before any in-memory state mutation —
+  that `since > local_committed.index()`, with the vote/log context in
+  the panic message. Under legal raft this can never fire (leader
+  completeness plus the `has_log_id` committed mask keep every
+  legitimate truncation strictly above committed; `install_full_snapshot`'s
+  `truncate(committed.next_index())` sits exactly on the allowed boundary),
+  so a trigger means election safety was already breached upstream and
+  the node fails stop instead of widening replica divergence. New vendor
+  unit tests in `following_handler/truncate_logs_test.rs` (truncate at /
+  below committed panics; above committed unaffected).
+- **Vendored openraft patch #5 — committed index regression guard**
+  (soak run 38045591646 defense in depth, 2026-10-19): `LogId`/`LogIOId`
+  ordering is lexicographic on `(vote/leader_id, index)`, so a commit
+  reported by a higher-vote leader with a *shorter* log compared
+  "greater" and was adopted by `RaftState::update_local_committed` —
+  depressing the local committed cursor (apply ceiling) from index
+  1434247 to 392176 and unmasking the committed suffix from
+  `has_log_id`, which let conflict truncation physically erase ~1.04M
+  committed, client-ACKed entries. The cursor's index now never moves
+  backwards: an update whose index is below the current local committed
+  index is rejected with a `warn!`, regardless of vote ordering.
+  Legitimate paths are unaffected by construction: leader completeness
+  guarantees a legally elected leader's commit carries an index ≥ the
+  locally committed one (same-vote and same-index updates keep the
+  original lexicographic comparison), and snapshot installation advances
+  `apply_progress` directly, bypassing the guarded funnel. Complements
+  vendor patch #4 (committed-truncate fail-stop guard): #5 keeps the
+  cursor correct, #4 panics if anything still tries to cut into it.
+  New vendor unit tests in `raft_state/tests/update_committed_test.rs`
+  (regression rejected / same-vote progression / higher-vote
+  higher-index advance / funnel semantics; negative control verified —
+  both guard tests go red without the patch).
 
 ### Changed
 
