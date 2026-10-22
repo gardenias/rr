@@ -115,7 +115,16 @@ impl RateLimitConfig {
             ("per_caller_client_rps", self.per_caller_client_rps),
         ] {
             if let Some(rps) = rps {
-                if rps > MAX_RPS {
+                if rps == 0 {
+                    // A 0-rps bucket never refills: after the initial burst
+                    // the service is permanently dead — and a refill task
+                    // still spins. Almost always a config mistake; unlimited
+                    // is expressed by leaving the field unset.
+                    violations.push(format!(
+                        "{field} = 0 creates a never-refilling bucket (service dies after \
+                         the initial burst); leave the field unset for unlimited instead"
+                    ));
+                } else if rps > MAX_RPS {
                     violations.push(format!(
                         "{field} = {rps} exceeds MAX_RPS ({MAX_RPS}); above ~10⁹ rps the \
                          token-bucket model is meaningless — leave the field unset \
@@ -343,11 +352,80 @@ impl RateLimiter {
 
 /// An entry in the per-caller limiter map.
 struct CallerEntry {
-    limiter: RateLimiter,
+    bucket: LazyBucket,
     last_seen: Instant,
 }
 
-/// Shared state that holds one [`RateLimiter`] per authenticated caller.
+/// A token bucket refilled lazily on access — NO background task per
+/// bucket, so a [`PerCallerLimiterMap`] can hold thousands of entries
+/// without spawning a tokio task per caller (a forged-token flood would
+/// otherwise inflate the runtime by one task per fake fingerprint).
+/// Refill math mirrors [`RateLimiter`]: elapsed-time batched, with
+/// sub-permit fractions carried between acquisitions.
+struct LazyBucket {
+    semaphore: Semaphore,
+    rps: u32,
+    burst: usize,
+    last_refill: Instant,
+    carry: u128,
+}
+
+impl LazyBucket {
+    fn new(rps: u32, burst: u32) -> Self {
+        let burst = burst.max(1) as usize;
+        Self {
+            semaphore: Semaphore::new(burst),
+            rps,
+            burst,
+            last_refill: Instant::now(),
+            carry: 0,
+        }
+    }
+
+    fn try_acquire(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed_ns = now.duration_since(self.last_refill).as_nanos();
+        self.last_refill = now;
+        self.carry += elapsed_ns * u128::from(self.rps);
+        let new_permits = (self.carry / 1_000_000_000) as usize;
+        self.carry %= 1_000_000_000;
+        if new_permits > 0 {
+            let current = self.semaphore.available_permits();
+            if current < self.burst {
+                self.semaphore.add_permits(new_permits.min(self.burst - current));
+            }
+        }
+        match self.semaphore.try_acquire() {
+            Ok(permit) => {
+                permit.forget();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+/// Hard cap on distinct per-caller buckets. Without it a client rotating
+/// forged bearer tokens would mint a fresh full bucket per fingerprint —
+/// silently bypassing the limit AND growing the map without bound. When
+/// the cap is reached, new callers fall back to the global bucket (the
+/// interceptor emits `rr_rate_limit_per_caller_fallback_total`).
+const MAX_PER_CALLER_ENTRIES: usize = 10_000;
+
+/// Outcome of a per-caller acquisition attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerVerdict {
+    /// Permit granted from the caller's own bucket.
+    Granted,
+    /// The caller exhausted its bucket — reject with RESOURCE_EXHAUSTED.
+    Denied,
+    /// The per-caller map is at [`MAX_PER_CALLER_ENTRIES`]: this caller
+    /// could not get its own bucket and must draw from the global bucket
+    /// (or pass through when no fallback is configured).
+    UseGlobal,
+}
+
+/// Shared state that holds one [`LazyBucket`] per authenticated caller.
 ///
 /// Backed by `std::sync::RwLock<HashMap>` — not a hot path, so
 /// contention is acceptable. If profiling shows issues, upgrading to
@@ -358,6 +436,7 @@ pub struct PerCallerLimiterMap {
     per_caller_rps: u32,
     per_caller_burst: u32,
     ttl: Duration,
+    full_warned: Arc<std::sync::atomic::AtomicBool>,
     _gc_guard: Arc<AbortOnDrop>,
 }
 
@@ -393,37 +472,14 @@ impl PerCallerLimiterMap {
             per_caller_rps,
             per_caller_burst,
             ttl,
+            full_warned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _gc_guard: Arc::new(AbortOnDrop(gc_handle)),
         }
     }
 
-    /// Try to acquire one permit for `caller_fp`.  Lazily inserts a new
-    /// [`RateLimiter`] if the caller is not yet present, and lazily
-    /// evicts stale entries whose `last_seen` age exceeds `ttl`.
-    ///
-    /// Returns `true` when the caller still has quota.
-    pub fn try_acquire(&self, caller_fp: &str) -> bool {
-        {
-            let read_guard = self
-                .entries
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(entry) = read_guard.get(caller_fp) {
-                if entry.limiter.try_acquire() {
-                    drop(read_guard);
-                    let mut write_guard = self
-                        .entries
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if let Some(entry) = write_guard.get_mut(caller_fp) {
-                        entry.last_seen = Instant::now();
-                    }
-                    return true;
-                }
-                return false;
-            }
-        }
-
+    /// Try to acquire one permit for `caller_fp`, with the full verdict
+    /// (including the map-full fallback signal).
+    pub fn try_acquire_verdict(&self, caller_fp: &str) -> CallerVerdict {
         let mut write_guard = self
             .entries
             .write()
@@ -432,19 +488,49 @@ impl PerCallerLimiterMap {
 
         if let Some(entry) = write_guard.get_mut(caller_fp) {
             entry.last_seen = Instant::now();
-            return entry.limiter.try_acquire();
+            return if entry.bucket.try_acquire() {
+                CallerVerdict::Granted
+            } else {
+                CallerVerdict::Denied
+            };
         }
 
-        let limiter = RateLimiter::new(self.per_caller_rps, self.per_caller_burst);
-        let acquired = limiter.try_acquire();
+        if write_guard.len() >= MAX_PER_CALLER_ENTRIES {
+            // Edge-triggered warn: the flood that fills the map must not
+            // also fill the logs.
+            if !self.full_warned.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                tracing::warn!(
+                    target: AUDIT_TARGET,
+                    op = "rate_limit",
+                    entries = write_guard.len(),
+                    "per-caller limiter map at capacity; new callers fall back to the global bucket"
+                );
+            }
+            return CallerVerdict::UseGlobal;
+        }
+
+        let mut bucket = LazyBucket::new(self.per_caller_rps, self.per_caller_burst);
+        let acquired = bucket.try_acquire();
         write_guard.insert(
             caller_fp.to_string(),
             CallerEntry {
-                limiter,
+                bucket,
                 last_seen: Instant::now(),
             },
         );
-        acquired
+        if acquired {
+            CallerVerdict::Granted
+        } else {
+            CallerVerdict::Denied
+        }
+    }
+
+    /// Try to acquire one permit for `caller_fp`. Lazily inserts a new
+    /// bucket if the caller is not yet present. `false` covers both
+    /// "bucket empty" and "map full" — use [`Self::try_acquire_verdict`]
+    /// to tell them apart (the interceptor needs the fallback signal).
+    pub fn try_acquire(&self, caller_fp: &str) -> bool {
+        matches!(self.try_acquire_verdict(caller_fp), CallerVerdict::Granted)
     }
 
     /// Evict entries whose `last_seen` is older than `ttl`.
@@ -559,19 +645,31 @@ impl Interceptor for RateLimitInterceptor {
 
         if let Some((map, _rps, _burst)) = &self.per_caller {
             if let Some(fp) = caller_fp(&request) {
-                if map.try_acquire(&fp) {
-                    return Ok(request);
+                match map.try_acquire_verdict(&fp) {
+                    CallerVerdict::Granted => return Ok(request),
+                    CallerVerdict::UseGlobal => {
+                        // Per-caller map at capacity (forged-token flood
+                        // shape): this caller shares the global bucket
+                        // instead of minting a private one.
+                        tracing::debug!(
+                            service = self.service.as_str(),
+                            "per-caller limiter map full; caller uses the global bucket"
+                        );
+                        // fall through to the global limiter below
+                    }
+                    CallerVerdict::Denied => {
+                        tracing::warn!(
+                            target: AUDIT_TARGET,
+                            op = "rate_limit",
+                            service = self.service.as_str(),
+                            peer = %peer,
+                            caller_token_fp = %fp,
+                            result = "rejected",
+                            "rate limit exceeded"
+                        );
+                        return Err(Status::resource_exhausted("rate limit exceeded"));
+                    }
                 }
-                tracing::warn!(
-                    target: AUDIT_TARGET,
-                    op = "rate_limit",
-                    service = self.service.as_str(),
-                    peer = %peer,
-                    caller_token_fp = %fp,
-                    result = "rejected",
-                    "rate limit exceeded"
-                );
-                return Err(Status::resource_exhausted("rate limit exceeded"));
             }
         }
 
@@ -683,6 +781,57 @@ mod tests {
         assert!(map.try_acquire("caller-b"));
         assert!(map.try_acquire("caller-b"));
         assert!(!map.try_acquire("caller-b"));
+    }
+
+    // A forged-token flood must not mint unlimited private buckets: once the
+    // map hits MAX_PER_CALLER_ENTRIES, new fingerprints get the UseGlobal
+    // fallback signal instead of a fresh full bucket.
+    #[tokio::test]
+    async fn per_caller_map_at_capacity_signals_global_fallback() {
+        let map = PerCallerLimiterMap::new(1, 1, Duration::from_secs(300));
+        for i in 0..MAX_PER_CALLER_ENTRIES {
+            let fp = format!("forged-{i}");
+            assert!(
+                matches!(
+                    map.try_acquire_verdict(&fp),
+                    CallerVerdict::Granted | CallerVerdict::Denied
+                ),
+                "entries below the cap must get their own bucket"
+            );
+        }
+        assert_eq!(
+            map.try_acquire_verdict("one-token-too-many"),
+            CallerVerdict::UseGlobal
+        );
+        // And the map must not have grown past the cap.
+        assert_eq!(
+            map.try_acquire_verdict("another-one"),
+            CallerVerdict::UseGlobal
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_rps() {
+        for cfg in [
+            RateLimitConfig {
+                admin_rps: Some(0),
+                ..Default::default()
+            },
+            RateLimitConfig {
+                client_rps: Some(0),
+                ..Default::default()
+            },
+            RateLimitConfig {
+                per_caller_admin_rps: Some(0),
+                ..Default::default()
+            },
+        ] {
+            let err = cfg.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("never-refilling"),
+                "rps=0 must be rejected as a config mistake, got: {err}"
+            );
+        }
     }
 
     #[tokio::test]

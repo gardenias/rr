@@ -17,6 +17,12 @@
 //!   (two-phase) apply of A-0033 must not enable client batching.
 //! - **All-or-nothing commit.** If any item's `handle` fails, the entry's
 //!   apply fails as a whole — identical to a single failing write today.
+//! - **No intra-batch atomicity on failure.** Items ahead of the failing
+//!   one have already produced their user effects and outbox outputs, and
+//!   since apply errors are group-fatal (ADR A-0018) a restart replays the
+//!   whole entry — those items execute AGAIN (unkeyed writes have no
+//!   idempotency layer). Services must tolerate that re-execution (make
+//!   item effects idempotent at the application level).
 //!
 //! # Wire format (big-endian)
 //!

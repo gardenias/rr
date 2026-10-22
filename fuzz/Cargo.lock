@@ -904,6 +904,7 @@ dependencies = [
  "metrics",
  "serde",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

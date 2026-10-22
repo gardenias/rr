@@ -60,6 +60,21 @@ pub enum RoutingTableChange {
 /// Trait for reading cluster configuration (routing table, node addresses).
 ///
 /// Implementations may read from etcd, a static file, or an in-memory store.
+///
+/// # Backend behavior differences (contract-relevant)
+///
+/// - The **in-memory** backend (`rr-config`) strips a removed node from
+///   group replica lists on `remove_node` but does NOT emit a
+///   `GroupMembershipChanged` event for that strip; the **etcd** backend
+///   does not strip dead nodes from stored replica lists at all (the
+///   membership quorum guard measures voters from the raft membership,
+///   not the table). Pure stream consumers can therefore reconstruct
+///   slightly different tables under the two backends.
+/// - Group deletion currently maps to an EMPTY replica set in the change
+///   stream (there is deliberately no `GroupRemoved` variant yet).
+/// - Watch streams differ on lag: the in-memory backend **silently drops**
+///   events on lag; the etcd backend applies backpressure (see
+///   [`Self::watch_changes`] rustdoc).
 #[async_trait]
 pub trait ConfigProvider: Send + Sync {
     /// Get the current full routing table.

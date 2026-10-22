@@ -38,7 +38,7 @@ mod tests {
     use crate::batch::{encode_batch, BATCH_FRAME_MAGIC, BATCH_FRAME_VERSION};
     use crate::framed_entry::FRAMED_ENTRY_MAGIC;
 
-    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    // INV-1 (enforcement point 8): a malformed house-framed payload is rejected BEFORE propose, so a poison entry can never reach the log and wedge the group at apply time.
     #[test]
     fn magicless_payloads_pass_untouched() {
         assert!(validate_client_payload(b"plain application payload").is_ok());
@@ -46,14 +46,14 @@ mod tests {
         assert!(validate_client_payload(b"\0rrENT0").is_ok()); // near-miss, not magic
     }
 
-    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    // INV-1 (enforcement point 8): a malformed house-framed payload is rejected BEFORE propose, so a poison entry can never reach the log and wedge the group at apply time.
     #[test]
     fn well_formed_batch_frame_passes() {
         let frame = encode_batch(&[b"a".to_vec(), b"b".to_vec()]);
         assert!(validate_client_payload(&frame).is_ok());
     }
 
-    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    // INV-1 (enforcement point 8): a malformed house-framed payload is rejected BEFORE propose, so a poison entry can never reach the log and wedge the group at apply time.
     #[test]
     fn malformed_batch_frame_is_rejected() {
         let mut poison = Vec::from(BATCH_FRAME_MAGIC);
@@ -61,7 +61,7 @@ mod tests {
         assert!(validate_client_payload(&poison).is_err());
     }
 
-    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    // INV-1 (enforcement point 8): a malformed house-framed payload is rejected BEFORE propose, so a poison entry can never reach the log and wedge the group at apply time.
     #[test]
     fn future_batch_version_is_rejected() {
         let mut frame = encode_batch(&[b"a".to_vec()]);
@@ -69,7 +69,7 @@ mod tests {
         assert!(validate_client_payload(&frame).is_err());
     }
 
-    // INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
+    // INV-1 (enforcement point 8): a malformed house-framed payload is rejected BEFORE propose, so a poison entry can never reach the log and wedge the group at apply time.
     #[test]
     fn malformed_framed_entry_is_rejected() {
         let mut poison = Vec::from(FRAMED_ENTRY_MAGIC);

@@ -56,7 +56,17 @@ pub struct IngressCommand<O> {
 ///
 /// Implement this to expose a Kafka topic, file, or any other
 /// command stream as input for an rr Raft group. Use `Offset = i64`
-/// for Kafka, `Offset = String` for HTTP cursor APIs, etc.
+/// for Kafka-style sequential sources.
+///
+/// **`Offset` must be `Copy`** (enforced by the associated-type bound
+/// below): the framework persists the bincode-encoded offset alongside
+/// every Raft log entry and restores `IngestorState.last_applied_offset`
+/// from snapshots, and the apply path copies and compares offsets at
+/// high frequency. Offsets must therefore be small, plain-old-data
+/// values; heap-allocated cursors (e.g. a `String` token from an HTTP
+/// cursor API) are deliberately ruled out. If a source needs such a
+/// cursor, keep it inside the ingestor and expose a `u64` position as
+/// the offset.
 ///
 /// **Safety**: implementations must be cancel-safe — the framework
 /// drops the ingestor on leader step-down, which awaits any in-flight
@@ -65,7 +75,10 @@ pub struct IngressCommand<O> {
 #[async_trait]
 pub trait CommandIngestor: Send + Sync + 'static {
     /// Backend-specific offset type. Must round-trip through bincode
-    /// because the framework persists offsets opaquely as bytes.
+    /// because the framework persists offsets opaquely as bytes; must be
+    /// `Copy` for the reasons stated in the trait docs (offsets are
+    /// persisted per entry and compared at high frequency on the apply
+    /// path).
     type Offset: Serialize + DeserializeOwned + Ord + Copy + Debug + Send + Sync + 'static;
 
     /// Reposition the source so the next `poll` returns the command

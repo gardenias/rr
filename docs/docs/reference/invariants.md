@@ -106,16 +106,18 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
 
 - `tests/integration/src/lib.rs:1057` `test_restart_persistence`(rocks,重启后 log/vote 存活)
 - `tests/integration/src/lib.rs:1347` `test_node_failure_recovery`(rocks,节点故障恢复)
-- `tests/integration/src/lib.rs:1926` `test_crash_during_write_preserves_acked_entries`(rocks,
-  20 条已 ACK 写在 abrupt drop 后全部存活)
+- `tests/integration/src/lib.rs:2404` `test_sequenced_writes_preserved_across_restart`(rocks,
+  20 条顺序 ACK 写在 abrupt drop 后全部存活;固定 fsync-before-ACK 半边,真断电面由
+  tests/crash 场景 A/B/C 覆盖;2026-10-21 前名 `test_crash_during_write_preserves_acked_entries`)
 - `crates/rr-raft/src/rocks_log_storage.rs:490` `test_rocks_vote_persistence`、`:512`
   `test_rocks_log_persistence`(reopen 存活)
 - `crates/rr-raft/src/rocks_log_storage.rs`
   `test_save_vote_waits_for_pending_appends`(vote 写入必须先排空 append 积压:
   vote 完成会把 openraft vote 主导的 flushed 光标推过未落盘日志尾)
 - `crates/rr-raft/src/io_batcher.rs:292` `batcher_exits_cleanly_on_drop`(drop 后 worker 退出)
-- `tests/integration/src/lib.rs:2010` `test_concurrent_writes_under_chaos_linearizability`
-  (chaos 下"已 ACK 不丢"压力验证)
+- `tests/integration/src/lib.rs:2629` `test_concurrent_writes_under_chaos_linearizability`
+  (chaos 下"已 ACK 不丢"压力验证:5 writer + 2 linearizable reader 混合负载,
+  `last_applied >= acked` 计数断言 + ≥80% ack 地板为回归兜底)
 - `crates/rr-raft/src/io_batcher_proptest.rs` `proptest_io_batcher_interleavings_exactly_once_and_ordered`、
   `crates/rr-raft/src/io_batcher_proptest.rs` `proptest_io_batcher_write_error_propagates_to_whole_batch`
   (R-6 proptest:随机 submit 并发 × window × max_entries;每个 submission 恰好完成一次、
@@ -200,8 +202,9 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   测试:T1 `batcher_close_drains_pending`(`io_batcher.rs:597`)、T2
   `batcher_close_idempotent_and_rejects_new`(`:641`)、T3 `test_rocks_append_close_reopen`
   (`rocks_log_storage.rs:657`)、T4 `test_stop_group_flush_preserves_acked_and_pending`
-  (`tests/integration/src/lib.rs:2012`,优雅 close 路径,与 abrupt-drop 路径的
-  `test_crash_during_write_preserves_acked_entries` 互补)。
+  (`tests/integration/src/lib.rs:2486`,优雅 close 路径,与 abrupt-drop 路径的
+  `test_sequenced_writes_preserved_across_restart` 互补;后者 2026-10-21 前名
+  `test_crash_during_write_preserves_acked_entries`)。
 - **【review P0#2 → WS-1】上述 3 个 rocks 持久化集成测试在 CI 实际不运行。** 它们被
   `#[cfg(feature = "rocks")]` 门控(`tests/integration/src/lib.rs:1055/1345/1924`),而 CI
   的 `cargo test --workspace --features rr-storage/rocks`(`.github/workflows/ci.yml:93`)
@@ -225,6 +228,13 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   `test_send_request_converges_once_leader_is_known`(mock gRPC server 模拟未知/已知窗口);
   既有 redirect/failover 集成测试(`test_client_redirect`、`test_client_leader_failover`、
   `leader_redirect_failover`)实测全绿。
+
+  **✅ Java 侧闭环(2026-10-21,全面评审批次)**:同一缺口此前只修了 Rust 端,Java SDK 写路径
+  原样重犯——`success=false` 且无 `leaderInfo` 时直接返回空字节当成功。现已对齐移植:
+  `success=false` 一律按可重试处理(有 `leaderInfo` 更新缓存,无则回退 bootstrap),耗尽抛
+  `NotLeaderException`,只有 `success=true` 才完成 future;同批次补请求超时 API(builder
+  `requestTimeout`,逐 stub deadline)与确定性 gRPC 状态码不再指数退避满配额。
+  回归测试:`RrClientWriteRedirectTest`(mock server 模拟未知/已知 leader 窗口)。
 - **【2026-09-06 R-4 crash harness 首跑发现 → 当批次闭环】异步 append 违反 openraft
   "submitted ⇒ visible" 契约。** `RocksLogStorage::append` 入队 IoBatcher 即返回,而
   openraft 0.10.0-alpha.34 的 apply/复制管线以 log-IO **submit**(非 flush)为门控
@@ -250,6 +260,17 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   **✅ 已闭环(2026-09-23)**:`rr_core::ingress::validate_client_payload` 入口校验 + apply
   侧批拆分 gate 限定 raw client bytes;apply 错误契约见 ADR A-0018
   (`.sisyphus/adr/A-0018-apply-error-contract.md`)。
+- **【2026-10-21 全面评审 P0 → 当批次闭环】幂等命名空间上限在 apply 期以错误拒绝 = 客户端
+  可触发的组级崩溃循环(日志投毒同模式在新代码重犯)。** 第 1025 个新 `request_type` 的
+  keyed 写使 apply 返回 `Err`,按 A-0018 契约 apply 错误即组 Fatal,durable log 重启重放
+  再死——触发条件完全由客户端字节决定。
+
+  **✅ 已闭环(2026-10-21)**:比照 `IdempotencyExpired` 先例,新增
+  `ApplyOutcome::IdempotencyNamespaceLimitExceeded` 响应变体(apply OUTCOME,绝非 apply
+  错误),经 proto wire-additive 可选字段 `NamespaceLimitError` 送达客户端;rr-client 映射为
+  类型化 `RrError::IdempotencyNamespaceLimitExceeded`(不进入重试),Java SDK 抛
+  `NamespaceLimitException`。回归测试:rr-raft apply 臂断言返回 outcome 而非 Err
+  (`service_adapter.rs:1032`)、rr-client 假服务 `ns_limit_error` 测试(`lib.rs:2076`)。
 - **【2026-09-23 fresh review P0② → 批次 A】TCP 传输 request_id 跨组碰撞** → 响应错投
   → false matched 推进(证据 `.sisyphus/evidence/rr-fresh-review-2026-09-23.md`)。
 
@@ -318,7 +339,10 @@ client 收到写 ACK(`client_write` 成功返回)的 log entry,在任何**单点
   follower 轮转隔离;写 + `read_linearizable` 历史必须过 checker,stale-able
   `read_local` 历史单独记录不送检)
 - `tests/integration/src/lib.rs` `test_concurrent_writes_under_chaos_linearizability`
-  (E5 计数断言保留为回归兜底,记录的写历史同时送 checker——INV-2 的写侧压力面)
+  (E5:计数断言(`last_applied >= acked`、≥80% ack 地板)保留为回归兜底,记录的
+  **混合读写历史**同时送 checker——线性一致读侧真正咬合:纯写历史恒合法,
+  读到陈旧值才无可合法线性化;fault pool 仍排除 leader 以保 quorum 与 ack 地板,
+  leader 故障面由 leader-kill 重定向测试与 tests/crash 场景 B 覆盖)
 - `crates/rr-network/src/client_service.rs` `test_read_linearizable_ambiguous_redirect_maps_to_unavailable`(:632)
   —— 歧义 leader 线索映射为 UNAVAILABLE,绝不按错误目标作答(2026-09-23 批次 B
   错误脱敏/改码的线性一致读侧)
@@ -494,6 +518,12 @@ apply,就**最终会被投递**到目标(Raft 写/Kafka 发布):投递失败按�
   `run_send_loop_parks_when_group_stopped`(:680)、`send_backoff_is_cancellable_via_stop`(:707)
   —— 组不支持 outbox 响亮上报;组停后 runner 停驻不自旋;退避可经 stop 取消
   (生命周期竞态修复组)
+- `crates/rr-core/src/output.rs` 与 `deferred.rs` 单测组(2026-10-21 全面评审批次补上空白):
+  Output 构造/target 携带/bincode roundtrip(:145/:173/:229)、`HandleResult` 两种形态
+  (:194/:201)、`KafkaProducer` object-safety 与 noop 响亮报错(:270/:278);
+  `DeferredApply::into_response` 三变体(:141/:150/:165)与"非 deferred 调用方 + deferring
+  service"的 Pending 防御映射——warn + `rr_deferred_pending_via_non_deferred_total` 计数
+  (:232/:317)
 - 集群级 e2e(2026-10-22 落地,可靠性专项 R-4 / R-8 出账,设计文档
   `.sisyphus/plans/rr-inv4-outbox-failover-e2e.md`;共享 harness `outbox_support.rs`):
   `tests/integration/src/outbox_failover_kafka.rs` `test_inv4_outbox_delivers_outputs_kafka`(:151)、
@@ -507,7 +537,6 @@ apply,就**最终会被投递**到目标(Raft 写/Kafka 发布):投递失败按�
   `tests/integration/src/outbox_restart_rocks.rs` `test_inv4_outbox_watermark_survives_snapshot_restart`(:192)
   ——rocks-gated 重启臂(`integration/rocks` feature,默认跑跳过):快照恢复后水线连续
   (快照点前 seq 零重投、点后允许重投、去重后不重不漏)
-
 
 ### 已知缺口
 
@@ -576,7 +605,10 @@ index 的状态一致(相关契约经 openraft 源码级核对,见 ADR A-0002)�
   `:660` `restore_malformed_framed_bytes_errors`、`:838` `restore_records_snapshot_install_metric`
 - `crates/rr-raft/src/idempotency.rs:352` `restore_replaces_existing_cache_entries_not_merge`
 - `tests/integration/src/lib.rs:802` `test_snapshot_state_digest_consistent_across_nodes`(3 节点快照字节一致)
-- `tests/integration/src/lib.rs:1430` `test_snapshot_catchup`(落后 follower 经快照追平)
+- `tests/integration/src/lib.rs:1865` `test_snapshot_trigger_purge_keeps_cluster_operational`
+  (健康 3 节点集群上 leader 触发 snapshot + purge 后集群仍可选举、可写——无落后节点、
+  不走 install 路径;2026-10-21 前名 `test_snapshot_catchup`,落后 follower 的快照追平由
+  下方 tests/crash 场景 C 覆盖)
 - `tests/crash/src/scenarios.rs` `scenario_c_snapshot_purge_kill`(快照/清理周期下的 SIGKILL:
   持久化 SM 快照 + 未清理日志尾部合成恢复,落后过清理界线的节点经快照安装追平)
 - `crates/rr-raft/src/snapshot_store.rs` `save_if_newer_refuses_stale_write_from_cache_alone`(:562)、

@@ -158,7 +158,19 @@ impl Completion {
 proptest! {
     // Bounded case counts: each case opens a real tempdir RocksDB and runs
     // real (Strict-durability) write_batches; this runs in the CI test job.
-    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+    //
+    // R-6 review item L7a: persist failing seeds into the git-tracked
+    // `crates/rr-raft/proptest-regressions/` so a failure reproduces across
+    // runs; `SourceParallel` resolves relative to `src/lib.rs`.
+    #![proptest_config(ProptestConfig {
+        cases: 24,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::SourceParallel(
+                "proptest-regressions",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
 
     /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
     #[test]

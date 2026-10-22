@@ -231,7 +231,19 @@ fn assert_decision_parity(
 
 proptest! {
     // Bounded case count: this runs in the default CI test job (R-6 budget).
-    #![proptest_config(ProptestConfig { cases: 128, ..ProptestConfig::default() })]
+    //
+    // R-6 review item L7a: persist failing seeds into the git-tracked
+    // `crates/rr-raft/proptest-regressions/` so a failure reproduces across
+    // runs; `SourceParallel` resolves relative to `src/lib.rs`.
+    #![proptest_config(ProptestConfig {
+        cases: 128,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::SourceParallel(
+                "proptest-regressions",
+            ),
+        )),
+        ..ProptestConfig::default()
+    })]
 
     /// INV-3: a Kafka offset's user-visible effect happens exactly once; replays return the cached response.
     #[test]

@@ -208,7 +208,22 @@ fn assert_outcome_eq(a: &ApplyOutcome, b: &ApplyOutcome) -> Result<(), TestCaseE
 proptest! {
     // Bounded case count: these run in the default CI test job (R-6 budget).
     // Pure CPU bincode work — the default 256 cases complete in well under a second.
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    //
+    // R-6 review item L7a: persist failing seeds into the git-tracked
+    // `crates/rr-core/proptest-regressions/` so a failure reproduces across
+    // runs. `SourceParallel` cannot find a lib.rs/main.rs ancestor above
+    // `tests/` (it would degrade to an extension-swapped sibling file with a
+    // warning), so pin the absolute path via CARGO_MANIFEST_DIR.
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/proptest-regressions/framed_compat_proptest.txt"
+            )),
+        )),
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn proptest_framed_entry_version_matrix(

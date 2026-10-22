@@ -52,6 +52,278 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bare-manager local snapshot helper (`fetch_framed_snapshot` is
   `RrNode`-bound).
 
+### Fixed — 2026-10-21 review-deferred sweep (P2 tail)
+
+Closes every deferred item from the full-review remediation batch (same
+day, earlier section). All items below were P2-level unless noted.
+
+**rr-raft**:
+
+- **Write-admission counting is now under the `GroupState` lock**
+  (`get_raft_for_write`): `stop_group`'s drain provably observes every
+  admitted write — a write entering after the group is removed is rejected
+  loudly (`GroupNotFound`) instead of racing the drain uncounted
+  (drain-semantics proof gap, review rr-raft P2).
+- **Learner promoter correctness**: the promotion target voter set is built
+  from a live membership re-read just before `change_membership` — a voter
+  concurrently removed by an admin is no longer re-added from a stale
+  metrics snapshot (the attempt aborts with an audit warn and replans next
+  tick). A learner with NO replication record is no longer treated as
+  caught-up (`matched_index` absence is `None`, not `0`).
+- **ChannelPool address revalidation**: a cached-channel hit whose
+  registered address no longer matches evicts and redials (node-id reuse /
+  address change previously kept dialing the old address until error-driven
+  eviction). Applies to both the shared `rr-network` pool and the raft
+  network factory's local pool.
+
+**rr-server / rr-admin**:
+
+- **Boolean CLI precedence**: `--no-bootstrap`, `--no-allow-insecure`,
+  `--no-require-client-cert` (clap-conflicting with their positive
+  counterparts). Merge order is now CLI positive > CLI negative > file >
+  default false — previously `||`-merged, so a `true` in the TOML could
+  never be overridden from the CLI, contradicting the documented
+  CLI-over-file precedence.
+- **Bootstrap idempotency is typed**: `is_initialized()` pre-check plus
+  `InitializeError::NotAllowed` matching replace the string matching on
+  openraft error text (`"already"/"Initialized"`), which a vendored
+  openraft wording change would have turned into a hard failure.
+- **REPL admin channel follows kv leader redirects**: after a `leader_info`
+  redirect moves the kv channel, a derived admin endpoint follows (same
+  host, port + 1000) so `status`/`members` keep describing the node the
+  session talks to; an explicit `--admin-addr` stays pinned.
+
+**rr-core / rr-router**:
+
+- **`output.rs` / `deferred.rs` test coverage** (the only two source files
+  without unit tests): 13 tests covering Output construction/targets/
+  roundtrip and all `DeferredApply::into_response` variants. The defensive
+  `Pending` → empty-bytes mapping (a programming-error signal) now emits a
+  `tracing::warn!` and counts `rr_deferred_pending_via_non_deferred_total`.
+- **Read-path cost model**: `ShardRouter::routing_table()` delegates to
+  `routing_table_snapshot()` + clone instead of a deep etcd pull.
+- **ingestor doc**: the `Offset = String` example is gone (the `Copy`
+  bound forbids it); the bound's persistence-path motivation is documented.
+
+**Config plane / ingest**:
+
+- **etcd compaction resync no longer blocks the snapshot path**
+  (`rr-config-etcd`): resync collects the diff under `rescan_lock` but
+  dispatches events after releasing it (FIFO order preserved by a separate
+  dispatch lock) — a stalled watch consumer can no longer block
+  `routing_table_snapshot`'s rescan. Zero event loss by construction.
+- **Kafka offset decode rejects trailing bytes** (fail-closed, same
+  `KafkaOffsetError` path as garbage bytes).
+
+**Test infrastructure**:
+
+- **E5 chaos linearizability test strengthened**: writer/reader/chaos task
+  panics now propagate (no more `let _ = h.await`), the ack floor is 80%
+  of attempts (was `>= 1`), and the checked history mixes linearizable
+  reads with writes (a write-only history is vacuously legal). Leader
+  exclusion from the fault pool is kept deliberately — documented in the
+  test and invariants registry.
+- **Seeded packet-loss injection**: the fault injector draws from an
+  `RR_FAULT_SEED`-seeded RNG (same knob as the fault schedule), printing a
+  replay hint when entropy-seeded.
+- **proptest regression persistence**: all 7 proptest suites get explicit
+  `failure_persistence` configs and tracked `proptest-regressions/`
+  directories — a failing seed is now replayable across runs.
+- **fuzz**: `fuzz_batch_frame_decode` asserts `decode_batch` ⇔
+  `validate_batch_frame` agreement on arbitrary input.
+- **crash scenario C**: kill timing is seed-randomized (recorded in the
+  fault log) and the snapshot check verifies freshness (mtime after kill),
+  not mere existence.
+- **Renames for honesty**: `test_crash_during_write_preserves_acked_entries`
+  → `test_sequenced_writes_preserved_across_restart` (it sequences all
+  writes — the true power-cut face is tests/crash);
+  `test_snapshot_catchup` → `test_snapshot_trigger_purge_keeps_cluster_operational`
+  (no lagging node, no install path). The invariants registry records both
+  renames; rocks-gated integration tests now carry a prominent "how to run"
+  note in the crate docs.
+
+### Deprecated — 2026-10-21 (0.3.0 breaking window)
+
+- **`rr_core::codec::Codec` / `BincodeCodec`**: unbounded bincode decode on
+  untrusted bytes is an OOM risk; the framework's own decode paths all go
+  through `bounded_decode` / the frame codecs. Deprecated with a pointer to
+  those; zero in-workspace consumers.
+- **`RouterError::GroupNotFound` removed** (never constructed; the matching
+  arm in rr-network was dead too), and error fields now use the
+  `NodeId`/`GroupId`/`PartitionId` newtype aliases instead of bare `u64`
+  (`NotLeader.leader`, `RaftError::GroupNotFound.group_id`,
+  `RouterError::PartitionNotFound.partition_id`).
+
+### Fixed — 2026-10-21 full-review remediation batch
+
+A whole-project review (14 areas) found two correctness P0s, several
+broken operational mechanisms, and a systematic docs drift after v0.2.0.
+Everything found is fixed in this batch; the docs site was synced
+end-to-end (`docs/`, README, invariants registry).
+
+**Correctness (the two P0s)**:
+
+- **Idempotency namespace cap was an apply-time error — a client-triggerable
+  group-fatal crash loop** (`rr-raft`): the 1025th new `request_type` made
+  apply return `Err`, and under the project's own A-0018 contract an apply
+  error is group-fatal — replayed (and re-fatal) on every restart with a
+  durable log. Same shape as the log-poison fixed 2026-09-23. The rejection
+  is now an apply OUTCOME: new `ApplyOutcome::IdempotencyNamespaceLimitExceeded`
+  variant, surfaced over a wire-additive optional proto field
+  `NamespaceLimitError`; rr-client maps it to the typed
+  `RrError::IdempotencyNamespaceLimitExceeded` (never retried, counted),
+  the Java SDK throws `NamespaceLimitException`. Regression tests pin the
+  outcome-not-error contract in the apply arm and both clients.
+- **Java SDK write path fake success** (data-loss class; the Rust fix of
+  2026-09-04 had never been ported): `success=false` with no `leaderInfo`
+  returned empty bytes as if the write succeeded, so Java applications
+  silently lost writes in the leader-unknown window. The write path now
+  treats every `success=false` as retriable (redirect-cache update when
+  `leaderInfo` is present, bootstrap fallback otherwise), fails with
+  `NotLeaderException` on exhaustion, and only completes on
+  `success=true`. `RrClientWriteRedirectTest` covers both windows.
+
+**Storage**:
+
+- **MemStorage: land the three fixes the 0.2.0 changelog had already
+  announced** (`rr-storage`): no more derived `Default` (capacity is
+  explicit), `write_batch` is atomic (all-or-nothing), and a reversed
+  `scan` range returns empty instead of panicking. Three regression tests.
+
+**Clients (Rust + Java)**:
+
+- **Deterministic gRPC status codes are no longer retried to exhaustion**
+  (both SDKs): `Unauthenticated`/`InvalidArgument`/etc. fail fast instead
+  of burning the full backoff budget, and retry sleeps carry jitter.
+  Java additionally gains a request-timeout API
+  (`RrClientBuilder.requestTimeout`, per-stub deadlines) and a
+  closed-client guard; metric registration is cached (was per-request).
+
+**rr-raft**:
+
+- **Ingestor poll-error backoff is now cancellable** — the sleep (up to
+  30s) races the cancel channel, so `stop_group` during a Kafka outage
+  returns promptly instead of stalling for the full backoff (regression
+  test asserts stop < 1s mid-backoff).
+- Supervisor/runner `stop()` join failures (`IngestorHandle`,
+  `OutputHandle`) now log a warning instead of vanishing silently.
+- `RocksLogStorage` preserves the underlying `io::ErrorKind` instead of
+  flattening every failure to `Other`.
+- `RaftNode::init_single_node` returns `RrError`
+  (`RaftError::InitializationFailed`) instead of `Box<dyn Error>`.
+- `IoBatcher::flush_barrier` rustdoc now states the no-timeout trade-off
+  explicitly (a wedged worker hangs the barrier callers — deliberate,
+  INV-1 over silent reordering).
+
+**rr-server / rr-admin**:
+
+- **`grpc_max_frame_size` startup validation**: a value above the apply
+  decoder's hard bound (16 MiB) is rejected at startup — previously keyed
+  writes replicated fine but failed apply-decode on every node
+  (group-fatal, same A-0018 shape).
+- **Startup-failure path now shuts down gracefully**: when the TCP raft
+  bind or `bootstrap_hosted_groups` fails after `node.start()`, the node
+  is `shutdown().await`ed before returning the error (raft groups reach
+  log close instead of being dropped mid-flight).
+- **decommission leader drain works against any contact node**
+  (`rr-admin`): the drain re-dials the TARGET node's own admin endpoint
+  and issues `DrainNode` there (TransferLeader/DrainNode are self-only
+  server-side) instead of issuing `transfer_leader` to the contacted
+  node (which the server only supports for itself).
+- **`rr-admin node drain` exits non-zero** when any group reports
+  `leadership_transferred=false` (matching decommission and the
+  "failed admin mutations exit non-zero" contract).
+- **Backup hardening**: `create_backup` refuses an `--output` inside
+  `--data-dir` (the archive would contain itself); `sha256_of_dir` fails
+  loudly on traversal errors instead of `filter_map`-skipping them; the
+  module doc no longer claims online backup is "planned" (it shipped).
+- **`--peers` help text is now honest**: only the entry COUNT sizes the
+  bootstrap routing table (IDs guessed 1-based in list order); the
+  address strings are never dialed — use an etcd ConfigProvider for real
+  topologies.
+
+**Config plane / ingest**:
+
+- **etcd compaction resync no longer has an event-loss window**
+  (`rr-config-etcd`): the rescan captures its revision up front and the
+  watch resumes from it, so events between scan and watch-establish can
+  no longer vanish permanently.
+- `EtcdConfigProvider` rejects `PartitionConfig::Range` loudly instead of
+  silently persisting a routing variant nothing honors.
+- **Kafka `topic_pattern` must contain `{group_id}`** — without it,
+  multiple groups would consume the same topic and apply each other's
+  commands. `enable.auto.commit` is pinned off (offsets move only via
+  `commit_applied` after apply) and `auto_commit_interval` is deprecated
+  to a no-op.
+
+**Network**:
+
+- **Per-caller rate limiting can no longer be bypassed by rotating forged
+  Bearer tokens**, and buckets are refilled lazily on access — a forged
+  fingerprint no longer spawns a tokio task per entry. A configured
+  `rps = 0` is now a startup validation error (never-refilling bucket).
+- `ChannelPool` endpoints get connect timeout + TCP/HTTP2 keepalive
+  tuning (previously a dead peer could park a dial indefinitely).
+
+**Deploy / observability / scripts**:
+
+- **Helm default install no longer CrashLoops**: `metrics_bind_host` is
+  only rendered when `metrics.bindHost` is set (v0.2.0's strict parser
+  rejects the key), and the chart ships a post-install cluster-form Job
+  (add-learner + change-membership via rr-admin), a ServiceAccount, and
+  NOTES.txt — an `helm install` now yields a formed 3-voter cluster
+  instead of 1 voter + 2 idling nodes. Raw `deploy/k8s/` manifests get
+  the same Job, pinned image tags, security contexts, and probe windows.
+- **Replication-lag alert fires again** (`rr-alerts.yml`): the expression
+  joined on `instance`, which the recording rule had aggregated away
+  (always empty). Also corrected: idempotency-cache threshold (code cap
+  is 10000, was alerting at 45000) and leader-flapping units
+  (per-second rate → per-minute elections). New fail-closed alert
+  coverage; Grafana dashboard variables fixed.
+- **`scripts/bench-compare.sh` regression gate actually fires**: the
+  criterion output parser split on `", "` but criterion prints
+  space-separated columns — the gate could never trip (verified: a
+  +16.5% regression now exits 1). Both separators are accepted.
+- **`scripts/check-invariants.sh` parser fixes** (second bullet test
+  names no longer dropped, `INV-1` no longer substring-matches future
+  `INV-10`) and rr-client tests carry their `// INV-2:` back-links — the
+  lint is green on the worktree again.
+- `scripts/gen-dev-certs.sh` generates a CA with the critical `CA:TRUE`
+  basic-constraints extension; `scripts/prod-perf.sh` no longer swallows
+  benchmark failures; compose node configs publish admin/metrics on
+  0.0.0.0 (local dev only) and the lab Prometheus/Grafana ports bind to
+  loopback.
+- **`examples/config/*.toml` parse against the current schema** and
+  `counter --demo` now actually defaults to demo mode with no arguments.
+
+**Tests**:
+
+- **Crash harness**: zero-panic gate in teardown (any `panic` in a node
+  log fails the scenario), the previously dead batch-lane count-bounds
+  verification is wired in, and the INV-5 snapshot-digest test now
+  compares real state (EchoSM snapshots carry their apply count — the
+  old test compared three empty byte strings, which was vacuously true).
+
+**Docs**: full-site sync of the post-v0.2.0 drift — FAQ (zh/en) no longer
+claims durable raft logs "aren't wired into stock rr-server", the RC
+banner, consumer guide, compatibility external links, Kubernetes
+versions, `metrics-reference.md` (verified against emitted metrics),
+getting-started, durability/storage-engines, admin-api `TransferLeader`
+section (proto returns `Empty`; self-only transfer documented), README
+feature list (TLS/auth/rate-limit/backup/linearizable reads/durable log)
+and REPL/admin-port notes.
+
+### Added — 2026-10-21 full-review remediation batch
+
+- **Automatic learner promotion is wired into stock `rr-server`**:
+  `NodeConfig::auto_promote_learners` (default `true`,
+  `with_auto_promote_learners(false)` to opt out) starts the
+  quorum-guarded `start_learner_promoter` on every locally hosted group —
+  previously an orphan API no caller used. A metrics-recorder conflict
+  now logs a warning instead of leaving `/metrics` silently empty.
+- **Java SDK**: `requestTimeout` builder option (see above),
+  `NotLeaderException`, `NamespaceLimitException`.
+
 ### Fixed — 2026-10-20 soak INV-1 defense-in-depth
 
 - **Read-path fake success** (soak-nightly run 38045591646 follow-up):

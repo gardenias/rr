@@ -502,36 +502,41 @@ Incremented by 1 when graceful shutdown begins on the node.
 
 #### `node.group.started`
 
-`RrNode` 响应 `RoutingTableChange::PartitionAdded` / `GroupMembershipChanged` 事件成功启动一个本地 Raft group 时 +1。
+`RrNode` 在 `start()` 的初始路由表循环中成功启动一个本地 Raft group 时 +1。
+注意：config watch 循环后续启动的组**不**重复发射此指标（仅初始循环）。
 
 ---
 
-Incremented by 1 when `RrNode` successfully starts a local Raft group in response to a
-`RoutingTableChange::PartitionAdded` or `GroupMembershipChanged` event.
+Incremented by 1 when `RrNode` successfully starts a local Raft group during the
+initial routing-table loop in `start()`. Groups started later by the config watch
+loop do NOT re-emit this metric.
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Counter |
 | 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-server/src/node.rs` — config watch loop |
+| 记录位置 / Recorded in | `rr-server/src/node.rs` — `start()` initial routing-table loop |
 
 ---
 
 #### `raft.group.start`
 
-`RaftGroupManager::start_group()` 或 `init_cluster()` 成功启动一个 Raft group 时 +1。区别于 `node.group.started`：此指标在较低层（GroupManager 本身）发出，无论触发方是 config watch 还是直接调用。
+`RaftGroupManager::start_group()` 成功启动一个 Raft group 时 +1（`init_cluster()`
+不发射）。区别于 `node.group.started`：此指标在较低层（GroupManager 本身）发出，
+无论触发方是 config watch 还是直接调用。
 
 ---
 
-Incremented by 1 whenever `RaftGroupManager::start_group()` or `init_cluster()` successfully
-starts a Raft group. Emitted at a lower layer (the GroupManager itself) than `node.group.started`
-— regardless of whether the caller is the config-watch loop or a direct API call.
+Incremented by 1 whenever `RaftGroupManager::start_group()` successfully starts a Raft
+group (`init_cluster()` does not emit). Emitted at a lower layer (the GroupManager
+itself) than `node.group.started` — regardless of whether the caller is the
+config-watch loop or a direct API call.
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Counter |
 | 标签 / Labels | `node_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `start_group()`, `init_cluster()` |
+| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `start_group()` |
 
 ---
 
@@ -627,19 +632,24 @@ Investigate logs when nonzero.
 
 #### `rr_framing_decode_failures_total`
 
-字节信封解码失败计数，按 `kind` 分（`framed_entry_body` / `framed_snapshot_*` /
-`apply_outcome_*` / `batch_*`）。非零 = 有不兼容或损坏的写入方。
+字节信封解码失败计数，按 `kind` 分（`framed_entry_body` / `framed_entry_future_version` /
+`framed_snapshot_body` / `framed_snapshot_future_version` / `apply_outcome_too_short` /
+`apply_outcome_bad_tag` / `apply_outcome_future_version` / `apply_outcome_body`）。
+非零 = 有不兼容或损坏的写入方。
 
 ---
 
-Envelope decode failures by `kind` (`framed_entry_body` / `framed_snapshot_*` /
-`apply_outcome_*` / `batch_*`). Nonzero means an incompatible or corrupt writer.
+Envelope decode failures by `kind` (`framed_entry_body` / `framed_entry_future_version` /
+`framed_snapshot_body` / `framed_snapshot_future_version` / `apply_outcome_too_short` /
+`apply_outcome_bad_tag` / `apply_outcome_future_version` / `apply_outcome_body`).
+Nonzero means an incompatible or corrupt writer. (No `batch_*` kinds exist —
+batch frames are validated no-alloc at ingress, never counted here.)
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Counter |
 | 标签 / Labels | `kind` |
-| 记录位置 / Recorded in | `rr-core/src/{framed_entry,framed_snapshot,idempotency,batch}.rs` |
+| 记录位置 / Recorded in | `rr-core/src/{framed_entry,framed_snapshot,idempotency}.rs` |
 | 可用版本 / Available since | v0.2.0 |
 
 ---
@@ -735,7 +745,7 @@ Both should be rare — nonzero means a `Service` implementation bug.
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
+| 标签 / Labels | — (无标签；组上下文见同位置的 `rr_raft_pending_deferred` gauge / no labels — see the `rr_raft_pending_deferred` gauge for per-group depth) |
 | 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
 | 可用版本 / Available since | Unreleased (v0.3.0) |
 
@@ -824,12 +834,12 @@ groups on a missing replicas key (all accompanied by logs).
 
 `RrClient::send_request` 的端到端耗时（含所有重试）。`outcome` 标签区分成功与最终失败。
 
-End-to-end latency of `RrClient::send_request` including all retry attempts. The `outcome` label distinguishes success from terminal failure.
+End-to-end latency of `RrClient::send_request` including all retry attempts. The `outcome` label distinguishes success, terminal failure, and idempotency-layer rejections.
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Histogram |
-| 标签 / Labels | `group_id`, `outcome` (`success` \| `failure`) |
+| 标签 / Labels | `group_id`, `outcome` (`success` \| `failure` \| `idempotency_expired` \| `idempotency_namespace_limit`) |
 | 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
 
 ---
@@ -878,7 +888,7 @@ signal).
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Counter / Histogram / Counter |
-| 标签 / Labels | `partition_id`（+ `trigger` / `limit`） |
+| 标签 / Labels | flush 指标为 `partition_id`（+ `trigger`）；`rr_client_batch_buffer_rejected_total` 仅 `limit`（`entries` \| `bytes`，无 `partition_id`） |
 | 记录位置 / Recorded in | `rr-client/src/batch.rs` |
 | 可用版本 / Available since | Unreleased (v0.3.0) |
 
