@@ -150,6 +150,37 @@ impl std::fmt::Display for IdempotencyError {
     }
 }
 
+/// Wire-level error surfaced when a keyed request is rejected because its
+/// `request_type` would open a NEW idempotency namespace beyond the
+/// per-group cap (`MAX_IDEMPO_NAMESPACES` in `rr-raft`). Maps onto the
+/// proto `NamespaceLimitError` field on `ClientResponse`.
+///
+/// Unlike [`IdempotencyError`], picking a fresh `request_id` does NOT
+/// help: every ID in the rejected namespace is refused while the group
+/// tracks `max` namespaces. Remediation is a `request_type` the group
+/// already tracks (or raising the cap / retiring namespaces).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceLimitError {
+    /// The rejected namespace.
+    pub request_type: String,
+    /// Request ID the client submitted.
+    pub request_id: u64,
+    /// Namespaces currently tracked on the group.
+    pub namespaces: u64,
+    /// The configured cap.
+    pub max: u64,
+}
+
+impl std::fmt::Display for NamespaceLimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "idempotency namespace limit exceeded: request_type={}, request_id={}, namespaces={}, max={}",
+            self.request_type, self.request_id, self.namespaces, self.max
+        )
+    }
+}
+
 /// Wire-level outcome of applying a *keyed* request through the idempotency
 /// layer.
 ///
@@ -171,6 +202,14 @@ pub enum ApplyOutcome {
     /// The request_id was below the watermark and had been evicted from
     /// the LRU cache. Client must pick a fresh ID.
     IdempotencyExpired(IdempotencyError),
+    /// The request's `request_type` would open a new idempotency namespace
+    /// beyond the per-group cap. Encoded as an apply OUTCOME — never an
+    /// apply error — because the trigger is client-controlled: an apply
+    /// error is group-fatal and would be replayed (and re-fatal) on every
+    /// restart of a durable log, i.e. the log-poison shape of ADR A-0018.
+    /// The entry applies cleanly on every node and the caller receives a
+    /// typed, deterministic rejection instead.
+    IdempotencyNamespaceLimitExceeded(NamespaceLimitError),
 }
 
 /// Tag byte prefixed to `ApplyOutcome` bytes. Identifies the bytes as

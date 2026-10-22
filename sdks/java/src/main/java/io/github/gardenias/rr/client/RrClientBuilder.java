@@ -27,6 +27,7 @@ public final class RrClientBuilder {
     private TlsConfig tlsConfig;
     private String bearerToken;
     private boolean strictSecurity;
+    private long requestTimeoutMs;
     private MeterRegistry meterRegistry = Metrics.globalRegistry;
     private ChannelFactory channelFactory = new NettyChannelFactory();
 
@@ -66,6 +67,23 @@ public final class RrClientBuilder {
         return this;
     }
 
+    /**
+     * Bounds a single gRPC attempt (mirrors the Rust {@code rr-client}
+     * {@code with_request_timeout}). A deadline expiry maps to a retryable
+     * failure inside the normal retry budget — the intended use is bounding
+     * waits that can otherwise park forever (e.g. deferred two-phase apply).
+     * Zero (the default) means unbounded.
+     */
+    public RrClientBuilder withRequestTimeout(java.time.Duration timeout) {
+        Objects.requireNonNull(timeout, "timeout");
+        long ms = timeout.toMillis();
+        if (ms <= 0) {
+            throw new IllegalArgumentException("request timeout must be at least 1 ms");
+        }
+        this.requestTimeoutMs = ms;
+        return this;
+    }
+
     public RrClientBuilder withMeterRegistry(MeterRegistry meterRegistry) {
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry");
         return this;
@@ -96,6 +114,7 @@ public final class RrClientBuilder {
                         retryConfig,
                         tlsConfig,
                         bearerToken,
+                        requestTimeoutMs,
                         meterRegistry,
                         channelFactory));
     }

@@ -155,9 +155,8 @@ impl IntoStatus for RouterError {
             RouterError::PartitionNotFound { partition_id } => {
                 Status::not_found(format!("partition {partition_id} not found"))
             }
-            RouterError::GroupNotFound { group_id } => {
-                Status::not_found(format!("group {group_id} not found"))
-            }
+            // RouterError::GroupNotFound was removed in the 0.3.0 breaking
+            // window: it had no constructor anywhere in the workspace.
             _ => Status::internal("router error"),
         }
     }

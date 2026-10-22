@@ -3,7 +3,6 @@ package io.github.gardenias.rr.client;
 import com.google.common.util.concurrent.ListenableFuture;
 import io.grpc.ClientInterceptor;
 import io.grpc.ManagedChannel;
-import io.grpc.StatusException;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -41,6 +40,7 @@ public final class RrClient implements AutoCloseable {
     private final RetryConfig retryConfig;
     private final TlsConfig tlsConfig;
     private final String bearerToken;
+    private final long requestTimeoutMs;
     private final MeterRegistry meterRegistry;
     private final RrClientBuilder.ChannelFactory channelFactory;
 
@@ -53,12 +53,14 @@ public final class RrClient implements AutoCloseable {
             RetryConfig retryConfig,
             TlsConfig tlsConfig,
             String bearerToken,
+            long requestTimeoutMs,
             MeterRegistry meterRegistry,
             RrClientBuilder.ChannelFactory channelFactory) {
         this.bootstrapAddrs = List.copyOf(bootstrapAddrs);
         this.retryConfig = Objects.requireNonNull(retryConfig, "retryConfig");
         this.tlsConfig = tlsConfig;
         this.bearerToken = bearerToken;
+        this.requestTimeoutMs = requestTimeoutMs;
         this.meterRegistry = Objects.requireNonNull(meterRegistry, "meterRegistry");
         this.channelFactory = Objects.requireNonNull(channelFactory, "channelFactory");
         this.bearerTokenInterceptor = bearerToken == null ? null : new BearerTokenInterceptor(bearerToken);
@@ -220,6 +222,9 @@ public final class RrClient implements AutoCloseable {
             long groupId, byte[] payload, IdempotencyKey idemKey,
             int attempt, int bootstrapIndex) {
 
+        if (closed) {
+            return CompletableFuture.failedFuture(new IllegalStateException("client is closed"));
+        }
         int maxAttempts = retryConfig.maxRetries() + 1;
         if (attempt >= maxAttempts) {
             return CompletableFuture.failedFuture(
@@ -249,7 +254,8 @@ public final class RrClient implements AutoCloseable {
         // FutureStub: gRPC sends the request via Netty, returns a ListenableFuture
         // that completes on Netty's I/O thread — no blocking involved.
         ListenableFuture<Client.ClientResponse> grpcFuture =
-                ClientServiceGrpc.newFutureStub(channelFor(addr)).request(reqBuilder.build());
+                applyDeadline(ClientServiceGrpc.newFutureStub(channelFor(addr)))
+                        .request(reqBuilder.build());
 
         return fromListenableFuture(grpcFuture)
                 .thenCompose(response -> {
@@ -258,22 +264,54 @@ public final class RrClient implements AutoCloseable {
                         return CompletableFuture.failedFuture(new IdempotencyExpiredException(
                                 e.getRequestType(), e.getRequestId(), e.getWatermark()));
                     }
+                    if (response.hasNsLimitError()) {
+                        Client.NamespaceLimitError e = response.getNsLimitError();
+                        return CompletableFuture.failedFuture(new NamespaceLimitException(
+                                e.getRequestType(), e.getRequestId(), e.getNamespaces(), e.getMax()));
+                    }
+                    if (response.getSuccess()) {
+                        return CompletableFuture.completedFuture(
+                                response.getPayload().toByteArray());
+                    }
+                    // success == false: the contacted node is not (or not yet)
+                    // the leader — the write was NOT applied. Never surface it
+                    // as success: that would acknowledge bytes that never went
+                    // through consensus (silent fake success). Retry until the
+                    // redirect converges or the budget runs out (mirrors the
+                    // Rust rr-client write path).
+                    final NotLeaderException lastError;
                     if (response.hasLeaderInfo()) {
                         Client.LeaderInfo li = response.getLeaderInfo();
                         updateLeaderCache(groupId, li.getNodeId(), li.getAddr());
-                        if (!response.getSuccess()) {
-                            return asyncDelay(attempt).thenCompose(__ ->
-                                    sendRequestAsync(groupId, payload, idemKey,
-                                            attempt + 1, nextBootstrapIndex));
-                        }
+                        lastError = new NotLeaderException(li.getNodeId(), li.getAddr());
+                    } else {
+                        // Follower does not know the current leader (election
+                        // window): drop any stale cache entry so the next
+                        // attempt falls back to bootstrap polling.
+                        removeCachedLeader(groupId);
+                        lastError = new NotLeaderException(null, null);
                     }
-                    return CompletableFuture.completedFuture(
-                            response.getPayload().toByteArray());
+                    if (attempt + 1 >= maxAttempts) {
+                        return CompletableFuture.failedFuture(lastError);
+                    }
+                    return asyncDelay(attempt).thenCompose(__ ->
+                            sendRequestAsync(groupId, payload, idemKey,
+                                    attempt + 1, nextBootstrapIndex));
                 })
                 .exceptionallyCompose(ex -> {
                     Throwable cause = unwrapRelay(ex);
-                    if (cause instanceof IdempotencyExpiredException) {
+                    if (cause instanceof IdempotencyExpiredException
+                            || cause instanceof NamespaceLimitException
+                            || cause instanceof NotLeaderException) {
                         return CompletableFuture.failedFuture(cause);
+                    }
+                    io.grpc.Status.Code detCode = deterministicCode(cause);
+                    if (detCode != null) {
+                        // Deterministic rejections (auth, validation, …) never
+                        // converge through backoff — fail fast with the code
+                        // preserved instead of burning the whole retry budget.
+                        return CompletableFuture.failedFuture(new RpcFailedException(
+                                addr, "deterministic gRPC rejection: " + detCode, cause));
                     }
                     removeCachedLeader(groupId);
                     if (attempt + 1 >= maxAttempts) {
@@ -291,6 +329,9 @@ public final class RrClient implements AutoCloseable {
     private CompletableFuture<byte[]> readAsync(
             long groupId, byte[] payload, int attempt, int bootstrapIndex) {
 
+        if (closed) {
+            return CompletableFuture.failedFuture(new IllegalStateException("client is closed"));
+        }
         int maxAttempts = retryConfig.maxRetries() + 1;
         if (attempt >= maxAttempts) {
             return CompletableFuture.failedFuture(
@@ -306,15 +347,21 @@ public final class RrClient implements AutoCloseable {
                 .build();
 
         ListenableFuture<Client.ReadLocalResponse> grpcFuture =
-                ClientServiceGrpc.newFutureStub(channelFor(addr)).readLocal(req);
+                applyDeadline(ClientServiceGrpc.newFutureStub(channelFor(addr))).readLocal(req);
 
         return fromListenableFuture(grpcFuture)
                 .thenApply(resp -> resp.getPayload().toByteArray())
                 .exceptionallyCompose(ex -> {
+                    Throwable cause = unwrapRelay(ex);
+                    io.grpc.Status.Code detCode = deterministicCode(cause);
+                    if (detCode != null) {
+                        return CompletableFuture.failedFuture(new RpcFailedException(
+                                addr, "deterministic gRPC rejection: " + detCode, cause));
+                    }
                     if (attempt + 1 >= maxAttempts) {
-                        RuntimeException err = ex instanceof RrClientException
-                                ? (RrClientException) ex
-                                : new NetworkException(addr, "read failed", ex);
+                        RuntimeException err = cause instanceof RrClientException
+                                ? (RrClientException) cause
+                                : new NetworkException(addr, "read failed", cause);
                         return CompletableFuture.failedFuture(err);
                     }
                     return asyncDelay(attempt).thenCompose(__ ->
@@ -332,6 +379,9 @@ public final class RrClient implements AutoCloseable {
     private CompletableFuture<byte[]> readLinearizableAsync(
             long groupId, byte[] payload, int attempt, int bootstrapIndex, String redirectAddr) {
 
+        if (closed) {
+            return CompletableFuture.failedFuture(new IllegalStateException("client is closed"));
+        }
         int maxAttempts = retryConfig.maxRetries() + 1;
         if (attempt >= maxAttempts) {
             return CompletableFuture.failedFuture(
@@ -365,7 +415,7 @@ public final class RrClient implements AutoCloseable {
         }
 
         ListenableFuture<Client.ReadLocalResponse> grpcFuture =
-                ClientServiceGrpc.newFutureStub(channel).readLinearizable(req);
+                applyDeadline(ClientServiceGrpc.newFutureStub(channel)).readLinearizable(req);
 
         return fromListenableFuture(grpcFuture)
                 .thenCompose(resp -> {
@@ -384,6 +434,11 @@ public final class RrClient implements AutoCloseable {
                     if (cause instanceof RrClientException) {
                         return CompletableFuture.failedFuture(cause);
                     }
+                    io.grpc.Status.Code detCode = deterministicCode(cause);
+                    if (detCode != null) {
+                        return CompletableFuture.failedFuture(new RpcFailedException(
+                                addr, "deterministic gRPC rejection: " + detCode, cause));
+                    }
                     if (attempt + 1 >= maxAttempts) {
                         return CompletableFuture.failedFuture(
                                 new NetworkException(addr, "linearizable read failed", cause));
@@ -395,13 +450,16 @@ public final class RrClient implements AutoCloseable {
     }
 
     private CompletableFuture<Client.ClusterInfo> clusterInfoAsync(int bootstrapIndex) {
+        if (closed) {
+            return CompletableFuture.failedFuture(new IllegalStateException("client is closed"));
+        }
         if (bootstrapIndex >= bootstrapAddrs.size()) {
             return CompletableFuture.failedFuture(
                     new NetworkException("<all>", "no reachable bootstrap nodes"));
         }
         final String addr = bootstrapAddrs.get(bootstrapIndex);
         ListenableFuture<Client.ClusterInfo> grpcFuture =
-                ClientServiceGrpc.newFutureStub(channelFor(addr))
+                applyDeadline(ClientServiceGrpc.newFutureStub(channelFor(addr)))
                         .getClusterInfo(Client.Empty.getDefaultInstance());
         return fromListenableFuture(grpcFuture)
                 .exceptionallyCompose(ex ->
@@ -450,13 +508,49 @@ public final class RrClient implements AutoCloseable {
     /** Non-blocking delay using a JDK scheduled executor — no thread is held during the wait. */
     private CompletableFuture<Void> asyncDelay(int attempt) {
         long multiplier = 1L << Math.min(attempt, 20);
-        long delayMs = retryConfig.retryDelayMs() * multiplier;
-        if (delayMs <= 0) {
+        long baseMs;
+        try {
+            baseMs = Math.multiplyExact(retryConfig.retryDelayMs(), multiplier);
+        } catch (ArithmeticException overflow) {
+            // Saturate instead of wrapping negative (which would retry immediately).
+            baseMs = Long.MAX_VALUE;
+        }
+        if (baseMs <= 0) {
             return CompletableFuture.completedFuture(null);
+        }
+        // ±20% jitter so a fleet of clients does not retry in lockstep.
+        long delayMs = baseMs;
+        if (baseMs <= Long.MAX_VALUE / 2) {
+            long lo = baseMs * 4 / 5;
+            long hi = baseMs * 6 / 5;
+            delayMs = java.util.concurrent.ThreadLocalRandom.current().nextLong(lo, hi + 1);
         }
         return CompletableFuture.runAsync(
                 () -> { },
                 CompletableFuture.delayedExecutor(delayMs, TimeUnit.MILLISECONDS));
+    }
+
+    /**
+     * gRPC status codes that can never converge through backoff retries:
+     * the request itself is rejected, not the transport.
+     */
+    private static boolean isDeterministic(io.grpc.Status.Code code) {
+        return switch (code) {
+            case UNAUTHENTICATED, PERMISSION_DENIED, INVALID_ARGUMENT, FAILED_PRECONDITION,
+                    NOT_FOUND, UNIMPLEMENTED, OUT_OF_RANGE, ALREADY_EXISTS, CANCELLED -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Extracts a deterministic-rejection code from a relay failure, or null when
+     * the failure is transient (transport, deadline, …) and worth retrying.
+     * {@code Status.fromThrowable} covers both {@code StatusException} and the
+     * {@code StatusRuntimeException} client stubs actually deliver.
+     */
+    private static io.grpc.Status.Code deterministicCode(Throwable cause) {
+        io.grpc.Status.Code code = io.grpc.Status.fromThrowable(cause).getCode();
+        return isDeterministic(code) ? code : null;
     }
 
     private String chooseAddr(long groupId, int bootstrapIndex) {
@@ -485,41 +579,74 @@ public final class RrClient implements AutoCloseable {
     private static String timerOutcome(Throwable ex) {
         if (ex == null) return "success";
         if (ex instanceof IdempotencyExpiredException) return "idempotency_expired";
+        if (ex instanceof NamespaceLimitException) return "idempotency_namespace_limit";
         return "failure";
     }
 
+    private volatile boolean closed = false;
+
     private ManagedChannel channelFor(String addr) {
+        if (closed) {
+            throw new IllegalStateException("client is closed");
+        }
         return channels.computeIfAbsent(
-                addr, a -> channelFactory.createChannel(a, tlsConfig, bearerTokenInterceptor));
+                addr, a -> {
+                    if (closed) {
+                        throw new IllegalStateException("client is closed");
+                    }
+                    return channelFactory.createChannel(a, tlsConfig, bearerTokenInterceptor);
+                });
     }
 
+    /** Applies the configured per-attempt deadline (0 = unbounded). */
+    private ClientServiceGrpc.ClientServiceFutureStub applyDeadline(
+            ClientServiceGrpc.ClientServiceFutureStub stub) {
+        return requestTimeoutMs > 0
+                ? stub.withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS)
+                : stub;
+    }
+
+    private final ConcurrentMap<String, Timer> requestTimerCache = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, Counter> retriesCounterCache = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, Counter> leaderCacheHitsCache = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Long, Counter> leaderCacheMissesCache = new ConcurrentHashMap<>();
+
     private Timer requestTimer(long groupId, String outcome) {
-        return Timer.builder("rr.client.request.duration")
-                .tag("group_id", Long.toString(groupId))
-                .tag("outcome", outcome)
-                .register(meterRegistry);
+        return requestTimerCache.computeIfAbsent(
+                groupId + "|" + outcome,
+                k -> Timer.builder("rr.client.request.duration")
+                        .tag("group_id", Long.toString(groupId))
+                        .tag("outcome", outcome)
+                        .register(meterRegistry));
     }
 
     private Counter retriesCounter(long groupId) {
-        return Counter.builder("rr.client.retries")
-                .tag("group_id", Long.toString(groupId))
-                .register(meterRegistry);
+        return retriesCounterCache.computeIfAbsent(
+                groupId,
+                k -> Counter.builder("rr.client.retries")
+                        .tag("group_id", Long.toString(groupId))
+                        .register(meterRegistry));
     }
 
     private Counter leaderCacheHits(long groupId) {
-        return Counter.builder("rr.client.leader_cache.hits")
-                .tag("group_id", Long.toString(groupId))
-                .register(meterRegistry);
+        return leaderCacheHitsCache.computeIfAbsent(
+                groupId,
+                k -> Counter.builder("rr.client.leader_cache.hits")
+                        .tag("group_id", Long.toString(groupId))
+                        .register(meterRegistry));
     }
 
     private Counter leaderCacheMisses(long groupId) {
-        return Counter.builder("rr.client.leader_cache.misses")
-                .tag("group_id", Long.toString(groupId))
-                .register(meterRegistry);
+        return leaderCacheMissesCache.computeIfAbsent(
+                groupId,
+                k -> Counter.builder("rr.client.leader_cache.misses")
+                        .tag("group_id", Long.toString(groupId))
+                        .register(meterRegistry));
     }
 
     @Override
     public void close() {
+        closed = true;
         for (ManagedChannel channel : channels.values()) {
             channel.shutdown();
             try {

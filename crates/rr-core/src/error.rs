@@ -1,5 +1,7 @@
 //! Error types for the rr distributed framework.
 
+use crate::types::{GroupId, NodeId, PartitionId};
+
 /// Top-level error type of the rr framework, wrapping the domain-specific errors.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -60,7 +62,7 @@ pub enum RaftError {
     #[error("not leader, current leader: id={leader:?}, addr={leader_addr:?}")]
     NotLeader {
         /// Node ID of the current leader, if known.
-        leader: Option<u64>,
+        leader: Option<NodeId>,
         /// Address of the current leader, if known.
         leader_addr: Option<String>,
     },
@@ -68,7 +70,7 @@ pub enum RaftError {
     #[error("group not found: {group_id}")]
     GroupNotFound {
         /// ID of the missing group.
-        group_id: u64,
+        group_id: GroupId,
     },
     /// A Raft proposal failed to commit.
     #[error("proposal failed: {reason}")]
@@ -140,13 +142,7 @@ pub enum RouterError {
     #[error("partition not found: {partition_id}")]
     PartitionNotFound {
         /// ID of the missing partition.
-        partition_id: u64,
-    },
-    /// No routing table entry exists for the group.
-    #[error("group not found: {group_id}")]
-    GroupNotFound {
-        /// ID of the missing group.
-        group_id: u64,
+        partition_id: PartitionId,
     },
 }
 
@@ -165,6 +161,16 @@ pub enum NetworkError {
     /// An established RPC call failed.
     #[error("rpc failed: {0}")]
     RpcFailed(String),
+    /// An established RPC call was rejected with a deterministic gRPC
+    /// status code — retrying can never converge (auth, validation,
+    /// quota, …), so the code is preserved for the caller to classify.
+    #[error("rpc rejected ({code}): {message}")]
+    RpcRejected {
+        /// The gRPC status code (e.g. `Unauthenticated`).
+        code: String,
+        /// Server-supplied (already sanitized) message.
+        message: String,
+    },
     /// A network operation timed out.
     #[error("network timeout")]
     Timeout,

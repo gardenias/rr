@@ -44,6 +44,19 @@ message IdempotencyError {
     uint64 watermark = 3;
 }
 
+/// Wire-level error returned in `ClientResponse.ns_limit_error` when the
+/// request's `request_type` would open a NEW idempotency namespace beyond
+/// the per-group cap. This is a deterministic rejection: picking a fresh
+/// request_id does NOT help (every ID in the rejected namespace is
+/// refused while the group tracks `max` namespaces). Resubmit under an
+/// already-tracked request_type, or contact operators about the cap.
+message NamespaceLimitError {
+    string request_type = 1;
+    uint64 request_id = 2;
+    uint64 namespaces = 3;
+    uint64 max = 4;
+}
+
 /// Client request. partition_id is used by framework to route to correct Raft group.
 message ClientRequest {
     uint64 partition_id = 1;
@@ -65,6 +78,14 @@ message ClientResponse {
     /// cache hit). Mutually exclusive with `payload` content (success
     /// will be false).
     optional IdempotencyError idem_error = 4;
+    /// Set when the framework rejected a request because its
+    /// `request_type` would open a new idempotency namespace beyond
+    /// the per-group cap. Mutually exclusive with `payload` content
+    /// (success will be false). Wire-additive: older servers never
+    /// set it, older clients ignore it (and see a plain
+    /// `success=false`, which their retry logic treats as a
+    /// transient failure — loud, never a fake success).
+    optional NamespaceLimitError ns_limit_error = 5;
 }
 
 /// Leader redirect information for client-side caching.

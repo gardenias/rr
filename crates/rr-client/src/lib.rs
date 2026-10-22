@@ -61,6 +61,50 @@ fn idem_key_to_proto(key: IdempotencyKey) -> ProtoIdemKey {
     }
 }
 
+/// gRPC status codes that can never converge through backoff retries —
+/// the request itself is rejected (auth, validation, quota), not the
+/// transport. Mirrors the Java SDK's deterministic-status classification.
+fn is_deterministic_grpc(code: tonic::Code) -> bool {
+    use tonic::Code;
+    matches!(
+        code,
+        Code::Unauthenticated
+            | Code::PermissionDenied
+            | Code::InvalidArgument
+            | Code::FailedPrecondition
+            | Code::NotFound
+            | Code::Unimplemented
+            | Code::OutOfRange
+            | Code::AlreadyExists
+            | Code::Cancelled
+    )
+}
+
+/// Map a deterministic gRPC rejection to a typed error with the code
+/// preserved (instead of flattening it into an opaque retry loop).
+fn rpc_rejected(status: &tonic::Status) -> RrError {
+    RrError::Network(NetworkError::RpcRejected {
+        code: format!("{:?}", status.code()),
+        message: status.message().to_string(),
+    })
+}
+
+/// Exponential backoff (`base_ms * 2^attempt`) with ±20% jitter so a fleet
+/// of clients does not retry in lockstep. `attempt` is 0-based.
+fn backoff_delay_ms(base_ms: u64, attempt: u32) -> u64 {
+    let base = base_ms.saturating_mul(2u64.saturating_pow(attempt.min(20)));
+    if base == 0 {
+        return 0;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()))
+        .unwrap_or(0);
+    let spread = base / 5 + 1;
+    let offset = (nanos % (2 * spread + 1)) as i64 - spread as i64;
+    (base as i64 + offset).max(0) as u64
+}
+
 /// Configuration for retry behavior on transient failures and leader redirects.
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
@@ -440,12 +484,15 @@ impl RrClient {
                     })
                 })?;
             }
-            let channel = endpoint.connect().await.map_err(|e| {
-                RrError::Network(NetworkError::ConnectionFailed {
-                    addr: addr.to_string(),
-                    reason: e.to_string(),
-                })
-            })?;
+            let channel = rr_network::tuned_endpoint(endpoint)
+                .connect()
+                .await
+                .map_err(|e| {
+                    RrError::Network(NetworkError::ConnectionFailed {
+                        addr: addr.to_string(),
+                        reason: e.to_string(),
+                    })
+                })?;
             set.push(channel);
         }
         // Concurrent first-dials race here; last writer wins, the dropped
@@ -482,7 +529,7 @@ impl RrClient {
     /// 2. If response has `leader_info` (a redirect): update cache, retry to that addr
     /// 3. If transport error: remove from cache, try next bootstrap addr round-robin
     /// 4. Max `retry_config.max_retries` total attempts before returning error
-    /// 5. Exponential backoff: `retry_delay_ms * 2^attempt`
+    /// 5. Exponential backoff with ±20% jitter: `retry_delay_ms * 2^attempt`
     ///
     /// With batching enabled ([`RrClientBuilder::with_batching`], off by
     /// default) the payload instead joins the partition's batch buffer and
@@ -536,16 +583,16 @@ impl RrClient {
                 Ok(mut client) => match client.read_local(tonic_req).await {
                     Ok(resp) => return Ok(resp.into_inner().payload),
                     Err(e) => {
+                        if is_deterministic_grpc(e.code()) {
+                            return Err(rpc_rejected(&e));
+                        }
                         last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
                         if e.code() == tonic::Code::Unavailable {
                             self.evict_channel(addr).await;
                         }
                         if attempt + 1 < max_attempts {
-                            let delay = self
-                                .retry_config
-                                .retry_delay_ms
-                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
-                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                            let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
                     }
                 },
@@ -637,16 +684,16 @@ impl RrClient {
                         return Ok(inner.payload);
                     }
                     Err(e) => {
+                        if is_deterministic_grpc(e.code()) {
+                            return Err(rpc_rejected(&e));
+                        }
                         last_error = Some(RrError::Network(NetworkError::RpcFailed(e.to_string())));
                         if e.code() == tonic::Code::Unavailable {
                             self.evict_channel(addr).await;
                         }
                         if attempt + 1 < max_attempts {
-                            let delay = self
-                                .retry_config
-                                .retry_delay_ms
-                                .saturating_mul(2u64.saturating_pow(attempt.min(20)));
-                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                            let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
                     }
                 },
@@ -760,10 +807,7 @@ impl RrClient {
 
                     // Exponential backoff before retry
                     if attempt + 1 < max_attempts {
-                        let delay_ms = self
-                            .retry_config
-                            .retry_delay_ms
-                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                        let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                     continue;
@@ -811,10 +855,7 @@ impl RrClient {
                             self.remove_cached_leader(group_id).await;
                             last_error = Some(RrError::Network(NetworkError::Timeout));
                             if attempt + 1 < max_attempts {
-                                let delay_ms = self
-                                    .retry_config
-                                    .retry_delay_ms
-                                    .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                                let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
                                     .await;
                             }
@@ -840,6 +881,22 @@ impl RrClient {
                             request_type: idem_err.request_type,
                             request_id: idem_err.request_id,
                             watermark: idem_err.watermark,
+                        });
+                    }
+
+                    if let Some(ns_err) = resp.ns_limit_error {
+                        // Deterministic rejection: the namespace cap refuses
+                        // every ID in this request_type — retrying is pointless.
+                        metrics::histogram!(
+                            "rr_client_request_duration_seconds",
+                            "group_id" => gid_label.clone(),
+                            "outcome" => "idempotency_namespace_limit",
+                        )
+                        .record(request_start.elapsed().as_secs_f64());
+                        return Err(RrError::IdempotencyNamespaceLimitExceeded {
+                            request_type: ns_err.request_type,
+                            namespaces: ns_err.namespaces as usize,
+                            max: ns_err.max as usize,
                         });
                     }
 
@@ -892,10 +949,7 @@ impl RrClient {
                     }
 
                     if attempt + 1 < max_attempts {
-                        let delay_ms = self
-                            .retry_config
-                            .retry_delay_ms
-                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                        let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                 }
@@ -907,6 +961,18 @@ impl RrClient {
                         message = %status.message(),
                         "rpc failed"
                     );
+                    if is_deterministic_grpc(status.code()) {
+                        // Deterministic rejections (auth, validation, …)
+                        // never converge through backoff — fail fast with
+                        // the code preserved instead of burning the budget.
+                        metrics::histogram!(
+                            "rr_client_request_duration_seconds",
+                            "group_id" => gid_label.clone(),
+                            "outcome" => "failure",
+                        )
+                        .record(request_start.elapsed().as_secs_f64());
+                        return Err(rpc_rejected(&status));
+                    }
                     self.remove_cached_leader(group_id).await;
                     if status.code() == tonic::Code::Unavailable {
                         self.evict_channel(addr).await;
@@ -917,10 +983,7 @@ impl RrClient {
 
                     // Exponential backoff before retry
                     if attempt + 1 < max_attempts {
-                        let delay_ms = self
-                            .retry_config
-                            .retry_delay_ms
-                            .saturating_mul(2u64.saturating_pow(attempt.min(20)));
+                        let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
                 }
@@ -1769,6 +1832,7 @@ mod tests {
                 payload: vec![],
                 leader_info: None,
                 idem_error: None,
+                ns_limit_error: None,
             }))
         }
 
@@ -1807,6 +1871,7 @@ mod tests {
                     payload: vec![],
                     leader_info: None,
                     idem_error: None,
+                    ns_limit_error: None,
                 }))
             } else {
                 Ok(tonic::Response::new(ClientResponse {
@@ -1814,6 +1879,7 @@ mod tests {
                     payload: self.payload.clone(),
                     leader_info: None,
                     idem_error: None,
+                    ns_limit_error: None,
                 }))
             }
         }
@@ -1929,6 +1995,179 @@ mod tests {
         assert_eq!(result, b"applied".to_vec());
     }
 
+    /// Fake node that always rejects with `ns_limit_error` (namespace cap).
+    struct NamespaceLimitService {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl ClientServiceTrait for NamespaceLimitService {
+        async fn request(
+            &self,
+            _request: tonic::Request<ClientRequest>,
+        ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Ok(tonic::Response::new(ClientResponse {
+                success: false,
+                payload: vec![],
+                leader_info: None,
+                idem_error: None,
+                ns_limit_error: Some(rr_network::proto::client::NamespaceLimitError {
+                    request_type: "one-namespace-too-many".to_string(),
+                    request_id: 1,
+                    namespaces: 1024,
+                    max: 1024,
+                }),
+            }))
+        }
+
+        async fn read_local(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_linearizable(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn get_cluster_info(
+            &self,
+            _request: tonic::Request<Empty>,
+        ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
+            Ok(tonic::Response::new(ClusterInfo { groups: vec![] }))
+        }
+    }
+
+    // INV-3: a namespace-cap rejection is a deterministic typed error, never
+    // retried and never an apply error (ADR A-0018 log-poison shape).
+    #[tokio::test]
+    async fn test_send_request_idempotent_namespace_limit_is_typed_and_not_retried() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let svc = NamespaceLimitService {
+            hits: Arc::clone(&hits),
+        };
+        let (addr, server) = spawn_fake_client_service(svc).await;
+
+        let client = RrClient::connect_with_config(
+            vec![addr],
+            RetryConfig {
+                max_retries: 5,
+                retry_delay_ms: 5,
+            },
+        )
+        .await
+        .expect("connect");
+
+        let key = rr_core::idempotency::IdempotencyKey::new("one-namespace-too-many", 1);
+        let result = client
+            .send_request_idempotent(1, b"write".to_vec(), key)
+            .await;
+        server.abort();
+
+        let Err(err) = result else {
+            panic!("ns_limit_error must surface as a typed error, not a success");
+        };
+        match err {
+            RrError::IdempotencyNamespaceLimitExceeded {
+                request_type,
+                namespaces,
+                max,
+            } => {
+                assert_eq!(request_type, "one-namespace-too-many");
+                assert_eq!(namespaces, 1024);
+                assert_eq!(max, 1024);
+            }
+            other => panic!("expected IdempotencyNamespaceLimitExceeded, got {other}"),
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a deterministic namespace-cap rejection must not be retried"
+        );
+    }
+
+    /// Fake node that always fails the write RPC with INVALID_ARGUMENT.
+    struct InvalidArgumentService {
+        hits: Arc<AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl ClientServiceTrait for InvalidArgumentService {
+        async fn request(
+            &self,
+            _request: tonic::Request<ClientRequest>,
+        ) -> Result<tonic::Response<ClientResponse>, tonic::Status> {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+            Err(tonic::Status::invalid_argument(
+                "payload rejected by ingress validation",
+            ))
+        }
+
+        async fn read_local(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn read_linearizable(
+            &self,
+            _request: tonic::Request<ReadLocalRequest>,
+        ) -> Result<tonic::Response<ReadLocalResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not under test"))
+        }
+
+        async fn get_cluster_info(
+            &self,
+            _request: tonic::Request<Empty>,
+        ) -> Result<tonic::Response<ClusterInfo>, tonic::Status> {
+            Ok(tonic::Response::new(ClusterInfo { groups: vec![] }))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deterministic_grpc_status_fails_fast_with_code_preserved() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let svc = InvalidArgumentService {
+            hits: Arc::clone(&hits),
+        };
+        let (addr, server) = spawn_fake_client_service(svc).await;
+
+        let client = RrClient::connect_with_config(
+            vec![addr],
+            RetryConfig {
+                max_retries: 5,
+                retry_delay_ms: 5,
+            },
+        )
+        .await
+        .expect("connect");
+
+        let result = client.send_request(1, b"write".to_vec()).await;
+        server.abort();
+
+        let Err(err) = result else {
+            panic!("a deterministic rejection must surface as an error, not a success");
+        };
+        match err {
+            RrError::Network(NetworkError::RpcRejected { code, message }) => {
+                assert_eq!(code, "InvalidArgument");
+                assert!(message.contains("ingress validation"));
+            }
+            other => panic!("expected RpcRejected, got {other}"),
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "deterministic gRPC rejections must not burn the retry budget"
+        );
+    }
+
     // ── Read-path fake-success regression (leader-unknown window) ──────
     //
     // Read-path twin of the write-path tests above. A follower mid-election
@@ -2029,6 +2268,7 @@ mod tests {
         }
     }
 
+    // INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
     #[tokio::test]
     async fn test_read_linearizable_no_fake_success_when_leader_unknown() {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -2077,6 +2317,7 @@ mod tests {
         );
     }
 
+    // INV-2: linearizable reads reflect all writes committed before the read was issued; followers redirect to the leader.
     #[tokio::test]
     async fn test_read_linearizable_converges_once_leader_is_known() {
         let svc = ReadLeaderAppearsService {

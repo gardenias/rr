@@ -793,6 +793,7 @@ mod tests {
                 payload: rr_core::batch::encode_batch(&items),
                 leader_info: None,
                 idem_error: None,
+                ns_limit_error: None,
             }))
         }
 
@@ -912,6 +913,7 @@ mod tests {
                 payload: rr_core::batch::encode_batch(&responses),
                 leader_info: None,
                 idem_error: None,
+                ns_limit_error: None,
             }))
         }
 

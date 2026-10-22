@@ -11,12 +11,13 @@
 
 use std::sync::Arc;
 
-use rr_core::idempotency::{IdempotencyError, IdempotencyKey};
+use rr_core::idempotency::{IdempotencyError, IdempotencyKey, NamespaceLimitError};
 
 use crate::proto::client::client_service_server;
 use crate::proto::client::{
     ClientRequest, ClientResponse, ClusterInfo, Empty, GroupInfo, IdempotencyError as ProtoIdemErr,
-    IdempotencyKey as ProtoIdemKey, LeaderInfo, ReadLocalRequest, ReadLocalResponse,
+    IdempotencyKey as ProtoIdemKey, LeaderInfo, NamespaceLimitError as ProtoNsLimitErr,
+    ReadLocalRequest, ReadLocalResponse,
 };
 use crate::tracing::debug_traceparent;
 
@@ -34,6 +35,10 @@ pub struct ClientWriteResult {
     /// `request_id` is below the watermark and has been evicted from the
     /// LRU cache. Mutually exclusive with non-empty `payload`.
     pub idem_error: Option<IdempotencyError>,
+    /// Set when the framework rejected an idempotent request because its
+    /// `request_type` would open a new idempotency namespace beyond the
+    /// per-group cap. Mutually exclusive with non-empty `payload`.
+    pub ns_limit_error: Option<NamespaceLimitError>,
 }
 
 /// Result of submitting a linearizable read request.
@@ -144,6 +149,15 @@ fn idem_err_to_proto(err: IdempotencyError) -> ProtoIdemErr {
     }
 }
 
+fn ns_limit_err_to_proto(err: NamespaceLimitError) -> ProtoNsLimitErr {
+    ProtoNsLimitErr {
+        request_type: err.request_type,
+        request_id: err.request_id,
+        namespaces: err.namespaces,
+        max: err.max,
+    }
+}
+
 /// Render the dispatch's leader hint into proto `LeaderInfo`.
 ///
 /// A redirect is only actionable when BOTH the leader's node id and its
@@ -218,6 +232,7 @@ impl client_service_server::ClientService for ClientServiceImpl {
             payload: result.payload,
             leader_info,
             idem_error: result.idem_error.map(idem_err_to_proto),
+            ns_limit_error: result.ns_limit_error.map(ns_limit_err_to_proto),
         }))
     }
 
@@ -328,6 +343,7 @@ mod tests {
                     leader_node_id: None,
                     leader_addr: None,
                     idem_error: None,
+                    ns_limit_error: None,
                 }),
                 cluster_info: Ok(vec![GroupInfo {
                     group_id: 1,
@@ -345,6 +361,7 @@ mod tests {
                     leader_node_id: Some(42),
                     leader_addr: Some("127.0.0.1:50051".to_string()),
                     idem_error: None,
+                    ns_limit_error: None,
                 }),
                 cluster_info: Ok(vec![]),
             }
@@ -627,6 +644,7 @@ mod tests {
                 leader_node_id: Some(42),
                 leader_addr: None,
                 idem_error: None,
+                ns_limit_error: None,
             })
         }
         async fn submit_read(&self, _: u64, _: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {

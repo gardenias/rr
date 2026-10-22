@@ -26,6 +26,11 @@
 //! - **Expired** → returns an [`ApplyOutcome::IdempotencyExpired`]
 //!   wrapping the watermark info; the dispatch layer surfaces it as
 //!   `ClientResponse.idem_error`.
+//! - **Namespace limit** → a NEW `request_type` beyond the per-group
+//!   cap returns an [`ApplyOutcome::IdempotencyNamespaceLimitExceeded`];
+//!   the dispatch layer surfaces it as `ClientResponse.ns_limit_error`.
+//!   Encoded as an outcome (never an apply error) because the trigger
+//!   is client-controlled and apply errors are group-fatal (ADR A-0018).
 //! - **New** → calls the user service, records the response, and wraps
 //!   it as [`ApplyOutcome::Success`] so the dispatch layer can decode
 //!   it back to raw bytes.
@@ -458,7 +463,46 @@ impl<S: Service> ServiceStateMachineAdapter<S> {
         ctx: Option<ApplyContext>,
     ) -> Result<Vec<u8>, RrError> {
         let group_id_label = self.group_id.to_string();
-        match self.idempotency.decide(&key)? {
+        let decision = match self.idempotency.decide(&key) {
+            Ok(decision) => decision,
+            Err(RrError::IdempotencyNamespaceLimitExceeded {
+                request_type,
+                namespaces,
+                max,
+            }) => {
+                // Client-controlled rejection — must NOT escape as an apply
+                // error (group-fatal, and replayed on every restart of a
+                // durable log: the ADR A-0018 log-poison shape). Encode it
+                // as an apply outcome so the entry applies cleanly on every
+                // node and the caller receives a typed, deterministic
+                // rejection, mirroring the Expired path.
+                metrics::counter!(
+                    "rr_idempotency_namespace_rejects_total",
+                    "group_id" => group_id_label
+                )
+                .increment(1);
+                tracing::warn!(
+                    target: "rr::audit",
+                    op = "idempotency_namespace_limit",
+                    group_id = self.group_id,
+                    request_type = %request_type,
+                    namespaces = namespaces,
+                    max = max,
+                    "refusing new idempotency namespace beyond the per-group cap"
+                );
+                return ApplyOutcome::IdempotencyNamespaceLimitExceeded(
+                    rr_core::idempotency::NamespaceLimitError {
+                        request_type,
+                        request_id: key.request_id,
+                        namespaces: namespaces as u64,
+                        max: max as u64,
+                    },
+                )
+                .encode();
+            }
+            Err(err) => return Err(err),
+        };
+        match decision {
             IdempotencyDecision::Replay(cached) => {
                 metrics::counter!(
                     "rr_idempotency_replays_total",
@@ -959,6 +1003,50 @@ mod tests {
                 assert_eq!(err.watermark, 3);
             }
             other => panic!("expected IdempotencyExpired, got {other:?}"),
+        }
+    }
+
+    // INV-3: the namespace cap rejects client writes loudly WITHOUT an apply
+    // error — a client-controlled condition must never wedge the group
+    // (ADR A-0018 log-poison shape; the entry applies cleanly on every node).
+    #[tokio::test]
+    async fn apply_keyed_namespace_beyond_cap_returns_outcome_not_apply_error() {
+        let svc = MockService::new(b"resp".to_vec());
+        let mut adapter = ServiceStateMachineAdapter::new(7, svc);
+
+        for i in 0..crate::idempotency::MAX_IDEMPO_NAMESPACES {
+            let key = rr_core::idempotency::IdempotencyKey::new(format!("ns-{i}"), 0);
+            let bytes = adapter.apply(&keyed_entry(b"req", key)).await.unwrap();
+            match rr_core::idempotency::ApplyOutcome::decode(&bytes).unwrap() {
+                rr_core::idempotency::ApplyOutcome::Success(_) => {}
+                other => panic!("expected Success while filling namespaces, got {other:?}"),
+            }
+        }
+
+        let over = rr_core::idempotency::IdempotencyKey::new("one-namespace-too-many", 1);
+        let bytes = adapter
+            .apply(&keyed_entry(b"req", over))
+            .await
+            .expect("namespace-limit rejection must be an apply outcome, not an apply error");
+        match rr_core::idempotency::ApplyOutcome::decode(&bytes).unwrap() {
+            rr_core::idempotency::ApplyOutcome::IdempotencyNamespaceLimitExceeded(err) => {
+                assert_eq!(err.request_type, "one-namespace-too-many");
+                assert_eq!(err.request_id, 1);
+                assert_eq!(
+                    err.namespaces as usize,
+                    crate::idempotency::MAX_IDEMPO_NAMESPACES
+                );
+                assert_eq!(err.max as usize, crate::idempotency::MAX_IDEMPO_NAMESPACES);
+            }
+            other => panic!("expected IdempotencyNamespaceLimitExceeded, got {other:?}"),
+        }
+
+        // Already-tracked namespaces still apply cleanly at the cap.
+        let tracked = rr_core::idempotency::IdempotencyKey::new("ns-0", 7);
+        let bytes = adapter.apply(&keyed_entry(b"req", tracked)).await.unwrap();
+        match rr_core::idempotency::ApplyOutcome::decode(&bytes).unwrap() {
+            rr_core::idempotency::ApplyOutcome::Success(_) => {}
+            other => panic!("tracked namespace must keep working at the cap, got {other:?}"),
         }
     }
 

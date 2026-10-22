@@ -461,13 +461,9 @@ async fn main() -> Result<()> {
             admin_addr,
             group,
         } => {
-            let admin_addr = match admin_addr {
-                Some(a) => a.clone(),
-                None => default_admin_addr(addr)?,
-            };
             run_repl(
                 addr,
-                &admin_addr,
+                admin_addr.clone(),
                 *group,
                 tls.as_ref(),
                 &admin_token,
@@ -567,8 +563,23 @@ async fn main() -> Result<()> {
                 Commands::Node {
                     cmd: NodeCommands::Decommission { node_id, dry_run },
                 } => {
-                    let report =
-                        decommission::decommission_node(&mut client, *node_id, *dry_run).await?;
+                    let tls_dial = tls.clone();
+                    let token_dial = admin_token.clone();
+                    let report = decommission::decommission_node(
+                        &mut client,
+                        move |addr: &str| {
+                            let tls = tls_dial.clone();
+                            let token = token_dial.clone();
+                            let addr = addr.to_owned();
+                            async move {
+                                let channel = connect(&addr, tls.as_ref()).await?;
+                                Ok(make_admin_client(channel, &token))
+                            }
+                        },
+                        *node_id,
+                        *dry_run,
+                    )
+                    .await?;
                     match cli.output {
                         OutputFormat::Json => {
                             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -659,6 +670,13 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
+                    }
+                    // Loud failure semantics, same as decommission above: a
+                    // drain that left any group's leadership unmoved must not
+                    // exit 0 (CI/CD wrappers key on the exit code). A remote
+                    // no-op (empty group list) stays exit 0.
+                    if groups.iter().any(|g| !g.leadership_transferred) {
+                        std::process::exit(1);
                     }
                 }
                 Commands::Node {
@@ -1273,6 +1291,18 @@ fn default_admin_addr(addr: &str) -> Result<String> {
     Ok(format!("{host}:{admin_port}"))
 }
 
+/// Decide whether the admin channel should follow a kv leader redirect.
+/// An explicit `--admin-addr` always wins (returns `None`); otherwise the
+/// admin endpoint is re-derived from the new leader's client address
+/// (host, port + 1000 — same rule as startup).
+fn admin_follows_redirect(admin_explicit: bool, leader_addr: &str) -> Option<Result<String>> {
+    if admin_explicit {
+        None
+    } else {
+        Some(default_admin_addr(leader_addr))
+    }
+}
+
 /// Submit one kv request on the current client channel.
 ///
 /// On a `leader_info` redirect (`success=false` + leader hint) the leader
@@ -1319,6 +1349,44 @@ async fn kv_call(
     unreachable!("the loop returns by the second iteration at the latest")
 }
 
+/// After a kv leader redirect moved `kv_addr`, move the admin channel along
+/// so `status`/`members` keep describing the node the kv commands are
+/// talking to. An explicit `--admin-addr` stays pinned. `status` is
+/// node-level, so the switch is announced with that caveat.
+async fn follow_admin_after_redirect(
+    kv_addr_before: &str,
+    kv_addr: &str,
+    admin_explicit: bool,
+    admin_addr: &mut String,
+    admin_client: &mut AdminClient,
+    tls: Option<&TlsConfig>,
+    admin_token: &Option<Arc<str>>,
+) {
+    if kv_addr == kv_addr_before {
+        return;
+    }
+    let Some(new_admin) = admin_follows_redirect(admin_explicit, kv_addr) else {
+        return;
+    };
+    match new_admin {
+        Err(e) => println!("admin channel could not derive an endpoint from {kv_addr}: {e}"),
+        Ok(new_admin) => match connect(&new_admin, tls).await {
+            Ok(ch) => {
+                *admin_client = make_admin_client(ch, admin_token);
+                *admin_addr = new_admin;
+                println!(
+                    "admin channel switched to {admin_addr} — note: 'status' is node-level \
+                     and now describes the leader node"
+                );
+            }
+            Err(e) => println!(
+                "admin channel could not follow the leader redirect ({new_admin}): {e} — \
+                 status/members still target {admin_addr}"
+            ),
+        },
+    }
+}
+
 /// Render a loud, actionable message for a `success=false` kv response
 /// (the request was NOT applied — never let it look like an OK).
 fn kv_failure_detail(resp: &ClientResponse) -> String {
@@ -1327,6 +1395,14 @@ fn kv_failure_detail(resp: &ClientResponse) -> String {
             "request rejected: idempotency key expired (request_id={}, watermark={}) — \
              NOT applied; retry with a fresh request_id above the watermark",
             idem.request_id, idem.watermark
+        );
+    }
+    if let Some(ns) = &resp.ns_limit_error {
+        return format!(
+            "request rejected: idempotency namespace limit exceeded (request_type={:?}, \
+             {} namespaces tracked, max {}) — NOT applied; a fresh request_id does NOT help, \
+             resubmit under an already-tracked request_type",
+            ns.request_type, ns.namespaces, ns.max
         );
     }
     if let Some(info) = &resp.leader_info {
@@ -1369,7 +1445,7 @@ fn handle_rpc_error(e: &Status, service: &str, dialed: &str, needs_reconnect: &m
 /// port (`--admin-addr`, default: client port + 1000).
 async fn run_repl(
     addr: &str,
-    admin_addr: &str,
+    admin_addr: Option<String>,
     group: u64,
     tls: Option<&TlsConfig>,
     admin_token: &Option<Arc<str>>,
@@ -1377,8 +1453,17 @@ async fn run_repl(
 ) -> Result<()> {
     // Admin and client APIs are separate listeners on the node, so the REPL
     // keeps one channel per service.
+    //
+    // An explicit `--admin-addr` is pinned for the session; a derived one
+    // follows kv leader redirects so `status`/`members` keep describing the
+    // node the kv commands are talking to.
+    let admin_explicit = admin_addr.is_some();
+    let mut admin_addr = match admin_addr {
+        Some(a) => a,
+        None => default_admin_addr(addr)?,
+    };
     let kv_channel = connect(addr, tls).await?;
-    let admin_channel = connect(admin_addr, tls).await?;
+    let admin_channel = connect(&admin_addr, tls).await?;
     let mut admin_client = make_admin_client(admin_channel, admin_token);
     let mut kv_client = make_kv_client(kv_channel, client_token);
     let mut kv_addr = addr.to_string();
@@ -1402,7 +1487,7 @@ async fn run_repl(
 
         if needs_reconnect || line.trim() == "reconnect" {
             let kv = connect(&kv_addr, tls).await;
-            let admin = connect(admin_addr, tls).await;
+            let admin = connect(&admin_addr, tls).await;
             match (kv, admin) {
                 (Ok(kv_ch), Ok(admin_ch)) => {
                     kv_client = make_kv_client(kv_ch, client_token);
@@ -1440,7 +1525,8 @@ async fn run_repl(
             ReplCommand::Get { key } => {
                 let req = KvRequest::Get { key };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
-                match kv_call(
+                let kv_before = kv_addr.clone();
+                let resp = kv_call(
                     &mut kv_client,
                     &mut kv_addr,
                     group,
@@ -1448,8 +1534,18 @@ async fn run_repl(
                     tls,
                     client_token,
                 )
-                .await
-                {
+                .await;
+                follow_admin_after_redirect(
+                    &kv_before,
+                    &kv_addr,
+                    admin_explicit,
+                    &mut admin_addr,
+                    &mut admin_client,
+                    tls,
+                    admin_token,
+                )
+                .await;
+                match resp {
                     Ok(inner) if inner.success => match decode_kv_response(&inner.payload) {
                         Ok(Some(s)) => println!("{s}"),
                         Ok(None) => println!("(nil)"),
@@ -1465,7 +1561,8 @@ async fn run_repl(
                     value: value.as_bytes().to_vec(),
                 };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
-                match kv_call(
+                let kv_before = kv_addr.clone();
+                let resp = kv_call(
                     &mut kv_client,
                     &mut kv_addr,
                     group,
@@ -1473,8 +1570,18 @@ async fn run_repl(
                     tls,
                     client_token,
                 )
-                .await
-                {
+                .await;
+                follow_admin_after_redirect(
+                    &kv_before,
+                    &kv_addr,
+                    admin_explicit,
+                    &mut admin_addr,
+                    &mut admin_client,
+                    tls,
+                    admin_token,
+                )
+                .await;
+                match resp {
                     Ok(inner) if inner.success => println!("OK"),
                     Ok(inner) => println!("Error: {}", kv_failure_detail(&inner)),
                     Err(e) => handle_rpc_error(&e, "ClientService", &kv_addr, &mut needs_reconnect),
@@ -1483,7 +1590,8 @@ async fn run_repl(
             ReplCommand::Delete { key } => {
                 let req = KvRequest::Delete { key };
                 let payload = bincode::serde::encode_to_vec(&req, standard())?;
-                match kv_call(
+                let kv_before = kv_addr.clone();
+                let resp = kv_call(
                     &mut kv_client,
                     &mut kv_addr,
                     group,
@@ -1491,8 +1599,18 @@ async fn run_repl(
                     tls,
                     client_token,
                 )
-                .await
-                {
+                .await;
+                follow_admin_after_redirect(
+                    &kv_before,
+                    &kv_addr,
+                    admin_explicit,
+                    &mut admin_addr,
+                    &mut admin_client,
+                    tls,
+                    admin_token,
+                )
+                .await;
+                match resp {
                     Ok(inner) if inner.success => println!("OK"),
                     Ok(inner) => println!("Error: {}", kv_failure_detail(&inner)),
                     Err(e) => handle_rpc_error(&e, "ClientService", &kv_addr, &mut needs_reconnect),
@@ -1506,7 +1624,7 @@ async fn run_repl(
                     println!("group_ids  : {:?}", s.group_ids);
                     println!("uptime_secs: {}", s.uptime_secs);
                 }
-                Err(e) => handle_rpc_error(&e, "AdminService", admin_addr, &mut needs_reconnect),
+                Err(e) => handle_rpc_error(&e, "AdminService", &admin_addr, &mut needs_reconnect),
             },
             ReplCommand::Members => {
                 match admin_client
@@ -1522,7 +1640,7 @@ async fn run_repl(
                         println!("leader_node_id: {}", s.leader_node_id);
                     }
                     Err(e) => {
-                        handle_rpc_error(&e, "AdminService", admin_addr, &mut needs_reconnect)
+                        handle_rpc_error(&e, "AdminService", &admin_addr, &mut needs_reconnect)
                     }
                 }
             }
@@ -1539,7 +1657,10 @@ async fn run_repl(
                     "Note: get/put/delete use kv-store wire format \
                      (bincode-encoded KvRequest/KvResponse) and go to --addr \
                      (client port); status/members go to --admin-addr \
-                     (default: client port + 1000)."
+                     (default: client port + 1000). A kv leader redirect moves \
+                     the derived admin channel along (an explicit --admin-addr \
+                     stays pinned); 'status' is node-level and then describes \
+                     the leader node."
                 );
             }
         }
@@ -2008,6 +2129,21 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_follows_redirect() {
+        // An explicit --admin-addr never moves with the kv channel.
+        assert!(admin_follows_redirect(true, "10.0.0.9:51003").is_none());
+        // A derived admin endpoint follows the leader: same host, port+1000.
+        let derived = admin_follows_redirect(false, "10.0.0.9:51003")
+            .expect("derived admin addr should follow")
+            .unwrap();
+        assert_eq!(derived, "10.0.0.9:52003");
+        // A malformed leader address surfaces the derivation error.
+        assert!(admin_follows_redirect(false, "no-port")
+            .expect("derived admin addr should follow")
+            .is_err());
+    }
+
+    #[test]
     fn test_kv_failure_detail_variants() {
         let resp = ClientResponse {
             success: false,
@@ -2017,6 +2153,7 @@ mod tests {
                 addr: "10.0.0.3:51001".to_string(),
             }),
             idem_error: None,
+            ns_limit_error: None,
         };
         let msg = kv_failure_detail(&resp);
         assert!(msg.contains("non-leader") && msg.contains("10.0.0.3:51001"));
@@ -2027,8 +2164,25 @@ mod tests {
             payload: vec![],
             leader_info: None,
             idem_error: None,
+            ns_limit_error: None,
         };
         assert!(kv_failure_detail(&resp).contains("NOT applied"));
+
+        let resp = ClientResponse {
+            success: false,
+            payload: vec![],
+            leader_info: None,
+            idem_error: None,
+            ns_limit_error: Some(rr_network::proto::client::NamespaceLimitError {
+                request_type: "orders".to_string(),
+                request_id: 7,
+                namespaces: 1024,
+                max: 1024,
+            }),
+        };
+        let msg = kv_failure_detail(&resp);
+        assert!(msg.contains("namespace limit exceeded"));
+        assert!(msg.contains("NOT applied"));
     }
 
     /// Verify KvRequest::Put encodes and decodes correctly via bincode.

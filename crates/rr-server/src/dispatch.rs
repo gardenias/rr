@@ -122,6 +122,7 @@ impl ClientDispatch for ClientDispatchImpl {
                             leader_node_id: None,
                             leader_addr: None,
                             idem_error: None,
+                            ns_limit_error: None,
                         }),
                         Ok(ApplyOutcome::IdempotencyExpired(err)) => Ok(ClientWriteResult {
                             success: false,
@@ -129,7 +130,18 @@ impl ClientDispatch for ClientDispatchImpl {
                             leader_node_id: None,
                             leader_addr: None,
                             idem_error: Some(err),
+                            ns_limit_error: None,
                         }),
+                        Ok(ApplyOutcome::IdempotencyNamespaceLimitExceeded(err)) => {
+                            Ok(ClientWriteResult {
+                                success: false,
+                                payload: vec![],
+                                leader_node_id: None,
+                                leader_addr: None,
+                                idem_error: None,
+                                ns_limit_error: Some(err),
+                            })
+                        }
                         Err(e) => {
                             tracing::error!(
                                 group_id,
@@ -146,6 +158,7 @@ impl ClientDispatch for ClientDispatchImpl {
                         leader_node_id: None,
                         leader_addr: None,
                         idem_error: None,
+                        ns_limit_error: None,
                     })
                 }
             }
@@ -158,6 +171,7 @@ impl ClientDispatch for ClientDispatchImpl {
                         leader_node_id: fwd.leader_id,
                         leader_addr: fwd.leader_node.as_ref().map(|n: &BasicNode| n.addr.clone()),
                         idem_error: None,
+                        ns_limit_error: None,
                     })
                 } else {
                     tracing::error!(
@@ -183,6 +197,7 @@ impl ClientDispatch for ClientDispatchImpl {
         }
         let outcome = match &result {
             Ok(r) if r.idem_error.is_some() => "idempotency_expired",
+            Ok(r) if r.ns_limit_error.is_some() => "idempotency_namespace_limit",
             Ok(r) if r.success => "success",
             Ok(_) => "redirect",
             Err(_) => "error",
