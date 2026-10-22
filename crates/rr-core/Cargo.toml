@@ -10,6 +10,7 @@ async-trait.workspace = true
 futures.workspace = true
 bincode.workspace = true
 metrics.workspace = true
+tracing.workspace = true
 # Optional: only compiled with the `test-utils` feature (storage_fault's
 # latency injection sleeps on the tokio timer).
 tokio = { workspace = true, optional = true }

@@ -131,3 +131,168 @@ impl KafkaProducer for NoopKafkaProducer {
         )))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Output construction contract ──────────────────────────────────
+
+    // INV-4 chain 1: the framework (service_adapter) assigns the real `seq`
+    // when the output is recorded; user-constructed outputs must start at 0
+    // so the assignment is distinguishable from an explicit sequence.
+    #[test]
+    fn output_new_assigns_zero_seq_and_carries_fields() {
+        let out = Output::new(
+            "req-1:0",
+            OutputTarget::KafkaPublish {
+                topic: "orders".to_string(),
+                partition: 3,
+                key: b"key".to_vec(),
+            },
+            b"payload".to_vec(),
+        );
+        assert_eq!(out.seq, 0, "framework assigns seq; user-built outputs start at 0");
+        assert_eq!(out.idempotency_key, "req-1:0");
+        assert_eq!(out.payload, b"payload".to_vec());
+        match &out.target {
+            OutputTarget::KafkaPublish {
+                topic,
+                partition,
+                key,
+            } => {
+                assert_eq!(topic, "orders");
+                assert_eq!(*partition, 3);
+                assert_eq!(key, &b"key".to_vec());
+            }
+            other => panic!("expected KafkaPublish target, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_raft_write_target_carries_addrs_and_group() {
+        let out = Output::new(
+            "req-2:0",
+            OutputTarget::RaftWrite {
+                addrs: vec!["127.0.0.1:9001".to_string()],
+                group_id: 7,
+            },
+            b"x".to_vec(),
+        );
+        match &out.target {
+            OutputTarget::RaftWrite { addrs, group_id } => {
+                assert_eq!(addrs, &vec!["127.0.0.1:9001".to_string()]);
+                assert_eq!(*group_id, 7);
+            }
+            other => panic!("expected RaftWrite target, got: {other:?}"),
+        }
+    }
+
+    // ── HandleResult builders ─────────────────────────────────────────
+
+    #[test]
+    fn handle_result_from_response_has_empty_outputs() {
+        let result = HandleResult::from_response(b"resp".to_vec());
+        assert_eq!(result.response, b"resp".to_vec());
+        assert!(result.outputs.is_empty());
+    }
+
+    #[test]
+    fn handle_result_with_outputs_carries_both() {
+        let output = Output::new(
+            "req-3:0",
+            OutputTarget::RaftWrite {
+                addrs: vec!["10.0.0.1:50051".to_string()],
+                group_id: 11,
+            },
+            b"out".to_vec(),
+        );
+        let result = HandleResult::with_outputs(b"resp".to_vec(), vec![output.clone()]);
+        assert_eq!(result.response, b"resp".to_vec());
+        assert_eq!(result.outputs.len(), 1);
+        let carried = &result.outputs[0];
+        assert_eq!(carried.seq, output.seq);
+        assert_eq!(carried.idempotency_key, output.idempotency_key);
+        assert_eq!(carried.payload, output.payload);
+        assert_eq!(
+            format!("{:?}", carried.target),
+            format!("{:?}", output.target)
+        );
+    }
+
+    // ── serde contract ────────────────────────────────────────────────
+
+    // INV-4 chain 5: outbox state (including user outputs) is persisted in
+    // FramedSnapshot.framework_state; pin the bincode field-level contract so
+    // a serde drift cannot silently break snapshot restore across versions.
+    #[test]
+    fn output_bincode_roundtrip_preserves_fields() {
+        for target in [
+            OutputTarget::RaftWrite {
+                addrs: vec!["10.0.0.1:50051".to_string(), "10.0.0.2:50051".to_string()],
+                group_id: 42,
+            },
+            OutputTarget::KafkaPublish {
+                topic: "orders".to_string(),
+                partition: 5,
+                key: b"k".to_vec(),
+            },
+        ] {
+            let out = Output {
+                seq: 17,
+                idempotency_key: "req-9:2".to_string(),
+                target,
+                payload: b"payload".to_vec(),
+            };
+            let encoded =
+                bincode::serde::encode_to_vec(&out, bincode::config::standard()).unwrap();
+            let (decoded, n): (Output, _) =
+                bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+            assert_eq!(n, encoded.len());
+            // Output intentionally has no PartialEq; byte-identical re-encode
+            // plus field asserts pins the wire contract just as strongly.
+            let re_encoded =
+                bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap();
+            assert_eq!(re_encoded, encoded, "re-encode must be byte-identical");
+            assert_eq!(decoded.seq, out.seq);
+            assert_eq!(decoded.idempotency_key, out.idempotency_key);
+            assert_eq!(decoded.payload, out.payload);
+            assert_eq!(
+                format!("{:?}", decoded.target),
+                format!("{:?}", out.target)
+            );
+        }
+    }
+
+    // ── KafkaProducer surface ─────────────────────────────────────────
+
+    #[test]
+    fn kafka_producer_is_object_safe() {
+        let _: Option<Box<dyn KafkaProducer>> = None;
+    }
+
+    // INV-4: with no producer wired, a KafkaPublish target must fail LOUDLY
+    // — the output runner retries forever against this stub, and the error
+    // names the topic so operators can find the misconfigured service.
+    #[tokio::test]
+    async fn noop_kafka_producer_errors_naming_topic() {
+        let producer = NoopKafkaProducer;
+        let err = producer
+            .publish("orders", 0, b"key", b"payload", "idem-1")
+            .await
+            .expect_err("stub producer must refuse delivery");
+        match err {
+            RrError::Application(msg) => {
+                assert!(
+                    msg.contains("orders"),
+                    "error must name the topic for operability, got: {msg}"
+                );
+                assert!(
+                    msg.contains("no KafkaProducer is configured"),
+                    "error must explain the missing wiring, got: {msg}"
+                );
+            }
+            other => panic!("expected RrError::Application, got: {other:?}"),
+        }
+    }
+}
