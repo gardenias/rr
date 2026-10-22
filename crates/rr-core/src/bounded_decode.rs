@@ -27,9 +27,15 @@ use serde::de::DeserializeOwned;
 /// `grpc_max_frame_size`) and entries traverse AppendEntries replication
 /// under the same cap. 16 MiB is 4× headroom over the default ingress
 /// ceiling while keeping any corrupt length prefix far from
-/// allocation-abort territory. Operators who raise `grpc_max_frame_size`
-/// beyond ~16 MiB must also raise this constant.
-pub(crate) const MAX_ENTRY_BODY: usize = 16 * 1024 * 1024;
+/// allocation-abort territory.
+///
+/// HARD COUPLING: `grpc_max_frame_size` must NEVER exceed this constant.
+/// A keyed write larger than 16 MiB would encode and replicate fine, but
+/// the apply side's `FramedEntry::decode` would hit this limit and fail —
+/// and apply errors are group-fatal (ADR A-0018), with a durable log
+/// replaying the poison on every restart. rr-server enforces the bound at
+/// startup; library embedders must uphold it themselves.
+pub const MAX_ENTRY_BODY: usize = 16 * 1024 * 1024;
 
 /// Decode cap for [`crate::framed_snapshot::FramedSnapshot`] bodies.
 ///

@@ -16,7 +16,7 @@
 //! | `state_machine`| [`StateMachine`] — low-level Raft SM trait |
 //! | `storage` | [`StorageEngine`], [`BatchOp`] |
 //! | `config` | [`ConfigProvider`], [`RoutingTableChange`] |
-//! | `codec` | [`Codec`], [`BincodeCodec`] |
+//! | `codec` | [`Codec`], [`BincodeCodec`] — **deprecated** (unbounded decode; use `bounded_decode` / frame codecs) |
 //! | `error` | [`RrError`] and domain-specific error enums |
 //! | `membership` | [`MIN_VOTERS_AFTER_REMOVAL`] — change-membership quorum policy |
 //! | `types` | [`NodeId`], [`GroupId`], [`RoutingTable`], … |
@@ -27,7 +27,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use rr_core::{Service, Codec, BincodeCodec, RrError, NodeId};
+//! use rr_core::{Service, RrError, NodeId};
 //!
 //! // Implement the Service trait to define your application logic.
 //! // The framework handles Raft consensus and replication.
@@ -45,7 +45,7 @@
 //! ```
 
 pub mod batch;
-mod bounded_decode;
+pub mod bounded_decode;
 pub mod codec;
 pub mod config;
 pub mod deferred;
@@ -64,6 +64,10 @@ pub mod storage;
 pub mod storage_fault;
 pub mod types;
 
+// Re-exported for backward compatibility. Both items are deprecated: their
+// unbounded `decode` is an OOM risk on untrusted bytes — use `bounded_decode`
+// or the frame codecs instead (see `codec` module docs).
+#[allow(deprecated)]
 pub use codec::{BincodeCodec, Codec};
 pub use config::{ConfigProvider, RoutingTableChange};
 pub use deferred::{CompletedResponse, CorrelationId, DeferredApply, DeferredHandleResult};

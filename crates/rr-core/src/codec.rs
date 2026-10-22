@@ -7,6 +7,20 @@ use crate::error::CodecError;
 /// Trait for encoding and decoding values to/from bytes.
 ///
 /// The default implementation uses bincode for binary serialization.
+///
+/// # Deprecation
+///
+/// Deprecated in the 0.3.0 breaking window: [`Codec::decode`] is UNBOUNDED —
+/// it trusts the input's length prefixes. Never use it on untrusted bytes
+/// (network input, on-disk frames from other parties): a corrupt length
+/// claim can exhaust memory before bincode notices. The framework's own
+/// wire paths decode through the bounded helpers in
+/// [`crate::bounded_decode`] instead; downstream users handling untrusted
+/// input should do the same.
+#[deprecated(
+    note = "unbounded bincode decode on untrusted bytes is an OOM risk; \
+            use rr_core::bounded_decode or the frame codecs (FramedEntry/FramedSnapshot) instead"
+)]
 pub trait Codec: Send + Sync {
     /// Encode a value to bytes.
     fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CodecError>;
@@ -15,8 +29,16 @@ pub trait Codec: Send + Sync {
 }
 
 /// Default codec using bincode v2 for binary serialization.
+#[deprecated(
+    note = "unbounded bincode decode on untrusted bytes is an OOM risk; \
+            use rr_core::bounded_decode or the frame codecs (FramedEntry/FramedSnapshot) instead"
+)]
 pub struct BincodeCodec;
 
+// Zero workspace consumers of these items remain (verified by workspace-wide
+// grep); the impl is kept for the deprecated public surface and exercised
+// only by this module's tests until removal in 0.3.0.
+#[allow(deprecated)]
 impl Codec for BincodeCodec {
     fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CodecError> {
         bincode::serde::encode_to_vec(value, bincode::config::standard())
@@ -32,6 +54,11 @@ impl Codec for BincodeCodec {
 
 #[cfg(test)]
 mod tests {
+    // These tests intentionally pin the legacy unbounded codec's behavior
+    // until the deprecated items are removed in the 0.3.0 breaking window.
+    // Production wire paths decode through bounded_decode / frame codecs.
+    #![allow(deprecated)]
+
     use super::*;
     use serde::{Deserialize, Serialize};
 
@@ -63,6 +90,19 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        // R-6 review item L7a: persist failing seeds into
+        // `crates/rr-core/proptest-regressions/` (git-tracked) so a failure
+        // reproduces across runs; `SourceParallel` resolves relative to
+        // `src/lib.rs`. (`ProptestConfig::default()` already enables this;
+        // the explicit setting pins the contract.)
+        #![proptest_config(ProptestConfig {
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::SourceParallel(
+                    "proptest-regressions",
+                ),
+            )),
+            ..ProptestConfig::default()
+        })]
         #[test]
         fn proptest_bincode_roundtrip_vec_u8(data: Vec<u8>) {
             let codec = BincodeCodec;
