@@ -303,6 +303,23 @@ impl CrashCluster {
             .join(format!("node{}.boot{}.log", id, node.spec.boot))
     }
 
+    /// First node boot log (any boot, any node) containing `needle` — the
+    /// zero-panic gate scans every boot because a node that panicked, died,
+    /// and restarted left the evidence in its PREVIOUS boot's log.
+    pub fn any_node_log_contains(&self, needle: &str) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(self.log_dir()).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("log") {
+                continue;
+            }
+            if log_contains(&path, needle) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     /// Path of the node's persisted state-machine snapshot (the T1 durable
     /// artifact). The `group-{GROUP_ID}` segment mirrors rr-crash-node's
     /// `data_dir/group-{GROUP_ID}` rocks layout.

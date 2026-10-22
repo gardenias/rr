@@ -1,9 +1,10 @@
 //! `crash-tests` — process-level crash-recovery harness for rr (reliability
 //! program R-4, `.sisyphus/plans/rr-reliability-program.md`).
 //!
-//! Unlike the in-process crash test in `tests/integration`
-//! (`test_crash_during_write_preserves_acked_entries`, which simulates a
-//! crash by dropping a `RaftGroupManager`), this harness spawns **real node
+//! Unlike the in-process restart test in `tests/integration`
+//! (`test_sequenced_writes_preserved_across_restart`, which simulates a
+//! restart by dropping a `RaftGroupManager` after a fully-drained write
+//! stream), this harness spawns **real node
 //! processes** and kills them with **real SIGKILL/SIGTERM**, so the kernel —
 //! not a `Drop` impl — decides what survives. Each node runs
 //! `rr-crash-node` (see `src/bin/rr-crash-node.rs`): a server assembled from

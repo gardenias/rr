@@ -226,6 +226,37 @@ mod rocks_scenarios {
                     "batch lane observed responses that did not echo their request \
                      (batch framing regression): {lane_errors:?}"
                 );
+                // Count-bounds oracle for the batched lane (wired here — it
+                // was dead code in oracle.rs): the applied count must cover
+                // every ACKed write (keyed + batched) and never exceed what
+                // the harness actually sent.
+                let keyed_acked = stats.acked.load(std::sync::atomic::Ordering::Relaxed);
+                let batch_acked = lane_stats.acked.load(std::sync::atomic::Ordering::Relaxed);
+                let keyed_sent = stats.sent.load(std::sync::atomic::Ordering::Relaxed);
+                let batch_sent = lane_stats.sent.load(std::sync::atomic::Ordering::Relaxed);
+                let count = crate::oracle::verify_applied_count_bounds(
+                    &self.client,
+                    keyed_acked + batch_acked,
+                    move || (keyed_sent, batch_sent),
+                )
+                .await
+                .expect("batch-lane count-bounds oracle failed");
+                println!(
+                    "[crash-harness] scenario={scenario} count-bounds: applied={count} acked_floor={} sent_ceiling={}",
+                    keyed_acked + batch_acked,
+                    keyed_sent + batch_sent,
+                );
+            }
+            // Zero-panic gate (same shape as scripts/soak.sh): a panicked
+            // raft core can leave gRPC serving while apply is frozen, which
+            // the oracle cannot see when quorum survives. Scans every boot
+            // log (a panic precedes the restart, so evidence lives in the
+            // previous boot's log).
+            if let Some(path) = self.cluster.any_node_log_contains("panicked at") {
+                panic!(
+                    "node log contains a panic (raft-core death is never expected): {}",
+                    path.display()
+                );
             }
             // CrashCluster::drop SIGKILLs and reaps any surviving children.
             drop(self.cluster);
@@ -466,15 +497,35 @@ mod rocks_scenarios {
     async fn scenario_c_body() -> Result<()> {
         let mut h = Harness::setup_with("scenario-c-snapshot-purge-kill", Some(100)).await?;
         h.warmup_barrier().await?;
-        // Let a few snapshot/purge cycles complete on ALL nodes before the
-        // fault lands (~280 writes at the default 50 writes/s ≫ threshold).
-        tokio::time::sleep(Duration::from_secs(5)).await;
 
+        // Seeded-random kill plan, drawn up front (same discipline as
+        // scenario B): CRASH_SEED replays the exact timings, and the draws
+        // land in the fault log. Bounds are calibrated at the default
+        // CRASH_WRITE_RPS=50 with snapshot threshold 100 (a snapshot+purge
+        // cycle ≈ 2s of load):
+        // - warmup 5–8s ⇒ 250–400 entries ⇒ a few full snapshot/purge cycles
+        //   on ALL nodes before the fault lands (was a fixed 5s);
+        // - dead window 12–20s ⇒ 600–1000 entries ⇒ 6–10 cycles on the
+        //   surviving quorum, so the dead node falls well behind the purge
+        //   horizon (was a fixed 15s).
         let target = h.rng.gen_range(1..=3u64);
+        let warmup_ms = h.rng.gen_range(5_000..=8_000u64);
+        let dead_window_ms = h.rng.gen_range(12_000..=20_000u64);
+        log_fault(
+            &mut h.fault_log,
+            h.seed,
+            "plan",
+            Some(target),
+            None,
+            None,
+            Some(format!("warmup_ms={warmup_ms} dead_window_ms={dead_window_ms}")),
+        )?;
+        tokio::time::sleep(Duration::from_millis(warmup_ms)).await;
+
         let frontier = h.acked_on_disk()?;
         println!(
             "[crash-harness] SIGKILL node {target} at frontier={frontier} \
-             under snapshot threshold 100 (seed={})",
+             under snapshot threshold 100 (seed={}, warmup={warmup_ms}ms)",
             h.seed
         );
         log_fault(
@@ -486,13 +537,16 @@ mod rocks_scenarios {
             None,
             Some(format!("frontier={frontier} snapshot_threshold=100")),
         )?;
+        // Capture the kill instant BEFORE the kill: the post-restart snapshot
+        // check below requires an artifact written strictly after this point.
+        let killed_at = std::time::SystemTime::now();
         h.cluster.kill_node(target).await?;
 
         // Dead window: the surviving quorum keeps writing and cycles through
         // several snapshot+purge rounds, so the dead node falls behind the
         // purge horizon — its restart must compose durable snapshot + log
         // tail, or install a snapshot outright.
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        tokio::time::sleep(Duration::from_millis(dead_window_ms)).await;
 
         h.cluster.restart_node(target).await?;
         log_fault(
@@ -521,18 +575,29 @@ mod rocks_scenarios {
             Some(format!("applied={caught_up} frontier={frontier}")),
         )?;
 
-        // T1 artifact: the restarted node must persist `sm-snapshot.bin`
-        // (write → fsync → rename) once it applies past the low threshold
-        // again. Poll with a deadline — the trigger is apply-count-based and
-        // load is still running. (The node may already have persisted one
-        // pre-kill; the post-condition we rely on is that the artifact is
-        // present and recovery above succeeded.)
+        // T1 artifact, freshness-checked (2026-10-21 review): mere existence
+        // of `sm-snapshot.bin` was vacuous — the node may have persisted it
+        // pre-kill. Require the artifact to have been (re)written AFTER the
+        // kill instant: the restarted node applies past the low threshold
+        // again under continuing load, and the persist path
+        // (write → fsync → rename) refreshes the file mtime. Poll with a
+        // deadline — the trigger is apply-count-based.
         let snap_deadline = Instant::now() + Duration::from_secs(30);
-        while !h.cluster.sm_snapshot_path(target).exists() {
+        let snap_path = h.cluster.sm_snapshot_path(target);
+        loop {
+            let fresh = std::fs::metadata(&snap_path)
+                .and_then(|m| m.modified())
+                .map(|mtime| mtime > killed_at)
+                .unwrap_or(false);
+            if fresh {
+                break;
+            }
             if Instant::now() >= snap_deadline {
                 anyhow::bail!(
-                    "node {target} has no durable sm-snapshot.bin 30s after catch-up — \
-                     the T1 persist-on-build path regressed"
+                    "node {target} has no post-kill sm-snapshot.bin 30s after catch-up \
+                     (path={}, killed_at={killed_at:?}) — either the T1 persist-on-build \
+                     path regressed or only a pre-kill snapshot survived",
+                    snap_path.display(),
                 );
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
