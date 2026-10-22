@@ -53,6 +53,27 @@ pub use tracing::{
     TRACEPARENT_HEADER, TRACESTATE_HEADER,
 };
 
+/// Bounds a single dial. Without it a black-holed address hangs the caller
+/// until the OS TCP timeout fires (minutes).
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Shared endpoint tuning for every outbound gRPC dial in the workspace
+/// (rr-network pool, rr-client, rr-raft network factory): connect timeout
+/// plus TCP/H2 keepalive so a black-holed or silently half-open connection
+/// is torn down and redialed instead of producing permanent heartbeat/RPC
+/// timeouts on a pooled channel.
+///
+/// Defined at crate root (rather than in `channel_pool`) so the pool's
+/// internal layout can evolve without moving this cross-crate helper.
+pub fn tuned_endpoint(endpoint: tonic::transport::Endpoint) -> tonic::transport::Endpoint {
+    endpoint
+        .connect_timeout(CONNECT_TIMEOUT)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+        .keep_alive_timeout(std::time::Duration::from_secs(5))
+        .keep_alive_while_idle(true)
+}
+
 /// Compose two interceptors in order: `first` runs, then (if it passes)
 /// `second`. Used by rr-server to stack auth (first, cheap fail-fast)
 /// before rate-limit (second, only counts authenticated requests).

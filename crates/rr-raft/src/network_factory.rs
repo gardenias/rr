@@ -141,10 +141,30 @@ pub struct TlsPaths {
 /// Functionally identical to `rr_network::ChannelPool` but defined locally
 /// to avoid a cyclic crate dependency. When constructed with
 /// [`ChannelPool::with_tls`], every new channel is opened over TLS.
+///
+/// Values carry the dialed address alongside the channel: a cache hit with
+/// a MISMATCHED address (node id reused with a new address) is evicted and
+/// redialed instead of silently streaming to the old peer.
 #[derive(Clone, Default)]
 pub struct ChannelPool {
-    channels: Arc<DashMap<NodeId, Channel>>,
+    channels: Arc<DashMap<NodeId, (String, Channel)>>,
     tls: Option<Arc<TlsPaths>>,
+}
+
+/// Bounds a single dial. Without it a black-holed address hangs the caller
+/// until the OS TCP timeout fires (minutes).
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Endpoint tuning shared with the other workspace dial sites (duplicated
+/// locally to avoid the cyclic crate dependency — keep in sync with
+/// `rr_network::channel_pool::tuned_endpoint`).
+fn tuned_endpoint(endpoint: tonic::transport::Endpoint) -> tonic::transport::Endpoint {
+    endpoint
+        .connect_timeout(CONNECT_TIMEOUT)
+        .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(10))
+        .keep_alive_timeout(std::time::Duration::from_secs(5))
+        .keep_alive_while_idle(true)
 }
 
 impl ChannelPool {
@@ -175,8 +195,22 @@ impl ChannelPool {
         node_id: NodeId,
         addr: &str,
     ) -> Result<Channel, NetworkError> {
-        if let Some(channel) = self.channels.get(&node_id) {
-            return Ok(channel.clone());
+        if let Some(entry) = self.channels.get(&node_id) {
+            let (cached_addr, channel) = entry.value();
+            if cached_addr == addr {
+                return Ok(channel.clone());
+            }
+            // Node id reused with a new address: evict the stale channel or
+            // replication traffic would keep streaming to the old peer.
+            let stale_addr = cached_addr.clone();
+            drop(entry);
+            self.channels.remove(&node_id);
+            tracing::info!(
+                node_id,
+                stale_addr = %stale_addr,
+                new_addr = %addr,
+                "channel pool: node address changed; evicted stale channel"
+            );
         }
         let uri = if self.tls.is_some() {
             format!("https://{addr}")
@@ -202,14 +236,15 @@ impl ChannelPool {
                         reason: format!("tls attach: {e}"),
                     })?;
         }
-        let channel = endpoint
+        let channel = tuned_endpoint(endpoint)
             .connect()
             .await
             .map_err(|e| NetworkError::ConnectionFailed {
                 addr: addr.to_string(),
                 reason: e.to_string(),
             })?;
-        self.channels.insert(node_id, channel.clone());
+        self.channels
+            .insert(node_id, (addr.to_string(), channel.clone()));
         Ok(channel)
     }
 
@@ -891,7 +926,7 @@ mod tests {
             // Use a fake address; get_or_connect will attempt to connect.
             // We insert a channel manually via the DashMap to avoid needing a server.
             let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
-            pool.channels.insert(1, channel);
+            pool.channels.insert(1, ("http://[::1]:50051".to_string(), channel));
         });
 
         assert_eq!(pool.len(), 1);
@@ -906,7 +941,7 @@ mod tests {
 
         // Insert a lazily-connected channel.
         let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
-        pool.channels.insert(42, channel);
+        pool.channels.insert(42, ("http://127.0.0.1:1".to_string(), channel));
         assert_eq!(pool.len(), 1);
 
         // remove_and_reconnect will remove the old channel, then try to connect.
@@ -919,13 +954,70 @@ mod tests {
         assert_eq!(pool.len(), 0, "old channel should have been evicted");
     }
 
+    /// G3 regression: a cache hit whose registered address differs from the
+    /// requested one (node id reused with a new address) evicts the stale
+    /// channel and redials — the new connection lands on the NEW address.
+    #[tokio::test]
+    async fn test_addr_change_evicts_stale_channel_and_redials() {
+        let pool = ChannelPool::new();
+        // Seed a channel registered under the OLD address.
+        let stale = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        pool.channels.insert(7, ("127.0.0.1:1".to_string(), stale));
+
+        // The NEW address has a live listener, so the redial succeeds —
+        // had the pool dialed the stale address it would fail fast.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let new_addr = listener.local_addr().unwrap().to_string();
+        let acceptor = tokio::spawn(async move {
+            while let Ok((_sock, _)) = listener.accept().await {}
+        });
+
+        pool.get_or_connect(7, &new_addr)
+            .await
+            .expect("redial to the new address must succeed");
+
+        let stored = pool.channels.get(&7).map(|e| e.value().0.clone());
+        assert_eq!(
+            stored.as_deref(),
+            Some(new_addr.as_str()),
+            "pool must re-register the channel under the new address"
+        );
+        acceptor.abort();
+    }
+
+    /// A cache hit with the SAME address returns the pooled channel without
+    /// redialing: once the listener is gone, a redial would fail fast, so
+    /// success proves the hit path served the cached channel.
+    #[tokio::test]
+    async fn test_same_addr_hit_does_not_redial() {
+        let pool = ChannelPool::new();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let acceptor = tokio::spawn(async move {
+            while let Ok((_sock, _)) = listener.accept().await {}
+        });
+
+        pool.get_or_connect(7, &addr).await.unwrap();
+        assert_eq!(pool.len(), 1);
+
+        // Tear down the listener; the acceptor owns it, so awaiting the
+        // aborted task guarantees the port is closed before we go on.
+        acceptor.abort();
+        let _ = acceptor.await;
+
+        pool.get_or_connect(7, &addr)
+            .await
+            .expect("same-address hit must be served from the pool, not redialed");
+        assert_eq!(pool.len(), 1);
+    }
+
     #[tokio::test]
     async fn test_unavailable_error_evicts_channel() {
         // When append_entries hits an Unavailable error, the channel should be evicted.
         // Insert a lazily-connected channel for node 99.
         let concrete_pool = ChannelPool::new();
         let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
-        concrete_pool.channels.insert(99, channel);
+        concrete_pool.channels.insert(99, ("http://127.0.0.1:1".to_string(), channel));
         let pool: Arc<dyn ChannelPoolLike> = Arc::new(concrete_pool);
         assert_eq!(pool.len(), 1);
 
