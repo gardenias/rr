@@ -8,7 +8,7 @@ slug: /
 
 ## 欢迎来到 rr 框架
 
-**rr** 是一个为 Rust 设计的分布式多 Raft 共识框架。它提供了高效的、容错的分布式系统构建块，支持多个独立的 Raft 集群在单个网络中的共存。该框架由 11 个库 crate 组成，其中 8 个核心 crate：
+**rr** 是一个为 Rust 设计的分布式多 Raft 共识框架。它提供了高效的、容错的分布式系统构建块，支持多个独立的 Raft 集群在单个网络中的共存。该框架由 11 个 crate 组成（9 个库 crate + 2 个二进制 crate rr-server/rr-admin），其中 8 个核心 crate：
 
 - **rr-core**: 核心数据结构和共识逻辑
 - **rr-config**: 配置管理和参数调优
@@ -47,7 +47,7 @@ slug: /
 
 ### G2. 高吞吐 & 低延迟
 
-- 单共识组 100k ops/s 量级；聚合吞吐靠 multi-raft 分片**随组数水平增长**（而非加副本）
+- 单共识组 100k ops/s 量级；聚合吞吐靠 multi-raft 分片水平扩展（而非加副本）——当前实测边界：同机多组聚合吞吐尚未随组数增长（受单 h2 连接串行点限制，见 `docs/perf/roadmap-100k.md`），跨机扩展不受此限
 - IoBatcher 批量落盘 + 字节级背压；gRPC 连接池；读写 RPC 分离，本地读走最低延迟路径
 - benches + perf-lab + soak + 基线对比：性能回归必须能被自动化发现
 
@@ -71,7 +71,7 @@ slug: /
 
 ## Welcome to rr Framework
 
-**rr** is a distributed multi-Raft consensus framework designed for Rust. It provides efficient, fault-tolerant building blocks for distributed systems, supporting the coexistence of multiple independent Raft clusters within a single network. The framework comprises 11 library crates, of which 8 are core crates:
+**rr** is a distributed multi-Raft consensus framework designed for Rust. It provides efficient, fault-tolerant building blocks for distributed systems, supporting the coexistence of multiple independent Raft clusters within a single network. The framework comprises 11 crates (9 library crates plus the rr-server/rr-admin binaries), of which 8 are core crates:
 
 - **rr-core**: Core data structures and consensus logic
 - **rr-config**: Configuration management and parameter tuning
@@ -111,7 +111,7 @@ Three pillars, in priority order **G1 > G2 > G3** — conflicts are resolved in 
 
 ### G2. High throughput & low latency
 
-- ~100k ops/s per consensus group; aggregate throughput scales **with group count** via multi-raft sharding (not replicas)
+- ~100k ops/s per consensus group; aggregate throughput scales horizontally via multi-raft sharding (not replicas) — current measured boundary: same-host multi-group aggregate does NOT yet scale with group count (single-h2-connection serialization point, see `docs/perf/roadmap-100k.md`); multi-host scaling is unaffected
 - IoBatcher batched fsync with byte-level backpressure; gRPC connection pooling; read/write RPC separation with a lowest-latency local read path
 - benches + perf-lab + soak + baseline comparison: performance regressions must be caught automatically
 

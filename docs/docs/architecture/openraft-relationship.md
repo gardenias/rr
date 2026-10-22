@@ -33,7 +33,7 @@ openraft 是一个**单共识组（single-group）** 的 Raft 共识库，忠实
 | **数据接入 / 输出** | Kafka ingestor（at-least-once + 框架去重 = exactly-once apply）；输出 outbox（at-least-once 投递） | `rr-ingestor-kafka` / `rr-core` |
 | **配置提供者** | `MemConfigProvider`（内存，可写）；`EtcdConfigProvider`（**只读**——rr 不会把路由表写回 etcd） | `rr-config` / `rr-config-etcd` |
 | **安全** | TLS/mTLS（RaftService 强制 mTLS）、bearer token（admin/client 分离）、按服务/按调用方限流、G1–G7 启动安全门 | `rr-server` |
-| **存储** | `MemStorage`；RocksDB（`rocks` feature）目前仅在集成测试中接线，stock `rr-server` 二进制始终使用内存日志 | `rr-storage` |
+| **存储** | `MemStorage`；RocksDB（`rocks` feature）：stock `rr-server --storage rocks` 持久化 Raft 日志（ADR A-0016）与状态机快照 `sm-snapshot.bin`（T1，fail-closed）；默认 `mem` 为全内存 | `rr-storage` |
 | **运维工具** | `rr-admin` CLI + REPL、DrainNode/退役、OnlineBackup（tar.gz + sha256）、node-reset、metrics + tracing | `rr-admin` |
 
 ## rr 如何封装 openraft（技术细节)
@@ -93,7 +93,7 @@ A production sharded system needs far more than one consensus group. rr fills th
 | **Ingest / egress** | Kafka ingestor (at-least-once + framework dedup = exactly-once apply); output outbox (at-least-once delivery) | `rr-ingestor-kafka` / `rr-core` |
 | **Config providers** | `MemConfigProvider` (in-memory, writable); `EtcdConfigProvider` (**read-only** — rr never writes the routing table back to etcd) | `rr-config` / `rr-config-etcd` |
 | **Security** | TLS/mTLS (RaftService requires mTLS), bearer tokens (admin/client separated), per-service/per-caller rate limiting, G1–G7 startup safety gates | `rr-server` |
-| **Storage** | `MemStorage`; RocksDB (`rocks` feature) is currently only wired in integration tests — the stock `rr-server` binary always uses in-memory logs | `rr-storage` |
+| **Storage** | `MemStorage`; RocksDB (`rocks` feature): the stock `rr-server --storage rocks` persists the Raft log (ADR A-0016) and the state-machine snapshot `sm-snapshot.bin` (T1, fail-closed); the default `mem` is fully in-memory | `rr-storage` |
 | **Ops tooling** | `rr-admin` CLI + REPL, DrainNode/decommission, OnlineBackup (tar.gz + sha256), node-reset, metrics + tracing | `rr-admin` |
 
 ## How rr wraps openraft (technical view)

@@ -75,7 +75,7 @@ Key facts:
 
 ### DurabilityPolicy
 
-`crates/rr-storage/src/rocks.rs:46-86` 定义三档策略（v0.2.0 起改名，旧名保留为 deprecated 别名一个次版本）：
+`crates/rr-storage/src/rocks.rs:46-86` 定义三档策略（v0.2.0 起改名；deprecated 别名已在 v0.3.0 移除，旧字符串硬报错）：
 
 | 策略 / Policy | 行为 / Behavior | 适用 / Use |
 | :--- | :--- | :--- |
@@ -85,9 +85,13 @@ Key facts:
 
 CLI 选择：`--durability strict|replicated_only|test_only`（env `RR_DURABILITY`）。
 
+**作用域注意**：`--durability` 只驱动**状态机侧**引擎（`rr-server --storage rocks`
+的数据目录）；每组 Raft 日志（`RocksLogStorage`）恒按 `Strict` 打开——日志侧
+不允许降级是 fail-safe 设计（`crates/rr-raft/src/rocks_log_storage.rs`）。
+
 ---
 
-`crates/rr-storage/src/rocks.rs:46-86` defines three policies (renamed in v0.2.0; old names remain as deprecated aliases for one minor version):
+`crates/rr-storage/src/rocks.rs:46-86` defines three policies (renamed in v0.2.0; the deprecated aliases were removed in v0.3.0 — old strings are hard-rejected):
 
 | Policy | Behavior | Use |
 | :--- | :--- | :--- |
@@ -96,6 +100,11 @@ CLI 选择：`--durability strict|replicated_only|test_only`（env `RR_DURABILIT
 | `TestOnly` (formerly `Fast`) | No fsync, no WAL; total data loss on crash | Tests / throwaway caches; never production |
 
 CLI: `--durability strict|replicated_only|test_only` (env `RR_DURABILITY`).
+
+**Scope note**: `--durability` drives only the **state-machine-side** engine
+(the `rr-server --storage rocks` data dir); each group's Raft log
+(`RocksLogStorage`) always opens as `Strict` — downgrading the log side is
+blocked by design (`crates/rr-raft/src/rocks_log_storage.rs`).
 
 ## 存储布局 / Storage layout
 

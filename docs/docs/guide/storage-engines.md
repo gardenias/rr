@@ -145,19 +145,28 @@ safety guarantees.
 | `DurabilityPolicy::ReplicatedOnly` | `"replicated_only"` | WAL written, no fsync | ⚠️ Only with replication ≥ 3 + external backup |
 | `DurabilityPolicy::TestOnly` | `"test_only"` | No WAL, no fsync | ❌ Tests only |
 
-**v0.2.0 rename**: 旧名称 `Balanced` / `Fast` 被重命名为
-`ReplicatedOnly` / `TestOnly` 以更明确表达意图。旧名仍作为 `#[deprecated]`
-alias 保留一个 minor version；TOML / CLI 也接受旧字符串
-（`"balanced"` / `"fast"`）但会在启动时发出 deprecation warning。在 v0.3.0
-之前请迁移到新名。
+**v0.2.0 rename / v0.3.0 removal**: 旧名称 `Balanced` / `Fast` 在 v0.2.0
+重命名为 `ReplicatedOnly` / `TestOnly`，deprecated 别名已在 **v0.3.0 移除**——
+TOML / CLI 收到旧字符串（`"balanced"` / `"fast"`）现在会**硬报错**拒绝启动
+（`crates/rr-server/src/config_file.rs`）。请统一使用新名。
+
+另：`--durability` 只作用于**状态机侧**存储引擎；每组 Raft 日志
+（`RocksLogStorage`）恒按 `Strict` 打开（fail-safe 设计，见
+`crates/rr-raft/src/rocks_log_storage.rs`）。`ReplicatedOnly` 节点可配置
+`group_commit_interval_ms` 做周期性 WAL 组提交（`crates/rr-storage/src/rocks.rs`）。
 
 ---
 
-**v0.2.0 rename**: the old variants `Balanced` / `Fast` were renamed to
-`ReplicatedOnly` / `TestOnly` for clearer intent. The old names remain as
-`#[deprecated]` aliases for one minor version; TOML / CLI still accept the
-old strings (`"balanced"` / `"fast"`) but emit a deprecation warning at
-startup. Migrate to the new names before v0.3.0.
+**v0.2.0 rename / v0.3.0 removal**: the old variants `Balanced` / `Fast` were
+renamed in v0.2.0; the deprecated aliases were **removed in v0.3.0** — TOML /
+CLI now **hard-fail** on the old strings (`"balanced"` / `"fast"`) at startup
+(`crates/rr-server/src/config_file.rs`). Use the new names.
+
+Note: `--durability` only applies to the **state-machine-side** engine; each
+group's Raft log (`RocksLogStorage`) always opens as `Strict` (a fail-safe —
+see `crates/rr-raft/src/rocks_log_storage.rs`). `ReplicatedOnly` nodes may set
+`group_commit_interval_ms` for periodic WAL group-commit
+(`crates/rr-storage/src/rocks.rs`).
 
 `RocksStorage::open()` 在 policy 不是 `Strict` 时也会在启动日志里发一条
 `tracing::warn!`，提醒 ops 这个节点违反了 Raft 的持久性契约。

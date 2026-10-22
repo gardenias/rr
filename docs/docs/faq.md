@@ -52,7 +52,7 @@ openraft 给你**一个**共识组的引擎，存储、网络、部署都要自�
 
 ### 为什么 REPL 里 `put` 打印了 OK，值却没写进去？
 
-REPL 的 OK 只表示**传输层成功**（RPC 完成），不等于写被提交。常见原因：请求落到了 follower 上——写只能由 leader 处理，follower 会返回 `success=false` 加 `leader_info`；或者你随后用 `read`（本地读）立刻验证，读到了尚未 apply 的副本。排查方法：用 `rr-admin` 的 `get-group-status` 看 `last_log_index` 是否增长，并用 `read_linearizable` 读回验证。
+现行 REPL 只在服务端返回 `ClientResponse.success=true` 时才打印 OK（`crates/rr-admin/src/main.rs` 的 `kv_call` / `kv_failure_detail`）：写请求落到 follower 时，REPL 会自动跟随一次 `leader_info` 重定向（打印 `redirected to leader node N at ...`），重定向后仍未成功则打印 `Error: request rejected ...`（不会打印 OK）。因此"OK 但值没写进去"在当前版本理论上不应出现；如果你写完立刻读不到值，更可能是随后用 `read`（本地读）在尚未 apply 的副本上验证。排查方法：用 `rr-admin` 的 `group status` 看 `last_log_index` 是否增长，并用 `read_linearizable` 读回验证。
 
 ### 第一次启动为什么报 TLS 错误？
 
@@ -74,7 +74,7 @@ rr-server 启动时执行 **G1–G7 安全检查**（`crates/rr-server/src/node.
 
 ### 我能在生产环境用 RocksDB 持久化吗？
 
-目前**不能通过 stock 二进制获得**。`rocks` feature 提供 `RocksLogStorage`，但它只在集成测试中接线；stock `rr-server` 始终使用内存 `RrLogStorage`。此外快照也只存在于内存中，**重启恢复 = 日志重放**（在内存日志下意味着状态不跨重启保留）。RocksDB 接入二进制在路线图上，但如果你今天就要持久化，需要以库方式嵌入 rr 并自行接线 `start_group_rocks`——且要意识到这条路径的测试覆盖还不如内存路径充分。
+可以。stock `rr-server --storage rocks`（需以 `rocks` feature 构建）持久化全部关键状态：Raft 日志落在 `{data_dir}/raft-log/{group_id}`（ADR A-0016），状态机快照与成员 sidecar 以原子写（write → fsync → rename）落在同目录的 `sm-snapshot.bin` / `sm-membership.bin`（T1/R-P0）。快照持久化是 **fail-closed** 的：写不进盘的快照会中止 build/install，OpenRaft 永远不会 purge 掉没有持久快照兜底的日志前缀；存在但损坏的快照文件会让节点启动时响亮失败，而不是以空状态机悄悄重启。默认 `mem` 后端仍是全内存、不跨重启保留。rocks 路径有单元测试、rocks-gated 集成测试与滚动重启验收测试覆盖，但测试深度仍不及 mem 路径，生产采用前建议按 [存储引擎指南](guide/storage-engines.md) 自行验证。
 
 ### openraft 稳定吗？
 
@@ -82,7 +82,7 @@ openraft 目前处于 pre-1.0 阶段（rr 使用的是 `0.10.0-alpha.34`），�
 
 ### rr 的测试覆盖到什么程度？
 
-当前是：单元测试 + 集成测试（`tests/integration`）+ 模糊测试目标（`fuzz/`）。**还没有** Jepsen 或混沌工程测试；`tools/rr-perf-bench` 基准工具存在，但没有发布过官方基线数据。工作区版本为 0.2.0，这意味着 API 与行为仍可能调整。把 rr 当作"核心路径经过测试、但尚未经过形式化一致性验证"的框架来评估是准确的。
+单元测试 + 集成测试（`tests/integration`，含 4 个在默认测试任务中运行的混沌/故障注入测试）+ 进程级 crash harness（`tests/crash`，真 SIGKILL/SIGTERM 三节点集群 + ack-log oracle）+ 模糊测试目标（`fuzz/`，含提交入仓的种子语料）+ proptest 属性测试 + porcupine 风格线性一致检查器（`tests/integration/src/linearizability.rs`）。另有 `scripts/soak.sh` 数小时级稳定性 harness 与已发布的官方性能基线（`docs/perf/baselines/v0.2.0-baseline.md`）。形式化方面，`formal/tla/` 携带 4 份 TLA+ 规约（MembershipGuard / OffsetExactlyOnce / OutputWatermark / RoutingTableSwitch），TLC 小模型实测零反例。工作区版本为 0.2.0，API 与行为仍可能调整。
 
 ### learner 会自动提升为 voter 吗？
 
@@ -139,7 +139,7 @@ Because the stock binary embeds `EchoStateMachine` (`crates/rr-server/src/builti
 
 ### Why did `put` print OK in the REPL but the value isn't there?
 
-The REPL's OK only means **transport success** (the RPC completed), not that the write was committed. Common causes: the request landed on a follower — only the leader serves writes, and followers answer `success=false` with `leader_info`; or you verified with `read` (a local read) before the replica applied the entry. To diagnose: check `last_log_index` growth via `rr-admin`'s `get-group-status`, and read back with `read_linearizable`.
+The current REPL only prints OK when the server answers `ClientResponse.success=true` (see `kv_call` / `kv_failure_detail` in `crates/rr-admin/src/main.rs`): when a write lands on a follower, the REPL automatically follows one `leader_info` redirect (printing `redirected to leader node N at ...`), and if the write still fails it prints `Error: request rejected ...` — never OK. So "OK but the value was not written" should not occur in the current version; if a value is missing right after a write, the more likely cause is verifying with `read` (a local read) on a replica that has not applied the entry yet. To diagnose: check `last_log_index` growth via `rr-admin`'s `group status`, and read back with `read_linearizable`.
 
 ### Why do I get TLS errors on first launch?
 
@@ -161,7 +161,7 @@ It runs, but be clear about the cost: every write requires a round-trip confirma
 
 ### Can I use RocksDB persistence in production?
 
-Not via the stock binary **today**. The `rocks` feature provides `RocksLogStorage`, but it is only wired in integration tests; the stock `rr-server` always uses the in-memory `RrLogStorage`. Snapshots are also in-memory only, and **restart recovery = log replay** (with in-memory logs, state does not survive restarts). Wiring RocksDB into the binary is on the roadmap; if you need persistence today, embed rr as a library and wire `start_group_rocks` yourself — aware that this path's test coverage is not yet as deep as the in-memory path.
+Yes. The stock `rr-server --storage rocks` (built with the `rocks` feature) persists all critical state: the Raft log lives at `{data_dir}/raft-log/{group_id}` (ADR A-0016), and the state-machine snapshot plus the membership sidecar are written atomically (write → fsync → rename) to `sm-snapshot.bin` / `sm-membership.bin` in the same directory (T1/R-P0). Snapshot persistence is **fail-closed**: a snapshot that cannot be written aborts the build/install, so OpenRaft never purges a log prefix that has no durable snapshot behind it; a present-but-corrupt snapshot file fails startup loudly instead of restarting empty. The default `mem` backend remains fully in-memory and does not survive restarts. The rocks path is covered by unit tests, rocks-gated integration tests, and a rolling-restart acceptance test, but its test depth still trails the mem path — validate against the [storage engine guide](guide/storage-engines.md) before production adoption.
 
 ### Is openraft stable?
 
@@ -169,7 +169,7 @@ openraft is pre-1.0 (rr uses `0.10.0-alpha.34`), and its API may shift between r
 
 ### How well tested is rr?
 
-Currently: unit tests + integration tests (`tests/integration`) + fuzz targets (`fuzz/`). There is **no** Jepsen or chaos testing yet; the `tools/rr-perf-bench` benchmark tool exists but no official baselines have been published. The workspace is at version 0.2.0, which means APIs and behavior can still change. The accurate mental model is "core paths are tested, but the framework has not yet undergone formal consistency verification".
+Unit tests + integration tests (`tests/integration`, including four chaos/fault-injection tests running in the default test job) + a process-level crash harness (`tests/crash`: real SIGKILL/SIGTERM on a 3-node cluster with an ack-log oracle) + fuzz targets (`fuzz/`, with a committed seed corpus) + proptest property tests + a porcupine-style linearizability checker (`tests/integration/src/linearizability.rs`). There is also `scripts/soak.sh` for hours-long stability runs and a published official performance baseline (`docs/perf/baselines/v0.2.0-baseline.md`). On the formal side, `formal/tla/` carries four TLA+ specifications (MembershipGuard / OffsetExactlyOnce / OutputWatermark / RoutingTableSwitch), all model-checked with TLC at small scale with zero counterexamples. The workspace is at version 0.2.0, so APIs and behavior can still change.
 
 ### Are learners automatically promoted to voters?
 

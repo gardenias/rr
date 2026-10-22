@@ -15,10 +15,15 @@ rr is a distributed multi-Raft consensus framework written in Rust, designed for
 - **Multi-Raft Consensus Groups** — 单节点支持多个独立的 Raft 共识组 / Single node supports multiple independent Raft consensus groups
 - **Table-Based Shard Routing** — 使用路由表进行分片映射，无需哈希环 / Shard mapping via routing table without hash ring
 - **Pluggable Storage Backends** — 支持内存存储和 RocksDB（通过 `rocks` feature 启用）/ Support for in-memory and RocksDB storage via `rocks` feature
+- **Durable Raft Log & Snapshots** — `--storage rocks` 持久化 Raft 日志与状态机快照（fail-closed）/ Durable raft log and state-machine snapshots with `--storage rocks` (fail-closed)
 - **gRPC Networking with Connection Pooling** — 高效的 gRPC 网络层和连接池管理 / Efficient gRPC networking with connection pooling
-- **Dynamic Configuration Management** — 通过 ConfigProvider 动态管理分布式配置和分区 / Dynamic distributed configuration via ConfigProvider
-- **Client SDK with Auto Leader-Redirect** — 智能客户端 SDK 自动处理领导者重定向和重试 / Smart client SDK with auto leader-redirect and retry
+- **TLS/mTLS + Bearer Auth + Rate Limiting** — 生产安全默认（G1–G7 启动安全门）/ Production-grade security by default (G1–G7 startup gates)
+- **Dynamic Configuration Management** — 通过 ConfigProvider 动态管理分布式配置和分区（内存与 etcd 后端）/ Dynamic distributed configuration via ConfigProvider (in-memory and etcd backends)
+- **Client SDK with Auto Leader-Redirect** — 智能客户端 SDK 自动处理领导者重定向和重试（Rust + Java）/ Smart client SDK with auto leader-redirect and retry (Rust + Java)
 - **Snapshot Transfer Between Nodes** — 节点间的快照传输支持快速同步 / Snapshot transfer between nodes for fast synchronization
+- **Linearizable Reads** — 协议层强一致读（ReadIndex + leader 重定向）/ Protocol-level linearizable reads (ReadIndex + leader redirect)
+- **Framework Idempotency & Kafka Ingest** — exactly-once apply 语义与 Kafka 输入 / Exactly-once apply semantics and Kafka input
+- **Backup / Restore** — 离线备份、在线快照流式备份与恢复 / Offline backup, online snapshot streaming backup, and restore
 
 ## Architecture
 
@@ -199,8 +204,8 @@ OK
 (nil)
 ```
 
-> **Note**: `kv-store` 会把 Admin API 挂在客户端端口 +1000（51001 → 52001）。REPL 的 KV 与管理命令共用同一个 `--addr`——指向客户端端口 51001 时只有 `put`/`get`/`delete` 可用，`status`/`members` 会返回 Unimplemented（AdminService 只在管理端口上服务）。要用管理命令：一次性子命令加 `--addr 127.0.0.1:52001`（如 `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`），或另起一个指向 52001 的 REPL。
-> `kv-store` serves its Admin API on the client port +1000 (51001 → 52001). The REPL carries both KV and admin commands over a single `--addr` — pointed at the client port 51001, only `put`/`get`/`delete` work and `status`/`members` fail with Unimplemented (AdminService listens only on the admin port). For admin commands, run one-shot subcommands with `--addr 127.0.0.1:52001` (e.g. `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`) or start a second REPL against 52001.
+> **Note**: `kv-store` 会把 Admin API 挂在客户端端口 +1000（51001 → 52001）。REPL 的管理命令默认按 `--addr` 的主机 + 端口+1000 推导 admin 端点（`--admin-addr` 可显式覆盖），所以指向客户端端口 51001 时 `status`/`members` 也会自动打到 52001；一次性子命令用 `--addr 127.0.0.1:52001`（如 `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`）。
+> `kv-store` serves its Admin API on the client port +1000 (51001 → 52001). The REPL derives the admin endpoint as the `--addr` host with port +1000 by default (override with `--admin-addr`), so pointing it at the client port 51001 still reaches admin commands on 52001; for one-shot subcommands use `--addr 127.0.0.1:52001` (e.g. `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`).
 
 想以编程方式嵌入节点，请参考 [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) 和[快速入门指南](https://rr-framework.github.io/guide/getting-started)。真实 API 为 `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?`（同步、单参数）→ `node.start().await?`。
 
@@ -264,9 +269,9 @@ Failover (verified): Ctrl-C the leader node — within seconds the survivors ele
 
 - **`--peers` 花名册格式为 `id@addr`**：三个节点使用相同的花名册且必须包含本节点；畸形条目会在启动时报错。/ **The `--peers` roster uses `id@addr` entries**: all nodes take the same roster, which must include the node itself; malformed entries fail fast at startup.
 - **写请求必须发往 leader 的监听端口**：客户端分发不会转发给 leader，发往 follower 会返回 `success=false`。/ **Client writes must go to the leader's listen port**: the client dispatch does not forward to the leader — a follower returns `success=false`.
-- **REPL 中 `put` 打印 `OK` ≠ 已提交**：它只代表传输成功，不检查 raft success 标志；请用每个节点 `group status` 的 `last_log_index` 验证复制进度。/ **`put` printing `OK` in the REPL ≠ committed**: it only means transport success and does not check the raft success flag — verify replication via `last_log_index` in `group status` on each node.
+- **REPL 的 `OK` 以服务端 `success=true` 为准**：REPL 会跟随一次 `leader_info` 重定向，被拒绝的写打印 `Error: request rejected ...`（不再有假 OK）；复制进度仍请用每个节点 `group status` 的 `last_log_index` 验证。/ **The REPL's `OK` requires the server's `success=true**: it follows one `leader_info` redirect and prints `Error: request rejected ...` for refused writes (no more fake OKs) — still verify replication via `last_log_index` in `group status` on each node.
 - **生产式路径**：使用 stock `rr-server` + `rr-admin` 显式成员管理（`add-learner` + `change-membership`）的三节点集群同样实测可用，详见 [getting-started 指南](docs/docs/guide/getting-started.md)。注意 stock `rr-server` 内置的是 EchoStateMachine 冒烟服务（`get` 回显 key 本身，非 KV 语义）。/ **Production-style path**: a three-node cluster driven by stock `rr-server` + explicit `rr-admin` membership management (`add-learner` + `change-membership`) is also verified — see the [getting-started guide](docs/docs/guide/getting-started.md). Note the stock `rr-server` ships an EchoStateMachine smoke service (`get` echoes the key itself — not KV semantics).
-- **`examples/config/3node-cluster-node{1,2,3}.toml` 是多机部署模板**（需要 `rocks` feature 构建、TLS 证书与可解析主机名），不是本地快速启动。/ **`examples/config/3node-cluster-node{1,2,3}.toml` are multi-machine deployment templates** (they need a `rocks`-feature build, TLS certs, and resolvable hostnames) — not a local quickstart.
+- **`examples/config/3node-cluster-node{1,2,3}.toml` 是多机部署模板**（已含 `[tls]`/`[auth]` 段：需要 `rocks` feature 构建、scripts/gen-dev-certs.sh 生成的 TLS 证书、可解析主机名与 `RR_ADMIN_TOKEN`/`RR_CLIENT_TOKEN` 环境变量），不是本地快速启动；成员组建命令见 node1 模板头注释。/ **`examples/config/3node-cluster-node{1,2,3}.toml` are multi-machine deployment templates** (they ship `[tls]`/`[auth]` sections and need a `rocks`-feature build, TLS certs from scripts/gen-dev-certs.sh, resolvable hostnames, and the `RR_ADMIN_TOKEN`/`RR_CLIENT_TOKEN` env vars) — not a local quickstart; the membership commands are in the node1 template's header comment.
 
 ## Documentation
 

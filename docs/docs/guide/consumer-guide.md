@@ -36,8 +36,9 @@ dependency pinned to a tag**.
    [net]
    git-fetch-with-cli = true
    ```
-3. **Rust 工具链 ≥ 1.98**。rr 的 workspace `rust-version = "1.98"`（edition2024 及
-   新稳定特性所需），仓库根目录的 `rust-toolchain.toml` 会自动锁定对应工具链。
+3. **Rust 工具链 ≥ 1.98**。rr 的 workspace `rust-version = "1.98"`（传递依赖
+   的 edition2024/`let_chains` 等新稳定特性所需），仓库根目录的 `rust-toolchain.toml`
+   会自动锁定对应工具链。
    推荐业务项目 `rust-toolchain.toml` 锁定 `channel = "1.98"` 或更高。
 
 没有这三项任意一个，`cargo build` 会直接报错。
@@ -67,14 +68,14 @@ rust-version = "1.98"
 [workspace.dependencies]
 # ─── rr framework (lock all crates to the same tag) ──────────────────────
 # Private repo — use SSH URL. For public release, switch to https://.
-rr-core    = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
-rr-server  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
-rr-client  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
-rr-raft    = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
-rr-config  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
-rr-storage = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
-rr-network = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
-rr-router  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0-rc2" }
+rr-core    = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-server  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-client  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-raft    = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-config  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-storage = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-network = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-router  = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
 
 # ─── rr 公共 API 暴露的依赖 —— 版本必须与 rr 对齐 ────────────────────────
 openraft           = { version = "= 0.10.0-alpha.34", features = ["serde"] }
@@ -240,7 +241,7 @@ See **Prerequisites** under Mode A. For private repos, put
 git ls-remote --tags https://github.com/gardenias/rr.git | grep -v '\^{}'
 
 # 2. 全局替换业务项目里的 tag
-sed -i '' 's|tag = "v0.2.0-rc2"|tag = "v0.2.0-rc3"|g' Cargo.toml
+sed -i '' 's|tag = "v0.2.0"|tag = "v0.2.0-rc3"|g' Cargo.toml
 
 # 3. 更新 lock 文件里的 rr crates
 cargo update -p rr-core -p rr-server -p rr-client -p rr-raft \

@@ -63,8 +63,7 @@ Error variants are grouped by their respective components or domains, allowing d
 
 | 变体 / Variant | 发生场景 / When it occurs | 处理建议 / How to handle it |
 | :--- | :--- | :--- |
-| `PartitionNotFound { id }` | 路由表中找不到指定的分区 ID。 / Specified partition ID not found in the routing table. | 确保客户端持有最新的路由表。 / Ensure the client has the latest routing table. |
-| `GroupNotFound { id }` | 路由表中存在分区但找不到对应的 Raft 组。 / Partition exists in the routing table but no corresponding Raft group is found. | 同上。 / Same as above. |
+| `PartitionNotFound { partition_id }` | 路由表中找不到指定的分区 ID。 / Specified partition ID not found in the routing table. | 确保客户端持有最新的路由表。 / Ensure the client has the latest routing table. |
 
 ### 网络错误 / NetworkError
 

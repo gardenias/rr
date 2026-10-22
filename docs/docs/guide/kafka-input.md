@@ -5,7 +5,7 @@ description: Drive an rr Raft group from a Kafka topic with leader-exclusive con
 
 # Kafka Input — `rr-ingestor-kafka`
 
-> **Available since**: v0.2.0 (release-candidate phase, final tag not yet cut — see the [v0.1 → v0.2 Migration Guide](../deployment/v0.1-to-v0.2-migration.md)).
+> **Available since**: v0.2.0 (see the [v0.1 → v0.2 Migration Guide](../deployment/v0.1-to-v0.2-migration.md)).
 > **Reference ADR**: [A-0001](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0001-command-ingestor-abstraction.md).
 
 The `rr-ingestor-kafka` crate makes a Kafka topic a first-class write source for an rr Raft group: only the current leader of group `G` reads from `input_{G}` (single partition); followers receive every command via Raft log replication. Combined with the [framework idempotency layer](idempotency.md), Kafka's at-least-once delivery becomes **exactly-once apply** at the user `Service::handle()`.

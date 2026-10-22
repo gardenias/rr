@@ -244,5 +244,5 @@ file it as a bug:
 
 ## 相关 / Related
 
-- [CHANGELOG.md](https://github.com/rr-framework/rr/blob/main/CHANGELOG.md)
-- [CONTRIBUTING.md](https://github.com/rr-framework/rr/blob/main/CONTRIBUTING.md) — 开发者流程 / dev workflow
+- [CHANGELOG.md](https://github.com/gardenias/rr/blob/main/CHANGELOG.md)
+- [CONTRIBUTING.md](https://github.com/gardenias/rr/blob/main/CONTRIBUTING.md) — 开发者流程 / dev workflow

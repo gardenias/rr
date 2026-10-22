@@ -130,6 +130,15 @@ RaftCore -> RaftCore : 分配 log_id (term=T, index=N)
 RaftCore -> Batcher : append(entries, callback)\n**立即返回，不等 fsync！**
 note right of Batcher #DCEDC8
 **IoBatcher Group Commit**
+
+字节背压 / Byte-budget backpressure: submissions acquire byte permits
+(`IoBatcherConfig::max_inflight_bytes`, default 64 MiB, keys + values)
+before enqueueing; permits are released only after the covering flush
+completes. Exhaustion back-pressures the Raft proposal pipeline itself,
+bounding the accepted-but-unflushed tail in bytes (the entry-count
+channel bound alone is payload-blind). `crates/rr-raft/src/io_batcher.rs`.
+
+
 Phase 2: try_recv() 零等待 drain
 Phase 3: 500µs 窗口（低吞吐时）
 Phase 4: 单次 write_batch()

@@ -29,18 +29,18 @@ System_Boundary(client_side, "Client Side") {
 
 System_Boundary(cluster, "rr Cluster (N nodes)") {
   Container(rr_node, "rr-server Node", "Rust binary built from examples/* or custom server", "Hosts multiple Raft groups; serves Client + Raft gRPC on listen_addr (51001 by convention), Admin gRPC on a separate admin_port, /metrics on metrics_port")
-  ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-group independent RocksDB at {base_path}/{group_id} (rocks feature). Caveat: the stock binary never wires RocksDB raft-log storage — used today only by integration tests")
+  ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-group independent RocksDB at {data_dir}/raft-log/{group_id} plus durable sm-snapshot.bin (stock rr-server --storage rocks, ADR A-0016/T1)")
 }
 
 System_Ext(prometheus, "Prometheus", "Scrapes /metrics over HTTP")
 System_Ext(config_store, "External ConfigProvider", "etcd / file / custom - optional in prod")
 
 Rel(end_user, user_app, "Sends domain requests", "Any protocol")
-Rel(user_app, rr_node, "Submits ClientRequest, receives leader_info redirect / ClusterInfo (group ids only; leader & replicas are placeholders)", "gRPC / HTTP2")
+Rel(user_app, rr_node, "Submits ClientRequest, receives leader_info redirect / ClusterInfo (live leader & membership from raft metrics)", "gRPC / HTTP2")
 Rel(admin_cli, rr_node, "Queries status, triggers snapshot, transfers leader", "gRPC (AdminService)")
 
 Rel_U(rr_node, rr_node, "Raft RPCs (AppendEntries, Vote, InstallSnapshot)", "gRPC / HTTP2")
-Rel(rr_node, rocks, "Reads/writes raft log (per-group instance; not wired by stock binary)", "File I/O")
+Rel(rr_node, rocks, "Reads/writes raft log + sm snapshot (per-group instance)", "File I/O")
 Rel(rr_node, config_store, "Loads routing table, subscribes to changes", "ConfigProvider trait")
 Rel(rr_node, prometheus, "Exposes metrics", "HTTP /metrics")
 
@@ -95,7 +95,7 @@ For internal breakdown of each crate, see the [Component-level diagrams](./compo
 | rr-admin → rr-server | gRPC | `AdminService` @ `admin_port` | Node/group status, snapshots, leader transfer, membership, backup, metrics |
 | rr-server ↔ rr-server | gRPC (bidirectional) | `RaftService` @ 51001 | `AppendEntries`, `Vote`, `InstallSnapshot` (streaming) |
 | Prometheus → rr-server | HTTP | `/metrics` @ `metrics_port` | Metrics scraping |
-| rr-server → Disk | File I/O (RocksDB) | Local path | Raft log persistence (rocks feature; not wired by the stock binary — see above) |
+| rr-server → Disk | File I/O (RocksDB) | Local path | Raft log + sm-snapshot persistence (`--storage rocks`, ADR A-0016/T1) |
 | rr-server → ConfigProvider | Trait call | Impl-defined | Load routing table (`get_routing_table`), watch `RoutingTableChange` stream |
 
 **关键点 / Key points**:

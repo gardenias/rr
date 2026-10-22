@@ -25,7 +25,7 @@ The numbers below are **framework-overhead benchmarks** (mirroring openraft's mi
 | 操作系统 / OS | macOS 26.6.1 |
 | 工具链 / Toolchain | rustc 1.98.0, `--release` |
 | 拓扑 / Topology | 单机 loopback；1/3/5 个 `rr-server` 进程 |
-| 存储 / Storage | `MemStorage`（内存 raft 日志；stock 二进制尚未接线 RocksDB 日志存储） |
+| 存储 / Storage | `MemStorage`（本基线使用内存 raft 日志；stock 二进制自 v0.3.0 起亦支持 `--storage rocks` 持久化日志——见 ADR A-0016） |
 | 负载 / Load | 128B（默认）或 1KiB payload；4s 预热 + 10s 计量窗口 |
 
 ## 场景定义 / Scenarios

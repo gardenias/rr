@@ -26,7 +26,7 @@ System(rr_service, "rr-based Service", "Distributed service (e.g. KV store) runn
 
 System_Ext(prometheus, "Prometheus", "Time-series metrics DB. Scrapes per-node /metrics")
 System_Ext(config_store, "External ConfigProvider (optional)", "etcd / file / custom source for routing table in production")
-SystemDb_Ext(disk, "Local Disk", "Per-group RocksDB instances for raft log (rocks feature; not wired by the stock binary)")
+SystemDb_Ext(disk, "Local Disk", "Per-group RocksDB instances for raft log + durable sm-snapshot.bin (stock rr-server --storage rocks, ADR A-0016/T1)")
 
 Rel(end_user, rr_service, "Uses (e.g. GET/PUT keys)", "gRPC via rr-client SDK")
 Rel(developer, rr_service, "Builds & deploys", "cargo, config, topology")
@@ -79,11 +79,11 @@ rr nodes expose metrics at HTTP `/metrics` via the built-in `metrics-exporter-pr
 The default `MemConfigProvider` keeps the routing table in process memory — suitable only for development. In production you can use the workspace-provided `rr-config-etcd` (`EtcdConfigProvider`, **read-only** — rr never writes back to etcd), or implement `ConfigProvider` yourself to load from and watch another external source.
 
 ### Local Disk
-启用 `rocks` feature 后，rr-raft 可将每个 group 的 Raft 日志持久化到本地文件系统（通常是 SSD）——**每个 group 一个独立的 RocksDB 实例**，路径为 `{base_path}/{group_id}`。注意：stock `rr-server` 二进制目前不会接线 RocksDB raft 日志（仅集成测试使用）；`--data-dir` 是 CLI/配置文件层的概念，`NodeConfig` 本身没有 `data_dir` 字段。状态机快照不持久化——只存于内存，重启后靠日志重放恢复。
+启用 `rocks` feature 并以 `--storage rocks` 运行 stock `rr-server` 后，每个 group 的 Raft 日志持久化到本地文件系统（通常是 SSD）——**每个 group 一个独立的 RocksDB 实例**，路径为 `{data_dir}/raft-log/{group_id}`（ADR A-0016）。状态机快照同样持久化：原子写入同目录的 `sm-snapshot.bin`（fail-closed，T1），重启时先恢复快照再重放未 purge 的日志尾部。默认 `--storage mem` 仍为全内存。
 
 ---
 
-With the `rocks` feature, rr-raft can persist each group's Raft log to the local filesystem (typically an SSD) — **one independent RocksDB instance per group** at `{base_path}/{group_id}`. Note: the stock `rr-server` binary currently never wires RocksDB raft-log storage (only integration tests use it); `--data-dir` is a CLI/config-file-layer concept — `NodeConfig` itself has no `data_dir` field. State machine snapshots are not persisted — they live in memory only, and state is recovered by log replay after a restart.
+With the `rocks` feature and `--storage rocks`, the stock `rr-server` persists each group's Raft log to the local filesystem (typically an SSD) — **one independent RocksDB instance per group** at `{data_dir}/raft-log/{group_id}` (ADR A-0016). State-machine snapshots are persisted too: atomically written to `sm-snapshot.bin` in the same directory (fail-closed, T1), and a restart restores the snapshot before replaying the un-purged log tail. The default `--storage mem` remains fully in-memory.
 
 ## 未显式建模的内容 / What's Intentionally Out of Scope
 

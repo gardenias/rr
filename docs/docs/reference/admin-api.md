@@ -106,28 +106,30 @@ rr-admin group snapshot --group 1
 
 ---
 
-### `TransferLeader(TransferLeaderRequest) → TransferLeaderResponse`
+### `TransferLeader(TransferLeaderRequest) → google.protobuf.Empty`
 
-请求将指定 Raft 组的 Leader 转移到目标节点。当前节点必须是该组的 Leader。
+请求本节点发起选举成为指定 Raft 组的 Leader（`raft.trigger().elect(false)`）。
+**重要限制**：`target_node_id` 必须等于被调用节点自身的 node id——向远程节点
+转移不受支持，请求会以 `FAILED_PRECONDITION` 拒绝。要让节点 N 成为 Leader，
+请对节点 N 的 admin 端口调用本 RPC；要迁出某节点的全部 Leader，用
+`DrainNode`（同样只作用于被调用节点自身）。
 
 ---
 
-Requests leadership transfer of the specified Raft group to a target node.
-The current node must be the leader of the group.
+Triggers an election on the CALLED node to become the leader of the given
+Raft group (`raft.trigger().elect(false)`). **Limitation**: `target_node_id`
+must equal the called node's own node id — transfers to a remote node are
+rejected with `FAILED_PRECONDITION`. To make node N the leader, call this
+RPC on node N's admin port; to move ALL leadership off a node, use
+`DrainNode` (also self-only). The response is `Empty`; failures surface as
+gRPC status errors, not response fields.
 
 **请求字段 / Request Fields**:
 
 | 字段 / Field | 类型 / Type | 描述 / Description |
 | :--- | :--- | :--- |
 | `group_id` | `uint64` | Raft 组 ID / Raft group ID |
-| `target_node_id` | `uint64` | 目标 Leader 的节点 ID / Target node ID for leader transfer |
-
-**响应字段 / Response Fields**:
-
-| 字段 / Field | 类型 / Type | 描述 / Description |
-| :--- | :--- | :--- |
-| `success` | `bool` | 转移是否成功发起 / Whether the transfer was initiated successfully |
-| `message` | `string` | 状态消息或错误信息 / Status message or error description |
+| `target_node_id` | `uint64` | 必须等于被调用节点的 node id / Must equal the called node's node id |
 
 **rr-admin 用法 / rr-admin usage**:
 
