@@ -53,7 +53,7 @@ use crate::AdminClient;
 use anyhow::{anyhow, Result};
 use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 use rr_network::proto::admin::{
-    ChangeMembershipRequest, Empty, GroupId, NodeMember, TransferLeaderRequest,
+    ChangeMembershipRequest, DrainRequest, Empty, GroupId, NodeMember,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -176,13 +176,24 @@ fn target_is_leader(leader_node_id: u64, target_node_id: u64) -> bool {
 /// Run the decommission workflow against `client` for `target_node_id`.
 ///
 /// `client` MUST point at a healthy admin endpoint of any cluster
-/// member (preferably a leader, but the orchestrator follows
-/// `TransferLeader` errors gracefully).
-pub async fn decommission_node(
+/// member. Group enumeration, status polling, and the membership change
+/// itself all go through it.
+///
+/// `dial_admin` dials an arbitrary node's admin endpoint with the same
+/// TLS/token configuration — needed because the leadership drain is
+/// driven via the TARGET's OWN admin API: `TransferLeader`/`DrainNode`
+/// are self-only RPCs server-side (asking the contacted node to transfer
+/// to a third node is always refused with FailedPrecondition).
+pub async fn decommission_node<F, Fut>(
     client: &mut AdminClient,
+    dial_admin: F,
     target_node_id: u64,
     dry_run: bool,
-) -> Result<DecommissionReport> {
+) -> Result<DecommissionReport>
+where
+    F: Fn(&str) -> Fut,
+    Fut: std::future::Future<Output = Result<AdminClient>>,
+{
     let node_status = client.get_node_status(Empty {}).await?.into_inner();
 
     let mut caveats = Vec::new();
@@ -215,9 +226,15 @@ pub async fn decommission_node(
 
     let mut coverage_gaps = Vec::new();
     for (group_id, target_is_replica) in groups {
-        let result =
-            decommission_one_group(client, group_id, target_node_id, target_is_replica, dry_run)
-                .await;
+        let result = decommission_one_group(
+            client,
+            &dial_admin,
+            group_id,
+            target_node_id,
+            target_is_replica,
+            dry_run,
+        )
+        .await;
         report.groups.push(match result {
             Ok(outcome) => {
                 if outcome.coverage_gap {
@@ -244,13 +261,18 @@ pub async fn decommission_node(
     Ok(report)
 }
 
-async fn decommission_one_group(
+async fn decommission_one_group<F, Fut>(
     client: &mut AdminClient,
+    dial_admin: &F,
     group_id: u64,
     target_node_id: u64,
     target_is_replica: bool,
     dry_run: bool,
-) -> Result<GroupOutcome> {
+) -> Result<GroupOutcome>
+where
+    F: Fn(&str) -> Fut,
+    Fut: std::future::Future<Output = Result<AdminClient>>,
+{
     let membership = match client.get_group_membership(GroupId { group_id }).await {
         Ok(resp) => resp.into_inner(),
         Err(status) if status.code() == Code::NotFound => {
@@ -325,17 +347,25 @@ async fn decommission_one_group(
         .await?
         .into_inner();
     let mut drained_via_transfer = false;
+    let mut drain_caveat: Option<String> = None;
     if target_is_leader(group_status.leader_node_id, target_node_id) {
-        let new_leader = pick_new_leader(&membership.voters, target_node_id)
-            .ok_or_else(|| anyhow!("no candidate voter to receive leadership"))?;
-        let _ = client
-            .transfer_leader(TransferLeaderRequest {
-                group_id,
-                target_node_id: new_leader,
-            })
-            .await?;
-        drained_via_transfer = true;
-        wait_for_drain(client, group_id, target_node_id).await?;
+        match drive_drain_via_target(client, dial_admin, &membership.voters, group_id, target_node_id)
+            .await
+        {
+            Ok(()) => drained_via_transfer = true,
+            Err(reason) => {
+                // The drain is an availability optimization; the membership
+                // change below is the authoritative removal. A target that
+                // cannot be drained is usually already down (the election
+                // settles leadership on its own) — proceed, but say so loudly
+                // instead of failing the whole group like the old
+                // `transfer_leader`-via-contacted-node path always did.
+                drain_caveat = Some(format!(
+                    "leadership drain could not be driven ({reason}); proceeded with the \
+                     membership change — the raft election settles leadership"
+                ));
+            }
+        }
     }
 
     client
@@ -368,21 +398,50 @@ async fn decommission_one_group(
             GroupAction::Removed
         },
         message: format!(
-            "voters: {voter_ids:?} → {remaining:?}{}",
+            "voters: {voter_ids:?} → {remaining:?}{}{}",
             if drained_via_transfer {
                 " (after leadership transfer)"
             } else {
                 ""
-            }
+            },
+            drain_caveat
+                .map(|c| format!(" — WARNING: {c}"))
+                .unwrap_or_default()
         ),
     }))
 }
 
-fn pick_new_leader(voters: &[NodeMember], target_node_id: u64) -> Option<u64> {
-    voters
+/// Drive the leadership drain OFF the target via the target's OWN admin
+/// endpoint: `TransferLeader`/`DrainNode` are self-only RPCs server-side,
+/// so asking the contacted node to transfer leadership to a third node is
+/// always refused. The target's admin address is derived from its raft
+/// address with the deployment-wide port+1000 convention.
+async fn drive_drain_via_target<F, Fut>(
+    client: &mut AdminClient,
+    dial_admin: &F,
+    voters: &[NodeMember],
+    group_id: u64,
+    target_node_id: u64,
+) -> Result<()>
+where
+    F: Fn(&str) -> Fut,
+    Fut: std::future::Future<Output = Result<AdminClient>>,
+{
+    let target_addr = voters
         .iter()
-        .find(|m| m.node_id != target_node_id)
-        .map(|m| m.node_id)
+        .find(|m| m.node_id == target_node_id)
+        .map(|m| m.addr.clone())
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| anyhow!("target's raft address is unknown (not in membership)"))?;
+    let admin_addr = crate::default_admin_addr(&target_addr)?;
+    let mut target_client = dial_admin(&admin_addr).await?;
+    target_client
+        .drain_node(DrainRequest {
+            node_id: target_node_id,
+            timeout_secs: DRAIN_TIMEOUT.as_secs() as u32,
+        })
+        .await?;
+    wait_for_drain(client, group_id, target_node_id).await
 }
 
 async fn wait_for_drain(
@@ -501,34 +560,6 @@ mod tests {
             caveats: Vec::new(),
         };
         assert!(report.has_failures());
-    }
-
-    #[test]
-    fn pick_new_leader_picks_first_non_target_voter() {
-        let voters = vec![
-            NodeMember {
-                node_id: 4,
-                addr: String::new(),
-            },
-            NodeMember {
-                node_id: 1,
-                addr: String::new(),
-            },
-            NodeMember {
-                node_id: 2,
-                addr: String::new(),
-            },
-        ];
-        assert_eq!(pick_new_leader(&voters, 4), Some(1));
-    }
-
-    #[test]
-    fn pick_new_leader_returns_none_when_only_target() {
-        let voters = vec![NodeMember {
-            node_id: 4,
-            addr: String::new(),
-        }];
-        assert_eq!(pick_new_leader(&voters, 4), None);
     }
 
     // INV-7: change-membership must not shrink a group's voters below quorum (>= 2) without explicit force + audit.

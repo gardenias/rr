@@ -24,8 +24,11 @@
 //! 4. Start the target node again; it rejoins as a follower.
 //! 5. Upload `backup.tar.gz` to long-term storage.
 //!
-//! Online / non-disruptive backup via snapshot-fetch RPC is planned for a
-//! later milestone (Phase 3.1).
+//! Online / non-disruptive backup is also available for a RUNNING node via
+//! `rr-admin group online-backup` (snapshot byte stream over the admin RPC,
+//! with size verification) — that path produces a state-machine snapshot,
+//! not a raw data_dir copy, so it complements rather than replaces the
+//! offline procedure above.
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -84,13 +87,15 @@ impl BackupMetadata {
 /// file is added, removed, renamed, or has its content modified.
 fn sha256_of_dir(dir: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
-    let mut paths: Vec<_> = walkdir::WalkDir::new(dir)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .collect();
+    let mut paths = Vec::new();
+    for entry in walkdir::WalkDir::new(dir).sort_by_file_name() {
+        // An integrity tool must fail loudly on traversal errors (permission
+        // denied, I/O) rather than silently hashing an incomplete file set.
+        let entry = entry.with_context(|| format!("failed to walk {}", dir.display()))?;
+        if entry.file_type().is_file() {
+            paths.push(entry.into_path());
+        }
+    }
     paths.sort();
     for path in &paths {
         let rel = path
@@ -146,6 +151,25 @@ pub fn create_backup(
         return Err(anyhow!(
             "output file already exists; refusing to overwrite: {}",
             output.display()
+        ));
+    }
+    // Refuse to write the archive into the directory being archived: the
+    // tar walk would pick up its own partially-written output file.
+    let data_dir_canon = data_dir
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", data_dir.display()))?;
+    let output_parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let output_parent_canon = output_parent
+        .canonicalize()
+        .with_context(|| format!("failed to canonicalize {}", output_parent.display()))?;
+    if output_parent_canon.starts_with(&data_dir_canon) {
+        return Err(anyhow!(
+            "output must not be inside data_dir (the archive would contain itself): {} is under {}",
+            output.display(),
+            data_dir.display()
         ));
     }
 
@@ -432,6 +456,20 @@ mod tests {
 
         let err = create_backup(src.path(), &out, None, None).unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn backup_refuses_output_inside_data_dir() {
+        let src = TempDir::new().unwrap();
+        populate_fake_data_dir(src.path()).unwrap();
+        // The archive would otherwise contain its own partially-written
+        // output file (and race the tar walk).
+        let out = src.path().join("backup.tar.gz");
+        let err = create_backup(src.path(), &out, None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("inside data_dir"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
