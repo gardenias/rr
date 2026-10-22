@@ -5,22 +5,83 @@
 //! by giving each cluster member its own `FaultAwareChannelPool` that shares
 //! a common `FaultState`; isolation of node N is enforced both at N's own
 //! pool (blocking all outbound) and at every other pool (blocking destination N).
+//!
+//! # Randomness discipline (packet loss)
+//!
+//! Packet-loss coin flips draw from a single `StdRng` per [`FaultInjector`],
+//! seeded at construction: `RR_FAULT_SEED=<n>` pins the seed (same env var
+//! as `crate::fault_schedule`, so one value reproduces schedule AND loss
+//! stream), otherwise entropy is used and the seed is printed the first time
+//! packet loss is configured. Given the same seed and the same call
+//! sequence, the loss decisions replay exactly (see
+//! `tests::packet_loss_draws_are_seed_reproducible`). Caveat: concurrent
+//! `get_or_connect` calls share one stream, so task-scheduling jitter can
+//! reorder draws within a run — per-call attribution under full concurrency
+//! needs a deterministic scheduler (the R-3 turmoil track); what the seed
+//! guarantees here is a reproducible stream for a reproducible call order.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::{DashMap, DashSet};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rr_core::error::NetworkError;
 use rr_core::types::NodeId;
 use rr_raft::network_factory::{ChannelPool, ChannelPoolLike};
 use tonic::transport::Channel;
 
-#[derive(Default)]
 struct FaultState {
     isolated: DashSet<NodeId>,
     latency_ms: DashMap<NodeId, u64>,
     loss: DashMap<NodeId, f64>,
+    /// Seeded stream for packet-loss coin flips (see module docs). One
+    /// stream per injector: pools sharing this state draw from it under a
+    /// short lock (never held across `.await`).
+    loss_rng: Mutex<StdRng>,
+    loss_seed: u64,
+    /// Print the replay line once, the first time loss is configured.
+    loss_seed_announced: AtomicBool,
+}
+
+impl FaultState {
+    fn new(loss_seed: u64) -> Self {
+        Self {
+            isolated: DashSet::new(),
+            latency_ms: DashMap::new(),
+            loss: DashMap::new(),
+            loss_rng: Mutex::new(StdRng::seed_from_u64(loss_seed)),
+            loss_seed,
+            loss_seed_announced: AtomicBool::new(false),
+        }
+    }
+
+    /// Announce the loss seed once per injector, the first time packet loss
+    /// is armed — the replay breadcrumb for a failed run.
+    fn announce_loss_seed(&self) {
+        if !self.loss_seed_announced.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "[fault-injection] packet-loss RNG seed={} (replay: RR_FAULT_SEED={})",
+                self.loss_seed, self.loss_seed
+            );
+        }
+    }
+
+    /// One seeded coin flip: `true` with probability `p`.
+    fn loss_roll(&self, p: f64) -> bool {
+        self.loss_rng.lock().unwrap().gen::<f64>() < p
+    }
+}
+
+/// Resolve the packet-loss seed: `RR_FAULT_SEED` wins (aligning with the
+/// fault-schedule replay knob), else entropy.
+fn resolve_loss_seed() -> u64 {
+    std::env::var("RR_FAULT_SEED")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or_else(rand::random)
 }
 
 /// A [`ChannelPoolLike`] implementation with fault injection support.
@@ -48,8 +109,16 @@ impl FaultAwareChannelPool {
     /// via this pool blocks only outbound connections *to* that node
     /// (one-directional). For bidirectional isolation across a real cluster,
     /// use [`FaultInjector::new`] + [`FaultInjector::new_pool_for_node`].
+    ///
+    /// The packet-loss stream is seeded from `RR_FAULT_SEED` when set, else
+    /// from entropy (see module docs); use [`Self::new_seeded`] to pin it.
     pub fn new() -> (Self, FaultInjector) {
-        let state = Arc::new(FaultState::default());
+        Self::new_seeded(resolve_loss_seed())
+    }
+
+    /// Like [`Self::new`] but with an explicit packet-loss seed.
+    pub fn new_seeded(seed: u64) -> (Self, FaultInjector) {
+        let state = Arc::new(FaultState::new(seed));
         let pool = Self {
             inner: Arc::new(ChannelPool::new()),
             owner_node: None,
@@ -80,8 +149,13 @@ impl ChannelPoolLike for FaultAwareChannelPool {
                 reason: format!("destination node {node_id} is isolated by fault injector"),
             });
         }
-        if let Some(p) = self.state.loss.get(&node_id) {
-            if rand::random::<f64>() < *p {
+        // Copy the probability out of the DashMap guard before taking the
+        // RNG lock (single lock-ordering direction, no guard held across
+        // the draw). The draw itself is synchronous — the RNG mutex is
+        // never held across an `.await`.
+        let loss_p = self.state.loss.get(&node_id).map(|p| *p);
+        if let Some(p) = loss_p {
+            if self.state.loss_roll(p) {
                 return Err(NetworkError::ConnectionFailed {
                     addr: addr.to_string(),
                     reason: format!("simulated packet loss for node {node_id}"),
@@ -117,11 +191,25 @@ impl FaultInjector {
     /// Create a new bidirectional fault injector with no pools attached.
     ///
     /// Use [`FaultInjector::new_pool_for_node`] to build per-node pools.
+    ///
+    /// The packet-loss stream is seeded from `RR_FAULT_SEED` when set, else
+    /// from entropy (the seed is printed on the first [`Self::set_packet_loss`]
+    /// call); use [`Self::new_seeded`] to pin it explicitly.
     pub fn new() -> Self {
+        Self::new_seeded(resolve_loss_seed())
+    }
+
+    /// Like [`Self::new`] but with an explicit packet-loss seed.
+    pub fn new_seeded(seed: u64) -> Self {
         Self {
-            state: Arc::new(FaultState::default()),
+            state: Arc::new(FaultState::new(seed)),
             per_node_inner: DashMap::new(),
         }
+    }
+
+    /// The seed feeding the packet-loss stream (for replay breadcrumbs).
+    pub fn loss_seed(&self) -> u64 {
+        self.state.loss_seed
     }
 
     /// Create a new pool owned by `owner_node`, sharing this injector's state.
@@ -161,7 +249,11 @@ impl FaultInjector {
     }
 
     /// Set packet loss probability (0.0–1.0) for `node_id`.
+    ///
+    /// Coin flips draw from the injector's seeded stream (see module docs);
+    /// the first call prints the seed for replay.
     pub fn set_packet_loss(&self, node_id: NodeId, probability: f64) {
+        self.state.announce_loss_seed();
         self.state.loss.insert(node_id, probability);
     }
 
@@ -278,5 +370,47 @@ mod tests {
             !matches!(&result, Err(NetworkError::ConnectionFailed { reason, .. }) if reason.contains("isolated")),
             "after restore, the isolation-specific error should not fire (any other connection error is fine)"
         );
+    }
+
+    /// L6 (2026-10-21 review): the packet-loss coin flips must be
+    /// seed-reproducible — two injectors seeded identically, driven with the
+    /// same sequential call pattern, must drop/pass the same calls. (Under
+    /// concurrent traffic the draw ORDER can interleave differently; the
+    /// guaranteed unit is one sequential stream — see module docs.)
+    #[tokio::test]
+    async fn packet_loss_draws_are_seed_reproducible() {
+        async fn loss_pattern(seed: u64) -> Vec<bool> {
+            let injector = FaultInjector::new_seeded(seed);
+            let pool = injector.new_pool_for_node(1);
+            injector.set_packet_loss(2, 0.5);
+            let mut pattern = Vec::new();
+            for _ in 0..64 {
+                // Nothing listens on 127.0.0.1:9999 — every call fails; a
+                // loss-drawn failure is identifiable by its reason string.
+                match pool.get_or_connect(2, "127.0.0.1:9999").await {
+                    Err(NetworkError::ConnectionFailed { reason, .. }) => {
+                        pattern.push(reason.contains("simulated packet loss"));
+                    }
+                    Err(other) => panic!("unexpected error variant: {other:?}"),
+                    Ok(_) => panic!("unexpected successful connection to a closed port"),
+                }
+            }
+            pattern
+        }
+
+        let a = loss_pattern(0x5EED_0001).await;
+        let b = loss_pattern(0x5EED_0001).await;
+        assert_eq!(
+            a, b,
+            "same seed + same call sequence must replay the same loss sequence"
+        );
+        assert!(
+            a.iter().any(|&dropped| dropped) && a.iter().any(|&dropped| !dropped),
+            "p=0.5 over 64 draws must produce a non-degenerate mix (got {a:?})"
+        );
+        // Fixed seeds make this deterministic: StdRng streams for distinct
+        // seeds diverging is the property under test, not a probabilistic one.
+        let c = loss_pattern(0x5EED_0002).await;
+        assert_ne!(a, c, "distinct seeds must produce distinct loss sequences");
     }
 }

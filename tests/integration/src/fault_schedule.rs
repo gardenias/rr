@@ -28,10 +28,12 @@
 //!
 //! # Randomness discipline
 //!
-//! All choices are drawn from a `StdRng` seeded at construction. The apply
-//! loop adds no randomness of its own, so plan == record == replay. (The
-//! pre-existing per-call `rand::random` in packet-loss evaluation is a
-//! separate, unchanged code path — schedules never depend on its draws.)
+//! All schedule choices are drawn from a `StdRng` seeded at construction. The
+//! apply loop adds no randomness of its own, so plan == record == replay.
+//! The packet-loss coin flips a `PacketLoss` event arms are likewise seeded:
+//! `crate::fault_injection` draws them from a per-injector `StdRng` pinned by
+//! the same `RR_FAULT_SEED` knob (reproducible for a given call sequence;
+//! concurrent draw interleaving is the known limit — see that module's docs).
 
 use std::path::{Path, PathBuf};
 
