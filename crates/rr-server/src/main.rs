@@ -17,6 +17,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use openraft::error::{InitializeError, RaftError};
 use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
 use rr_core::config::ConfigProvider;
@@ -30,6 +31,7 @@ use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::network_factory::{ChannelPool, ChannelPoolLike, TlsPaths};
 use rr_raft::tcp_transport::TcpConnectionPool;
+use rr_raft::RrTypeConfig;
 use rr_router::router::ShardRouter;
 use rr_server::builtin_service::EchoStateMachine;
 use rr_server::cli::{Cli, Command, ServeArgs};
@@ -92,11 +94,13 @@ async fn serve(args: ServeArgs) -> Result<()> {
     wait_for_shutdown_signal().await?;
 
     info!(node_id = cfg.node_id, "shutdown signal received");
-    node.shutdown().await.context("graceful shutdown failed")?;
     if let Some(handle) = tcp_raft_handle {
+        // Stop accepting new raft RPCs BEFORE tearing the groups down —
+        // AppendEntries arriving mid-shutdown would race stop_group.
         handle.abort();
         let _ = handle.await;
     }
+    node.shutdown().await.context("graceful shutdown failed")?;
     info!(node_id = cfg.node_id, "rr-server shut down cleanly");
     Ok(())
 }
@@ -255,6 +259,7 @@ async fn start_node(
     node_config = node_config.with_rate_limit(rl_config);
 
     node_config = node_config.with_snapshot_logs_since_last(cfg.snapshot_logs_since_last);
+    node_config = node_config.with_auto_promote_learners(cfg.auto_promote_learners);
 
     if cfg.allow_insecure {
         node_config = node_config.with_allow_insecure(true);
@@ -263,30 +268,51 @@ async fn start_node(
     let node = Arc::new(RrNode::new(node_config)?);
     node.start().await?;
 
-    let tcp_raft_handle = if let Some(tcp_bind_addr) = tcp_bind_addr {
-        // G6/G7 already vetted this address in `RrNode::new` above; binding
-        // here can only happen after those gates passed.
-        let server = TcpRaftServer::bind(&tcp_bind_addr, Arc::clone(&lookup))
-            .await
-            .with_context(|| format!("failed to bind tcp raft server at {tcp_bind_addr}"))?;
-        let local_addr = server.local_addr()?;
-        info!(
-            node_id = cfg.node_id,
-            tcp_raft_addr = %local_addr,
-            "tcp raft server listening"
-        );
-        Some(tokio::spawn(async move {
-            if let Err(e) = server.serve().await {
-                tracing::error!(error = %e, "tcp raft server terminated");
-            }
-        }))
-    } else {
-        None
-    };
+    // From here on the node owns running raft groups: any startup failure
+    // must exit through node.shutdown() so the log-close contract
+    // (stop_group → RocksLogStorage::close, ADR A-0011) is honored instead
+    // of being bypassed by process exit.
+    let post_start_result: anyhow::Result<Option<tokio::task::JoinHandle<()>>> = async {
+        let tcp_raft_handle = if let Some(tcp_bind_addr) = tcp_bind_addr {
+            // G6/G7 already vetted this address in `RrNode::new` above; binding
+            // here can only happen after those gates passed.
+            let server = TcpRaftServer::bind(&tcp_bind_addr, Arc::clone(&lookup))
+                .await
+                .with_context(|| format!("failed to bind tcp raft server at {tcp_bind_addr}"))?;
+            let local_addr = server.local_addr()?;
+            info!(
+                node_id = cfg.node_id,
+                tcp_raft_addr = %local_addr,
+                "tcp raft server listening"
+            );
+            Some(tokio::spawn(async move {
+                if let Err(e) = server.serve().await {
+                    tracing::error!(error = %e, "tcp raft server terminated");
+                }
+            }))
+        } else {
+            None
+        };
 
-    if cfg.bootstrap {
-        bootstrap_hosted_groups(&node, cfg).await?;
+        if cfg.bootstrap {
+            bootstrap_hosted_groups(&node, cfg).await?;
+        }
+        Ok(tcp_raft_handle)
     }
+    .await;
+
+    let tcp_raft_handle = match post_start_result {
+        Ok(handle) => handle,
+        Err(err) => {
+            if let Err(se) = node.shutdown().await {
+                tracing::error!(
+                    error = %se,
+                    "graceful shutdown after startup failure also failed"
+                );
+            }
+            return Err(err);
+        }
+    };
 
     Ok((node, tcp_raft_handle))
 }
@@ -403,6 +429,10 @@ fn echo_factory() -> rr_raft::group_manager::StateMachineFactory {
 
 /// Initialize every hosted group (`1..=cfg.groups`) with this node as the
 /// single voter. Runs ONCE per cluster life (`--bootstrap`).
+///
+/// Idempotency contract: re-running against an already-initialized group
+/// (restarted node still holding the `--bootstrap` flag, or a node rejoining
+/// an existing cluster) must be a silent no-op, never a hard failure.
 async fn bootstrap_hosted_groups(node: &Arc<RrNode>, cfg: &ResolvedConfig) -> Result<()> {
     for group_id in 1..=cfg.groups {
         let raft = node
@@ -410,6 +440,24 @@ async fn bootstrap_hosted_groups(node: &Arc<RrNode>, cfg: &ResolvedConfig) -> Re
             .get_raft(group_id)
             .await
             .ok_or_else(|| anyhow!("group {group_id} not started after node.start()"))?;
+
+        // Primary gate: read membership state BEFORE calling initialize(), so
+        // the common re-bootstrap path never enters the error branch at all.
+        match raft.is_initialized().await {
+            Ok(true) => {
+                info!(
+                    node_id = cfg.node_id,
+                    group_id, "group already initialized; skipping bootstrap"
+                );
+                continue;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                return Err(anyhow!(
+                    "raft.is_initialized failed for group {group_id}: {e}"
+                ));
+            }
+        }
 
         let mut members = BTreeMap::new();
         members.insert(
@@ -421,22 +469,34 @@ async fn bootstrap_hosted_groups(node: &Arc<RrNode>, cfg: &ResolvedConfig) -> Re
 
         match raft.initialize(members).await {
             Ok(()) => info!(node_id = cfg.node_id, group_id, "cluster bootstrapped"),
+            Err(e) if is_already_initialized(&e) => {
+                // Typed fallback for the race between the is_initialized()
+                // check and initialize(): openraft documents NotAllowed as
+                // "the cluster is already up and running — safe to ignore".
+                warn!(
+                    node_id = cfg.node_id,
+                    group_id,
+                    error = %e,
+                    "cluster already initialized; continuing"
+                );
+            }
             Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("already") || msg.contains("Initialized") {
-                    warn!(
-                        node_id = cfg.node_id,
-                        group_id, "cluster already initialized; continuing"
-                    );
-                } else {
-                    return Err(anyhow!(
-                        "raft.initialize failed for group {group_id}: {msg}"
-                    ));
-                }
+                return Err(anyhow!("raft.initialize failed for group {group_id}: {e}"));
             }
         }
     }
     Ok(())
+}
+
+/// True when an `initialize()` failure denotes an already-initialized group
+/// and bootstrap must degrade to an idempotent no-op.
+///
+/// Matching the typed [`InitializeError::NotAllowed`] variant keeps the
+/// idempotency contract independent of the vendored openraft error-text
+/// wording (the old `"already"/"Initialized"` substring match broke whenever
+/// openraft rephrased its Display strings).
+fn is_already_initialized(err: &RaftError<RrTypeConfig, InitializeError<RrTypeConfig>>) -> bool {
+    matches!(err, RaftError::APIError(InitializeError::NotAllowed(_)))
 }
 
 async fn wait_for_shutdown_signal() -> Result<()> {
@@ -512,5 +572,49 @@ mod tests {
             .unwrap()
             .ip()
             .is_loopback());
+    }
+
+    #[test]
+    fn already_initialized_matches_only_typed_not_allowed_variant() {
+        use openraft::error::{NotAllowed, NotInMembers};
+        use openraft::impls::Vote;
+        use openraft::Membership;
+
+        type InitError = RaftError<RrTypeConfig, InitializeError<RrTypeConfig>>;
+
+        // The "already initialized" case: openraft InitializeError::NotAllowed
+        // (e.g. re-bootstrap of a restarted node). Must be treated as an
+        // idempotent no-op regardless of the vendored error-text wording.
+        let not_allowed =
+            InitError::APIError(InitializeError::NotAllowed(NotAllowed::<RrTypeConfig> {
+                last_log_id: None,
+                vote: Vote::new(0, 0),
+            }));
+        assert!(is_already_initialized(&not_allowed));
+
+        // A genuine configuration error (this node is not in the initial
+        // membership) must stay a hard failure.
+        let membership = Membership::new(
+            vec![std::iter::once(1u64).collect::<std::collections::BTreeSet<_>>()],
+            std::collections::BTreeMap::from([(
+                1u64,
+                BasicNode {
+                    addr: "127.0.0.1:51001".to_string(),
+                },
+            )]),
+        )
+        .unwrap();
+        let not_in_members = InitError::APIError(InitializeError::NotInMembers(NotInMembers::<
+            RrTypeConfig,
+        > {
+            node_id: 2,
+            membership,
+        }));
+        assert!(!is_already_initialized(&not_in_members));
+
+        // A fatal raft error (core stopped / storage failure) must stay a
+        // hard failure.
+        let fatal = InitError::Fatal(openraft::error::Fatal::Stopped);
+        assert!(!is_already_initialized(&fatal));
     }
 }

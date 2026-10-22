@@ -111,10 +111,23 @@ pub struct ServeArgs {
     pub raft_tcp_port: Option<u16>,
 
     /// Bootstrap this node as a single-member cluster (use ONCE per cluster life).
+    /// Overrides `[cluster].bootstrap` in the config file; a file-level `true`
+    /// can be forced back off with `--no-bootstrap`.
     #[arg(long = "bootstrap", env = "RR_BOOTSTRAP")]
     pub bootstrap: bool,
 
-    /// Comma-separated peer addresses to join (e.g. `127.0.0.1:51001,127.0.0.1:51002`).
+    /// Force `[cluster].bootstrap = false`, overriding a `true` set in the
+    /// config file. Conflicts with `--bootstrap`.
+    #[arg(long = "no-bootstrap", conflicts_with = "bootstrap")]
+    pub no_bootstrap: bool,
+
+    /// Comma-separated peer list that ONLY sizes the local bootstrap routing
+    /// table: one entry per cluster node, node IDs guessed 1-based in list
+    /// order (so this node's `--node-id` must be in `1..=N`). The address
+    /// strings are never dialed — raft peers are reached via the addresses
+    /// registered in membership / the ConfigProvider. For real multi-node
+    /// topologies (non-contiguous IDs, later membership changes) use an
+    /// etcd-backed ConfigProvider instead.
     #[arg(long = "peers", env = "RR_PEERS", value_delimiter = ',')]
     pub peers: Vec<String>,
 
@@ -145,9 +158,19 @@ pub struct ServeArgs {
     pub tls_ca: Option<PathBuf>,
 
     /// Require clients to present a valid certificate (mTLS). Ignored
-    /// unless `--tls-cert` and `--tls-ca` are also set.
+    /// unless `--tls-cert` and `--tls-ca` are also set. Overrides
+    /// `[tls].require_client_cert` in the config file; a file-level `true`
+    /// can be forced back off with `--no-require-client-cert`.
     #[arg(long = "tls-require-client-cert", env = "RR_TLS_REQUIRE_CLIENT_CERT")]
     pub tls_require_client_cert: bool,
+
+    /// Force `[tls].require_client_cert = false`, overriding a `true` set
+    /// in the config file. Conflicts with `--tls-require-client-cert`.
+    #[arg(
+        long = "no-require-client-cert",
+        conflicts_with = "tls_require_client_cert"
+    )]
+    pub no_require_client_cert: bool,
 
     /// SNI domain name to verify in the server cert when dialing peers.
     #[arg(long = "tls-domain", env = "RR_TLS_DOMAIN")]
@@ -198,8 +221,15 @@ pub struct ServeArgs {
     /// sets the Prometheus gauge `rr_security_insecure_mode = 1`.
     /// NOTE: the one gate this does NOT bypass is the TCP raft loopback
     /// restriction — `--raft-transport tcp` may never bind off-loopback.
+    /// Overrides `[node].allow_insecure` in the config file; a file-level
+    /// `true` can be forced back off with `--no-allow-insecure`.
     #[arg(long = "allow-insecure", env = "RR_ALLOW_INSECURE")]
     pub allow_insecure: bool,
+
+    /// Force `[node].allow_insecure = false`, overriding a `true` set in the
+    /// config file. Conflicts with `--allow-insecure`.
+    #[arg(long = "no-allow-insecure", conflicts_with = "allow_insecure")]
+    pub no_allow_insecure: bool,
 }
 
 #[cfg(test)]
@@ -322,5 +352,62 @@ mod tests {
         };
         assert_eq!(args.raft_transport.as_deref(), Some("tcp"));
         assert_eq!(args.raft_tcp_port, Some(61001));
+    }
+
+    #[test]
+    fn cli_parses_negative_boolean_flags() {
+        let cli = Cli::try_parse_from([
+            "rr-server",
+            "serve",
+            "--node-id",
+            "1",
+            "--listen-addr",
+            "127.0.0.1:51001",
+            "--no-bootstrap",
+            "--no-allow-insecure",
+            "--no-require-client-cert",
+        ])
+        .expect("parse");
+        let Command::Serve(args) = cli.command else {
+            panic!("expected Serve");
+        };
+        assert!(args.no_bootstrap);
+        assert!(args.no_allow_insecure);
+        assert!(args.no_require_client_cert);
+        // Negated flags must not imply their positive counterparts.
+        assert!(!args.bootstrap);
+        assert!(!args.allow_insecure);
+        assert!(!args.tls_require_client_cert);
+    }
+
+    #[test]
+    fn cli_positive_and_negative_bootstrap_conflict() {
+        let err = Cli::try_parse_from(["rr-server", "serve", "--bootstrap", "--no-bootstrap"])
+            .expect_err("--bootstrap and --no-bootstrap must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_positive_and_negative_allow_insecure_conflict() {
+        let err = Cli::try_parse_from([
+            "rr-server",
+            "serve",
+            "--allow-insecure",
+            "--no-allow-insecure",
+        ])
+        .expect_err("--allow-insecure and --no-allow-insecure must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn cli_positive_and_negative_require_client_cert_conflict() {
+        let err = Cli::try_parse_from([
+            "rr-server",
+            "serve",
+            "--tls-require-client-cert",
+            "--no-require-client-cert",
+        ])
+        .expect_err("--tls-require-client-cert and --no-require-client-cert must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }

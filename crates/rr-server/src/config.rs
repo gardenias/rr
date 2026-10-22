@@ -148,6 +148,13 @@ pub struct NodeConfig {
     ///
     /// [ADR A-0008]: https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0008-snapshot-strategy.md
     pub snapshot_logs_since_last: u64,
+    /// Automatically promote caught-up learners to voters
+    /// (`RaftGroupManager::start_learner_promoter` on every locally started
+    /// group). Default `true` — the promoter is quorum-guarded server-side
+    /// and only promotes learners whose replication lag stays within
+    /// tolerance for a stability window. Set `false` to drive membership
+    /// exclusively by hand (rr-admin `change-membership`).
+    pub auto_promote_learners: bool,
     /// **DANGEROUS — development escape hatch.**
     ///
     /// When `false` (the default), [`RrNode::new`](super::node::RrNode::new)
@@ -219,6 +226,7 @@ impl NodeConfig {
             auth_config: AuthConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
             snapshot_logs_since_last: rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST,
+            auto_promote_learners: true,
             allow_insecure: false,
         }
     }
@@ -227,6 +235,13 @@ impl NodeConfig {
     /// See [`Self::snapshot_logs_since_last`] for guidance.
     pub fn with_snapshot_logs_since_last(mut self, n: u64) -> Self {
         self.snapshot_logs_since_last = n;
+        self
+    }
+
+    /// Toggle automatic learner promotion. See
+    /// [`Self::auto_promote_learners`].
+    pub fn with_auto_promote_learners(mut self, enabled: bool) -> Self {
+        self.auto_promote_learners = enabled;
         self
     }
 

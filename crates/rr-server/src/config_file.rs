@@ -5,6 +5,12 @@
 //! 2. Environment variables (already parsed into `ServeArgs` by clap)
 //! 3. TOML config file values
 //! 4. Built-in defaults (applied inside [`ResolvedConfig::resolve`])
+//!
+//! Boolean flags with a `--no-*` negation (`bootstrap`, `allow_insecure`,
+//! `tls.require_client_cert`) merge by explicit precedence:
+//! CLI affirmative > CLI negation > config file > default `false`. The
+//! negations exist because a plain `||` merge could never turn a file-level
+//! `true` back off.
 
 use rr_core::error::ConfigError;
 use serde::{Deserialize, Serialize};
@@ -92,6 +98,10 @@ pub struct ClusterSection {
     /// authentication: requires `allow_insecure` and a loopback
     /// `listen_addr` (G6/G7, ADR A-0014).
     pub raft_transport: Option<String>,
+    /// Automatically promote caught-up learners to voters on hosted groups
+    /// (default true; quorum-guarded). Set false to drive membership only
+    /// by hand.
+    pub auto_promote_learners: Option<bool>,
 }
 
 /// `[tls]` section — when present, gRPC runs over TLS.
@@ -172,6 +182,8 @@ pub struct ResolvedConfig {
     /// Number of Raft groups/partitions the node hosts (stock topology:
     /// partition i → group i, replicas = all peers). Default 1.
     pub groups: u64,
+    /// Auto-promote caught-up learners to voters (default true).
+    pub auto_promote_learners: bool,
     pub log_level: String,
     pub tls: Option<ResolvedTls>,
     pub auth: ResolvedAuth,
@@ -360,7 +372,17 @@ impl ResolvedConfig {
             raft_tcp_port
         };
 
-        let bootstrap = args.bootstrap || file.cluster.bootstrap.unwrap_or(false);
+        // Boolean precedence: CLI affirmative > CLI negation (`--no-bootstrap`)
+        // > config file > default false. A plain `||` merge could never turn a
+        // file-level `true` back off (the I5 contract: CLI beats the file in
+        // both directions).
+        let bootstrap = if args.bootstrap {
+            true
+        } else if args.no_bootstrap {
+            false
+        } else {
+            file.cluster.bootstrap.unwrap_or(false)
+        };
         let peers = if !args.peers.is_empty() {
             args.peers.clone()
         } else {
@@ -379,6 +401,7 @@ impl ResolvedConfig {
                 "groups must be >= 1 (0 would start no Raft group at all)",
             ));
         }
+        let auto_promote_learners = file.cluster.auto_promote_learners.unwrap_or(true);
 
         let tls = resolve_tls(args, &file.tls)?;
         let auth = resolve_auth(&file.auth)?;
@@ -394,7 +417,15 @@ impl ResolvedConfig {
                 .or(file.rate_limit.per_caller_client_rps),
             per_caller_burst: args.per_caller_burst.or(file.rate_limit.per_caller_burst),
         };
-        let allow_insecure = args.allow_insecure || file.node.allow_insecure.unwrap_or(false);
+        // Same boolean precedence as `bootstrap` above: CLI affirmative >
+        // CLI negation (`--no-allow-insecure`) > config file > default false.
+        let allow_insecure = if args.allow_insecure {
+            true
+        } else if args.no_allow_insecure {
+            false
+        } else {
+            file.node.allow_insecure.unwrap_or(false)
+        };
 
         let grpc_max_concurrent_streams = args
             .grpc_max_concurrent_streams
@@ -405,6 +436,18 @@ impl ResolvedConfig {
         let grpc_max_frame_size = args.grpc_max_frame_size.or(file.node.grpc_max_frame_size);
         if grpc_max_frame_size == Some(0) {
             return Err(invalid("grpc_max_frame_size must be >= 1 (bytes)"));
+        }
+        if let Some(n) = grpc_max_frame_size {
+            let cap = rr_core::bounded_decode::MAX_ENTRY_BODY as u64;
+            if u64::from(n) > cap {
+                return Err(invalid(format!(
+                    "grpc_max_frame_size ({n} bytes) exceeds the apply-side decode cap \
+                     MAX_ENTRY_BODY ({cap} bytes): a keyed write larger than the cap would \
+                     encode and replicate fine but fail FramedEntry::decode at apply time, \
+                     and apply errors are group-fatal (ADR A-0018). Lower grpc_max_frame_size \
+                     to at most {cap} bytes"
+                )));
+            }
         }
 
         let snapshot_logs_since_last = args
@@ -434,6 +477,7 @@ impl ResolvedConfig {
             bootstrap,
             peers,
             groups,
+            auto_promote_learners,
             log_level: args.log_level.clone(),
             tls,
             auth,
@@ -499,7 +543,15 @@ fn resolve_tls(args: &ServeArgs, file: &TlsSection) -> Result<Option<ResolvedTls
     let key_path = args.tls_key.clone().or_else(|| file.key_path.clone());
     let ca_path = args.tls_ca.clone().or_else(|| file.ca_path.clone());
     let domain_name = args.tls_domain.clone().or_else(|| file.domain_name.clone());
-    let require_client_cert = args.tls_require_client_cert || file.require_client_cert;
+    // Boolean precedence: CLI affirmative > CLI negation
+    // (`--no-require-client-cert`) > config file > default false.
+    let require_client_cert = if args.tls_require_client_cert {
+        true
+    } else if args.no_require_client_cert {
+        false
+    } else {
+        file.require_client_cert
+    };
 
     match (cert_path, key_path) {
         (None, None) => {
@@ -706,6 +758,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ResolvedConfig::resolve(&args).unwrap().groups, 5);
+    }
+
+    #[test]
+    fn auto_promote_learners_defaults_true_and_toml_override() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        assert!(ResolvedConfig::resolve(&args).unwrap().auto_promote_learners);
+
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+
+            [cluster]
+            auto_promote_learners = false
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        assert!(!ResolvedConfig::resolve(&args).unwrap().auto_promote_learners);
 
         // 0 is rejected — it would start no Raft group at all.
         let args = ServeArgs {
@@ -920,6 +998,41 @@ mod tests {
             err.to_string().contains("must be > 0"),
             "expected zero-rejection error, got: {err}"
         );
+    }
+
+    #[test]
+    fn grpc_max_frame_size_above_entry_body_cap_rejected() {
+        let over = rr_core::bounded_decode::MAX_ENTRY_BODY as u64 + 1;
+        let f = write_toml(&format!(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            grpc_max_frame_size = {over}
+            "#,
+        ));
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("MAX_ENTRY_BODY"),
+            "expected the cap-coupling error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn grpc_max_frame_size_at_entry_body_cap_accepted() {
+        let at = rr_core::bounded_decode::MAX_ENTRY_BODY as u64;
+        let f = write_toml(&format!(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            grpc_max_frame_size = {at}
+            "#,
+        ));
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        assert_eq!(resolved.grpc_max_frame_size, Some(at as u32));
     }
 
     #[test]
@@ -1307,6 +1420,160 @@ mod tests {
         let resolved = ResolvedConfig::resolve(&args).unwrap();
         let tls = resolved.tls.expect("tls from toml");
         assert_eq!(tls.cert_path, PathBuf::from("/srv/rr/cert.pem"));
+        assert!(tls.require_client_cert);
+    }
+
+    // ── Boolean CLI-negation merge semantics (I5) ──────────────────────────
+    // Contract: CLI affirmative > CLI negation > config file > default false.
+
+    #[test]
+    fn bootstrap_file_true_with_cli_negation_resolves_false() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            bootstrap = true
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.no_bootstrap = true;
+        assert!(!ResolvedConfig::resolve(&args).unwrap().bootstrap);
+    }
+
+    #[test]
+    fn bootstrap_file_true_without_cli_flag_stays_true() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            bootstrap = true
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        assert!(ResolvedConfig::resolve(&args).unwrap().bootstrap);
+    }
+
+    #[test]
+    fn bootstrap_cli_affirmative_beats_file_false() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            bootstrap = false
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.bootstrap = true;
+        assert!(ResolvedConfig::resolve(&args).unwrap().bootstrap);
+    }
+
+    #[test]
+    fn bootstrap_defaults_false_when_nothing_set() {
+        let args = ServeArgs {
+            log_level: "info".to_string(),
+            node_id: Some(1),
+            listen_addr: Some("127.0.0.1:51001".to_string()),
+            ..Default::default()
+        };
+        assert!(!ResolvedConfig::resolve(&args).unwrap().bootstrap);
+    }
+
+    #[test]
+    fn allow_insecure_file_true_with_cli_negation_resolves_false() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+            allow_insecure = true
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.no_allow_insecure = true;
+        assert!(!ResolvedConfig::resolve(&args).unwrap().allow_insecure);
+    }
+
+    #[test]
+    fn allow_insecure_file_true_without_cli_flag_stays_true() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+            allow_insecure = true
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        assert!(ResolvedConfig::resolve(&args).unwrap().allow_insecure);
+    }
+
+    #[test]
+    fn require_client_cert_file_true_with_cli_negation_resolves_false() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [tls]
+            cert_path = "/srv/rr/cert.pem"
+            key_path = "/srv/rr/key.pem"
+            ca_path = "/srv/rr/ca.pem"
+            require_client_cert = true
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.no_require_client_cert = true;
+        let tls = ResolvedConfig::resolve(&args).unwrap().tls.expect("tls");
+        assert!(!tls.require_client_cert);
+    }
+
+    #[test]
+    fn require_client_cert_file_true_without_cli_flag_stays_true() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [tls]
+            cert_path = "/srv/rr/cert.pem"
+            key_path = "/srv/rr/key.pem"
+            ca_path = "/srv/rr/ca.pem"
+            require_client_cert = true
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let tls = ResolvedConfig::resolve(&args).unwrap().tls.expect("tls");
+        assert!(tls.require_client_cert);
+    }
+
+    #[test]
+    fn require_client_cert_cli_affirmative_beats_file_false() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [tls]
+            cert_path = "/srv/rr/cert.pem"
+            key_path = "/srv/rr/key.pem"
+            ca_path = "/srv/rr/ca.pem"
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.tls_require_client_cert = true;
+        let tls = ResolvedConfig::resolve(&args).unwrap().tls.expect("tls");
         assert!(tls.require_client_cert);
     }
 }

@@ -17,7 +17,7 @@ use openraft::type_config::async_runtime::WatchReceiver as _;
 use rr_core::config::{ConfigProvider, RoutingTableChange};
 use rr_core::error::{ConfigError, RrError};
 use rr_core::membership::membership_change_is_safe;
-use rr_core::types::NodeId;
+use rr_core::types::{GroupId, NodeId};
 use rr_network::client_service::{ClientDispatch, ClientServiceImpl};
 use rr_network::proto::admin::admin_service_server::AdminServiceServer;
 use rr_network::proto::client::client_service_server::ClientServiceServer;
@@ -199,6 +199,28 @@ fn listener_incoming(
     })
 }
 
+/// Start the quorum-guarded learner promoter on a locally running group
+/// when [`NodeConfig::auto_promote_learners`] is on. Failures are logged,
+/// never fatal: membership can always be driven manually via rr-admin.
+async fn start_promoter_if_enabled(
+    gm: &Arc<RaftGroupManager>,
+    group_id: GroupId,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    if let Err(e) = gm
+        .start_learner_promoter(
+            group_id,
+            rr_raft::learner_promoter::AutoPromoteConfig::default(),
+        )
+        .await
+    {
+        warn!(group_id, "failed to start learner promoter: {e}");
+    }
+}
+
 /// The main node lifecycle manager.
 ///
 /// Owns the [`RaftGroupManager`], [`ShardRouter`], and an optional gRPC server.
@@ -229,6 +251,9 @@ pub struct RrNode {
     admin_port: Option<u16>,
     /// Port for HTTP observability endpoints (/health /ready /metrics).
     metrics_port: Option<u16>,
+    /// Whether to start the quorum-guarded learner promoter on locally
+    /// started groups (see [`NodeConfig::auto_promote_learners`]).
+    auto_promote_learners: bool,
     /// Bind host for the admin gRPC service (default loopback).
     admin_bind_host: String,
     /// Bind host for the HTTP observability server (default loopback).
@@ -300,7 +325,15 @@ impl RrNode {
                 .map_err(|e| ConfigError::InvalidConfig(format!("metrics bucket config: {e}")))?
                 .build_recorder();
             let handle = recorder.handle();
-            let _ = metrics::set_global_recorder(recorder);
+            if metrics::set_global_recorder(recorder).is_err() {
+                // A library embedder (or a second RrNode) already installed a
+                // recorder: our handle serves an EMPTY registry — say so
+                // loudly instead of letting /metrics look healthy-but-blank.
+                warn!(
+                    "a global metrics recorder is already installed; this node's \
+                     /metrics endpoint will serve an empty registry"
+                );
+            }
             info!("Prometheus recorder installed (metrics served via HTTP observability port)");
             gauge!("rr_security_insecure_mode").set(if config.allow_insecure { 1.0 } else { 0.0 });
             Some(handle)
@@ -345,6 +378,7 @@ impl RrNode {
             http_handle: Mutex::new(None),
             admin_port: config.admin_port,
             metrics_port: config.metrics_port,
+            auto_promote_learners: config.auto_promote_learners,
             admin_bind_host: config.admin_bind_host,
             metrics_bind_host: config.metrics_bind_host,
             grpc_max_concurrent_streams: config.grpc_max_concurrent_streams,
@@ -374,6 +408,8 @@ impl RrNode {
             if meta.replicas.contains(&self.node_id) {
                 self.group_manager.start_group(*group_id).await?;
                 self.group_manager.start_metrics_ticker(*group_id).await?;
+                start_promoter_if_enabled(&self.group_manager, *group_id, self.auto_promote_learners)
+                    .await;
                 info!(node_id = self.node_id, group_id, "started Raft group");
                 counter!("node.group.started").increment(1);
             }
@@ -389,6 +425,7 @@ impl RrNode {
         let gm = Arc::clone(&self.group_manager);
         let cp = Arc::clone(&self.config_provider);
         let node_id = self.node_id;
+        let auto_promote = self.auto_promote_learners;
 
         let watch_handle = tokio::spawn(async move {
             let mut stream = watch_stream;
@@ -416,6 +453,8 @@ impl RrNode {
                                                         "watch: failed to start metrics ticker: {e}"
                                                     );
                                                 }
+                                                start_promoter_if_enabled(&gm, group_id, auto_promote)
+                                                    .await;
                                                 info!(
                                                     group_id,
                                                     "watch: started group on PartitionAdded"
@@ -555,6 +594,8 @@ impl RrNode {
                                                 "watch: failed to start metrics ticker: {e}"
                                             );
                                         }
+                                        start_promoter_if_enabled(&gm, group_id, auto_promote)
+                                            .await;
                                         info!(
                                             group_id,
                                             "watch: started group on GroupMembershipChanged"
