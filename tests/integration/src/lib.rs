@@ -2,6 +2,22 @@
 //!
 //! Provides an in-process multi-node cluster builder and helpers for
 //! exercising Raft leader election, fault tolerance, and multi-group routing.
+//!
+//! **⚠ RocksDB-gated tests do NOT run by default.** Persistence/durability
+//! tests marked `#[cfg(feature = "rocks")]` (e.g.
+//! `test_sequenced_writes_preserved_across_restart`,
+//! `test_stop_group_flush_preserves_acked_and_pending`,
+//! `test_restart_persistence`, `raft_log_durability`) are compiled out under a
+//! plain `cargo test -p integration`. Run them with the crate's own `rocks`
+//! feature enabled — note `rr-storage/rocks` alone does NOT propagate here:
+//!
+//! ```text
+//! cargo test --workspace --features rr-storage/rocks,integration/rocks
+//! ```
+//!
+//! (Same contract as recorded in `docs/docs/reference/invariants.md` INV-1,
+//! WS-1 闭环条目; the process-level crash harness in `tests/crash` gates its
+//! scenarios the same way behind its own `rocks` feature.)
 
 #[cfg(test)]
 mod client_batching;
@@ -51,17 +67,30 @@ use rr_storage::mem::MemStorage;
 // ── Noop StateMachine ─────────────────────────────────────────────────────────
 
 /// Minimal state machine that echoes its input — used for harness tests.
-struct EchoSM;
+/// Tracks its applied-entry count so snapshots carry real state: an empty
+/// snapshot would make the cross-node digest comparison vacuous (it could
+/// never detect state-machine divergence — INV-5).
+#[derive(Default)]
+struct EchoSM {
+    applied: u64,
+}
 
 #[async_trait::async_trait]
 impl StateMachine for EchoSM {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, rr_core::error::RrError> {
+        self.applied += 1;
         Ok(entry.to_vec())
     }
     async fn snapshot(&self) -> Result<Vec<u8>, rr_core::error::RrError> {
-        Ok(vec![])
+        Ok(self.applied.to_be_bytes().to_vec())
     }
-    async fn restore(&mut self, _snapshot: &[u8]) -> Result<(), rr_core::error::RrError> {
+    async fn restore(&mut self, snapshot: &[u8]) -> Result<(), rr_core::error::RrError> {
+        self.applied = if snapshot.len() == 8 {
+            u64::from_be_bytes(snapshot.try_into().expect("length checked above"))
+        } else {
+            // Legacy empty snapshots restore as "no entries applied".
+            0
+        };
         Ok(())
     }
     async fn last_applied(&self) -> Option<LogIndex> {
@@ -85,7 +114,7 @@ impl StateMachineReader for EchoReader {
 }
 
 fn echo_factory() -> StateMachineFactory {
-    Box::new(|_group_id| -> Box<dyn StateMachine> { Box::new(EchoSM) })
+    Box::new(|_group_id| -> Box<dyn StateMachine> { Box::new(EchoSM::default()) })
 }
 
 // ── ClusterBuilder ────────────────────────────────────────────────────────────
@@ -664,6 +693,9 @@ mod tests {
             ApplyOutcome::IdempotencyExpired(err) => {
                 panic!("expected Success for keyed replay, got IdempotencyExpired: {err}")
             }
+            ApplyOutcome::IdempotencyNamespaceLimitExceeded(err) => {
+                panic!("expected Success for keyed replay, got IdempotencyNamespaceLimitExceeded: {err}")
+            }
         }
     }
 
@@ -917,7 +949,9 @@ mod tests {
             snapshots.push(snap);
         }
 
-        // All snapshot byte vectors must be identical (EchoSM produces empty bytes)
+        // All snapshot byte vectors must be identical (EchoSM snapshots now
+        // carry the applied-entry count, so this digest has real detection
+        // power: a diverged apply stream produces different bytes)
         let first = snapshots[0]
             .as_ref()
             .expect("first node must have snapshot");
@@ -1822,10 +1856,19 @@ mod tests {
     // ── T26: Snapshot-Based Node Catch-Up Test ───────────────────────────────────
 
     /// INV-5: a snapshot is the consistent state at one log index; install fully replaces state, never merges.
-    /// T26 — Snapshot catch-up: write entries, trigger snapshot, verify cluster health.
-    /// Verifies snapshot infrastructure doesn't break cluster operation.
+    /// T26 — Snapshot trigger + purge on a healthy cluster. Despite the
+    /// historical name (`test_snapshot_catchup`), this test has no lagging
+    /// node and exercises no InstallSnapshot path: it writes 10 entries on a
+    /// fully-caught-up 3-node cluster, fires `trigger().snapshot()` +
+    /// `purge_log` on the leader, and asserts the cluster keeps a healthy
+    /// leader and serves writes afterwards — i.e. snapshot/purge cycles do
+    /// not break normal cluster operation. Genuine lagging-follower snapshot
+    /// catch-up is covered by `tests/crash` scenario C
+    /// (`scenario_c_snapshot_purge_kill`), where a node killed across
+    /// snapshot/purge cycles falls behind the purge horizon and must recover
+    /// via durable snapshot + log tail or snapshot install.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn test_snapshot_catchup() {
+    async fn test_snapshot_trigger_purge_keeps_cluster_operational() {
         use std::time::Duration;
 
         let nodes = ClusterBuilder::new(3, 1)
@@ -2348,21 +2391,23 @@ mod tests {
     }
 
     /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
-    /// E4 — Crash-during-write durability. Spawn a rocks-backed
-    /// single-node cluster, write 20 entries sequentially (each
-    /// `Ok` confirms the leader has fsynced + applied), then drop
-    /// the manager WITHOUT calling `stop_group` — i.e. no
-    /// `raft.shutdown()`. This is the closest in-process simulation
-    /// of `kill -9` mid-write that still reuses the production code
-    /// path. Reopen the same data dir and verify all 20 acked entries
-    /// are still in the log.
-    ///
-    /// `DurabilityPolicy::Strict` (the v0.3 production default)
-    /// fsyncs on every write before `client_write` returns `Ok`, so
-    /// any acked write MUST survive an abrupt termination.
+    /// E4 — Sequenced-write durability across an abrupt in-process restart.
+    /// Despite the historical name, this test does NOT create a
+    /// crash-mid-write window: it writes 20 entries SEQUENTIALLY (each
+    /// `client_write` fully awaited before the next begins), so at the drop
+    /// point nothing is in flight. What it actually pins down is the
+    /// fsync-before-ACK half of INV-1: under `DurabilityPolicy::Strict` every
+    /// `Ok` return implies the entry was fsynced, so after dropping the
+    /// manager WITHOUT `stop_group`/`raft.shutdown()` (the closest in-process
+    /// simulation of `kill -9` that still reuses the production code path)
+    /// and reopening the data dir, all 20 acked entries and the vote must be
+    /// in the log. The true power-loss/crash-at-an-arbitrary-instruction
+    /// surface is covered by the process-level harness: `tests/crash`
+    /// scenario A (SIGTERM), scenario B (seeded-random SIGKILL under load)
+    /// and scenario C (SIGKILL across snapshot/purge cycles).
     #[cfg(feature = "rocks")]
     #[tokio::test]
-    async fn test_crash_during_write_preserves_acked_entries() {
+    async fn test_sequenced_writes_preserved_across_restart() {
         use openraft::storage::RaftLogStorage;
         use openraft::RaftLogReader;
         use rr_raft::group_manager::RaftGroupManager;
@@ -2438,9 +2483,10 @@ mod tests {
     /// (c) on reopen, every write that DID return `Ok` is present in the
     ///     persisted log (acked data is never lost), and the vote survives.
     ///
-    /// Complements `test_crash_during_write_preserves_acked_entries`: that
-    /// one exercises the abrupt-drop fallback, this one the graceful
-    /// `close()` path. Both must hold.
+    /// Complements `test_sequenced_writes_preserved_across_restart`: that
+    /// one exercises the abrupt-drop fallback with a fully-drained (sequenced)
+    /// write stream, this one the graceful `close()` path with writes still
+    /// in flight. Both must hold.
     #[cfg(feature = "rocks")]
     #[tokio::test]
     async fn test_stop_group_flush_preserves_acked_and_pending() {
@@ -2537,69 +2583,113 @@ mod tests {
     }
 
     /// INV-1: an ACKed write survives any single-node crash/restart (fsync precedes ACK under Strict durability).
-    /// INV-2: the recorded write history is fed to the porcupine-style register checker in
+    /// INV-2: the recorded mixed read/write history is fed to the porcupine-style register checker in
     /// [`crate::linearizability`] (R-5; docs/docs/reference/invariants.md INV-2 — the checker
     /// is the executable form of register linearizability).
-    /// E5 — Linearizability stress test. Drive a 3-node cluster with
-    /// 5 concurrent writer tasks (20 writes each = 100 total) while
-    /// rotating a follower-isolation fault every ~250ms. After all
-    /// writers complete, verify:
+    /// E5 — Linearizability stress test. Drives a 3-node kv-register cluster
+    /// ([`crate::linearizability::build_register_cluster`] +
+    /// [`crate::linearizability::RecordingClient`]) with 5 concurrent writer
+    /// tasks (20 writes each = 100 total) plus 2 linearizable-reader tasks
+    /// (20 reads each), while a seeded fault schedule rotates follower
+    /// isolation every ~250ms (`RR_FAULT_SEED` / `RR_FAULT_REPLAY` reproduce
+    /// a run). After all tasks complete, verify:
     ///
-    /// 1. Every `Ok` ack from a writer corresponds to an applied
-    ///    log entry (no acked-but-lost writes — the durability
-    ///    half of linearizability).
-    /// 2. `last_applied >= ack_count` on the final leader (no
-    ///    "skipped" entries).
-    /// 3. The cluster has a stable leader after fault clearing
-    ///    (system recovers, doesn't get stuck in election storm).
-    /// 4. The recorded write history (interval semantics, `?` for
-    ///    unknown responses) passes the porcupine-style register
-    ///    checker (R-5). The counting assertions above stay as the
-    ///    regression backstop; the checker validates the recording
-    ///    pipeline against real traffic and gates the register
-    ///    model end-to-end (read-side coverage lives in
-    ///    `test_kv_register_linearizable_under_partition`).
+    /// 1. No acked-but-lost writes: `last_applied >= acked` on the final
+    ///    leader (one applied log entry per acked write).
+    /// 2. Every recorded op — writes AND linearizable reads, interval
+    ///    semantics, `?` for unknown responses — passes the porcupine-style
+    ///    register checker. The read side is what gives the checker teeth:
+    ///    a write-only history is trivially linearizable (any interval
+    ///    ordering works), while a read observing a stale register value
+    ///    (e.g. an acked write lost under chaos) has no legal linearization.
+    /// 3. The cluster has a stable leader after fault clearing.
+    ///
+    /// Design notes (2026-10-21 review item L4):
+    ///
+    /// - **Panic propagation**: writer/reader/chaos `JoinHandle`s are awaited
+    ///   with `.expect(...)` — a panicked workload task fails the test instead
+    ///   of being swallowed by `let _ = ...`.
+    /// - **Acked floor (80%)**: the fault pool excludes the leader (below), so
+    ///   a 2/3 quorum (leader + one follower) exists at every instant and the
+    ///   SDK absorbs redirect/lease blips with 8 retries; writes fail only in
+    ///   narrow transient windows. The sibling workload
+    ///   (`test_kv_register_linearizable_under_partition`, same partition
+    ///   shape) holds an 80% floor with heavier pacing. The old `acked >= 1`
+    ///   floor passed with 99% of writes failing — 80/100 keeps CI slack
+    ///   while turning mass write failure into a test failure.
+    /// - **Fault pool excludes the leader — deliberately retained**: with a
+    ///   3-node group, isolating the leader removes quorum for the whole
+    ///   isolation window plus re-election, so no acked floor is attainable
+    ///   and the test would measure election behaviour instead of
+    ///   replication-under-chaos. Leader-fault coverage lives elsewhere:
+    ///   `test_client_redirect_converges_after_leader_kill` (leader kill +
+    ///   redirect convergence) and `tests/crash` scenario B (SIGKILL of a
+    ///   seeded-random node, leader included).
+    /// - **Workload**: the kv register ([`crate::linearizability::KvRegisterService`])
+    ///   replaces EchoSM so linearizable reads return the register value and
+    ///   join the checked history; writes flow through the full
+    ///   SDK → dispatch → raft path. Register values are unique and non-zero
+    ///   (zero is the register's initial value — a zero write would make a
+    ///   stale read indistinguishable from a legal one).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_concurrent_writes_under_chaos_linearizability() {
         use std::sync::atomic::{AtomicU64, Ordering};
 
-        use crate::linearizability::{Checker, History, Verdict};
+        use crate::linearizability::{
+            build_register_cluster, Checker, RecordingClient, Verdict, REGISTER_GROUP_ID,
+        };
 
-        let (builder, injector) = ClusterBuilder::new(3, 1).with_fault_injector();
-        let nodes = builder.build().await.expect("cluster build failed");
-        let initial_leader = wait_for_cluster_ready(&nodes, 1, 8_000)
+        let (nodes, injector, provider) = build_register_cluster()
+            .await
+            .expect("register cluster builds");
+        let initial_leader = wait_for_cluster_ready(&nodes, REGISTER_GROUP_ID, 8_000)
             .await
             .expect("initial leader");
 
-        let leader_node = nodes
-            .iter()
-            .find(|n| n.node_id() == initial_leader)
-            .unwrap();
-        let raft = leader_node.group_manager().get_raft(1).await.unwrap();
+        let table = provider.get_routing_table().await.expect("routing table");
+        let addrs: Vec<String> = table.nodes.values().map(|n| n.addr.clone()).collect();
+        let raw_client = RrClient::connect_with_config(
+            addrs,
+            RetryConfig {
+                max_retries: 8,
+                retry_delay_ms: 40,
+            },
+        )
+        .await
+        .expect("client connects");
+        let client = Arc::new(RecordingClient::new(raw_client, REGISTER_GROUP_ID));
 
-        let writers = 5;
-        let writes_per_writer = 20;
+        const WRITERS: u64 = 5;
+        const WRITES_PER_WRITER: u64 = 20;
+        const READERS: u64 = 2;
+        const READS_PER_READER: u64 = 20;
+
         let ack_count = Arc::new(AtomicU64::new(0));
-        // R-5: record every write as a register op (interval semantics; a
-        // failed client_write is an unknown response — the porcupine `?`).
-        let history = History::new();
-        let mut writer_handles = Vec::new();
-        for w in 0..writers {
-            let raft_clone = raft.clone();
+        let read_ok_count = Arc::new(AtomicU64::new(0));
+        let mut op_handles = Vec::new();
+        for w in 0..WRITERS {
+            let client = Arc::clone(&client);
             let ack_count = Arc::clone(&ack_count);
-            let history = history.clone();
-            writer_handles.push(tokio::spawn(async move {
-                for i in 0..writes_per_writer {
-                    let payload = vec![w as u8, i as u8];
-                    let value = ((w as u64) << 16) | i as u64;
-                    let op = history.begin_write(value);
-                    match raft_clone.client_write(payload.into()).await {
-                        Ok(_) => {
-                            op.ack(value);
-                            ack_count.fetch_add(1, Ordering::SeqCst);
-                        }
-                        Err(_) => op.unknown(),
+            op_handles.push(tokio::spawn(async move {
+                for i in 0..WRITES_PER_WRITER {
+                    // Unique, non-zero register values (see doc comment).
+                    let value = ((w + 1) << 16) | (i + 1);
+                    if client.write(value).await.is_ok() {
+                        ack_count.fetch_add(1, Ordering::SeqCst);
                     }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }));
+        }
+        for _ in 0..READERS {
+            let client = Arc::clone(&client);
+            let read_ok_count = Arc::clone(&read_ok_count);
+            op_handles.push(tokio::spawn(async move {
+                for _ in 0..READS_PER_READER {
+                    if client.read_linearizable().await.is_ok() {
+                        read_ok_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
                 }
             }));
         }
@@ -2630,21 +2720,31 @@ mod tests {
             })
         };
 
-        for h in writer_handles {
-            let _ = h.await;
+        for h in op_handles {
+            h.await.expect("writer/reader task panicked");
         }
-        let _ = chaos_handle.await;
+        chaos_handle.await.expect("chaos schedule task panicked");
         injector.clear_all();
 
-        let final_leader = wait_for_cluster_ready(&nodes, 1, 12_000)
+        let final_leader = wait_for_cluster_ready(&nodes, REGISTER_GROUP_ID, 12_000)
             .await
             .expect("cluster must converge to a stable leader after chaos");
         let final_leader_node = nodes.iter().find(|n| n.node_id() == final_leader).unwrap();
-        let final_raft = final_leader_node.group_manager().get_raft(1).await.unwrap();
+        let final_raft = final_leader_node
+            .group_manager()
+            .get_raft(REGISTER_GROUP_ID)
+            .await
+            .unwrap();
 
         let final_metrics = final_raft.metrics().borrow_watched().clone();
         let last_applied = final_metrics.last_applied.map(|l| l.index).unwrap_or(0);
         let acked = ack_count.load(Ordering::SeqCst);
+        let reads_ok = read_ok_count.load(Ordering::SeqCst);
+        eprintln!(
+            "e5 traffic: acked={acked}/{} reads_ok={reads_ok}/{} last_applied={last_applied}",
+            WRITERS * WRITES_PER_WRITER,
+            READERS * READS_PER_READER,
+        );
 
         assert!(
             last_applied >= acked,
@@ -2652,27 +2752,30 @@ mod tests {
              acked-but-lost writes detected"
         );
         assert!(
-            acked >= 1,
-            "at least 1 write should have acked across {writers} writers × \
-             {writes_per_writer} ops with chaos; got {acked}"
+            acked >= WRITERS * WRITES_PER_WRITER * 4 / 5,
+            "at least 80% of writes must ack under follower-only partitions (floor derivation \
+             in the doc comment); got {acked}/{}",
+            WRITERS * WRITES_PER_WRITER
+        );
+        assert!(
+            reads_ok > 0,
+            "some linearizable reads must succeed under follower-only partitions; got {reads_ok}"
         );
 
-        // R-5: feed the recorded register-write history (writes only on this
-        // EchoSM workload; the register model's read side is covered by
-        // test_kv_register_linearizable_under_partition) to the porcupine-style
-        // checker. Unknown responses participate as `?`.
-        let ops = history.snapshot();
+        // R-5: feed the mixed write+read register history to the
+        // porcupine-style checker. Unknown responses participate as `?`.
+        let ops = client.checked_history().snapshot();
         assert_eq!(
-            ops.len(),
-            writers * writes_per_writer,
-            "every write invocation must be recorded (acked or unknown)"
+            ops.len() as u64,
+            WRITERS * WRITES_PER_WRITER + READERS * READS_PER_READER,
+            "every write/linearizable-read invocation must be recorded (acked or unknown)"
         );
         match Checker::new().check(&ops) {
             Verdict::Linearizable { checked, total } => {
-                eprintln!("chaos write history linearizable ({checked}/{total} ops checked)");
+                eprintln!("chaos register history linearizable ({checked}/{total} ops checked)");
             }
             Verdict::Illegal(violation) => {
-                panic!("chaos write history is not linearizable:\n{violation}")
+                panic!("chaos register history is not linearizable:\n{violation}")
             }
         }
 
