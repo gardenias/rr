@@ -15,6 +15,12 @@ mod leader_redirect_failover;
 pub mod linearizability;
 #[cfg(test)]
 mod membership_guard;
+#[cfg(test)]
+mod outbox_failover_kafka;
+#[cfg(test)]
+mod outbox_failover_raft_write;
+mod outbox_restart_rocks;
+pub mod outbox_support;
 
 mod raft_log_durability;
 #[cfg(test)]

@@ -494,13 +494,35 @@ apply,就**最终会被投递**到目标(Raft 写/Kafka 发布):投递失败按�
   `run_send_loop_parks_when_group_stopped`(:680)、`send_backoff_is_cancellable_via_stop`(:707)
   —— 组不支持 outbox 响亮上报;组停后 runner 停驻不自旋;退避可经 stop 取消
   (生命周期竞态修复组)
+- 集群级 e2e(2026-10-22 落地,可靠性专项 R-4 / R-8 出账,设计文档
+  `.sisyphus/plans/rr-inv4-outbox-failover-e2e.md`;共享 harness `outbox_support.rs`):
+  `tests/integration/src/outbox_failover_kafka.rs` `test_inv4_outbox_delivers_outputs_kafka`(:151)、
+  `test_inv4_outbox_redelivers_after_leader_failover_kafka`(:279)——优雅 kill 老 leader 后新
+  leader 全量重投,不漏 / 重投确实发生 / 按键去重后恰好一次三断言;
+  `test_inv4_outbox_no_delivery_without_attached_runner`(:369)——负面对照:新 leader 不
+  attach runner,则 settle 窗口内 sink 零新增投递;
+  `tests/integration/src/outbox_failover_raft_write.rs`
+  `test_inv4_outbox_raft_write_duplicates_absorbed_by_target_group`(:216)——重投被目标组
+  框架幂等层 Replay 吸收(目标组 apply 计数恒 3N、日志仍长 N),pending 先满后空为重投证据链;
+  `tests/integration/src/outbox_restart_rocks.rs` `test_inv4_outbox_watermark_survives_snapshot_restart`(:192)
+  ——rocks-gated 重启臂(`integration/rocks` feature,默认跑跳过):快照恢复后水线连续
+  (快照点前 seq 零重投、点后允许重投、去重后不重不漏)
+
 
 ### 已知缺口
 
 - **无 review P0/P1 条目**(ADR A-0007 落地与契约一致)。如实记录两处覆盖空白:
   - 缺**集群级端到端测试**:leader 切换/节点重启后 outbox 经快照恢复、续投不重不漏的场景,
     目前只有 `snapshot_restore_roundtrip_preserves_outbox_state` 单测,无 3 节点集成测试。
-    建议随可靠性专项 R-4/R-8 补齐。
+
+    **✅ 已闭环(2026-10-22)**:集群级换主续投 + rocks 重启续投 e2e 三臂落地——
+    KafkaPublish 换主全量重投(`test_inv4_outbox_redelivers_after_leader_failover_kafka`,
+    不漏 / 重投确实发生 / 去重后恰好一次三断言,附不 attach runner 的负面对照
+    `test_inv4_outbox_no_delivery_without_attached_runner`)、RaftWrite 双组幂等吸收
+    (`test_inv4_outbox_raft_write_duplicates_absorbed_by_target_group`,目标组 apply 计数
+    恒 3N、用户 Service 不再被调)、rocks-gated 重启臂快照水线连续
+    (`test_inv4_outbox_watermark_survives_snapshot_restart`);测试清单见本节 `### 现有测试`,
+    设计 `.sisyphus/plans/rr-inv4-outbox-failover-e2e.md`。
   - `pending_outputs` 失败(组不支持 outbox)时 runner 仅 `warn!` 后 `return`
     (`output_runner.rs:171-176`)——该组 output 将停止投递直至下次成为 leader 重入循环;
     属"显式降级"而非静默丢弃,但无 metric 之外的告警通道。
@@ -874,7 +896,7 @@ gRPC 平面的五个 gate 全部通过才允许 `RrNode` 构造成功;`allow_ins
 | `constant_time_eq` 手写 / `token_fingerprint` 32-bit | P1 | INV-8 | 路线图 RC 并行项 | — |
 | 路由切换无 fence/epoch,测试依赖固定 sleep | P1(sleep/flaky)关联 | INV-6 | R-3(确定性仿真)/ R-6(proptest) | 可靠性专项 |
 | /metrics /ready 明文无 auth | P2 | INV-8 | 0.2.1 backlog | — |
-| outbox 缺集群级换主续投端到端测试 | 无(review 未列) | INV-4 | R-4 / R-8 | 可靠性专项 |
+| outbox 缺集群级换主续投端到端测试(✅ 已闭环 2026-10-22:三臂 e2e 落地——换主重投/双组吸收/重启水线连续) | 无(review 未列) | INV-4 | R-4 / R-8 | .sisyphus/plans/rr-inv4-outbox-failover-e2e.md |
 | 日志投毒崩溃循环(apply decode Err → sm worker 死)(✅ 已闭环 2026-09-23:ingress 校验 + apply 批拆分 gate) | fresh-review P0① | INV-1 | 批次 A | ADR A-0018 |
 | TCP request_id 跨组碰撞 → false matched(✅ 已闭环 2026-09-23:池级 id + (group,id) demux) | fresh-review P0② | INV-1 | 批次 A | — |
 | `OutputTarget::RaftWrite` 幂等键跨源组碰撞(✅ 已闭环 2026-09-23:`rr.output.g<N>` 命名空间) | fresh-review P0③ | INV-4 | 批次 A | — |

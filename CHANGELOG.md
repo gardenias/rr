@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-10-22 INV-4 outbox failover e2e
+
+- **Cluster-level outbox failover e2e suite** — closes the last INV-4 coverage
+  gap (leader-change / restart redelivery had unit tests and a TLA model but
+  never a cluster-level e2e; reliability program R-4 / R-8, design
+  `.sisyphus/plans/rr-inv4-outbox-failover-e2e.md`). Shared harness
+  `tests/integration/src/outbox_support.rs` (cluster builder, emitting
+  `OutboxEchoService` overriding `handle_with_outputs_ctx`, shared-records
+  `CapturingKafka`, poll-only waits — no fixed sleeps) plus three arm files:
+  - `test_inv4_outbox_delivers_outputs_kafka` (INV-4): N=5 writes to a 3-node
+    real-network group deliver as field-exact sink 5-tuples; a snapshot decode
+    pins the mechanism premise — the sent watermark is leader-local memory
+    (leader snapshot shows watermark == N with empty pending, a follower ==
+    0 with all N outputs still pending). Registered in the INV-4 test list
+    (check-invariants.sh enforced).
+  - `test_inv4_outbox_redelivers_after_leader_failover_kafka` (INV-4): after a
+    graceful leader kill the new leader re-delivers the whole pending outbox —
+    no loss, re-delivery provably observed (duplicate keys present), and
+    payload-exact effective-once after idempotency-key dedup. Registered in
+    the INV-4 test list (check-invariants.sh enforced).
+  - `test_inv4_outbox_no_delivery_without_attached_runner` (INV-4): negative
+    control verified — a node elected leader without an attached output
+    runner delivers nothing in the settle window, so the redelivery
+    assertions above cannot pass vacuously. Registered in the INV-4 test
+    list (check-invariants.sh enforced).
+  - `test_inv4_outbox_raft_write_duplicates_absorbed_by_target_group`
+    (INV-4): RaftWrite re-deliveries are absorbed by the TARGET group's
+    framework idempotency layer (Replay decisions — the user service is never
+    re-invoked): the target apply count stays pinned at 3N across the failover
+    while its raft log still grows by the N re-delivered entries. Registered
+    in the INV-4 test list (check-invariants.sh enforced).
+  - `test_inv4_outbox_watermark_survives_snapshot_restart` (INV-4, rocks-gated,
+    skipped in default-feature runs): the sent watermark survives snapshot
+    recovery — a rocks-backed single node rebuilt on the same data_dir
+    re-delivers exactly the M post-snapshot pending outputs (sink total
+    exactly N+2M, zero ghost deliveries) and never the N snapshotted seqs.
+    Registered in the INV-4 test list (check-invariants.sh enforced).
+  Two documented design deviations (see the design doc's 落地记录): the
+  RaftWrite arm pins the "full pending" premise on the followers BEFORE the
+  kill (the post-election drain can outrun the test thread's 50ms poll), with
+  target-group `last_log_index` growth as the second re-delivery proof; the
+  rocks arm asserts the exact total N+2M instead of an upper bound, via a
+  bare-manager local snapshot helper (`fetch_framed_snapshot` is
+  `RrNode`-bound).
+
 ### Fixed — 2026-10-20 soak INV-1 defense-in-depth
 
 - **Read-path fake success** (soak-nightly run 38045591646 follow-up):
