@@ -10,6 +10,9 @@
 [node]
 id = 1
 listen_addr = "127.0.0.1:51001"
+# DEV/SMOKE ONLY — bypasses the startup security gates (no TLS / no admin
+# token). Delete this and uncomment [tls]/[auth] below for anything real.
+allow_insecure = true
 # admin_port = 52001      # optional: enable AdminService on a separate port
 # metrics_port = 9100     # optional: enable Prometheus /metrics HTTP endpoint
 
@@ -18,8 +21,10 @@ listen_addr = "127.0.0.1:51001"
 # set "rocks" and provide node.data_dir.
 backend = "mem"
 # durability: "strict" (default, required for Raft correctness),
-#             "balanced" (no fsync — risks data loss on power failure),
-#             "fast" (no WAL — tests only; total data loss on crash).
+#             "replicated_only" (fsync off locally — safe only with multi-node
+#                              replication),
+#             "test_only" (no WAL sync at all — tests only; total data loss
+#                          on crash).
 durability = "strict"
 
 [cluster]
@@ -35,6 +40,10 @@ peers = []
 # ca_path             = "/etc/rr/tls/ca.pem"
 # require_client_cert = true
 # domain_name         = "node1.rr.internal"
+#
+# [auth]
+# admin_token_env  = "RR_ADMIN_TOKEN"
+# client_token_env = "RR_CLIENT_TOKEN"
 #
 # See docs/docs/deployment/tls.md for how to generate dev certs via
 # scripts/gen-dev-certs.sh and the full mTLS setup.

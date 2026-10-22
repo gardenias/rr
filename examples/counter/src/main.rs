@@ -222,7 +222,8 @@ async fn main() -> Result<()> {
 
     let cli = CliConfig::parse();
 
-    if cli.demo {
+    // Documented default: no arguments at all runs the demo and exits.
+    if cli.demo || std::env::args_os().len() == 1 {
         run_demo().await
     } else {
         run_node(cli).await

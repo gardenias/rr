@@ -1,6 +1,8 @@
 # rr-server 3-node cluster — NODE 2.
 #
-# Run this after node 1 is up and bootstrapped.
+# Run this after node 1 is up and bootstrapped. Node 2 becomes a voter only
+# after the membership commands shown in 3node-cluster-node1.toml's header
+# (peers below only builds the local routing table).
 
 [node]
 id = 2
@@ -16,3 +18,14 @@ durability = "strict"
 [cluster]
 bootstrap = false
 peers = ["node-1.internal:51001"]
+
+[tls]
+cert_path = "/etc/rr/tls/node2.pem"
+key_path  = "/etc/rr/tls/node2.key"
+ca_path   = "/etc/rr/tls/ca.pem"
+require_client_cert = true
+# domain_name = "node2.rr.local"
+
+[auth]
+admin_token_env = "RR_ADMIN_TOKEN"
+client_token_env = "RR_CLIENT_TOKEN"
