@@ -38,9 +38,13 @@ cd "$OUT_DIR"
 
 if [[ ! -f ca.key ]]; then
   echo "==> Generating CA"
+  # basicConstraints CA:TRUE (critical) — without it the "CA" cert is not a CA
+  # at all for strict verifiers (webpki tolerates it, many others don't).
   openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
     -keyout ca.key -out ca.pem \
-    -subj "/CN=rr-dev-ca" 2>/dev/null
+    -subj "/CN=rr-dev-ca" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null
 else
   echo "==> Reusing existing CA (ca.pem, ca.key)"
 fi

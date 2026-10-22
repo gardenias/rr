@@ -315,14 +315,18 @@ w9_tier() {
 w7_tier() {
   log "[w7] recreating kv nodes with snapshot threshold $W7_SNAPSHOT"
   SNAPSHOT_LOGS_SINCE_LAST=$W7_SNAPSHOT "${COMPOSE[@]}" up -d >/dev/null
-  local n
+  local n bench_rc=0
   for n in 1 2 3; do wait_healthy "perf-kv-$n" 60 || return 1; done
+  # NOTE: tiers run under `tier ... || rc=$?`, which suspends set -e inside
+  # the body — capture and propagate a bench failure explicitly or the tier
+  # would be recorded ok after a failed run.
   run_bench w7 --scenario=wladder "--ladder-rates=$W7_RATES" \
     "--duration-secs=$W1_RUNG_SECS" --warmup-secs=10 \
-    --timeseries-out=/out/ts-w7.jsonl
-  # Restore the default threshold for later phases.
+    --timeseries-out=/out/ts-w7.jsonl || bench_rc=$?
+  # Restore the default threshold for later phases (even on bench failure).
   SNAPSHOT_LOGS_SINCE_LAST=50000 "${COMPOSE[@]}" up -d >/dev/null
   for n in 1 2 3; do wait_healthy "perf-kv-$n" 60 || return 1; done
+  return "$bench_rc"
 }
 
 w6_tier() {
@@ -343,7 +347,9 @@ w6_tier() {
   win=$((end - start))
   # Server-side ingest summary from the host Prometheus port (bench is not
   # the load source in W6, so the script does the window query directly).
-  python3 - "$PROM_HOST" "$end" "$win" >"$OUT/raw-w6.json" <<'PYEOF'
+  # On query failure write an error placeholder — an empty raw-w6.json would
+  # crash the report renderer's json.load at the end of a 2h matrix.
+  if ! python3 - "$PROM_HOST" "$end" "$win" >"$OUT/raw-w6.json" <<'PYEOF'
 import json, sys, urllib.request, urllib.parse
 
 prom, end, win = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
@@ -366,6 +372,10 @@ out = {
 }
 print(json.dumps(out, indent=2))
 PYEOF
+  then
+    log "[w6] prometheus window query failed — writing error placeholder"
+    printf '{"window_secs": %s, "error": "prometheus query failed"}\n' "$win" >"$OUT/raw-w6.json"
+  fi
   tail -3 "$OUT/producer-w6.log"
 }
 

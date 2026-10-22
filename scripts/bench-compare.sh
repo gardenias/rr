@@ -23,20 +23,25 @@ fi
 
 # Criterion 0.5 prints per benchmark group:
 #   <bench-id>                time:   [...]
-#                             change: [+lo%, +est%, +hi%] (p = 0.00 < 0.05)
+#                             change: [+lo% +est% +hi%] (p = 0.00 < 0.05)
 #                             Performance has regressed.
-# Only lines with "p = .. < 0.05" are statistically significant.
+# The estimate list inside the brackets is separated by spaces (criterion
+# ≥0.4) or commas (older versions) — accept both. Only lines with
+# "p = .. < 0.05" are statistically significant.
 REPORT=$(awk '
     /^[A-Za-z0-9_\/-]+[[:space:]]+time:/ { bench = $1 }
     /change:/ && /< 0\.05/ {
         line = $0
-        gsub(/[][]/, "", line)
-        n = split(line, parts, ", ")
-        if (n >= 3) {
-            est = parts[2]
-            gsub(/[%+]/, "", est)
-            if (est + 0 > 15)      printf("REGRESS\t%s\t%.2f\n", bench, est)
-            else if (est + 0 > 5)  printf("WARN\t%s\t%.2f\n", bench, est)
+        if (match(line, /\[[^]]*\]/)) {
+            vals = substr(line, RSTART + 1, RLENGTH - 2)
+            gsub(/,/, " ", vals)
+            n = split(vals, parts, /[[:space:]]+/)
+            if (n >= 3) {
+                est = parts[2]
+                gsub(/[%+]/, "", est)
+                if (est + 0 > 15)      printf("REGRESS\t%s\t%.2f\n", bench, est)
+                else if (est + 0 > 5)  printf("WARN\t%s\t%.2f\n", bench, est)
+            }
         }
     }
 ' "$INPUT")

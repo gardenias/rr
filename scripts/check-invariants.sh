@@ -55,7 +55,9 @@ test_carries_marker() {
             for (j = i - 1; j >= 1; j--) {
               l = lines[j]
               if (l ~ /^[[:space:]]*$/ || l ~ /^[[:space:]]*\/\// || l ~ /^[[:space:]]*#/) {
-                if (index(l, marker) > 0) found = 1
+                # exact INV id match: "INV-1" must not substring-match "INV-10"
+                p = index(l, marker)
+                if (p > 0 && substr(l, p + length(marker), 1) !~ /[0-9]/) found = 1
                 continue
               }
               break
@@ -109,21 +111,28 @@ fi
 #     tokens such as `leader_info` / `last_log_index` out of the test list.
 # ---------------------------------------------------------------------------
 awk '
-  function flush(   s, tok, rest, prev_loc) {
+  function flush(   s, gap, tok, rest, located) {
     s = buf
-    prev_loc = 0
+    located = 0
     while (match(s, /`[^`]+`/)) {
+      gap  = substr(s, 1, RSTART - 1)
       tok  = substr(s, RSTART + 1, RLENGTH - 2)
       rest = substr(s, RSTART + RLENGTH)
       if (tok ~ /\.rs(:[0-9]+(-[0-9]+)?)?$/ || tok ~ /^:[0-9]+(-[0-9]+)?$/) {
-        prev_loc = 1
+        located = 1
       } else if (tok ~ /^[a-z_][a-z0-9_]*$/ || tok ~ /^\.\.\.[a-z0-9_]+$/) {
-        if (prev_loc || rest ~ /^[[:space:]]*\(:[0-9]+(-[0-9]+)?\)/) {
+        # A test list opened by a code-location token stays open across pure
+        # list separators (", ", "、", " and "…) so a second test name on the
+        # same bullet is not dropped; any other gap text closes it, keeping
+        # descriptive tokens (`leader_info` etc.) out of the test list.
+        if (located && gap !~ /^[[:space:]]*$/ && gap !~ /^[[:space:]]*[,、][[:space:]]*$/ && gap !~ /^[[:space:]]+(and|or|\/|和|或)[[:space:]]+$/) {
+          located = 0
+        }
+        if (located || rest ~ /^[[:space:]]*\(:[0-9]+(-[0-9]+)?\)/) {
           print inv "\t" tok
         }
-        prev_loc = 0
       } else {
-        prev_loc = 0
+        located = 0
       }
       s = rest
     }
@@ -185,8 +194,9 @@ while IFS=$'\t' read -r id tok; do
     fail "[$id] lists test \`$name\` in 现有测试, but no 'fn ${name}(' exists under ${SEARCH_DIRS[*]} — test renamed? update $REGISTRY in the same PR"
     continue
   fi
-  # check 5: the test must carry the marker (in its name or comment block)
-  if [[ "$name" == *"$id"* || "$name" == *"inv${id#INV-}"* ]]; then
+  # check 5: the test must carry the marker (in its name or comment block);
+  # match the INV id exactly — "INV-1" must not substring-match "INV-10"
+  if [[ "$name" =~ ${id}([^0-9]|$) || "$name" =~ inv${id#INV-}([^0-9]|$) ]]; then
     continue
   fi
   if ! test_carries_marker "$name" "$id"; then
