@@ -16,9 +16,15 @@ type Cf = BTreeMap<Vec<u8>, Vec<u8>>;
 ///
 /// Suitable for development, testing, and ephemeral workloads.
 /// Data is **not** persisted to disk.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MemStorage {
     inner: Arc<RwLock<HashMap<String, Cf>>>,
+}
+
+impl Default for MemStorage {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MemStorage {
@@ -73,13 +79,17 @@ impl StorageEngine for MemStorage {
         let cf_map = guard.get(cf).ok_or_else(|| StorageError::NotFound {
             key: format!("cf:{cf}"),
         })?;
-        let result = cf_map
-            .range((
-                Bound::Included(start.to_vec()),
-                Bound::Excluded(end.to_vec()),
-            ))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let result = if start > end {
+            Vec::new()
+        } else {
+            cf_map
+                .range((
+                    Bound::Included(start.to_vec()),
+                    Bound::Excluded(end.to_vec()),
+                ))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
         Ok(result)
     }
 
@@ -93,19 +103,23 @@ impl StorageEngine for MemStorage {
 
     async fn write_batch(&self, ops: Vec<BatchOp>) -> Result<(), StorageError> {
         let mut guard = self.inner.write().await;
+        for op in &ops {
+            let cf = match op {
+                BatchOp::Put { cf, .. } | BatchOp::Delete { cf, .. } => cf,
+            };
+            if !guard.contains_key(cf) {
+                return Err(StorageError::NotFound {
+                    key: format!("cf:{cf}"),
+                });
+            }
+        }
         for op in ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    let cf_map = guard.get_mut(&cf).ok_or_else(|| StorageError::NotFound {
-                        key: format!("cf:{cf}"),
-                    })?;
-                    cf_map.insert(key, value);
+                    guard.get_mut(&cf).expect("cf validated above").insert(key, value);
                 }
                 BatchOp::Delete { cf, key } => {
-                    let cf_map = guard.get_mut(&cf).ok_or_else(|| StorageError::NotFound {
-                        key: format!("cf:{cf}"),
-                    })?;
-                    cf_map.remove(&key);
+                    guard.get_mut(&cf).expect("cf validated above").remove(&key);
                 }
             }
         }
@@ -282,6 +296,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_default_equals_new() {
+        let storage = MemStorage::default();
+        storage
+            .put("state_machine", b"key", b"val")
+            .await
+            .expect("default() must pre-populate the framework CFs like new()");
+        assert_eq!(
+            storage.get("state_machine", b"key").await.unwrap(),
+            Some(b"val".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_is_atomic_on_unknown_cf() {
+        let storage = MemStorage::new();
+        let ops = vec![
+            BatchOp::Put {
+                cf: "state_machine".into(),
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+            },
+            BatchOp::Put {
+                cf: "nonexistent_cf".into(),
+                key: b"k2".to_vec(),
+                value: b"v2".to_vec(),
+            },
+        ];
+        let err = storage.write_batch(ops).await.unwrap_err();
+        assert!(matches!(err, StorageError::NotFound { .. }));
+        assert_eq!(
+            storage.get("state_machine", b"k1").await.unwrap(),
+            None,
+            "a failed batch must not apply any prefix of its ops"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_start_after_end_returns_empty() {
+        let storage = MemStorage::new();
+        storage.put("state_machine", b"a", b"1").await.unwrap();
+        let results = storage.scan("state_machine", b"z", b"a").await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_concurrent_reads_and_writes() {
         let storage = Arc::new(MemStorage::new());
         let mut handles = vec![];
@@ -304,6 +363,17 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        // R-6 review item L7a: persist failing seeds into the git-tracked
+        // `crates/rr-storage/proptest-regressions/` so a failure reproduces
+        // across runs; `SourceParallel` resolves relative to `src/lib.rs`.
+        #![proptest_config(ProptestConfig {
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::SourceParallel(
+                    "proptest-regressions",
+                ),
+            )),
+            ..ProptestConfig::default()
+        })]
         #[test]
         fn proptest_mem_put_get_roundtrip(key: Vec<u8>, value: Vec<u8>) {
             let rt = tokio::runtime::Runtime::new().unwrap();

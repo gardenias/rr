@@ -239,6 +239,11 @@ pub struct RocksStorage {
     db: Arc<DB>,
     durability: DurabilityPolicy,
     group_commit: Option<GroupCommitHandle>,
+    /// Base config + the DB-wide shared block cache, retained so a runtime
+    /// [`StorageEngine::create_cf`] builds options identical to the CFs
+    /// opened at `open()` (instead of bare `Options::default()`).
+    config: RocksConfig,
+    shared_cache: Cache,
     /// Column families opened at `open()` plus any later `create_cf()`.
     /// Tracked because `DB::flush()` alone only flushes the `default` CF —
     /// [`StorageEngine::flush`] walks this list instead. `lock().unwrap()`
@@ -407,6 +412,8 @@ impl RocksStorage {
             db: Arc::new(db),
             durability,
             group_commit: None,
+            config: config.clone(),
+            shared_cache,
             cf_names: std::sync::RwLock::new(cfs.iter().map(|s| s.to_string()).collect()),
         };
 
@@ -619,16 +626,27 @@ impl StorageEngine for RocksStorage {
     async fn create_cf(&self, name: &str) -> Result<(), StorageError> {
         let db = Arc::clone(&self.db);
         let name = name.to_string();
+        // Runtime-created CFs inherit the DB-level tuning + shared block
+        // cache, matching the CFs opened at `open()` (was: bare defaults).
+        let cf_opts = build_cf_options(&self.config, None, &self.shared_cache);
         let created = tokio::task::spawn_blocking({
             let name = name.clone();
             move || {
-                let opts = Options::default();
-                db.create_cf(&name, &opts).map_err(map_rocks_err)
+                if db.cf_handle(&name).is_some() {
+                    // Idempotent, mirroring MemStorage::create_cf.
+                    return Ok(());
+                }
+                db.create_cf(&name, &cf_opts).map_err(map_rocks_err)
             }
         })
         .await
         .map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
-        created.map(|()| self.cf_names.write().unwrap().push(name))
+        created.map(|()| {
+            let mut names = self.cf_names.write().unwrap();
+            if !names.iter().any(|n| n == &name) {
+                names.push(name);
+            }
+        })
     }
 }
 
@@ -1135,6 +1153,17 @@ mod tests {
     use proptest::prelude::*;
 
     proptest! {
+        // R-6 review item L7a: persist failing seeds into the git-tracked
+        // `crates/rr-storage/proptest-regressions/` so a failure reproduces
+        // across runs; `SourceParallel` resolves relative to `src/lib.rs`.
+        #![proptest_config(ProptestConfig {
+            failure_persistence: Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::SourceParallel(
+                    "proptest-regressions",
+                ),
+            )),
+            ..ProptestConfig::default()
+        })]
         #[test]
         fn proptest_rocks_put_get_roundtrip(key: Vec<u8>, value: Vec<u8>) {
             let rt = tokio::runtime::Runtime::new().unwrap();
