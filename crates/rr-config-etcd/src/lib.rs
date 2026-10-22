@@ -6,6 +6,7 @@
 //! * `/rr/{cluster_id}/partitions/{partition_id}`
 //! * `/rr/{cluster_id}/groups/{group_id}/replicas`
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -496,6 +497,61 @@ fn diff_tables(
     changes
 }
 
+/// Execute a compaction resync: scan etcd, publish the fresh table as the
+/// cache baseline, then dispatch the diff to the watch consumer.
+///
+/// Locking contract (K7a): `rescan_lock` covers the scan + cache store
+/// only — the diff events are collected and dispatched after it is
+/// released, so a slow or stalled consumer can never wedge the
+/// `routing_table_snapshot` rescan path through that lock. The scan stays
+/// inside `rescan_lock` so the staged table is never older than the
+/// baseline it is diffed against. `resync_dispatch_lock` serializes
+/// dispatch across concurrent domain resyncs, preserving the FIFO order
+/// the shared watch channel had when dispatch ran under `rescan_lock`.
+/// No event is dropped: a full channel waits for the consumer, and a
+/// closed channel ends dispatch early (the consumer is gone).
+async fn execute_resync<F, Fut>(
+    rescan_lock: &Mutex<()>,
+    resync_dispatch_lock: &Mutex<()>,
+    cache: &RevisionCache,
+    domain: WatchDomain,
+    sender: &mpsc::Sender<RoutingTableChange>,
+    scan: F,
+) -> Option<i64>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(PrefixFingerprint, Arc<RoutingTable>, i64), ConfigError>>,
+{
+    let (scan_revision, changes) = {
+        let _guard = rescan_lock.lock().await;
+        let (fingerprint, fresh, scan_revision) = match scan().await {
+            Ok(scanned) => scanned,
+            Err(err) => {
+                tracing::error!(
+                    target: "rr::config::etcd",
+                    domain = domain.as_str(),
+                    error = %err,
+                    "resync after watch compaction failed; cached routing table may be stale"
+                );
+                return None;
+            }
+        };
+        let baseline = cache
+            .latest()
+            .unwrap_or_else(|| Arc::new(RoutingTable::default()));
+        cache.store(fingerprint, Arc::clone(&fresh));
+        (scan_revision, diff_tables(domain, &baseline, &fresh))
+    };
+
+    let _dispatch_guard = resync_dispatch_lock.lock().await;
+    for change in changes {
+        if sender.send(change).await.is_err() {
+            return Some(scan_revision);
+        }
+    }
+    Some(scan_revision)
+}
+
 /// etcd-backed implementation of [`ConfigProvider`].
 ///
 /// This type is intentionally read-only at the trait surface:
@@ -515,11 +571,13 @@ fn diff_tables(
 /// Concurrent rescans are single-flight: one caller scans, the rest
 /// coalesce on the result.
 ///
-/// Staleness bound: a serializable probe can lag quorum writes by the
-/// member's apply lag (sub-millisecond on a healthy cluster) — a lagging
-/// probe simply misses the cache and triggers a linearizable rescan, so
-/// the served table is never older than the last successful quorum scan.
-/// Pass [`with_linearizable_probes`](Self::with_linearizable_probes) for
+/// Staleness bound: a serializable probe is served member-locally and can
+/// lag quorum writes by the member's apply lag (sub-millisecond on a
+/// healthy cluster). A lagging probe returns the member's CURRENT (stale)
+/// fingerprint, which HITS the equally stale cache entry — so the served
+/// table may trail the newest committed write by that same apply lag; it
+/// never returns data older than the member's own state. Pass
+/// [`with_linearizable_probes`](Self::with_linearizable_probes) for
 /// quorum-fresh probes at the price of one quorum RTT per call. When the
 /// probe itself fails (etcd unreachable), the last cached snapshot is
 /// served stale (`rr_config_etcd_stale_serves_total`); only a cold cache
@@ -530,6 +588,11 @@ pub struct EtcdConfigProvider {
     cluster_id: String,
     cache: Arc<RevisionCache>,
     rescan_lock: Arc<Mutex<()>>,
+    // Serializes compaction-resync diff dispatch across the three domain
+    // watchers. Kept separate from `rescan_lock` so a stalled consumer
+    // cannot block the `routing_table_snapshot` rescan path through it
+    // (K7a): staging needs `rescan_lock`, dispatching does not.
+    resync_dispatch_lock: Arc<Mutex<()>>,
     linearizable_probes: bool,
 }
 
@@ -640,6 +703,7 @@ impl EtcdConfigProvider {
             cluster_id: resolved_cluster_id,
             cache: Arc::new(RevisionCache::default()),
             rescan_lock: Arc::new(Mutex::new(())),
+            resync_dispatch_lock: Arc::new(Mutex::new(())),
             linearizable_probes: false,
         })
     }
@@ -690,12 +754,14 @@ impl EtcdConfigProvider {
 
     /// Full prefix scan of the routing table, returning the content
     /// fingerprint the scanned state corresponds to alongside the parsed
-    /// table. Individual malformed keys are skipped (loudly, with a
-    /// metric) instead of failing every routing read — one bad key under
-    /// a prefix must not take down routing for the whole cluster.
+    /// table and the etcd store revision at scan time (needed to resume a
+    /// watch gaplessly after a compaction resync). Individual malformed
+    /// keys are skipped (loudly, with a metric) instead of failing every
+    /// routing read — one bad key under a prefix must not take down
+    /// routing for the whole cluster.
     async fn fetch_routing_table(
         &self,
-    ) -> Result<(PrefixFingerprint, Arc<RoutingTable>), ConfigError> {
+    ) -> Result<(PrefixFingerprint, Arc<RoutingTable>, i64), ConfigError> {
         let mut client = self.connect().await?;
         let scan_prefix = format!("{}/", root_prefix(&self.cluster_id));
 
@@ -703,6 +769,13 @@ impl EtcdConfigProvider {
             .get(scan_prefix, Some(GetOptions::new().with_prefix()))
             .await
             .map_err(|err| map_etcd_error("scan routing table", err))?;
+
+        // The scan's store revision: events up to this revision are covered
+        // by the returned table, so a watch resumed from here loses nothing.
+        let scan_revision = response
+            .header()
+            .map(|h| h.revision())
+            .unwrap_or(0);
 
         let mut max_mod_revision: i64 = 0;
         let mut bad_keys: u64 = 0;
@@ -733,12 +806,27 @@ impl EtcdConfigProvider {
                 parse_partition_id_from_key(&self.cluster_id, key)
                     .and_then(|partition_id| {
                         decode_json::<PartitionValue>(kv.value(), "decode partition entry")
-                            .map(|part| (partition_id, part))
-                    })
-                    .map(|(partition_id, part)| {
-                        table
-                            .partitions
-                            .insert(partition_id, (part.config, part.group_id));
+                            .and_then(|part| {
+                                // PartitionConfig::Range is a reserved,
+                                // unimplemented variant: the shard router
+                                // only routes SingleId by exact lookup.
+                                // Reject it loudly at the provider boundary
+                                // (bad-key path) instead of silently
+                                // installing a partition whose range IDs
+                                // would all miss routing.
+                                if matches!(part.config, PartitionConfig::Range { .. }) {
+                                    return Err(ConfigError::InvalidConfig(format!(
+                                        "partition {partition_id} uses reserved PartitionConfig::Range \
+                                         (unimplemented — only SingleId routes); fix or remove the key"
+                                    )));
+                                }
+                                Ok((partition_id, part))
+                            })
+                            .map(|(partition_id, part)| {
+                                table
+                                    .partitions
+                                    .insert(partition_id, (part.config, part.group_id));
+                            })
                     })
             } else if key.starts_with(&groups_prefix(&self.cluster_id)) {
                 parse_group_id_from_key(&self.cluster_id, key)
@@ -794,7 +882,7 @@ impl EtcdConfigProvider {
             // self-consistent if a proxy strips it.
             key_count: response.count().max(response.kvs().len() as i64),
         };
-        Ok((fingerprint, Arc::new(table)))
+        Ok((fingerprint, Arc::new(table), scan_revision))
     }
 
     /// Spawn the reconnect loop for one watch domain and return its
@@ -857,10 +945,23 @@ impl EtcdConfigProvider {
                 WatchExit::ConsumerDropped => return,
                 WatchExit::Canceled { compact_revision } if compact_revision > 0 => {
                     metrics::counter!("rr_config_etcd_watch_compactions_total").increment(1);
-                    self.resync_after_compaction(domain, &sender).await;
-                    // The resume revision is gone — start the next watch
-                    // from the current head; the resync above covered the gap.
-                    last_seen_rev = 0;
+                    match self.resync_after_compaction(domain, &sender).await {
+                        Some(scan_revision) => {
+                            // Resume from the scan's store revision: events
+                            // up to it are covered by the resync, and the
+                            // next watch replays everything after it — the
+                            // (compaction, resync] gap is closed. Resuming
+                            // from head (0) instead would silently lose
+                            // writes between the scan and the new watch.
+                            last_seen_rev = scan_revision;
+                        }
+                        None => {
+                            // Resync failed (etcd unreachable): resume from
+                            // head — the stale-cache path stays loud via the
+                            // error log inside resync_after_compaction.
+                            last_seen_rev = 0;
+                        }
+                    }
                 }
                 WatchExit::StreamEnded | WatchExit::StreamFailed | WatchExit::Canceled { .. } => {}
             }
@@ -902,40 +1003,30 @@ impl EtcdConfigProvider {
     /// read cache with a fresh linearizable scan and emit the diff against
     /// the cached baseline as a synthetic change set so stream consumers
     /// converge (events are idempotent upserts/removals). Without a
-    /// baseline we cannot know what changed — consumers must re-fetch.
+    /// baseline, the diff is computed against an EMPTY table — every key in
+    /// the fresh scan is emitted as an upsert, which converges consumers
+    /// just the same (the events are idempotent by design).
+    ///
+    /// Returns the scan's store revision so the caller can resume the
+    /// watch gaplessly; `None` means the resync failed.
+    ///
+    /// `rescan_lock` is held only for the scan + cache store; the diff is
+    /// dispatched after it is released, so a slow consumer cannot block the
+    /// `routing_table_snapshot` rescan path (see `execute_resync`).
     async fn resync_after_compaction(
         &self,
         domain: WatchDomain,
         sender: &mpsc::Sender<RoutingTableChange>,
-    ) {
-        let _guard = self.rescan_lock.lock().await;
-        let (fingerprint, fresh) = match self.fetch_routing_table().await {
-            Ok(scanned) => scanned,
-            Err(err) => {
-                tracing::error!(
-                    target: "rr::config::etcd",
-                    domain = domain.as_str(),
-                    error = %err,
-                    "resync after watch compaction failed; cached routing table may be stale"
-                );
-                return;
-            }
-        };
-        let baseline = self.cache.latest();
-        self.cache.store(fingerprint, Arc::clone(&fresh));
-        let Some(baseline) = baseline else {
-            tracing::warn!(
-                target: "rr::config::etcd",
-                domain = domain.as_str(),
-                "watch compaction with no cached baseline; consumers must re-fetch the routing table to reconcile"
-            );
-            return;
-        };
-        for change in diff_tables(domain, &baseline, &fresh) {
-            if sender.send(change).await.is_err() {
-                return;
-            }
-        }
+    ) -> Option<i64> {
+        execute_resync(
+            &self.rescan_lock,
+            &self.resync_dispatch_lock,
+            &self.cache,
+            domain,
+            sender,
+            || self.fetch_routing_table(),
+        )
+        .await
     }
 }
 
@@ -970,7 +1061,11 @@ impl Drop for WatchStreamGuard {
 #[async_trait]
 impl ConfigProvider for EtcdConfigProvider {
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError> {
-        let (_fingerprint, table) = self.fetch_routing_table().await?;
+        let (fingerprint, table, _revision) = self.fetch_routing_table().await?;
+        // Populate the resync baseline: without this a deployment that only
+        // reads via get_routing_table has no cached table to diff a
+        // compaction resync against.
+        self.cache.store(fingerprint, Arc::clone(&table));
         Ok(table.as_ref().clone())
     }
 
@@ -1015,7 +1110,7 @@ impl ConfigProvider for EtcdConfigProvider {
             return Ok(table);
         }
         metrics::counter!("rr_config_etcd_rescans_total").increment(1);
-        let (fingerprint, table) = self.fetch_routing_table().await?;
+        let (fingerprint, table, _revision) = self.fetch_routing_table().await?;
         self.cache.store(fingerprint, Arc::clone(&table));
         Ok(table)
     }
@@ -1552,5 +1647,164 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ConfigError::ProviderUnavailable(_)));
+    }
+
+    // K7a: a stalled consumer must not block the routing_table_snapshot
+    // rescan path through the rescan lock.
+    #[tokio::test]
+    async fn resync_dispatch_does_not_block_rescan_path_on_stalled_consumer() {
+        let rescan_lock = Arc::new(Mutex::new(()));
+        let rescan_lock_probe = Arc::clone(&rescan_lock);
+        let dispatch_lock = Arc::new(Mutex::new(()));
+        let cache = Arc::new(RevisionCache::default());
+
+        let mut fresh = RoutingTable::default();
+        fresh.nodes.insert(1, NodeAddr { addr: "a:1".into() });
+        fresh.nodes.insert(2, NodeAddr { addr: "a:2".into() });
+        let fresh = Arc::new(fresh);
+        let scanned = (fp(9, 2), Arc::clone(&fresh), 42);
+
+        // Stalled consumer: one event buffered, receiver alive but not
+        // drained until the assertions below.
+        let (sender, mut receiver) = mpsc::channel::<RoutingTableChange>(1);
+        sender
+            .send(RoutingTableChange::NodeRemoved { node_id: 99 })
+            .await
+            .unwrap();
+
+        let cache_probe = Arc::clone(&cache);
+        let resync = tokio::spawn(async move {
+            execute_resync(
+                &rescan_lock,
+                &dispatch_lock,
+                &cache,
+                WatchDomain::Node,
+                &sender,
+                || async move { Ok::<_, ConfigError>(scanned) },
+            )
+            .await
+        });
+        // Let the resync stage its scan and park on the full channel.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Scan + stage are done and the lock released: the rescan path must
+        // stay acquirable while dispatch is stalled on the slow consumer.
+        // (Pre-fix this timed out — dispatch sent while holding rescan_lock.)
+        let acquired = tokio::time::timeout(Duration::from_millis(200), rescan_lock_probe.lock()).await;
+        assert!(
+            acquired.is_ok(),
+            "rescan lock must stay free while resync dispatch is stalled"
+        );
+
+        // Drain the consumer: dispatch completes and reports the scan
+        // revision so the watch can resume gaplessly. NodeAdded order is
+        // HashMap iteration order — compare as a sorted set.
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RoutingTableChange::NodeRemoved { node_id: 99 })
+        ));
+        let mut added = Vec::new();
+        for _ in 0..2 {
+            match receiver.recv().await {
+                Some(RoutingTableChange::NodeAdded { node_id, .. }) => added.push(node_id),
+                other => panic!("expected NodeAdded, got {other:?}"),
+            }
+        }
+        added.sort_unstable();
+        assert_eq!(added, vec![1, 2]);
+        assert_eq!(resync.await.unwrap(), Some(42));
+        assert!(Arc::ptr_eq(
+            &cache_probe.get_if_current(fp(9, 2)).unwrap(),
+            &fresh
+        ));
+    }
+
+    // K7a: dispatch serialization — a stalled resync's diff must keep its
+    // FIFO position on the shared watch channel: a later resync stages
+    // against the stalled one's table, and its diff is dispatched behind it.
+    #[tokio::test]
+    async fn resync_stage_proceeds_and_dispatch_stays_ordered_while_stalled() {
+        let rescan_lock = Arc::new(Mutex::new(()));
+        let dispatch_lock = Arc::new(Mutex::new(()));
+        let cache = Arc::new(RevisionCache::default());
+
+        let mut table_a = RoutingTable::default();
+        table_a.nodes.insert(1, NodeAddr { addr: "a:1".into() });
+        let scanned_a = (fp(10, 1), Arc::new(table_a), 41);
+
+        let mut table_b = RoutingTable::default();
+        table_b.nodes.insert(1, NodeAddr { addr: "a:1".into() });
+        table_b.nodes.insert(2, NodeAddr { addr: "a:2".into() });
+        let fingerprint_b = fp(11, 2);
+        let scanned_b = (fingerprint_b, Arc::new(table_b), 43);
+
+        let (sender, mut receiver) = mpsc::channel::<RoutingTableChange>(1);
+        sender
+            .send(RoutingTableChange::NodeRemoved { node_id: 99 })
+            .await
+            .unwrap();
+
+        let rescan_lock_a = Arc::clone(&rescan_lock);
+        let dispatch_lock_a = Arc::clone(&dispatch_lock);
+        let cache_a = Arc::clone(&cache);
+        let sender_a = sender.clone();
+        let resync_a = tokio::spawn(async move {
+            execute_resync(
+                &rescan_lock_a,
+                &dispatch_lock_a,
+                &cache_a,
+                WatchDomain::Node,
+                &sender_a,
+                || async move { Ok::<_, ConfigError>(scanned_a) },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Resync A is now parked sending into the full channel. Resync B
+        // must still stage its scan (rescan_lock is free) — only its
+        // dispatch waits behind A's.
+        let cache_b = Arc::clone(&cache);
+        let resync_b = tokio::spawn(async move {
+            execute_resync(
+                &rescan_lock,
+                &dispatch_lock,
+                &cache,
+                WatchDomain::Node,
+                &sender,
+                || async move { Ok::<_, ConfigError>(scanned_b) },
+            )
+            .await
+        });
+        let mut staged = false;
+        for _ in 0..100 {
+            if cache_b.get_if_current(fingerprint_b).is_some() {
+                staged = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            staged,
+            "second resync must stage its scan while the first dispatch is stalled"
+        );
+
+        // Drain: A's diff precedes B's on the shared channel.
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RoutingTableChange::NodeRemoved { node_id: 99 })
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RoutingTableChange::NodeAdded { node_id: 1, .. })
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RoutingTableChange::NodeAdded { node_id: 2, .. })
+        ));
+        assert_eq!(resync_a.await.unwrap(), Some(41));
+        assert_eq!(resync_b.await.unwrap(), Some(43));
     }
 }

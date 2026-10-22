@@ -56,7 +56,10 @@ pub struct NodeAddr {
 pub enum PartitionConfig {
     /// The partition is a single fixed ID.
     SingleId(u64),
-    /// The partition covers a contiguous range of IDs.
+    /// RESERVED — not implemented. The shard router only ever routes by
+    /// exact partition-id lookup (`SingleId`); a `Range` partition stored
+    /// in the config plane is rejected loudly at the provider boundary
+    /// instead of being silently mis-routed. Do not write this variant.
     Range {
         /// First ID in the range.
         start: u64,
