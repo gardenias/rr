@@ -204,11 +204,11 @@ impl KafkaIngestor {
             .set("bootstrap.servers", cfg.bootstrap_servers.join(","))
             .set("client.id", &client_id)
             .set("group.id", &client_id)
-            .set("enable.auto.commit", "true")
-            .set(
-                "auto.commit.interval.ms",
-                cfg.auto_commit_interval.as_millis().to_string(),
-            )
+            // Commits happen exclusively via commit_applied (manual, after
+            // the raft apply). auto.commit would publish the *consumed*
+            // position and race the manual commits, making the consumer
+            // group's committed offset useless as an observability signal.
+            .set("enable.auto.commit", "false")
             .set("enable.partition.eof", "false")
             .set("session.timeout.ms", "30000")
             .set("auto.offset.reset", "earliest")
@@ -262,6 +262,23 @@ fn validate_config(cfg: &KafkaIngestorConfig) -> Result<(), KafkaIngestorError> 
     }
     if cfg.partition < 0 {
         return Err(invalid("partition must be >= 0"));
+    }
+    // A static pattern makes every hosted group consume the SAME
+    // (topic, partition) with the SAME group.id — group A's commands get
+    // applied by group B (ADR A-0001's per-group topic contract, silently
+    // violated). Require the {group_id} placeholder so groups can never
+    // share a topic/consumer identity.
+    if !cfg.topic_pattern.contains("{group_id}") {
+        return Err(invalid(
+            "topic_pattern must contain the {group_id} placeholder — a static topic \
+             would be shared by every hosted group, applying each other's commands",
+        ));
+    }
+    if !cfg.client_id_pattern.contains("{group_id}") {
+        return Err(invalid(
+            "client_id_pattern must contain the {group_id} placeholder — a static \
+             client.id makes all groups share one Kafka consumer-group identity",
+        ));
     }
     if let Some(sec) = &cfg.security
         && matches!(
@@ -457,6 +474,26 @@ mod tests {
     #[test]
     fn validate_config_accepts_valid() {
         validate_config(&valid_cfg()).unwrap();
+    }
+
+    #[test]
+    fn validate_config_rejects_static_topic_pattern() {
+        let cfg = KafkaIngestorConfig {
+            topic_pattern: "shared-topic".into(),
+            ..valid_cfg()
+        };
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("{group_id}"));
+    }
+
+    #[test]
+    fn validate_config_rejects_static_client_id_pattern() {
+        let cfg = KafkaIngestorConfig {
+            client_id_pattern: "shared-client".into(),
+            ..valid_cfg()
+        };
+        let err = validate_config(&cfg).unwrap_err();
+        assert!(err.to_string().contains("{group_id}"));
     }
 
     #[test]

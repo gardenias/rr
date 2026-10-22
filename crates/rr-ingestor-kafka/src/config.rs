@@ -41,10 +41,12 @@ pub struct KafkaIngestorConfig {
     /// Free-form rdkafka `client.id` set on the consumer. Default
     /// `rr-ingestor-{group_id}`.
     pub client_id_pattern: String,
-    /// Auto-commit interval for the upstream Kafka consumer-group
-    /// offsets. Note: rr's correctness does NOT depend on this — the
-    /// authoritative offset lives in the framed snapshot. This setting
-    /// only affects external observability (e.g. Burrow/CMAK lag).
+    /// DEPRECATED / no-op: commits to the upstream Kafka consumer-group
+    /// happen exclusively via `commit_applied` after the raft apply —
+    /// rdkafka's auto-commit is disabled because it publishes the
+    /// *consumed* position and races the manual commits, making the
+    /// consumer group's committed offset useless as an observability
+    /// signal. Kept for config compatibility; ignored.
     pub auto_commit_interval: Duration,
 }
 

@@ -100,8 +100,15 @@ pub enum KafkaOffsetError {
 ///
 /// [`IdempotencyKey::request_id`]: rr_core::idempotency::IdempotencyKey::request_id
 pub fn kafka_offset_to_request_id(bytes: &[u8]) -> Result<u64, KafkaOffsetError> {
-    let (i, _): (i64, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+    let (i, consumed): (i64, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
         .map_err(|e| KafkaOffsetError::DecodeFailed(e.to_string()))?;
+    if consumed != bytes.len() {
+        return Err(KafkaOffsetError::DecodeFailed(format!(
+            "trailing bytes after offset: {} bytes consumed of {}",
+            consumed,
+            bytes.len()
+        )));
+    }
     if i < 0 {
         return Err(KafkaOffsetError::NegativeOffset(i));
     }
@@ -170,10 +177,17 @@ mod helper_tests {
         }
         // A lone odd varint byte zigzag-decodes to a negative value and must
         // be rejected as a sentinel, not clamped.
-        let result = kafka_offset_to_request_id(&[1_u8, 2, 3]);
+        let result = kafka_offset_to_request_id(&[1_u8]);
         assert!(
             matches!(result, Err(KafkaOffsetError::NegativeOffset(_))),
             "odd zigzag byte must be rejected as negative, got {result:?}"
+        );
+        // Trailing bytes after a valid offset are rejected (previously
+        // silently discarded — a fail-closed contract violation).
+        let result = kafka_offset_to_request_id(&[2_u8, 0xde, 0xad]);
+        assert!(
+            matches!(result, Err(KafkaOffsetError::DecodeFailed(_))),
+            "trailing bytes must be rejected, got {result:?}"
         );
     }
 }
