@@ -12,8 +12,11 @@ data:
     data_dir = "/var/lib/rr/data"
     admin_port = {{ .Values.ports.admin }}
     metrics_port = {{ .Values.ports.metrics }}
-    # Prometheus scrapes cross-pod (v0.3.0 defaults the HTTP server to loopback)
-    metrics_bind_host = "0.0.0.0"
+    {{- if .Values.metrics.bindHost }}
+    # Requires server >= 0.3.0 — v0.2.0's strict config parser rejects this
+    # key (deny_unknown_fields) and the pod CrashLoops.
+    metrics_bind_host = "{{ .Values.metrics.bindHost }}"
+    {{- end }}
 
     [storage]
     backend = "{{ .Values.storage.backend }}"

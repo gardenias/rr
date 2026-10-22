@@ -1,0 +1,99 @@
+# Post-install/upgrade cluster-formation job.
+#
+# rr-server's [cluster].peers only populates the local routing table — it
+# does NOT create raft membership (see getting-started: membership is formed
+# explicitly via rr-admin add-learner + change-membership on the leader).
+# Without this job, `helm install` yields one bootstrapped voter (rr-0) and
+# replicaCount-1 idle nodes forever.
+#
+# The job is idempotent: add-learner errors for nodes that are already
+# members are tolerated, and change-membership to the full voter set is the
+# authoritative converging step (change_membership is idempotent server-side).
+# On failure the job exits non-zero and Kubernetes retries (backoffLimit).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rr.fullname" . }}-cluster-form
+  labels:
+    {{- include "rr.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "rr.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "rr.serviceAccountName" . }}
+      restartPolicy: Never
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: cluster-form
+          image: {{ include "rr.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              FULLNAME='{{ include "rr.fullname" . }}'
+              REPLICAS='{{ .Values.replicaCount }}'
+              GRPC='{{ .Values.ports.grpc }}'
+              ADMIN='{{ .Values.ports.admin }}'
+              GROUP='{{ .Values.cluster.groupId }}'
+              LEADER_ADMIN="${FULLNAME}-0.${FULLNAME}:${ADMIN}"
+              TLS_ARGS='{{- if .Values.tls.enabled }}--tls-ca /etc/rr/tls/ca.crt --tls-cert /etc/rr/tls/tls.crt --tls-key /etc/rr/tls/tls.key{{ if .Values.tls.domain }} --tls-domain {{ .Values.tls.domain }}{{ end }}{{- end }}'
+
+              echo "waiting for the bootstrap node's admin endpoint at ${LEADER_ADMIN} ..."
+              i=0
+              until rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} node status >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "$i" -ge 60 ]; then
+                  echo "bootstrap node never came up" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              i=1
+              while [ "$i" -lt "$REPLICAS" ]; do
+                NODE_ID=$((i + 1))
+                PEER="${FULLNAME}-${i}.${FULLNAME}:${GRPC}"
+                echo "adding node ${NODE_ID} (${PEER}) as learner of group ${GROUP} ..."
+                # Tolerated: re-adding an existing learner/voter errors on
+                # re-runs; change-membership below is the authoritative step.
+                rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group add-learner \
+                  --group "${GROUP}" --node-id "${NODE_ID}" --addr "${PEER}" || true
+                i=$((i + 1))
+              done
+
+              VOTERS="$(seq -s, 1 "$REPLICAS")"
+              echo "electing full voter set: ${VOTERS}"
+              rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group change-membership \
+                --group "${GROUP}" --voters "${VOTERS}"
+              echo "cluster formation complete"
+          {{- if .Values.auth.adminTokenSecret.name }}
+          env:
+            - name: RR_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.adminTokenSecret.name }}
+                  key: {{ .Values.auth.adminTokenSecret.key }}
+                  optional: {{ .Values.auth.adminTokenSecret.optional }}
+          {{- end }}
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/rr/tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ required "tls.existingSecret is required when tls.enabled=true" .Values.tls.existingSecret }}
+      {{- end }}

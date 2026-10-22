@@ -50,7 +50,9 @@ groups:
             §Failure modes.
 
       - alert: RrIdempotencyCacheNearFull
-        expr: rr_idempotency_cache_size > 45000
+        # Code cap is DEFAULT_IDEMPOTENCY_CACHE_SIZE = 10000
+        # (crates/rr-raft/src/idempotency.rs) — alert at 80%.
+        expr: rr_idempotency_cache_size > 8000
         for: 10m
         labels:
           severity: warning
@@ -58,9 +60,10 @@ groups:
         annotations:
           summary: "Idempotency cache near full on group {{ $labels.group_id }}"
           description: |
-            Idempotency cache approaching its eviction threshold; idempotency_expired
-            errors will start firing if growth continues. Consider increasing cache
-            size or reducing client TTL.
+            Idempotency cache approaching its 10000-entry eviction threshold;
+            idempotency_expired errors will start firing if growth continues.
+            Consider increasing NodeConfig::idempotency_cache_size or reducing
+            client retry TTL.
 
       - alert: RrIngestorOffsetDrift
         expr: |
@@ -94,7 +97,12 @@ groups:
   - name: rr_availability
     rules:
       - alert: RrLeaderFlapping
-        expr: rr:leader_churn_5m:rate > 0.5
+        # rr:leader_churn_5m:rate is term-bumps PER SECOND summed across
+        # instances; convert to elections/minute before thresholding.
+        # > 1/minute: sustained churn beyond ~1 election per 2 minutes
+        # (one election bumps the term on every instance: ~1.5/min at that
+        # cadence on a 3-node group).
+        expr: rr:leader_churn_5m:rate * 60 > 1
         for: 2m
         labels:
           severity: warning
@@ -102,9 +110,9 @@ groups:
         annotations:
           summary: "Leader flapping on group {{ $labels.group_id }}"
           description: |
-            > 1 election every 2 minutes for 2m. Likely network instability,
-            disk I/O contention, or undersized election timeout. See
-            docs/operations/runbooks/leader-flapping.md.
+            > 1 election per 2 minutes sustained for 2m. Likely network
+            instability, disk I/O contention, or undersized election timeout.
+            See docs/operations/runbooks/leader-flapping.md.
 
       - alert: RrNoLeader
         expr: max by (group_id) (rr_raft_is_leader) == 0
@@ -119,12 +127,10 @@ groups:
             blocked. Check quorum (>= ceil((N+1)/2) replicas reachable).
 
       - alert: RrReplicationLagHigh
-        expr: |
-          (
-            rr:replication_lag_max:by_group > 1000
-          )
-          and on (group_id, instance)
-          (rr_raft_is_leader == 1)
+        # Use the leader-filtered recording rule: rr_raft_replication_lag is
+        # only emitted on leaders, and `max by (group_id)` drops the instance
+        # label, so an `and on (group_id, instance)` join can never match.
+        expr: cluster:rr_replication_lag:max_per_group > 1000
         for: 5m
         labels:
           severity: warning
@@ -132,6 +138,35 @@ groups:
         annotations:
           summary: "Replication lag > 1000 entries on group {{ $labels.group_id }}"
           description: |
-            Follower {{ $labels.follower_node_id }} is > 1000 entries behind
-            the leader for at least 5m. Possible follower disk-stall or
-            network partition.
+            The slowest follower of group {{ $labels.group_id }} is > 1000
+            entries behind the leader for at least 5m. Possible follower
+            disk-stall or network partition.
+
+      - alert: RrIngestorOffsetMapFailures
+        # Fail-closed path: an unmappable Kafka offset means the ingestor
+        # refuses to propose rather than risk the exactly-once contract.
+        expr: increase(rr_ingestor_offset_map_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          rr_component: ingestor
+        annotations:
+          summary: "Ingestor offset→request_id mapping failed on group {{ $labels.group_id }}"
+          description: |
+            The ingestor hit an undecodable/overflowing Kafka offset and
+            refused to propose (fail-closed). Investigate broker/topic state
+            and the persisted offset in the latest snapshot.
+
+      - alert: RrStorageWalFlushErrors
+        # WAL fsync failures: acknowledged writes may not survive a power
+        # loss — the durability contract is degrading in real time.
+        expr: increase(rr_storage_wal_flush_errors_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          rr_component: storage
+        annotations:
+          summary: "RocksDB WAL fsync failing on {{ $labels.instance }}"
+          description: |
+            flush_wal(true) is returning errors — committed entries may not
+            be durable. Check disk health/space immediately.

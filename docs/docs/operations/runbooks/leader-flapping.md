@@ -81,7 +81,7 @@ histogram_quantile(0.99, sum by (le) (rate(rr_proposal_duration_seconds_bucket[5
 如果 p99 > 250ms，磁盘是瓶颈。磁盘 fsync 阻塞 Raft heartbeat tick，引发被动选举。
 
 **Fix**:
-- 临时：把 `durability` 从 `strict` 降到 `balanced`（**注意**：违反 Raft 耐久性合约）。只用于已知非关键数据 + replicated clusters + 有完整备份 + 立即计划磁盘升级。
+- 临时：把 `durability` 从 `strict` 降到 `replicated_only`（**注意**：本机不再 fsync，违反 Raft 耐久性合约，仅靠多副本冗余兜底；旧别名 `balanced` 已在 v0.3.0 移除，配置会硬报错）。只用于已知非关键数据 + replicated clusters + 有完整备份 + 立即计划磁盘升级。
 - 长期：换更快的磁盘 (NVMe)，或减少写入速率。
 
 ### 3. CPU 抢占 / CPU starvation

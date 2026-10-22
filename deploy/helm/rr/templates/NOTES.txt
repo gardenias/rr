@@ -1,0 +1,22 @@
+rr has been deployed as a StatefulSet named {{ include "rr.fullname" . }} with {{ .Values.replicaCount }} replica(s).
+
+A post-install hook job ({{ include "rr.fullname" . }}-cluster-form) forms the
+raft group: it adds every pod as a learner on the bootstrap node and then
+sets the full voter set — [cluster].peers alone only fills routing tables
+and would otherwise leave {{ sub (int64 .Values.replicaCount) 1 }} node(s) idle.
+
+Watch formation:
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "rr.fullname" . }}-cluster-form -f
+
+Verify group status (leader elected, membership = all pods):
+  kubectl -n {{ .Release.Namespace }} exec {{ include "rr.fullname" . }}-0 -- \
+    rr-admin --addr 127.0.0.1:{{ .Values.ports.admin }} group status --group {{ .Values.cluster.groupId }}
+
+{{- if .Values.security.allowInsecure }}
+WARNING: security.allowInsecure=true — TLS/mTLS/token gates are bypassed.
+This mode is for LOCAL DEV ONLY; do not expose the pods outside the cluster.
+{{- end }}
+
+Admin RPCs from your workstation (plaintext dev mode):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rr.fullname" . }} {{ .Values.ports.admin }}:{{ .Values.ports.admin }}
+  rr-admin --addr 127.0.0.1:{{ .Values.ports.admin }} group status --group {{ .Values.cluster.groupId }}

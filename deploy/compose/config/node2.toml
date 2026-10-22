@@ -4,6 +4,10 @@ listen_addr = "0.0.0.0:51001"
 data_dir = "/var/lib/rr/data"
 admin_port = 52001
 metrics_port = 9100
+# Containers: publish admin/metrics beyond loopback so the host can
+# reach them (compose maps 5200N/910N to these ports). LOCAL DEV ONLY.
+admin_bind_host = "0.0.0.0"
+metrics_bind_host = "0.0.0.0"
 # Insecure opt-out lives in docker-compose.yml (RR_ALLOW_INSECURE=true) —
 # 仅本地开发 / local dev only. See node1.toml for the security context.
 

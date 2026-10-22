@@ -10,6 +10,13 @@ ports:
   admin: 52001
   metrics: 9100
 
+metrics:
+  # Bind host for the Prometheus/health HTTP server. Leave empty for v0.2.0
+  # images (their metrics server is already reachable cross-pod and the
+  # strict config parser rejects this key). Set to "0.0.0.0" on server
+  # >= 0.3.0, which defaults the HTTP server to loopback.
+  bindHost: ""
+
 storage:
   backend: "rocks"
   durability: "strict"
@@ -20,6 +27,8 @@ cluster:
   terminationGracePeriodSeconds: 30
   podDisruptionBudget:
     minAvailable: 2
+  # Raft group hosted by every pod (partition 1 → this group).
+  groupId: 1
 
 auth:
   adminTokenSecret:
@@ -34,6 +43,9 @@ tls:
   enabled: false
   existingSecret: ""
   requireClientCert: false
+  # SNI override for rr-admin clients (the cluster-form hook job) when the
+  # server certificates' SANs do not cover the in-cluster pod DNS names.
+  domain: ""
 
 security:
   # DEV/LOCAL ONLY — renders RR_ALLOW_INSECURE=true, bypassing rr-server's
@@ -55,6 +67,15 @@ podSecurityContext:
   runAsUser: 10001
   runAsGroup: 10001
   fsGroup: 10001
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # readOnlyRootFilesystem breaks nothing in rr-server (state lives on the
+  # data PVC, rendered config on an emptyDir) but flip deliberately — some
+  # storage engines mmap/create temp files elsewhere.
+  readOnlyRootFilesystem: false
 
 serviceAccount:
   create: true

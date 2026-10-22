@@ -894,13 +894,13 @@
       {
         "current": {
           "selected": false,
-          "text": "50000",
-          "value": "50000"
+          "text": "10000",
+          "value": "10000"
         },
         "hide": 0,
         "label": "Idempotency cache max",
         "name": "IDEMPOTENCY_CACHE_MAX",
-        "query": "50000",
+        "query": "10000",
         "skipUrlSync": false,
         "type": "textbox"
       }

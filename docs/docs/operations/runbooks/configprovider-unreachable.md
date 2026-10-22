@@ -35,8 +35,11 @@ node, migrate a partition, adjust membership).
 ## Detection / 检测
 
 ```promql
-# PromQL — ConfigProvider 错误率
-rate(rr_config_provider_errors_total[5m]) > 0.1
+# PromQL — etcd ConfigProvider 在 etcd 不可达时服务陈旧缓存（可用性退化信号）
+increase(rr_config_etcd_stale_serves_total[5m]) > 0
+
+# watch 重连频率（持续非零说明连接面不稳定）
+rate(rr_config_etcd_watch_reconnects_total[5m]) > 0
 
 # 或：如果你的 ConfigProvider 是 etcd
 etcd_server_has_leader == 0

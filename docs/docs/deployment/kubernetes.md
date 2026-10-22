@@ -47,7 +47,7 @@ This deploys: StatefulSet (3 replicas, OrderedReady), headless Service, ClusterI
 安装 / Install:
 
 ```bash
-helm install rr oci://ghcr.io/gardenias/charts/rr --version 0.1.0
+helm install rr oci://ghcr.io/gardenias/charts/rr --version 0.2.0
 ```
 
 升级 / Upgrade:

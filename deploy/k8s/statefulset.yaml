@@ -47,15 +47,19 @@ data:
     data_dir = "/var/lib/rr/data"
     admin_port = 52001
     metrics_port = 9100
-    # Prometheus scrapes cross-pod: bind the HTTP observability server wide
-    # (v0.3.0 defaults it to loopback).
-    metrics_bind_host = "0.0.0.0"
+    # NOTE: no metrics_bind_host here — that key only exists in server >= 0.3.0;
+    # v0.2.0's strict parser (deny_unknown_fields) refuses to boot on it, and
+    # v0.2.0's metrics server is already reachable cross-pod without it.
 
     [storage]
     backend = "rocks"
     durability = "strict"
 
     [cluster]
+    # peers only populates the LOCAL ROUTING TABLE — it does NOT create raft
+    # membership. The cluster-form Job (deploy/k8s/cluster-form-job.yaml)
+    # performs add-learner + change-membership; without it rr-0 stays the
+    # sole voter and the other pods idle forever.
     bootstrap = {{BOOTSTRAP}}
     peers = {{PEERS}}
 
@@ -196,8 +200,15 @@ spec:
               mountPath: /rendered
       containers:
         - name: rr-server
-          image: ghcr.io/gardenias/rr:latest
+          # Pinned release — never `latest`: pods must not silently run
+          # different builds (rolling restarts would mix wire/format
+          # versions). Bump deliberately and read the CHANGELOG first.
+          image: ghcr.io/gardenias/rr:0.2.0
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           args: ["serve", "--config", "/etc/rr/config.toml"]
           env:
             # REQUIRED in the default secure posture: a missing token means
@@ -232,12 +243,16 @@ spec:
               port: metrics
             initialDelaySeconds: 3
             periodSeconds: 5
+          # Generous liveness window: replaying a large RocksDB raft log can
+          # take over a minute before /health answers — killing the pod
+          # mid-recovery restarts the clock forever.
           livenessProbe:
             httpGet:
               path: /health
               port: metrics
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 10
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /var/lib/rr/data

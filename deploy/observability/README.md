@@ -7,8 +7,8 @@ Drop-in observability artifacts for an rr cluster.
 | File | Purpose |
 |---|---|
 | `prometheus/rr-recording-rules.yml` | Pre-computed aggregations (max lag, leader count, p99 latency, idempotency rates) |
-| `prometheus/rr-alerts.yml` | Alert rules (insecure mode, idempotency collisions, leader flap, no leader, high lag, ingestor seed failures) |
-| `grafana/rr-cluster-overview.json` | 24-panel dashboard in 4 row groups (throughput / latency / replication / cluster health): applied-entries TPS, per-op client latency, proposal latency, AppendEntries RTT, per-follower lag, leaders, idempotency rates & cache, ingestor health, framing decode failures, auth rejects |
+| `prometheus/rr-alerts.yml` | Alert rules (insecure mode, idempotency collisions & cache, leader flap, no leader, high replication lag, ingestor seed/offset failures, WAL flush errors, framing decode failures) |
+| `grafana/rr-cluster-overview.json` | 20-panel dashboard in 4 row groups (throughput / latency / replication / cluster health): applied-entries TPS, per-op client latency, proposal latency, AppendEntries RTT, per-follower lag, leaders, idempotency rates & cache, learner promotion outcomes, ingestor health, framing decode failures. (No auth-rejects panel: auth failures are emitted as `rr::audit` tracing events, not metrics.) |
 
 ## Prometheus integration
 

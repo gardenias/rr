@@ -42,6 +42,7 @@ spec:
       labels:
         {{- include "rr.selectorLabels" . | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "rr.serviceAccountName" . }}
       terminationGracePeriodSeconds: {{ .Values.cluster.terminationGracePeriodSeconds }}
       # Spread pods across nodes (best effort) so a single host failure cannot
       # take out 2 replicas and break raft quorum. Preferred, not required:
@@ -99,6 +100,8 @@ spec:
         - name: rr-server
           image: {{ include "rr.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           args: ["serve", "--config", "/etc/rr/config.toml"]
           env:
             - name: RUST_LOG
@@ -131,12 +134,16 @@ spec:
               port: metrics
             initialDelaySeconds: 3
             periodSeconds: 5
+          # Generous liveness window: a node replaying a large RocksDB raft
+          # log can take over a minute before /health answers — killing it
+          # mid-recovery restarts the clock forever.
           livenessProbe:
             httpGet:
               path: /health
               port: metrics
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 10
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /var/lib/rr/data

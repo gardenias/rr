@@ -1,0 +1,92 @@
+# Cluster-formation job for the raw manifests.
+#
+# rr-server's [cluster].peers only populates the local routing table — it
+# does NOT create raft membership. Applying statefulset.yaml alone yields
+# one bootstrapped voter (rr-0) and two idle pods. Apply this job AFTER the
+# StatefulSet's pods are created:
+#
+#   kubectl apply -f deploy/k8s/cluster-form-job.yaml
+#   kubectl logs job/rr-cluster-form -f
+#
+# The job is idempotent and safe to re-apply: add-learner errors for
+# already-added nodes are tolerated; change-membership to the full voter
+# set is the authoritative converging step (idempotent server-side).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rr-cluster-form
+  labels:
+    app.kubernetes.io/name: rr
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rr
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: cluster-form
+          image: ghcr.io/gardenias/rr:0.2.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              LEADER_ADMIN="rr-0.rr:52001"
+              GROUP=1
+              # The mounted rr-tls secret is the same CA + client keypair the
+              # servers trust. If the server certificates' SANs do not cover
+              # the pod DNS names (rr-N.rr), set TLS_DOMAIN to a SAN that
+              # matches (e.g. the cert's CN) and uncomment the export below.
+              TLS_ARGS="--tls-ca /etc/rr/tls/ca.crt --tls-cert /etc/rr/tls/tls.crt --tls-key /etc/rr/tls/tls.key"
+              # TLS_ARGS="${TLS_ARGS} --tls-domain rr"
+
+              echo "waiting for the bootstrap node's admin endpoint at ${LEADER_ADMIN} ..."
+              i=0
+              until rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} node status >/dev/null 2>&1; do
+                i=$((i + 1))
+                if [ "$i" -ge 60 ]; then
+                  echo "bootstrap node never came up" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              for i in 1 2; do
+                NODE_ID=$((i + 1))
+                PEER="rr-${i}.rr:51001"
+                echo "adding node ${NODE_ID} (${PEER}) as learner of group ${GROUP} ..."
+                rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group add-learner \
+                  --group "${GROUP}" --node-id "${NODE_ID}" --addr "${PEER}" || true
+              done
+
+              echo "electing full voter set: 1,2,3"
+              rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group change-membership \
+                --group "${GROUP}" --voters "1,2,3"
+              echo "cluster formation complete"
+          env:
+            - name: RR_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rr-admin-token
+                  key: token
+                  optional: false
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/rr/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: rr-tls

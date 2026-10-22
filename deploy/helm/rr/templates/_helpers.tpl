@@ -50,3 +50,14 @@ Image reference.
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}
+
+{{/*
+ServiceAccount name.
+*/}}
+{{- define "rr.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "rr.fullname" .) .Values.serviceAccount.name -}}
+{{- else -}}
+{{- default "default" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}

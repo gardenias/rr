@@ -192,7 +192,9 @@ services:
       - ../observability/prometheus/rr-recording-rules.yml:/etc/prometheus/rr/recording-rules.yml:ro
       - ../observability/prometheus/rr-alerts.yml:/etc/prometheus/rr/alerts.yml:ro
     ports:
-      - "9090:9090"
+      # Loopback-only publish: the lab carries no Prometheus auth — keep the
+      # UI off LAN interfaces (use `ssh -L` / `docker compose port` to view).
+      - "127.0.0.1:9090:9090"
     deploy:
       resources:
         limits:
@@ -211,7 +213,9 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ../observability/grafana/rr-cluster-overview.json:/var/lib/grafana/dashboards/rr-cluster-overview.json:ro
     ports:
-      - "3000:3000"
+      # Loopback-only publish: the lab uses the stock admin/admin credentials
+      # — never expose that on LAN interfaces (use `ssh -L` to browse).
+      - "127.0.0.1:3000:3000"
     depends_on:
       - prometheus
 
