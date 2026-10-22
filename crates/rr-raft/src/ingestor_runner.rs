@@ -163,7 +163,10 @@ impl IngestorHandle {
     /// Signal the supervisor to stop and wait for it to exit.
     pub async fn stop(self) {
         let _ = self.cancel.send(true);
-        let _ = self.join.await;
+        if let Err(e) = self.join.await {
+            // A supervisor panic must not vanish silently into teardown.
+            tracing::warn!(error = %e, "ingestor supervisor task failed to join cleanly (panicked?)");
+        }
     }
 
     /// Whether the supervisor task is still running.
@@ -453,7 +456,13 @@ async fn run_poll_loop(
                     backoff_ms = backoff.as_millis() as u64,
                     "ingestor poll failed; backing off"
                 );
-                tokio::time::sleep(backoff).await;
+                // The backoff (up to MAX_POLL_BACKOFF = 30s) must not delay a
+                // stop_group shutdown: race it against the cancel channel
+                // (same shape as the output runner's send backoff).
+                tokio::select! {
+                    _ = cancel_rx.changed() => return Ok(()),
+                    _ = tokio::time::sleep(backoff) => {}
+                }
                 backoff = (backoff * 2).min(MAX_POLL_BACKOFF);
                 continue;
             }
@@ -808,6 +817,35 @@ mod tests {
             "expected a small number of retries under backoff in 500ms, got {n}"
         );
         handle.stop().await;
+    }
+
+    // A poll-error backoff (capped at 30s) must not stall stop_group: the
+    // sleep races the cancel channel, so stop returns promptly even when the
+    // supervisor is mid-backoff during a Kafka outage.
+    #[tokio::test]
+    async fn poll_error_backoff_is_cancellable_for_fast_stop() {
+        let mgr = make_single_node_leader().await;
+        let attempts = Arc::new(AtomicU64::new(0));
+        let ingestor = AlwaysErrIngestor {
+            poll_attempts: Arc::clone(&attempts),
+        };
+        let handle = spawn_with_batch_size(Arc::clone(&mgr), 1, Box::new(ingestor), None, 1);
+
+        // Let the backoff grow past 1s (100→200→…→1600ms): an uncancellable
+        // sleep would stall stop() for seconds.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 4,
+            "expected several backed-off poll attempts by now"
+        );
+
+        let stop_started = std::time::Instant::now();
+        handle.stop().await;
+        assert!(
+            stop_started.elapsed() < Duration::from_secs(1),
+            "stop must not wait out the poll-error backoff (took {:?})",
+            stop_started.elapsed()
+        );
     }
 
     #[tokio::test]

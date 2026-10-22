@@ -406,6 +406,14 @@ impl IoBatcher {
     /// durability contract is unaffected either way. Unlike [`submit`], a
     /// barrier is NOT rejected while [`IoBatcher::close`] is draining: the
     /// closing sequence answers it along with everything else still queued.
+    ///
+    /// KNOWN TRADE-OFF: a barrier has no timeout. If the worker is wedged
+    /// (e.g. a blocked fsync that never returns), callers of `flush_barrier`
+    /// — `save_vote` / `truncate_after` / `purge` — hang with it. That is
+    /// deliberate: proceeding without the durability ordering the barrier
+    /// guarantees would silently violate INV-1, which is worse than hanging
+    /// loudly (the hang is observable via the missing flush metrics/logs;
+    /// `close()` does carry its own 30s deadline).
     pub async fn flush_barrier(&self) -> Result<(), String> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.tx

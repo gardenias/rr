@@ -39,8 +39,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use openraft::type_config::alias::WatchReceiverOf;
 use openraft::type_config::async_runtime::WatchReceiver;
-use openraft::ServerState;
+use openraft::{BasicNode, Membership, ServerState};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -162,7 +163,15 @@ async fn run(
                     }
                     continue;
                 }
-                evaluate_and_promote(&mgr, group_id, &snapshot, &config, &mut stable_ticks).await;
+                evaluate_and_promote(
+                    &mgr,
+                    group_id,
+                    &metrics_rx,
+                    &snapshot,
+                    &config,
+                    &mut stable_ticks,
+                )
+                .await;
             }
         }
     }
@@ -171,12 +180,12 @@ async fn run(
 async fn evaluate_and_promote(
     mgr: &RaftGroupManager,
     group_id: GroupId,
+    metrics_rx: &WatchReceiverOf<RrTypeConfig, RrRaftMetrics>,
     metrics: &RrRaftMetrics,
     config: &AutoPromoteConfig,
     stable_ticks: &mut BTreeMap<NodeId, u32>,
 ) {
     let cfg = metrics.membership_config.membership();
-    let voter_ids: BTreeSet<NodeId> = cfg.voter_ids().collect();
     let learner_ids: BTreeSet<NodeId> = cfg.learner_ids().collect();
     if learner_ids.is_empty() {
         if !stable_ticks.is_empty() {
@@ -196,16 +205,14 @@ async fn evaluate_and_promote(
     // change_membership call. Promoting one at a time would build the second
     // call's voter set from the pre-tick membership and thereby demote the
     // learner promoted moments earlier.
+    //
+    // A learner with NO replication record (`None`) is not "replicated up to
+    // index 0": the leader has never reported progress for it, so it must
+    // not count as caught up.
     let promotable = plan_promotions(
         group_id,
         &learner_ids,
-        |nid| {
-            replication
-                .get(nid)
-                .and_then(|opt| opt.as_ref())
-                .map(|l| l.index)
-                .unwrap_or(0)
-        },
+        |nid| replication.get(nid).and_then(|opt| opt.as_ref()).map(|l| l.index),
         leader_index,
         config,
         stable_ticks,
@@ -214,8 +221,28 @@ async fn evaluate_and_promote(
         return;
     }
 
-    let mut new_voters = voter_ids.clone();
-    new_voters.extend(promotable.iter().copied());
+    // Build the change_membership target from the membership read LIVE just
+    // before the call — never from the tick snapshot, which is stale by now:
+    // a voter removed by a concurrent admin change must not be re-added by
+    // this promotion, and a planned learner that is no longer in the
+    // membership aborts the attempt (re-planned next tick).
+    let live_membership = metrics_rx
+        .borrow_watched()
+        .membership_config
+        .membership()
+        .clone();
+    let Some(new_voters) = target_voter_set(&live_membership, &promotable) else {
+        warn!(
+            target: AUDIT_TARGET,
+            op = "AutoPromoteLearner",
+            group_id,
+            planned_node_ids = ?promotable,
+            success = false,
+            result = "aborted",
+            "learner auto-promotion aborted: membership changed since planning tick"
+        );
+        return;
+    };
     info!(
         target: AUDIT_TARGET,
         op = "AutoPromoteLearner",
@@ -269,17 +296,36 @@ async fn evaluate_and_promote(
 /// that reached `config.stability_ticks` on this tick. Pure planning, split
 /// from [`evaluate_and_promote`] so the batching rule (one change_membership
 /// per tick, no same-tick demotion) is unit-testable without a live cluster.
+///
+/// `matched_index` returns `None` for a learner with no replication record.
+/// `None` is NOT index 0: the leader has never reported progress for that
+/// learner, so it is treated as not caught up (its stability chain resets)
+/// rather than as matched-at-index-0 — on a young group whose
+/// `last_log_index <= max_lag`, reading `None` as 0 would count a learner
+/// that never replicated as caught up.
 fn plan_promotions(
     group_id: GroupId,
     learner_ids: &BTreeSet<NodeId>,
-    matched_index: impl Fn(&NodeId) -> u64,
+    matched_index: impl Fn(&NodeId) -> Option<u64>,
     leader_index: u64,
     config: &AutoPromoteConfig,
     stable_ticks: &mut BTreeMap<NodeId, u32>,
 ) -> Vec<NodeId> {
     let mut promotable = Vec::new();
     for nid in learner_ids {
-        let matched = matched_index(nid);
+        let Some(matched) = matched_index(nid) else {
+            if let Some(entry) = stable_ticks.get_mut(nid) {
+                if *entry > 0 {
+                    debug!(
+                        group_id,
+                        follower_node_id = nid,
+                        "no replication record; resetting stability counter"
+                    );
+                    *entry = 0;
+                }
+            }
+            continue;
+        };
         let lag = leader_index.saturating_sub(matched);
         if lag <= config.max_lag {
             let entry = stable_ticks.entry(*nid).or_insert(0);
@@ -308,6 +354,24 @@ fn plan_promotions(
         }
     }
     promotable
+}
+
+/// Build the `change_membership` target voter set from a membership read
+/// LIVE just before the call — never from the tick snapshot, which is stale
+/// by promotion time: a voter removed by a concurrent admin change must not
+/// be re-added, and a planned learner that is no longer in the membership
+/// aborts the promotion (`None`).
+fn target_voter_set(
+    live: &Membership<NodeId, BasicNode>,
+    promotable: &[NodeId],
+) -> Option<BTreeSet<NodeId>> {
+    let learners: BTreeSet<NodeId> = live.learner_ids().collect();
+    if !promotable.iter().all(|nid| learners.contains(nid)) {
+        return None;
+    }
+    let mut voters: BTreeSet<NodeId> = live.voter_ids().collect();
+    voters.extend(promotable.iter().copied());
+    Some(voters)
 }
 
 #[cfg(test)]
@@ -401,13 +465,13 @@ mod tests {
         let mut stable = BTreeMap::new();
 
         // Tick 1: both caught up but below the threshold.
-        let p = plan_promotions(1, &learners, |_| 100, 100, &cfg, &mut stable);
+        let p = plan_promotions(1, &learners, |_| Some(100), 100, &cfg, &mut stable);
         assert!(p.is_empty());
         assert_eq!(stable.get(&2), Some(&1));
         assert_eq!(stable.get(&3), Some(&1));
 
         // Tick 2: both cross the threshold together → ONE batched plan.
-        let p = plan_promotions(1, &learners, |_| 100, 100, &cfg, &mut stable);
+        let p = plan_promotions(1, &learners, |_| Some(100), 100, &cfg, &mut stable);
         assert_eq!(
             p,
             vec![2, 3],
@@ -426,13 +490,110 @@ mod tests {
         };
         let learners = BTreeSet::from([2u64, 3u64]);
         let mut stable = BTreeMap::new();
-        plan_promotions(1, &learners, |_| 100, 100, &cfg, &mut stable);
+        plan_promotions(1, &learners, |_| Some(100), 100, &cfg, &mut stable);
 
         // Node 3 falls 50 behind (lag > max_lag): counter resets, only node 2
         // crosses the threshold.
-        let matched = |nid: &u64| if *nid == 3 { 50 } else { 100 };
+        let matched = |nid: &u64| if *nid == 3 { Some(50) } else { Some(100) };
         let p = plan_promotions(1, &learners, matched, 100, &cfg, &mut stable);
         assert_eq!(p, vec![2]);
         assert_eq!(stable.get(&3), Some(&0));
+    }
+
+    /// G4(b) regression: a learner with NO replication record (`None`) must
+    /// never count as caught up — on a young group (last_log_index <=
+    /// max_lag) the old `unwrap_or(0)` would treat "never replicated" as
+    /// "replicated up to index 0" and promote it.
+    #[test]
+    fn plan_promotions_skips_learners_without_replication_record() {
+        let cfg = AutoPromoteConfig {
+            max_lag: 10,
+            stability_ticks: 2,
+            poll_interval: Duration::from_millis(50),
+        };
+        let learners = BTreeSet::from([2u64]);
+        let mut stable = BTreeMap::new();
+
+        // Young log: leader_index 5 <= max_lag 10, so a bogus matched=0
+        // default WOULD qualify. None must not accumulate any stability.
+        for _ in 0..3 {
+            let p = plan_promotions(1, &learners, |_| None, 5, &cfg, &mut stable);
+            assert!(
+                p.is_empty(),
+                "learner without a replication record must never be promotable"
+            );
+        }
+        assert!(
+            stable.get(&2).is_none_or(|v| *v == 0),
+            "no stability credit without a replication record"
+        );
+
+        // Contrast: an explicit record AT index 0 on the same young log is a
+        // real replication report and does count (lag 5 <= max_lag).
+        plan_promotions(1, &learners, |_| Some(0), 5, &cfg, &mut stable);
+        assert_eq!(stable.get(&2), Some(&1));
+        let p = plan_promotions(1, &learners, |_| Some(0), 5, &cfg, &mut stable);
+        assert_eq!(p, vec![2]);
+    }
+
+    /// G4(b): a learner whose replication record DISAPPEARS after earning
+    /// stability credit loses it — the consecutive-caught-up chain is broken.
+    #[test]
+    fn plan_promotions_resets_counter_when_record_disappears() {
+        let cfg = AutoPromoteConfig {
+            max_lag: 10,
+            stability_ticks: 3,
+            poll_interval: Duration::from_millis(50),
+        };
+        let learners = BTreeSet::from([2u64]);
+        let mut stable = BTreeMap::new();
+        plan_promotions(1, &learners, |_| Some(100), 100, &cfg, &mut stable);
+        assert_eq!(stable.get(&2), Some(&1));
+
+        let p = plan_promotions(1, &learners, |_| None, 100, &cfg, &mut stable);
+        assert!(p.is_empty());
+        assert_eq!(stable.get(&2), Some(&0));
+    }
+
+    /// G4(a) regression: the promotion target is built from the LIVE
+    /// membership read just before change_membership, so a voter removed by
+    /// a concurrent admin change (tick snapshot saw {1,2}; live is {1}) is
+    /// not re-added by the promotion.
+    #[test]
+    fn target_voter_set_never_re_adds_removed_voter() {
+        // Live: voters {1}, learner {3}. Stale snapshot would have given {1,2,3}.
+        let live = membership(&[1], &[3]);
+        let target = target_voter_set(&live, &[3]).expect("learner 3 still present");
+        assert_eq!(
+            target,
+            BTreeSet::from([1u64, 3u64]),
+            "voter 2 removed by a concurrent admin change must stay removed"
+        );
+    }
+
+    /// G4(a): a planned learner that is no longer in the live membership
+    /// (concurrently removed) aborts the promotion instead of re-adding it.
+    #[test]
+    fn target_voter_set_aborts_when_learner_gone() {
+        let live = membership(&[1, 2], &[]);
+        assert_eq!(target_voter_set(&live, &[3]), None);
+    }
+
+    /// The unchanged fast path: live membership matches planning, target is
+    /// current voters + the promoted learners.
+    #[test]
+    fn target_voter_set_happy_path() {
+        let live = membership(&[1, 2], &[3, 4]);
+        let target = target_voter_set(&live, &[3, 4]).unwrap();
+        assert_eq!(target, BTreeSet::from([1u64, 2u64, 3u64, 4u64]));
+    }
+
+    fn membership(voters: &[u64], learners: &[u64]) -> Membership<u64, BasicNode> {
+        let nodes: BTreeMap<u64, BasicNode> = voters
+            .iter()
+            .chain(learners.iter())
+            .map(|id| (*id, BasicNode { addr: String::new() }))
+            .collect();
+        Membership::new(vec![voters.iter().copied().collect()], nodes).unwrap()
     }
 }

@@ -126,7 +126,7 @@ impl RaftNode {
     }
 
     /// Initialize this node as a single-node cluster.
-    pub async fn init_single_node(&self, node_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn init_single_node(&self, node_id: u64) -> Result<(), rr_core::error::RrError> {
         let mut nodes = BTreeMap::new();
         nodes.insert(
             node_id,
@@ -134,7 +134,11 @@ impl RaftNode {
                 addr: String::new(),
             },
         );
-        self.raft.initialize(nodes).await?;
+        self.raft.initialize(nodes).await.map_err(|e| {
+            rr_core::error::RrError::Raft(rr_core::error::RaftError::InitializationFailed {
+                reason: e.to_string(),
+            })
+        })?;
         Ok(())
     }
 

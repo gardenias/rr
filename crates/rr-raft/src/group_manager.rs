@@ -1118,7 +1118,8 @@ impl RaftGroupManager {
     /// Get a Raft reference for a write operation, paired with an
     /// [`InFlightWriteGuard`] that tracks the write until it completes.
     ///
-    /// Returns `None` if the group does not exist.
+    /// Returns `None` if the group does not exist or is being stopped
+    /// (`stop_group` has removed it from the map and started draining).
     #[instrument(skip(self))]
     pub async fn get_raft_for_write(
         &self,
@@ -1132,9 +1133,20 @@ impl RaftGroupManager {
             .get(&group_id)
             .map(|entry| Arc::clone(entry.value()))?;
         let guard = state.lock().await;
+        // Re-check map membership under the GroupState lock (same pattern
+        // as start_metrics_ticker / start_learner_promoter): once
+        // stop_group removes the group, its drain loop starts observing
+        // in_flight_writes, so an increment admitted after the removal
+        // would be missed and the write would land on a shutting-down
+        // raft. Admitting the write (incrementing) only while the group
+        // is still in the map makes drain provable: a write entering
+        // after drain started is rejected here, one admitted before is
+        // counted.
+        if !self.groups.contains_key(&group_id) {
+            return None;
+        }
         let raft = guard.node.raft.clone();
         let counter = Arc::clone(&guard.in_flight_writes);
-        drop(guard);
         Some((raft, InFlightWriteGuard::new(counter)))
     }
 
@@ -2174,5 +2186,56 @@ mod tests {
             "recovered node must keep appending after snapshot recovery"
         );
         mgr2.stop_group(1).await.unwrap();
+    }
+
+    /// G2 regression: a write racing `stop_group` must be either COUNTED by
+    /// the drain loop (admitted before the group left the map) or REJECTED
+    /// (`None` once drain has started) — never admitted after the drain
+    /// loop began observing the counter, where its increment would be
+    /// missed and the write would land on a shutting-down raft.
+    #[tokio::test]
+    async fn test_write_entering_during_drain_is_rejected_not_missed() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+
+        // Hold one in-flight write so stop_group parks in the drain loop
+        // (count == 1 until the guard drops, well within the 5s deadline).
+        let (_raft, guard) = mgr.get_raft_for_write(1).await.expect("group is running");
+
+        let stopper = {
+            let mgr = Arc::clone(&mgr);
+            tokio::spawn(async move { mgr.stop_group(1).await })
+        };
+
+        // Once the group leaves the map, every write attempt must observe
+        // None (rejected). Poll until that happens; with the counter
+        // incremented under the same lock as the membership check, drain
+        // can no longer admit-and-miss a late write.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if mgr.get_raft_for_write(1).await.is_none() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "stop_group never removed the group from the map"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // Rejection alone is not a completed stop: the write admitted
+        // before drain must keep stop_group parked in the drain loop.
+        assert!(
+            !stopper.is_finished(),
+            "stop_group finished while an admitted write was still in flight"
+        );
+
+        // Dropping the guard releases the drain; shutdown completes.
+        drop(guard);
+        stopper
+            .await
+            .expect("stop task panicked")
+            .expect("stop_group failed");
+        assert_eq!(mgr.group_count().await, 0);
     }
 }

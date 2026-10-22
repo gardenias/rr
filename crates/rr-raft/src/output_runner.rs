@@ -71,7 +71,10 @@ impl OutputHandle {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
-        let _ = self.join.await;
+        if let Err(e) = self.join.await {
+            // A runner panic must not vanish silently into teardown.
+            tracing::warn!(error = %e, "output runner task failed to join cleanly (panicked?)");
+        }
     }
 }
 

@@ -88,11 +88,22 @@ fn de<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, io::Error> {
 }
 
 fn to_read_err(e: rr_core::error::StorageError) -> io::Error {
-    io::Error::other(e.to_string())
+    use rr_core::error::StorageError;
+    match e {
+        // Preserve the original io::ErrorKind (e.g. StorageFull from the
+        // RocksDB ENOSPC mapping) — flattening it into `Other` makes the
+        // failure unclassifiable upstream.
+        StorageError::Io(err) => err,
+        other => io::Error::other(other.to_string()),
+    }
 }
 
 fn to_write_err(e: rr_core::error::StorageError) -> io::Error {
-    io::Error::other(e.to_string())
+    use rr_core::error::StorageError;
+    match e {
+        StorageError::Io(err) => err,
+        other => io::Error::other(other.to_string()),
+    }
 }
 
 // ─── Key encoding ────────────────────────────────────────────────────────────
