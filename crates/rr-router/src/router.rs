@@ -57,11 +57,16 @@ impl ShardRouter {
 
     #[instrument(skip(self))]
     /// Get the full routing table.
+    ///
+    /// Reads through the same snapshot path as [`Self::route`] (INV-6: the
+    /// ConfigProvider stays the single source of truth — no cached view is
+    /// retained here) and clones on demand: providers holding the table in
+    /// memory serve the snapshot as an `Arc` clone, so this costs one local
+    /// copy instead of a backend-specific deep fetch (e.g. an etcd
+    /// full-prefix scan).
     pub async fn routing_table(&self) -> Result<RoutingTable, RrError> {
-        self.config
-            .get_routing_table()
-            .await
-            .map_err(RrError::Config)
+        let table = self.config.routing_table_snapshot().await?;
+        Ok((*table).clone())
     }
 }
 
@@ -143,5 +148,65 @@ mod tests {
         assert_eq!(table.nodes.len(), 1);
         assert!(table.partitions.contains_key(&1));
         assert!(table.partitions.contains_key(&2));
+    }
+
+    // ── Test 4: full-table read is a point-in-time copy, not a live view ──
+    // INV-6: routing_table() reads through the provider's snapshot path and
+    // hands back an owned copy, so later provider mutations must not leak
+    // into an already-returned table.
+    #[tokio::test]
+    async fn test_routing_table_returns_point_in_time_copy() {
+        let provider = make_provider();
+        provider
+            .add_partition(1, PartitionConfig::SingleId(1), 100, vec![1])
+            .await;
+        let router = make_router(&provider);
+
+        let table = router.routing_table().await.unwrap();
+        provider
+            .add_partition(2, PartitionConfig::SingleId(2), 200, vec![2])
+            .await;
+
+        assert_eq!(
+            table.partitions.len(),
+            1,
+            "returned table must be a point-in-time copy, not a live view"
+        );
+        assert!(!table.partitions.contains_key(&2));
+    }
+
+    // ── Test 5: both read paths observe the same routing state ─────────
+    // INV-6: route() and routing_table() read through the same snapshot
+    // path, so they cannot disagree about the current partition→group
+    // mapping.
+    #[tokio::test]
+    async fn test_route_and_routing_table_agree() {
+        let provider = make_provider();
+        provider
+            .add_partition(1, PartitionConfig::SingleId(1), 100, vec![1, 2])
+            .await;
+        provider
+            .add_partition(
+                2,
+                PartitionConfig::Range { start: 10, end: 20 },
+                200,
+                vec![3, 4],
+            )
+            .await;
+        let router = make_router(&provider);
+
+        let table = router.routing_table().await.unwrap();
+        for partition_id in table.partitions.keys() {
+            let via_route = router.route(*partition_id).await.unwrap();
+            let via_table = table
+                .partitions
+                .get(partition_id)
+                .map(|(_, group_id)| *group_id)
+                .unwrap();
+            assert_eq!(
+                via_route, via_table,
+                "route() and routing_table() disagree for partition {partition_id}"
+            );
+        }
     }
 }

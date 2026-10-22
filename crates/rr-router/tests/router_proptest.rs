@@ -104,7 +104,22 @@ fn expect_not_found(
 
 proptest! {
     // Bounded case count: this runs in the default CI test job (R-6 budget).
-    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+    //
+    // R-6 review item L7a: persist failing seeds into the git-tracked
+    // `crates/rr-router/proptest-regressions/` so a failure reproduces
+    // across runs. `SourceParallel` cannot find a lib.rs/main.rs ancestor
+    // above `tests/` (it would degrade to an extension-swapped sibling file
+    // with a warning), so pin the absolute path via CARGO_MANIFEST_DIR.
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: Some(Box::new(
+            proptest::test_runner::FileFailurePersistence::Direct(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/proptest-regressions/router_proptest.txt"
+            )),
+        )),
+        ..ProptestConfig::default()
+    })]
 
     /// INV-6: after a routing-table update the old shard receives no new writes; the routing table is the single source of truth.
     #[test]
