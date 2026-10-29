@@ -73,6 +73,7 @@ impl RaftNode {
                 election_timeout_max: 300,
                 enable_pre_vote: Some(true),
                 install_snapshot_timeout: 60_000,
+                allow_log_reversion: Some(true),
                 snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_logs_since_last),
                 ..Default::default()
             }

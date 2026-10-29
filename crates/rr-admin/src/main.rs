@@ -1303,50 +1303,89 @@ fn admin_follows_redirect(admin_explicit: bool, leader_addr: &str) -> Option<Res
     }
 }
 
-/// Submit one kv request on the current client channel.
-///
-/// On a `leader_info` redirect (`success=false` + leader hint) the leader
-/// address is dialed ONCE, `kv_client`/`kv_addr` are swapped over to it,
-/// and the request is retried there. Later commands keep talking to the
-/// leader; an explicit `reconnect` re-dials it.
+/// Submit one kv request, following leader redirects and trying known peers
+/// when the current transport fails or a follower has no leader hint.
 async fn kv_call(
     kv_client: &mut KvClient,
     kv_addr: &mut String,
+    peers: &[String],
     group: u64,
     payload: &[u8],
     tls: Option<&TlsConfig>,
     client_token: &Option<Arc<str>>,
 ) -> std::result::Result<ClientResponse, Status> {
-    for attempt in 0..2 {
-        let resp = kv_client
+    let mut pending: std::collections::VecDeque<String> = peers
+        .iter()
+        .filter(|addr| *addr != kv_addr)
+        .cloned()
+        .collect();
+    let mut last_response = None;
+    let mut last_error = None;
+
+    for _ in 0..peers.len() + 2 {
+        match kv_client
             .request(ClientRequest {
                 partition_id: group,
                 payload: payload.to_vec(),
                 idem_key: None,
             })
-            .await?
-            .into_inner();
-        let redirect = if resp.success || attempt > 0 {
-            None
-        } else {
-            resp.leader_info
-                .as_ref()
-                .filter(|info| !info.addr.is_empty())
-                .map(|info| (info.node_id, info.addr.clone()))
-        };
-        let Some((node_id, addr)) = redirect else {
-            return Ok(resp);
-        };
-        let channel = connect(&addr, tls).await.map_err(|e| {
-            Status::unavailable(format!(
-                "redirect to leader {node_id} at {addr} failed: {e}"
-            ))
-        })?;
-        *kv_client = make_kv_client(channel, client_token);
-        println!("redirected to leader node {node_id} at {addr}");
-        *kv_addr = addr;
+            .await
+        {
+            Ok(response) => {
+                let resp = response.into_inner();
+                if resp.success || resp.idem_error.is_some() || resp.ns_limit_error.is_some() {
+                    return Ok(resp);
+                }
+                if let Some(info) = resp
+                    .leader_info
+                    .as_ref()
+                    .filter(|info| !info.addr.is_empty())
+                {
+                    pending.retain(|addr| addr != &info.addr);
+                    pending.push_front(info.addr.clone());
+                }
+                last_response = Some(resp);
+                last_error = None;
+            }
+            Err(e) => {
+                if e.code() != Code::Unavailable {
+                    return Err(e);
+                }
+                last_response = None;
+                last_error = Some(e);
+            }
+        }
+
+        let mut connected = false;
+        while let Some(addr) = pending.pop_front() {
+            match connect(&addr, tls).await {
+                Ok(channel) => {
+                    *kv_client = make_kv_client(channel, client_token);
+                    println!("reconnected to {addr}");
+                    *kv_addr = addr;
+                    connected = true;
+                    break;
+                }
+                Err(e) => {
+                    last_response = None;
+                    last_error = Some(Status::unavailable(format!(
+                        "connect to peer {addr} failed: {e}"
+                    )));
+                }
+            }
+        }
+        if !connected {
+            break;
+        }
     }
-    unreachable!("the loop returns by the second iteration at the latest")
+
+    if let Some(e) = last_error {
+        Err(e)
+    } else if let Some(resp) = last_response {
+        Ok(resp)
+    } else {
+        Err(Status::unavailable("no reachable cluster peers"))
+    }
 }
 
 /// After a kv leader redirect moved `kv_addr`, move the admin channel along
@@ -1467,6 +1506,21 @@ async fn run_repl(
     let mut admin_client = make_admin_client(admin_channel, admin_token);
     let mut kv_client = make_kv_client(kv_channel, client_token);
     let mut kv_addr = addr.to_string();
+    let mut kv_peers = vec![addr.to_string()];
+    match admin_client
+        .get_group_membership(GroupId { group_id: group })
+        .await
+    {
+        Ok(response) => {
+            let membership = response.into_inner();
+            for member in membership.voters.into_iter().chain(membership.learners) {
+                if !member.addr.is_empty() && !kv_peers.contains(&member.addr) {
+                    kv_peers.push(member.addr);
+                }
+            }
+        }
+        Err(e) => println!("member discovery failed: {e}; automatic failover is limited to {addr}"),
+    }
     let mut needs_reconnect = false;
     println!("connected: client={addr} admin={admin_addr} group={group}");
 
@@ -1529,6 +1583,7 @@ async fn run_repl(
                 let resp = kv_call(
                     &mut kv_client,
                     &mut kv_addr,
+                    &kv_peers,
                     group,
                     &payload,
                     tls,
@@ -1565,6 +1620,7 @@ async fn run_repl(
                 let resp = kv_call(
                     &mut kv_client,
                     &mut kv_addr,
+                    &kv_peers,
                     group,
                     &payload,
                     tls,
@@ -1594,6 +1650,7 @@ async fn run_repl(
                 let resp = kv_call(
                     &mut kv_client,
                     &mut kv_addr,
+                    &kv_peers,
                     group,
                     &payload,
                     tls,
@@ -2377,5 +2434,101 @@ mod tests {
     #[test]
     fn test_decode_kv_response_invalid_bytes() {
         assert!(decode_kv_response(&[0xFF, 0xFF, 0xFF]).is_err());
+    }
+
+    struct StaticClientService;
+
+    #[tonic::async_trait]
+    impl rr_network::proto::client::client_service_server::ClientService for StaticClientService {
+        async fn request(
+            &self,
+            _request: tonic::Request<ClientRequest>,
+        ) -> std::result::Result<Response<ClientResponse>, Status> {
+            Ok(Response::new(ClientResponse {
+                success: true,
+                payload: b"leader-ok".to_vec(),
+                leader_info: None,
+                idem_error: None,
+                ns_limit_error: None,
+            }))
+        }
+
+        async fn get_cluster_info(
+            &self,
+            _request: tonic::Request<rr_network::proto::client::Empty>,
+        ) -> std::result::Result<Response<rr_network::proto::client::ClusterInfo>, Status> {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn read_local(
+            &self,
+            _request: tonic::Request<rr_network::proto::client::ReadLocalRequest>,
+        ) -> std::result::Result<Response<rr_network::proto::client::ReadLocalResponse>, Status>
+        {
+            Err(Status::unimplemented("not used by this test"))
+        }
+
+        async fn read_linearizable(
+            &self,
+            _request: tonic::Request<rr_network::proto::client::ReadLocalRequest>,
+        ) -> std::result::Result<Response<rr_network::proto::client::ReadLocalResponse>, Status>
+        {
+            Err(Status::unimplemented("not used by this test"))
+        }
+    }
+
+    async fn spawn_static_client_service() -> (
+        String,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use rr_network::proto::client::client_service_server::ClientServiceServer;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test client service");
+        let addr = listener.local_addr().expect("test service address");
+        drop(listener);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ClientServiceServer::new(StaticClientService))
+                .serve_with_shutdown(addr, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("test client service must run");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        (format!("127.0.0.1:{}", addr.port()), shutdown_tx, handle)
+    }
+
+    #[tokio::test]
+    async fn test_kv_call_reconnects_to_a_surviving_peer_after_transport_failure() {
+        let (dead_addr, dead_shutdown, dead_handle) = spawn_static_client_service().await;
+        let mut kv_addr = dead_addr.clone();
+        let mut kv_client = make_kv_client(connect(&dead_addr, None).await.unwrap(), &None);
+        dead_shutdown.send(()).unwrap();
+        dead_handle.await.unwrap();
+
+        let (leader_addr, leader_shutdown, leader_handle) = spawn_static_client_service().await;
+        let peers = vec![dead_addr, leader_addr.clone()];
+        let response = kv_call(
+            &mut kv_client,
+            &mut kv_addr,
+            &peers,
+            1,
+            b"request",
+            None,
+            &None,
+        )
+        .await
+        .expect("the request must reconnect to the surviving peer");
+
+        assert!(response.success);
+        assert_eq!(response.payload, b"leader-ok");
+        assert_eq!(kv_addr, leader_addr);
+        leader_shutdown.send(()).unwrap();
+        leader_handle.await.unwrap();
     }
 }

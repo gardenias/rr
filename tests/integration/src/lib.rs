@@ -22,6 +22,8 @@
 #[cfg(test)]
 mod client_batching;
 #[cfg(test)]
+mod cluster_recovery;
+#[cfg(test)]
 mod cross_tier_ingestor;
 pub mod fault_injection;
 #[cfg(test)]

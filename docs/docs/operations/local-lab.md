@@ -101,7 +101,7 @@ bash deploy/lab/chaos/run-all.sh
 
 ### 已验证的故障恢复要点 / Validated recovery notes
 
-- **被擦除节点（同 id）的追平需要一次换主**：openraft 0.10.0-alpha.34 下，leader 对被清空重建的 voter 的复制进度（`matching`）是陈旧的，不会自动驱动追平。已验证的恢复流程（`chaos/state-wipe-restart.sh` 编码并断言）：`change-membership` 将其移出 voters → `add-learner` 重新加入 → 若 45s 内无追平进展则**重启当前 leader**（换主会重建进度跟踪器，追平立即进行）→ `change-membership` 恢复为 voter。生产替换节点建议走同样流程。
+- **被擦除的 rocks 节点（同 id）的追平需要一次换主**：openraft 0.10.0-alpha.34 下，leader 对被清空重建的 voter 的复制进度（`matching`）是陈旧的，不会自动驱动追平。已验证的恢复流程（`chaos/state-wipe-restart.sh` 编码并断言）：`change-membership` 将其移出 voters → `add-learner` 重新加入 → 若 45s 内无追平进展则**重启当前 leader**（换主会重建进度跟踪器，追平立即进行）→ `change-membership` 恢复为 voter。生产替换节点建议走同样流程。默认 mem 节点重启为空属于预期行为，存活 leader 会重置复制进度并从头追平，无需换主；该日志回退恢复不用于 rocks 路径。
 - **选举超时是数据中心级假设**：心跳 50ms / 选举 150-300ms 硬编码；链路延迟 ≥150ms 会持续重选（混沌套件以 40ms 校准验证稳定性）。
 - **黑洞链路的连接必须由 keepalive 清除**：本轮修复前，网络分区恢复后陈旧 H2 通道会让分裂状态持续到进程重启。
 

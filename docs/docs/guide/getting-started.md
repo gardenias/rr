@@ -299,9 +299,9 @@ cargo run -p rr-admin -- repl --addr 127.0.0.1:51001 --group 1
 Failover (verified): Ctrl-C the leader — within seconds the survivors elect a new one (term increments); writes to the new leader's listen port succeed and committed data survives.
 
 :::warning
-写入必须发往 **leader** 的监听端口。现行 REPL 会在收到 `leader_info` 时自动跟随一次重定向（打印 `redirected to leader node N at ...`），且只在服务端返回 `success=true` 时打印 `OK`；被拒绝的写会打印 `Error: request rejected ...`。复制进度仍以各节点 `group status` 的 `last_log_index` 为准。
+服务端不在节点间转发客户端写请求。REPL 会跟随 `leader_info` 重定向，并在当前节点断连或没有 leader 提示时尝试启动时发现的组成员；只在服务端返回 `success=true` 时打印 `OK`，最终被拒绝的写会打印 `Error: request rejected ...`。复制进度仍以各节点 `group status` 的 `last_log_index` 为准。
 
-Writes must go to the **leader's** listen port. The current REPL automatically follows one `leader_info` redirect (printing `redirected to leader node N at ...`) and prints `OK` only when the server answers `success=true`; rejected writes print `Error: request rejected ...`. Verify replication via `last_log_index` in each node's `group status` as before.
+The server does not forward client writes between nodes. The REPL follows `leader_info` redirects and tries the members discovered at startup when the current node disconnects or has no leader hint. It prints `OK` only when the server answers `success=true`; refused writes print `Error: request rejected ...`. Verify replication via `last_log_index` in each node's `group status` as before.
 :::
 
 ### 运行 4：stock `rr-server` 三节点集群 / Run 4: Three-Node Cluster with Stock `rr-server`
@@ -349,15 +349,15 @@ After a write to the leader's listen port (51001), `last_log_index` advances on 
 以下均经实测验证 / All verified against live runs:
 
 - **`--peers` 与共识组建无关**：它只填充本地路由表（peer 的节点 ID 按列表顺序猜测，见 `crates/rr-server/src/main.rs:339-353`）；Raft 组实际由上面的 `add-learner` + `change-membership` 命令组建。
-- **写请求必须发往 leader 的监听端口**（51001）：stock `ClientDispatchImpl` 不会把请求转发给 leader；发往 follower 时 REPL 会跟随一次 `leader_info` 重定向，仍失败则打印 `Error: request rejected ...`（拒绝原因见 `crates/rr-admin/src/main.rs:1339` 的 `kv_failure_detail`）。
-- **REPL 的 `OK` 以服务端 `success=true` 为准**（`crates/rr-admin/src/main.rs:1297` 的 `kv_call`），不再出现"假 OK"；但复制进度仍应以每个节点 `group status` 的 `last_log_index` 验证。
+- **服务端不在节点间转发客户端写请求**：stock `ClientDispatchImpl` 发往 follower 时，REPL 会跟随 `leader_info` 重定向，并在断连或没有 leader 提示时尝试其他已知成员；最终仍失败则打印 `Error: request rejected ...`（拒绝原因见 `crates/rr-admin/src/main.rs` 的 `kv_failure_detail`）。
+- **REPL 的 `OK` 以服务端 `success=true` 为准**（`crates/rr-admin/src/main.rs` 的 `kv_call`），不再出现"假 OK"；但复制进度仍应以每个节点 `group status` 的 `last_log_index` 验证。
 - **stock `rr-server` 是冒烟服务**：内置 EchoStateMachine，`get <key>` 会回显 key 本身（即使该 key 从未写入），不是 KV 语义。
 - **端口职责分离**：AdminService 只在 `--admin-port` 上提供；ClientService 只在 `--listen-addr` 上提供。
 - **`GetClusterInfo` 返回 raft 运行时拓扑**：group id、leader（选举中为 0）、副本列表均来自 raft `metrics`（`crates/rr-server/src/dispatch.rs`）。逐 group 的更详细状态仍可用 Admin 端口上的 `group status` / `group membership`。
 
 - **`--peers` is irrelevant to consensus formation**: it only seeds the local routing table (peer node IDs are guessed by list index — see `crates/rr-server/src/main.rs:339-353`); the Raft group is actually formed by the `add-learner` + `change-membership` commands above.
-- **Client writes must go to the leader's listen port** (51001): the stock `ClientDispatchImpl` does not forward to the leader — the REPL follows one `leader_info` redirect, then prints `Error: request rejected ...` if the write is still refused (see `kv_failure_detail` at `crates/rr-admin/src/main.rs:1339`).
-- **The REPL's `OK` now requires the server's `success=true`** (`kv_call` at `crates/rr-admin/src/main.rs:1297`) — fake OKs are gone; still verify replication via `last_log_index` in `group status` on every node.
+- **The server does not forward client writes between nodes**: when the stock `ClientDispatchImpl` returns a follower response, the REPL follows `leader_info` redirects and tries other known members after disconnects or missing leader hints; refused writes print `Error: request rejected ...` (see `kv_failure_detail` in `crates/rr-admin/src/main.rs`).
+- **The REPL's `OK` now requires the server's `success=true`** (`kv_call` in `crates/rr-admin/src/main.rs`) — fake OKs are gone; still verify replication via `last_log_index` in `group status` on every node.
 - **Stock `rr-server` is a smoke service**: the built-in EchoStateMachine makes `get <key>` echo the key itself (even for never-written keys) — not KV semantics.
 - **Ports have separate roles**: AdminService is served only on `--admin-port`; ClientService only on `--listen-addr`.
 - **`GetClusterInfo` returns raft-runtime topology**: group ids, leader (0 mid-election), and replica lists are all sourced from raft `metrics` (`crates/rr-server/src/dispatch.rs`). For per-group detail use `group status` / `group membership` on the admin port.

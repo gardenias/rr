@@ -52,7 +52,7 @@ openraft 给你**一个**共识组的引擎，存储、网络、部署都要自�
 
 ### 为什么 REPL 里 `put` 打印了 OK，值却没写进去？
 
-现行 REPL 只在服务端返回 `ClientResponse.success=true` 时才打印 OK（`crates/rr-admin/src/main.rs` 的 `kv_call` / `kv_failure_detail`）：写请求落到 follower 时，REPL 会自动跟随一次 `leader_info` 重定向（打印 `redirected to leader node N at ...`），重定向后仍未成功则打印 `Error: request rejected ...`（不会打印 OK）。因此"OK 但值没写进去"在当前版本理论上不应出现；如果你写完立刻读不到值，更可能是随后用 `read`（本地读）在尚未 apply 的副本上验证。排查方法：用 `rr-admin` 的 `group status` 看 `last_log_index` 是否增长，并用 `read_linearizable` 读回验证。
+现行 REPL 只在服务端返回 `ClientResponse.success=true` 时才打印 OK（`crates/rr-admin/src/main.rs` 的 `kv_call` / `kv_failure_detail`）：写请求落到 follower 时，REPL 会跟随 `leader_info` 重定向，并在当前节点断连或没有 leader 提示时尝试启动时发现的组成员；全部尝试后仍未成功则打印 `Error: request rejected ...`（不会打印 OK）。因此"OK 但值没写进去"在当前版本理论上不应出现；如果你写完立刻读不到值，更可能是随后用 `read`（本地读）在尚未 apply 的副本上验证。排查方法：用 `rr-admin` 的 `group status` 看 `last_log_index` 是否增长，并用 `read_linearizable` 读回验证。
 
 ### 第一次启动为什么报 TLS 错误？
 
@@ -139,7 +139,7 @@ Because the stock binary embeds `EchoStateMachine` (`crates/rr-server/src/builti
 
 ### Why did `put` print OK in the REPL but the value isn't there?
 
-The current REPL only prints OK when the server answers `ClientResponse.success=true` (see `kv_call` / `kv_failure_detail` in `crates/rr-admin/src/main.rs`): when a write lands on a follower, the REPL automatically follows one `leader_info` redirect (printing `redirected to leader node N at ...`), and if the write still fails it prints `Error: request rejected ...` — never OK. So "OK but the value was not written" should not occur in the current version; if a value is missing right after a write, the more likely cause is verifying with `read` (a local read) on a replica that has not applied the entry yet. To diagnose: check `last_log_index` growth via `rr-admin`'s `group status`, and read back with `read_linearizable`.
+The current REPL only prints OK when the server answers `ClientResponse.success=true` (see `kv_call` / `kv_failure_detail` in `crates/rr-admin/src/main.rs`): when a write lands on a follower, the REPL follows `leader_info` redirects and tries the members discovered at startup after disconnects or missing leader hints; if every attempt fails it prints `Error: request rejected ...` — never OK. So "OK but the value was not written" should not occur in the current version; if a value is missing right after a write, the more likely cause is verifying with `read` (a local read) on a replica that has not applied the entry yet. To diagnose: check `last_log_index` growth via `rr-admin`'s `group status`, and read back with `read_linearizable`.
 
 ### Why do I get TLS errors on first launch?
 
