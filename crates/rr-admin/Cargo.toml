@@ -30,6 +30,12 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+rr-config = { path = "../rr-config" }
+rr-raft = { path = "../rr-raft" }
+rr-router = { path = "../rr-router" }
+rr-server = { path = "../rr-server" }
+rr-storage = { path = "../rr-storage" }
+openraft = { workspace = true, features = ["serde"] }
 
 [[bin]]
 name = "rr-admin"

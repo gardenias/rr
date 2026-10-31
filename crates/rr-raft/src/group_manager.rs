@@ -12,12 +12,14 @@ use metrics::{counter, gauge, histogram};
 use openraft::network::{NetSnapshot, RaftNetworkFactory};
 use openraft::type_config::async_runtime::WatchReceiver;
 use openraft::BasicNode;
+use openraft::ChangeMembers;
 use openraft::ReadPolicy;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use tracing::{debug, info, instrument};
 
 use rr_core::error::{RaftError, RrError};
+use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 use rr_core::state_machine::{
     IngestorOffsetControl, OutboxControl, StateMachine, StateMachineLifecycleHook,
     StateMachineReader,
@@ -53,6 +55,8 @@ struct GroupState {
     /// Tracks in-flight client writes so `stop_group()` can drain them
     /// before shutting down Raft.
     in_flight_writes: Arc<AtomicUsize>,
+    /// Serializes membership mutations for this group only.
+    membership_lock: Arc<Mutex<()>>,
 }
 
 pub struct InFlightWriteGuard {
@@ -76,6 +80,13 @@ impl Drop for InFlightWriteGuard {
 ///
 /// Responsible for creating, starting, and stopping Raft group instances.
 /// Thread-safe — all per-group mutable state is behind `Arc<Mutex<GroupState>>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovalPolicyOutcome {
+    pub forced: bool,
+    pub current_voters: usize,
+    pub target_voters: usize,
+}
+
 pub struct RaftGroupManager {
     node_id: NodeId,
     groups: Arc<DashMap<GroupId, Arc<Mutex<GroupState>>>>,
@@ -293,6 +304,7 @@ impl RaftGroupManager {
             learner_promoter_handle: None,
             lifecycle_hook,
             in_flight_writes: Arc::new(AtomicUsize::new(0)),
+            membership_lock: Arc::new(Mutex::new(())),
         }));
 
         // Never hold the dashmap shard write-lock (the Entry guard) across
@@ -343,6 +355,28 @@ impl RaftGroupManager {
         Ok(())
     }
 
+    async fn membership_mutation_context(
+        &self,
+        group_id: GroupId,
+    ) -> Result<
+        (
+            openraft::Raft<RrTypeConfig, crate::sm_adapter::RrStateMachine>,
+            Arc<Mutex<()>>,
+        ),
+        RrError,
+    > {
+        let state = self
+            .groups
+            .get(&group_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let (raft, membership_lock) = {
+            let state = state.lock().await;
+            (state.node.raft.clone(), Arc::clone(&state.membership_lock))
+        };
+        Ok((raft, membership_lock))
+    }
+
     /// Bootstrap a multi-node Raft cluster for a group.
     ///
     /// Calls `openraft::Raft::initialize(members)` on the group identified by
@@ -357,11 +391,8 @@ impl RaftGroupManager {
         group_id: GroupId,
         members: BTreeMap<u64, BasicNode>,
     ) -> Result<(), RrError> {
-        let raft = self
-            .get_raft(group_id)
-            .await
-            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
-
+        let (raft, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let _membership_guard = membership_lock.lock().await;
         raft.initialize(members)
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
@@ -383,12 +414,66 @@ impl RaftGroupManager {
         node_id: NodeId,
         addr: String,
     ) -> Result<(), RrError> {
-        let raft = self
-            .get_raft(group_id)
-            .await
-            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
+        let (raft, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let response = {
+            let _membership_guard = membership_lock.lock().await;
+            raft.add_learner(node_id, BasicNode { addr }, false)
+                .await
+                .map_err(|e| RrError::Application(e.to_string()))?
+        };
 
-        raft.add_learner(node_id, BasicNode { addr }, true)
+        if self.node_id != node_id {
+            let membership_log_id = &response.log_id;
+            raft.wait(None)
+                .metrics(
+                    |metrics| {
+                        if metrics.membership_config.log_id().as_ref() < Some(membership_log_id) {
+                            return false;
+                        }
+                        if metrics
+                            .membership_config
+                            .membership()
+                            .get_node(&node_id)
+                            .is_none()
+                        {
+                            return true;
+                        }
+                        let Some(replication) = &metrics.replication else {
+                            return true;
+                        };
+                        let Some(target_metrics) = replication.get(&node_id) else {
+                            return false;
+                        };
+                        let matched = target_metrics.clone();
+                        let matched_next = matched.map_or(0, |log_id| log_id.index + 1);
+                        let last_next = metrics.last_log_index.map_or(0, |index| index + 1);
+                        last_next.saturating_sub(matched_next)
+                            <= raft.config().replication_lag_threshold
+                    },
+                    "wait new learner to become line-rate",
+                )
+                .await
+                .map_err(|e| RrError::Application(e.to_string()))?;
+        }
+
+        info!(
+            group_id,
+            node_id, self.node_id, "added learner to raft group"
+        );
+        Ok(())
+    }
+
+    /// Add a learner without waiting for it to catch up with the leader.
+    #[instrument(skip(self))]
+    pub async fn add_learner_nonblocking(
+        &self,
+        group_id: GroupId,
+        node_id: NodeId,
+        addr: String,
+    ) -> Result<(), RrError> {
+        let (raft, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let _membership_guard = membership_lock.lock().await;
+        raft.add_learner(node_id, BasicNode { addr }, false)
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
 
@@ -410,11 +495,8 @@ impl RaftGroupManager {
         group_id: GroupId,
         members: BTreeSet<NodeId>,
     ) -> Result<(), RrError> {
-        let raft = self
-            .get_raft(group_id)
-            .await
-            .ok_or(RrError::Raft(RaftError::GroupNotFound { group_id }))?;
-
+        let (raft, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let _membership_guard = membership_lock.lock().await;
         raft.change_membership(members, true)
             .await
             .map_err(|e| RrError::Application(e.to_string()))?;
@@ -425,6 +507,121 @@ impl RaftGroupManager {
             "changed membership of raft group"
         );
         Ok(())
+    }
+
+    /// Promote existing learners to voters without replacing other voters.
+    #[instrument(skip(self, members))]
+    pub async fn promote_learners(
+        &self,
+        group_id: GroupId,
+        members: BTreeSet<NodeId>,
+    ) -> Result<(), RrError> {
+        let (raft, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let _membership_guard = membership_lock.lock().await;
+        raft.change_membership(ChangeMembers::AddVoterIds(members), true)
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+
+        info!(
+            group_id,
+            node_id = self.node_id,
+            "promoted learners to raft group voters"
+        );
+        Ok(())
+    }
+
+    /// Remove a voter or learner while preserving unrelated learners.
+    #[instrument(skip(self))]
+    pub async fn remove_node(&self, group_id: GroupId, node_id: NodeId) -> Result<(), RrError> {
+        self.remove_node_impl(group_id, node_id, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Remove a node after atomically applying the Admin voter-removal policy.
+    #[instrument(skip(self))]
+    pub async fn remove_node_with_policy(
+        &self,
+        group_id: GroupId,
+        node_id: NodeId,
+        force: bool,
+    ) -> Result<(), RrError> {
+        self.remove_node_with_policy_report(group_id, node_id, force)
+            .await
+            .map(|_| ())
+    }
+
+    /// Remove a node and return the policy decision made under the mutation lock.
+    #[instrument(skip(self))]
+    pub async fn remove_node_with_policy_report(
+        &self,
+        group_id: GroupId,
+        node_id: NodeId,
+        force: bool,
+    ) -> Result<RemovalPolicyOutcome, RrError> {
+        self.remove_node_impl(group_id, node_id, Some(force)).await
+    }
+
+    async fn remove_node_impl(
+        &self,
+        group_id: GroupId,
+        node_id: NodeId,
+        force: Option<bool>,
+    ) -> Result<RemovalPolicyOutcome, RrError> {
+        let (raft, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let _membership_guard = membership_lock.lock().await;
+        let (current_voters, target_voters, target_is_voter, target_is_any_voter) = {
+            let metrics = raft.metrics().borrow_watched().clone();
+            let membership = metrics.membership_config.membership();
+            let target_config = membership.get_joint_config().last();
+            let current_voters = target_config.map_or(0, BTreeSet::len);
+            let target_is_voter = target_config.is_some_and(|ids| ids.contains(&node_id));
+            let target_voters = current_voters.saturating_sub(usize::from(target_is_voter));
+            let target_is_any_voter = membership.voter_ids().any(|id| id == node_id);
+            (
+                current_voters,
+                target_voters,
+                target_is_voter,
+                target_is_any_voter,
+            )
+        };
+
+        if let Some(force) = force {
+            if target_is_voter && target_voters == 0 {
+                return Err(RrError::Raft(RaftError::FinalVoterRemoval));
+            }
+            if target_is_voter && !force && !membership_change_is_safe(target_voters) {
+                return Err(RrError::Raft(RaftError::UnsafeMembershipChange {
+                    target_voters,
+                    min: MIN_VOTERS_AFTER_REMOVAL,
+                }));
+            }
+        }
+        let outcome = RemovalPolicyOutcome {
+            forced: force == Some(true)
+                && target_is_voter
+                && !membership_change_is_safe(target_voters),
+            current_voters,
+            target_voters,
+        };
+
+        let (changes, retain) = if target_is_any_voter {
+            (
+                ChangeMembers::RemoveVoters(BTreeSet::from([node_id])),
+                false,
+            )
+        } else {
+            (ChangeMembers::RemoveNodes(BTreeSet::from([node_id])), true)
+        };
+        raft.change_membership(changes, retain)
+            .await
+            .map_err(|e| RrError::Application(e.to_string()))?;
+
+        info!(
+            group_id,
+            node_id, self.node_id, "removed node from raft group"
+        );
+        Ok(outcome)
     }
 
     /// Stop and remove a Raft group from this node.
@@ -2237,5 +2434,140 @@ mod tests {
             .expect("stop task panicked")
             .expect("stop_group failed");
         assert_eq!(mgr.group_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_blocking_add_learner_propagates_wait_shutdown() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        mgr.init_cluster(
+            1,
+            BTreeMap::from([(
+                1u64,
+                BasicNode {
+                    addr: String::new(),
+                },
+            )]),
+        )
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let raft = mgr.get_raft(1).await.unwrap();
+        loop {
+            if raft.metrics().borrow_watched().current_leader == Some(1) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        mgr.write_batch(1, vec![vec![0]; 5_001]).await.unwrap();
+
+        let add_mgr = Arc::clone(&mgr);
+        let addition =
+            tokio::spawn(async move { add_mgr.add_learner(1, 2, "127.0.0.1:1".to_string()).await });
+        loop {
+            let membership = raft
+                .metrics()
+                .borrow_watched()
+                .membership_config
+                .membership()
+                .clone();
+            if membership.learner_ids().any(|id| id == 2) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "learner submission did not complete"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            !addition.is_finished(),
+            "blocking addition must still be waiting for unreachable learner catch-up"
+        );
+
+        raft.shutdown().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), addition)
+            .await
+            .expect("wait must finish after Raft shutdown")
+            .expect("addition task must not panic");
+        let error = result.expect_err("shutdown during catch-up must not report success");
+        assert!(
+            matches!(error, RrError::Application(_)),
+            "wait failure must use the existing application-error convention: {error}"
+        );
+        assert!(
+            error.to_string().contains("raft is shutting down"),
+            "{error}"
+        );
+        let _ = mgr.stop_group(1).await;
+    }
+
+    #[cfg(feature = "rocks")]
+    #[tokio::test]
+    async fn test_joint_removal_policy_uses_target_config() {
+        use crate::snapshot_store::{PersistentSnapshot, SnapshotStore};
+        use openraft::vote::leader_id_adv::CommittedLeaderId;
+        use openraft::vote::RaftLeaderId;
+        use openraft::{LogId, Membership, StoredMembership};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("raft-log");
+        let group_path = base.join("1");
+        std::fs::create_dir_all(&group_path).unwrap();
+        let log_id = LogId::new(CommittedLeaderId::new(1, 1), 1);
+        let joint = Membership::new_with_defaults(
+            vec![BTreeSet::from([1u64, 2, 3]), BTreeSet::from([1u64, 2])],
+            vec![1u64, 2, 3],
+        );
+        SnapshotStore::new(group_path.join("sm-snapshot.bin"))
+            .save(&PersistentSnapshot {
+                last_log_id: Some(log_id),
+                last_membership: StoredMembership::new(Some(log_id), joint),
+                data: Vec::new(),
+            })
+            .unwrap();
+
+        let mgr = RaftGroupManager::new(1, noop_factory())
+            .with_rocks_base_path(base.to_string_lossy().into_owned());
+        mgr.start_group(1).await.unwrap();
+        let raft = mgr.get_raft(1).await.unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let restored = raft
+                .metrics()
+                .borrow_watched()
+                .membership_config
+                .membership()
+                .clone();
+            if restored.get_joint_config().len() == 2 {
+                assert_eq!(
+                    restored.get_joint_config(),
+                    &vec![BTreeSet::from([1u64, 2, 3]), BTreeSet::from([1u64, 2])]
+                );
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the joint snapshot to recover"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let err = mgr
+            .remove_node_with_policy(1, 2, false)
+            .await
+            .expect_err("removing node 2 must reject the target config's 2→1 transition");
+        assert!(
+            matches!(
+                err,
+                RrError::Raft(RaftError::UnsafeMembershipChange {
+                    target_voters: 1,
+                    min: MIN_VOTERS_AFTER_REMOVAL
+                })
+            ),
+            "policy must use the last joint config, not the three-voter union: {err}"
+        );
+        mgr.stop_group(1).await.unwrap();
     }
 }

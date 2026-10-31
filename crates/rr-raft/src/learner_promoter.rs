@@ -13,8 +13,8 @@
 //!                              learner stable >= stability_ticks
 //!                                              ▼
 //!                              ┌──────────────────────────────────┐
-//!                              │ call change_membership(voters +  │
-//!                              │  learner) → audit-log promotion  │
+//!                              │ call promote_learners(learners)  │
+//!                              │  → audit-log promotion           │
 //!                              └──────────────────────────────────┘
 //! ```
 //!
@@ -29,7 +29,7 @@
 //!
 //! # Why this lives in rr-raft, not rr-server
 //!
-//! Promotion calls `RaftGroupManager::change_membership` which is a
+//! Promotion calls `RaftGroupManager::promote_learners` which is a
 //! purely-internal openraft operation; no gRPC boundary needed. The
 //! audit emission goes via `tracing` so operators see promotions in
 //! the existing `rr::audit` stream alongside manual changes from
@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use openraft::type_config::alias::WatchReceiverOf;
 use openraft::type_config::async_runtime::WatchReceiver;
-use openraft::{BasicNode, Membership, ServerState};
+use openraft::ServerState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -202,9 +202,7 @@ async fn evaluate_and_promote(
     stable_ticks.retain(|nid, _| learner_ids.contains(nid));
 
     // Every learner crossing the stability threshold THIS tick goes into ONE
-    // change_membership call. Promoting one at a time would build the second
-    // call's voter set from the pre-tick membership and thereby demote the
-    // learner promoted moments earlier.
+    // incremental promotion call so the batch is audited and retried together.
     //
     // A learner with NO replication record (`None`) is not "replicated up to
     // index 0": the leader has never reported progress for it, so it must
@@ -221,17 +219,16 @@ async fn evaluate_and_promote(
         return;
     }
 
-    // Build the change_membership target from the membership read LIVE just
-    // before the call — never from the tick snapshot, which is stale by now:
-    // a voter removed by a concurrent admin change must not be re-added by
-    // this promotion, and a planned learner that is no longer in the
-    // membership aborts the attempt (re-planned next tick).
+    // Read membership LIVE just before the call: a planned learner that is no
+    // longer present aborts the attempt (re-planned next tick). Incremental
+    // promotion leaves the current voter set untouched.
     let live_membership = metrics_rx
         .borrow_watched()
         .membership_config
         .membership()
         .clone();
-    let Some(new_voters) = target_voter_set(&live_membership, &promotable) else {
+    let live_learners: BTreeSet<NodeId> = live_membership.learner_ids().collect();
+    if !promotable.iter().all(|nid| live_learners.contains(nid)) {
         warn!(
             target: AUDIT_TARGET,
             op = "AutoPromoteLearner",
@@ -242,13 +239,13 @@ async fn evaluate_and_promote(
             "learner auto-promotion aborted: membership changed since planning tick"
         );
         return;
-    };
+    }
     info!(
         target: AUDIT_TARGET,
         op = "AutoPromoteLearner",
         group_id,
         promoted_node_ids = ?promotable,
-        new_voter_count = new_voters.len(),
+        new_voter_count = live_membership.voter_ids().count() + promotable.len(),
         result = "started",
         "auto-promoting caught-up learners"
     );
@@ -257,7 +254,7 @@ async fn evaluate_and_promote(
         "group_id" => group_id.to_string()
     )
     .increment(promotable.len() as u64);
-    match mgr.change_membership(group_id, new_voters).await {
+    match mgr.promote_learners(group_id, promotable.iter().copied().collect()).await {
         Ok(()) => {
             info!(
                 target: AUDIT_TARGET,
@@ -294,8 +291,8 @@ async fn evaluate_and_promote(
 
 /// Advance every caught-up learner's stability counter and return the ids
 /// that reached `config.stability_ticks` on this tick. Pure planning, split
-/// from [`evaluate_and_promote`] so the batching rule (one change_membership
-/// per tick, no same-tick demotion) is unit-testable without a live cluster.
+/// from [`evaluate_and_promote`] so the batching rule (one incremental
+/// promotion per tick) is unit-testable without a live cluster.
 ///
 /// `matched_index` returns `None` for a learner with no replication record.
 /// `None` is NOT index 0: the leader has never reported progress for that
@@ -354,24 +351,6 @@ fn plan_promotions(
         }
     }
     promotable
-}
-
-/// Build the `change_membership` target voter set from a membership read
-/// LIVE just before the call — never from the tick snapshot, which is stale
-/// by promotion time: a voter removed by a concurrent admin change must not
-/// be re-added, and a planned learner that is no longer in the membership
-/// aborts the promotion (`None`).
-fn target_voter_set(
-    live: &Membership<NodeId, BasicNode>,
-    promotable: &[NodeId],
-) -> Option<BTreeSet<NodeId>> {
-    let learners: BTreeSet<NodeId> = live.learner_ids().collect();
-    if !promotable.iter().all(|nid| learners.contains(nid)) {
-        return None;
-    }
-    let mut voters: BTreeSet<NodeId> = live.voter_ids().collect();
-    voters.extend(promotable.iter().copied());
-    Some(voters)
 }
 
 #[cfg(test)]
@@ -452,8 +431,7 @@ mod tests {
     }
 
     /// Two learners crossing the stability threshold in the SAME tick must be
-    /// collected into one promotion plan — promoting them one at a time with
-    /// the pre-tick voter set would demote the first one promoted.
+    /// collected into one plan so the tick is audited and retried as one batch.
     #[test]
     fn plan_promotions_batches_all_stable_learners_in_one_tick() {
         let cfg = AutoPromoteConfig {
@@ -553,47 +531,5 @@ mod tests {
         let p = plan_promotions(1, &learners, |_| None, 100, &cfg, &mut stable);
         assert!(p.is_empty());
         assert_eq!(stable.get(&2), Some(&0));
-    }
-
-    /// G4(a) regression: the promotion target is built from the LIVE
-    /// membership read just before change_membership, so a voter removed by
-    /// a concurrent admin change (tick snapshot saw {1,2}; live is {1}) is
-    /// not re-added by the promotion.
-    #[test]
-    fn target_voter_set_never_re_adds_removed_voter() {
-        // Live: voters {1}, learner {3}. Stale snapshot would have given {1,2,3}.
-        let live = membership(&[1], &[3]);
-        let target = target_voter_set(&live, &[3]).expect("learner 3 still present");
-        assert_eq!(
-            target,
-            BTreeSet::from([1u64, 3u64]),
-            "voter 2 removed by a concurrent admin change must stay removed"
-        );
-    }
-
-    /// G4(a): a planned learner that is no longer in the live membership
-    /// (concurrently removed) aborts the promotion instead of re-adding it.
-    #[test]
-    fn target_voter_set_aborts_when_learner_gone() {
-        let live = membership(&[1, 2], &[]);
-        assert_eq!(target_voter_set(&live, &[3]), None);
-    }
-
-    /// The unchanged fast path: live membership matches planning, target is
-    /// current voters + the promoted learners.
-    #[test]
-    fn target_voter_set_happy_path() {
-        let live = membership(&[1, 2], &[3, 4]);
-        let target = target_voter_set(&live, &[3, 4]).unwrap();
-        assert_eq!(target, BTreeSet::from([1u64, 2u64, 3u64, 4u64]));
-    }
-
-    fn membership(voters: &[u64], learners: &[u64]) -> Membership<u64, BasicNode> {
-        let nodes: BTreeMap<u64, BasicNode> = voters
-            .iter()
-            .chain(learners.iter())
-            .map(|id| (*id, BasicNode { addr: String::new() }))
-            .collect();
-        Membership::new(vec![voters.iter().copied().collect()], nodes).unwrap()
     }
 }

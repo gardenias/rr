@@ -490,7 +490,10 @@ impl RrNode {
                             "watch: node added, adding as learner to all groups"
                         );
                         for group_id in gm.group_ids().await {
-                            if let Err(e) = gm.add_learner(group_id, nid, addr.addr.clone()).await {
+                            if let Err(e) = gm
+                                .add_learner_nonblocking(group_id, nid, addr.addr.clone())
+                                .await
+                            {
                                 warn!(
                                     group_id,
                                     node_id = nid,

@@ -1107,41 +1107,124 @@ mod tests {
         shutdown_all(&nodes).await;
     }
 
-    /// T21 — Dynamic node add/remove: register a new node in config provider,
-    /// verify the watch loop fires add_learner, then remove and verify cluster stability.
-    #[tokio::test]
+    /// T21 — Dynamic node add/remove: unreachable learner submission must not
+    /// stall later watch events or change existing partition routes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_dynamic_node_add() {
-        let builder = ClusterBuilder::new(3, 1).with_real_network();
+        let builder = ClusterBuilder::new(3, 2).with_real_network();
         let provider = builder.config_provider();
         let nodes = builder.build().await.unwrap();
 
-        // Wait for group 1 to have a stable leader
-        let _leader = wait_for_cluster_ready(&nodes, 1, 8_000).await.unwrap();
+        for group_id in 1..=2 {
+            wait_for_cluster_ready(&nodes, group_id, 8_000)
+                .await
+                .unwrap();
+        }
 
-        // Register node 4 in config provider — fires NodeAdded event
+        let routes_before = provider.get_routing_table().await.unwrap();
+        for (partition_id, group_id) in [(1, 1), (2, 2)] {
+            assert_eq!(
+                routes_before
+                    .partitions
+                    .get(&partition_id)
+                    .map(|(_, gid)| *gid),
+                Some(group_id),
+                "unexpected initial route for partition {partition_id}"
+            );
+        }
+
+        // Exceed Openraft's default 5000-entry line-rate threshold with real
+        // committed writes. Otherwise even an unreachable learner is considered
+        // sufficiently caught up and the blocking API returns immediately.
+        let leader_id = wait_for_cluster_ready(&nodes, 1, 2_000).await.unwrap();
+        let leader = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+        let raft = leader.group_manager().get_raft(1).await.unwrap();
+        for _ in 0..5_001 {
+            raft.client_write(vec![0].into()).await.unwrap();
+        }
+
+        // TEST-NET-1 is non-routable, so learner catch-up cannot finish.
         let node4_id: NodeId = 4;
-        let node4_addr = "127.0.0.1:19204".to_string();
+        let node4_addr = "192.0.2.1:50051".to_string();
         provider
             .add_node(node4_id, rr_core::types::NodeAddr { addr: node4_addr })
             .await;
 
-        // Wait briefly for the watch loop to fire add_learner calls
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // The leader for every pre-existing local group must submit the learner
+        // promptly even though the unreachable node cannot catch up.
+        let submission_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        for group_id in 1..=2 {
+            let leader_id = wait_for_cluster_ready(&nodes, group_id, 2_000)
+                .await
+                .unwrap();
+            let leader = nodes.iter().find(|n| n.node_id() == leader_id).unwrap();
+            let raft = leader.group_manager().get_raft(group_id).await.unwrap();
+            loop {
+                let membership = raft
+                    .metrics()
+                    .borrow_watched()
+                    .membership_config
+                    .membership()
+                    .clone();
+                let learners: Vec<NodeId> = membership.learner_ids().collect();
+                if learners == [node4_id] {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < submission_deadline,
+                    "group {group_id} did not submit learner {node4_id} within 2s; learners: {learners:?}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
 
-        // Cluster should still have a stable leader after add_learner attempts
+        // A later event proves the watch returned from learner submission rather
+        // than remaining parked on catch-up for an unreachable node.
+        let node_ids: Vec<NodeId> = nodes.iter().map(|n| n.node_id()).collect();
+        provider
+            .add_partition(3, PartitionConfig::SingleId(3), 3, node_ids)
+            .await;
+
+        let follow_up_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let mut started = 0;
+            for node in &nodes {
+                if node.group_manager().get_raft(3).await.is_some() {
+                    started += 1;
+                }
+            }
+            if started == nodes.len() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < follow_up_deadline,
+                "watch did not process PartitionAdded within 2s; group 3 started on {started}/{} nodes",
+                nodes.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        let routes_after = provider.get_routing_table().await.unwrap();
+        for (partition_id, group_id) in [(1, 1), (2, 2), (3, 3)] {
+            assert_eq!(
+                routes_after
+                    .partitions
+                    .get(&partition_id)
+                    .map(|(_, gid)| *gid),
+                Some(group_id),
+                "NodeAdded changed an unrelated route for partition {partition_id}"
+            );
+        }
+
         let leader_after = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
         assert!(
             (1..=3).contains(&leader_after),
             "leader must still be among original 3 nodes after NodeAdded"
         );
 
-        // Simulate NodeRemoved: remove node 4 from config
         provider.remove_node(node4_id).await;
-
-        // Wait briefly for watch loop to fire change_membership calls
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
 
-        // Cluster should remain stable
         let leader_final = wait_for_cluster_ready(&nodes, 1, 5_000).await.unwrap();
         assert!(
             (1..=3).contains(&leader_final),
