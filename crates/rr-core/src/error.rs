@@ -99,6 +99,9 @@ pub enum RaftError {
         /// Minimum required voter count (see `MIN_VOTERS_AFTER_REMOVAL`).
         min: usize,
     },
+    /// Membership change rejected because it would remove the final voter.
+    #[error("cannot remove the final voter")]
+    FinalVoterRemoval,
 }
 
 /// Errors raised by a storage engine backend.

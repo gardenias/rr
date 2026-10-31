@@ -25,8 +25,8 @@ use rr_network::proto::admin::{
     online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
     DrainRequest, DrainResult, Empty, GroupDrainStatus, GroupId, GroupList, GroupMembership,
     GroupStatus, GroupSummary, MetricsSummary, NodeMember, NodeStatus, OnlineBackupChunk,
-    OnlineBackupMetadata, OnlineBackupRequest, PartitionRoute, ResetIngestorOffsetRequest,
-    RoutingTableSnapshot, SnapshotStatus, TransferLeaderRequest,
+    OnlineBackupMetadata, OnlineBackupRequest, PartitionRoute, RemoveGroupMemberRequest,
+    ResetIngestorOffsetRequest, RoutingTableSnapshot, SnapshotStatus, TransferLeaderRequest,
 };
 use rr_raft::group_manager::RaftGroupManager;
 use std::collections::BTreeSet;
@@ -726,6 +726,98 @@ impl AdminService for AdminServiceImpl {
         }
     }
 
+    async fn remove_group_member(
+        &self,
+        request: Request<RemoveGroupMemberRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        let force = req.force;
+        info!(
+            target: AUDIT_TARGET,
+            op = "RemoveGroupMember",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            target_node_id = req.node_id,
+            force,
+            result = "started",
+            "admin rpc — mutation"
+        );
+
+        let _raft = match self.group_manager.get_raft(req.group_id).await {
+            Some(raft) => raft,
+            None => {
+                let status = Status::not_found(format!("group {} not found", req.group_id));
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "RemoveGroupMember",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                return Err(status);
+            }
+        };
+
+        match self
+            .group_manager
+            .remove_node_with_policy_report(req.group_id, req.node_id, req.force)
+            .await
+        {
+            Ok(outcome) => {
+                if outcome.forced {
+                    warn!(
+                        target: AUDIT_TARGET,
+                        op = "RemoveGroupMember",
+                        peer = %peer,
+                        node_id = self.node_id,
+                        group_id = req.group_id,
+                        target_node_id = req.node_id,
+                        force = true,
+                        current_voters = outcome.current_voters,
+                        target_voters = outcome.target_voters,
+                        result = "force_accepted",
+                        "quorum guard overridden by operator"
+                    );
+                }
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "RemoveGroupMember",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "group member removed",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let status = e.into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "RemoveGroupMember",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                Err(status)
+            }
+        }
+    }
+
     async fn reset_ingestor_offset(
         &self,
         request: Request<ResetIngestorOffsetRequest>,
@@ -1389,6 +1481,59 @@ mod tests {
             out.contains(AUDIT_TARGET) && out.contains("membership change rejected"),
             "guard rejection must emit a failed audit event with the reason; got:\n{out}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_remove_group_member_unknown_group_returns_not_found() {
+        let svc = make_admin_service();
+        let result = svc
+            .remove_group_member(Request::new(
+                rr_network::proto::admin::RemoveGroupMemberRequest {
+                    group_id: 99,
+                    node_id: 2,
+                    force: false,
+                },
+            ))
+            .await;
+        let err = result.expect_err("expected removal to fail for unknown group");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_remove_group_member_cannot_remove_final_voter_even_with_force() {
+        let svc = make_admin_service_with_group().await;
+        for force in [false, true] {
+            let result = svc
+                .remove_group_member(Request::new(
+                    rr_network::proto::admin::RemoveGroupMemberRequest {
+                        group_id: 1,
+                        node_id: 1,
+                        force,
+                    },
+                ))
+                .await;
+            let status = result.expect_err("removing the final voter must be rejected");
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "force={force} must not bypass the final-voter check"
+            );
+        }
+
+        let membership = svc
+            .get_group_membership(Request::new(GroupId { group_id: 1 }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            membership
+                .voters
+                .iter()
+                .map(|member| member.node_id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(membership.learners.is_empty());
     }
 
     #[tokio::test]

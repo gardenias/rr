@@ -602,27 +602,29 @@ async fn main() -> Result<()> {
                             if report.has_failures() {
                                 println!();
                                 println!(
-                                    "FAILURES present — investigate and re-run; \
-                                     change_membership is idempotent so partial progress is safe"
+                                    "DECOMMISSION INCOMPLETE/BLOCKED — investigate and re-run; \
+                                     RemoveGroupMember is idempotent so partial progress is safe"
                                 );
                             } else if report.made_progress() {
                                 println!();
                                 if report.dry_run {
                                     println!("(dry-run) re-run without --dry-run to apply.");
                                 } else {
-                                    println!("All eligible groups processed successfully.");
+                                    println!(
+                                        "All reported membership removals completed successfully."
+                                    );
                                 }
                             } else {
                                 println!();
                                 println!(
-                                    "No-op: target node was not a voter in any reported group."
+                                    "No-op: target was absent from voters and learners in all reported groups."
                                 );
                             }
                         }
                     }
-                    // Loud failure semantics: a decommission that left any
-                    // group unprocessed must not exit 0 (CI/CD wrappers key
-                    // on the exit code).
+                    // Loud failure semantics: failed, quorum-blocked, or
+                    // incompletely covered decommissions must not exit 0
+                    // (CI/CD wrappers key on the exit code).
                     if report.has_failures() {
                         std::process::exit(1);
                     }

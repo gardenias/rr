@@ -1797,6 +1797,8 @@ dependencies = [
  "tonic-health",
  "tonic-prost",
  "tower-service",
+ "tracing",
+ "tracing-subscriber",
  "turmoil",
 ]
 
@@ -3447,8 +3449,14 @@ dependencies = [
  "futures",
  "hex",
  "libc",
+ "openraft",
+ "rr-config",
  "rr-core",
  "rr-network",
+ "rr-raft",
+ "rr-router",
+ "rr-server",
+ "rr-storage",
  "rustyline",
  "serde",
  "serde_json",

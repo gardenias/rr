@@ -104,6 +104,7 @@ impl IntoStatus for RaftError {
             e @ RaftError::UnsafeMembershipChange { .. } => {
                 Status::failed_precondition(e.to_string())
             }
+            e @ RaftError::FinalVoterRemoval => Status::invalid_argument(e.to_string()),
             _ => Status::internal("raft error"),
         }
     }

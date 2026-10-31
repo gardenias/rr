@@ -26,10 +26,16 @@ service AdminService {
     rpc AddLearner(AddLearnerRequest) returns (Empty);
     /// Replace the voter set of a Raft group. Removed voters are kept
     /// as learners (`retain = true`). Must be called on the leader.
+    /// Use RemoveGroupMember to erase a node from both voters and learners.
     /// The server rejects a target voter set smaller than 2 with
     /// `failed_precondition` unless `force` is set.
     /// Returns OK on success; failures are returned as gRPC Status.
     rpc ChangeMembership(ChangeMembershipRequest) returns (Empty);
+    /// Remove one node from a Raft group's voters and learners.
+    /// The server rejects voter removal below the minimum without `force`;
+    /// removing the final voter is always rejected.
+    /// Returns OK on success; failures are returned as gRPC Status.
+    rpc RemoveGroupMember(RemoveGroupMemberRequest) returns (Empty);
     /// Override the persisted ingestor offset for disaster recovery.
     /// `offset = -1` clears/unsets the persisted offset.
     /// Returns OK on success; failures are returned as gRPC Status.
@@ -138,6 +144,14 @@ message ChangeMembershipRequest {
     /// recovery (e.g. rebuilding after permanent loss of a majority);
     /// every forced acceptance emits a WARN audit event. Cannot be used
     /// to empty the voter set — teardown goes through `node-reset`.
+    bool force = 3;
+}
+
+message RemoveGroupMemberRequest {
+    uint64 group_id = 1;
+    uint64 node_id = 2;
+    /// Override the minimum-voter guard for disaster recovery. Cannot be
+    /// used to remove the final voter; teardown goes through `node-reset`.
     bool force = 3;
 }
 
