@@ -15,6 +15,7 @@ rr-storage = { path = "../../crates/rr-storage" }
 rr-network = { path = "../../crates/rr-network" }
 rr-router = { path = "../../crates/rr-router" }
 rr-ingestor-kafka = { path = "../../crates/rr-ingestor-kafka" }
+kv-store = { path = "../../examples/kv-store" }
 bincode = { workspace = true }
 tokio.workspace = true
 anyhow.workspace = true

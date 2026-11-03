@@ -14,6 +14,7 @@ mimalloc = ["dep:mimalloc"]
 rr-core = { path = "../rr-core" }
 rr-storage = { path = "../rr-storage" }
 rr-config = { path = "../rr-config" }
+rr-config-etcd = { path = "../rr-config-etcd" }
 rr-raft = { path = "../rr-raft" }
 rr-network = { path = "../rr-network" }
 rr-router = { path = "../rr-router" }
@@ -34,6 +35,7 @@ tonic-health = "0.14"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

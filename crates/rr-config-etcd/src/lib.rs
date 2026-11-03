@@ -6,6 +6,9 @@
 //! * `/rr/{cluster_id}/partitions/{partition_id}`
 //! * `/rr/{cluster_id}/groups/{group_id}/replicas`
 
+pub mod lifecycle;
+pub use lifecycle::EtcdLifecycleStore;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

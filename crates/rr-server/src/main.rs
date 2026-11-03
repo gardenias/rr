@@ -20,10 +20,12 @@ use clap::Parser;
 use openraft::error::{InitializeError, RaftError};
 use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
+use rr_config_etcd::EtcdLifecycleStore;
 use rr_core::config::ConfigProvider;
 use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{NodeAddr, NodeId, PartitionConfig};
+use rr_core::LifecycleStore;
 use rr_network::auth::AuthConfig;
 use rr_network::rate_limit::RateLimitConfig;
 use rr_network::tcp_raft_server::TcpRaftServer;
@@ -116,6 +118,23 @@ fn init_tracing(filter: &str) {
 
 async fn start_node(
     cfg: &ResolvedConfig,
+) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
+    let lifecycle_store = match cfg.formation.as_ref() {
+        Some(formation) => Some(Arc::new(
+            EtcdLifecycleStore::new(
+                formation.etcd_endpoints.clone(),
+                formation.seed.cluster_name.clone(),
+            )
+            .await?,
+        ) as Arc<dyn LifecycleStore>),
+        None => None,
+    };
+    start_node_with_lifecycle_store(cfg, lifecycle_store).await
+}
+
+async fn start_node_with_lifecycle_store(
+    cfg: &ResolvedConfig,
+    lifecycle_store: Option<Arc<dyn LifecycleStore>>,
 ) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
     let config_provider = build_config_provider(cfg).await?;
     let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
@@ -265,7 +284,23 @@ async fn start_node(
         node_config = node_config.with_allow_insecure(true);
     }
 
-    let node = Arc::new(RrNode::new(node_config)?);
+    let node = if let Some(formation) = cfg.formation.as_ref() {
+        let store = lifecycle_store
+            .ok_or_else(|| anyhow!("managed formation requires a lifecycle store"))?;
+        Arc::new(RrNode::new_with_formation(
+            node_config,
+            rr_server::formation::FormationConfig {
+                seed: formation.seed.clone(),
+                store,
+                mode: formation.mode,
+            },
+        )?)
+    } else {
+        Arc::new(RrNode::new(node_config)?)
+    };
+    if cfg.formation.is_some() {
+        return Box::pin(start_managed_node(node, cfg, tcp_bind_addr, lookup)).await;
+    }
     node.start().await?;
 
     // From here on the node owns running raft groups: any startup failure
@@ -317,6 +352,73 @@ async fn start_node(
     Ok((node, tcp_raft_handle))
 }
 
+async fn start_managed_node(
+    node: Arc<RrNode>,
+    cfg: &ResolvedConfig,
+    tcp_bind_addr: Option<String>,
+    lookup: Arc<dyn rr_network::raft_service::RaftGroupLookup>,
+) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
+    let mut tcp_raft_handle = None;
+    let start_result: Result<()> = async {
+        if let Some(tcp_bind_addr) = tcp_bind_addr {
+            let server = TcpRaftServer::bind(&tcp_bind_addr, Arc::clone(&lookup))
+                .await
+                .with_context(|| format!("failed to bind tcp raft server at {tcp_bind_addr}"))?;
+            let local_addr = server.local_addr()?;
+            info!(
+                node_id = cfg.node_id,
+                tcp_raft_addr = %local_addr,
+                "tcp raft server listening"
+            );
+            tcp_raft_handle = Some(tokio::spawn(async move {
+                if let Err(e) = server.serve().await {
+                    tracing::error!(error = %e, "tcp raft server terminated");
+                }
+            }));
+        }
+        wait_for_managed_start(&node, &mut tcp_raft_handle).await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = start_result {
+        if let Some(handle) = tcp_raft_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+        if let Err(shutdown_error) = node.shutdown().await {
+            tracing::error!(
+                error = %shutdown_error,
+                "graceful shutdown after managed startup failure also failed"
+            );
+        }
+        return Err(error);
+    }
+
+    Ok((node, tcp_raft_handle))
+}
+
+async fn wait_for_managed_start(
+    node: &Arc<RrNode>,
+    tcp_raft_handle: &mut Option<tokio::task::JoinHandle<()>>,
+) -> Result<()> {
+    if let Some(handle) = tcp_raft_handle.as_mut() {
+        tokio::select! {
+            biased;
+            outcome = handle => {
+                return Err(match outcome {
+                    Ok(()) => anyhow!("tcp raft listener task completed unexpectedly during managed startup"),
+                    Err(error) => anyhow!("tcp raft listener task failed during managed startup: {error}"),
+                });
+            }
+            result = node.start() => result?,
+        }
+    } else {
+        node.start().await?;
+    }
+    Ok(())
+}
+
 fn build_tls_config(resolved: Option<&ResolvedTls>) -> Option<TlsConfig> {
     resolved.map(|t| TlsConfig {
         cert_path: t.cert_path.clone(),
@@ -329,6 +431,20 @@ fn build_tls_config(resolved: Option<&ResolvedTls>) -> Option<TlsConfig> {
 
 async fn build_config_provider(cfg: &ResolvedConfig) -> Result<Arc<MemConfigProvider>> {
     let provider = Arc::new(MemConfigProvider::new());
+
+    if let Some(formation) = cfg.formation.as_ref() {
+        let table = formation.seed.initial_routing_table()?;
+        for (node_id, addr) in table.nodes {
+            provider.add_node(node_id, addr).await;
+        }
+        for (partition_id, (partition, group_id)) in table.partitions {
+            let replicas = table.groups[&group_id].replicas.clone();
+            provider
+                .add_partition(partition_id, partition, group_id, replicas)
+                .await;
+        }
+        return Ok(provider);
+    }
 
     provider
         .add_node(
@@ -572,6 +688,243 @@ mod tests {
             .unwrap()
             .ip()
             .is_loopback());
+    }
+
+    fn managed_config(listen_addr: &str, raft_tcp_port: Option<u16>) -> ResolvedConfig {
+        ResolvedConfig::resolve(&ServeArgs {
+            node_id: Some(1),
+            listen_addr: Some(listen_addr.to_string()),
+            raft_transport: raft_tcp_port.map(|_| "tcp".to_string()),
+            raft_tcp_port,
+            cluster_name: Some("stock".to_string()),
+            cluster_nodes: vec![
+                "1@advertised-1:51001".to_string(),
+                "2@advertised-2:51002".to_string(),
+            ],
+            formation: Some("genesis".to_string()),
+            etcd_endpoints: vec!["http://127.0.0.1:2379".to_string()],
+            groups: Some(2),
+            allow_insecure: true,
+            log_level: "info".to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn managed_config_provider_uses_seed_roster_and_advertised_addresses() {
+        let cfg = managed_config("0.0.0.0:51001", None);
+
+        let provider = build_config_provider(&cfg).await.unwrap();
+        let table = provider.get_routing_table().await.unwrap();
+
+        assert_eq!(table.nodes.len(), 2);
+        assert_eq!(table.nodes[&1].addr, "advertised-1:51001");
+        assert_eq!(table.nodes[&2].addr, "advertised-2:51002");
+        assert_eq!(table.groups.len(), 2);
+        assert_eq!(table.groups[&1].replicas, vec![1, 2]);
+        assert_eq!(table.groups[&2].replicas, vec![1, 2]);
+        assert_eq!(table.partitions.len(), 2);
+    }
+
+    async fn unused_loopback_port() -> u16 {
+        tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn managed_start_initializes_hosted_groups_from_seed() {
+        let grpc_port = unused_loopback_port().await;
+        let cfg = managed_config(&format!("127.0.0.1:{grpc_port}"), None);
+        let store = Arc::new(rr_config::MemLifecycleStore::new());
+
+        let (node, tcp_handle) = start_node_with_lifecycle_store(&cfg, Some(store))
+            .await
+            .unwrap();
+
+        assert!(tcp_handle.is_none());
+        assert_eq!(node.group_manager().group_count().await, 2);
+        for group_id in 1..=2 {
+            let raft = node.group_manager().get_raft(group_id).await.unwrap();
+            assert!(raft.is_initialized().await.unwrap());
+        }
+        node.shutdown().await.unwrap();
+    }
+
+    struct TcpProbeStore {
+        tcp_addr: String,
+        connected: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl rr_core::LifecycleStore for TcpProbeStore {
+        async fn load_linearizable(
+            &self,
+        ) -> Result<Option<rr_core::VersionedLifecycle>, rr_core::LifecycleError> {
+            let connected = tokio::net::TcpStream::connect(&self.tcp_addr).await.is_ok();
+            self.connected
+                .store(connected, std::sync::atomic::Ordering::SeqCst);
+            Err(rr_core::LifecycleError::Unavailable(
+                "stop after TCP probe".to_string(),
+            ))
+        }
+
+        async fn create_if_absent(
+            &self,
+            _record: rr_core::ClusterLifecycle,
+        ) -> Result<rr_core::CasOutcome, rr_core::LifecycleError> {
+            unreachable!("the probe fails during the initial load")
+        }
+
+        async fn compare_and_swap(
+            &self,
+            _expected_revision: u64,
+            _record: rr_core::ClusterLifecycle,
+        ) -> Result<rr_core::CasOutcome, rr_core::LifecycleError> {
+            unreachable!("the probe fails during the initial load")
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_tcp_listener_precedes_formation_and_is_cleaned_up_on_failure() {
+        let grpc_port = unused_loopback_port().await;
+        let mut tcp_port = unused_loopback_port().await;
+        while tcp_port <= grpc_port {
+            tcp_port = unused_loopback_port().await;
+        }
+        let cfg = managed_config(&format!("127.0.0.1:{grpc_port}"), Some(tcp_port));
+        let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = Arc::new(TcpProbeStore {
+            tcp_addr: format!("127.0.0.1:{tcp_port}"),
+            connected: Arc::clone(&connected),
+        });
+
+        let error = match start_node_with_lifecycle_store(&cfg, Some(store)).await {
+            Ok(_) => panic!("the injected formation failure must abort startup"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("stop after TCP probe"));
+        assert!(
+            connected.load(std::sync::atomic::Ordering::SeqCst),
+            "formation ran before the TCP Raft listener was bound"
+        );
+        tokio::net::TcpListener::bind(("127.0.0.1", tcp_port))
+            .await
+            .expect("failed startup must release the TCP Raft listener");
+        tokio::net::TcpListener::bind(("127.0.0.1", grpc_port))
+            .await
+            .expect("failed startup must release the gRPC listener");
+    }
+
+    struct BlockingStore {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl rr_core::LifecycleStore for BlockingStore {
+        async fn load_linearizable(
+            &self,
+        ) -> Result<Option<rr_core::VersionedLifecycle>, rr_core::LifecycleError> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn create_if_absent(
+            &self,
+            _record: rr_core::ClusterLifecycle,
+        ) -> Result<rr_core::CasOutcome, rr_core::LifecycleError> {
+            unreachable!("the blocking store remains in the initial load")
+        }
+
+        async fn compare_and_swap(
+            &self,
+            _expected_revision: u64,
+            _record: rr_core::ClusterLifecycle,
+        ) -> Result<rr_core::CasOutcome, rr_core::LifecycleError> {
+            unreachable!("the blocking store remains in the initial load")
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_unexpected_tcp_listener_task_completion_fails_start() {
+        let cfg = managed_config("127.0.0.1:51001", Some(61001));
+        let formation = cfg.formation.as_ref().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let node = Arc::new(
+            RrNode::new_with_formation(
+                NodeConfig::new(
+                    cfg.node_id,
+                    cfg.listen_addr.clone(),
+                    Arc::new(MemStorage::new()),
+                    Arc::new(MemConfigProvider::new()),
+                    echo_factory(),
+                ),
+                rr_server::formation::FormationConfig {
+                    seed: formation.seed.clone(),
+                    store: Arc::new(BlockingStore {
+                        entered: Arc::clone(&entered),
+                    }),
+                    mode: formation.mode,
+                },
+            )
+            .unwrap(),
+        );
+        let release_listener = Arc::new(tokio::sync::Notify::new());
+        let listener_release = Arc::clone(&release_listener);
+        let mut tcp_raft_handle = Some(tokio::spawn(async move {
+            listener_release.notified().await;
+        }));
+        let startup_node = Arc::clone(&node);
+        let mut startup = tokio::spawn(async move {
+            wait_for_managed_start(&startup_node, &mut tcp_raft_handle).await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+            .await
+            .expect("node.start must reach managed formation");
+        release_listener.notify_one();
+        let result =
+            match tokio::time::timeout(std::time::Duration::from_millis(250), &mut startup).await {
+                Ok(joined) => joined.unwrap(),
+                Err(_) => {
+                    startup.abort();
+                    let _ = startup.await;
+                    Err(anyhow!("timed out waiting for listener-task failure"))
+                }
+            };
+        node.shutdown().await.unwrap();
+
+        let error = result.expect_err("unexpected listener completion must fail startup");
+        assert!(
+            error.to_string().contains("tcp raft listener"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_start_still_uses_manual_bootstrap() {
+        let grpc_port = unused_loopback_port().await;
+        let cfg = ResolvedConfig::resolve(&ServeArgs {
+            node_id: Some(1),
+            listen_addr: Some(format!("127.0.0.1:{grpc_port}")),
+            bootstrap: true,
+            allow_insecure: true,
+            log_level: "info".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let (node, tcp_handle) = start_node(&cfg).await.unwrap();
+
+        assert!(tcp_handle.is_none());
+        let raft = node.group_manager().get_raft(1).await.unwrap();
+        assert!(raft.is_initialized().await.unwrap());
+        node.shutdown().await.unwrap();
     }
 
     #[test]

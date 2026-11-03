@@ -81,6 +81,12 @@ impl Drop for InFlightWriteGuard {
 /// Responsible for creating, starting, and stopping Raft group instances.
 /// Thread-safe — all per-group mutable state is behind `Arc<Mutex<GroupState>>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitializeOutcome {
+    Initialized,
+    AlreadyInitialized,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemovalPolicyOutcome {
     pub forced: bool,
     pub current_voters: usize,
@@ -377,6 +383,23 @@ impl RaftGroupManager {
         Ok((raft, membership_lock))
     }
 
+    /// Run formation verification and lifecycle activation under one group's
+    /// membership mutation lock, without serializing unrelated groups.
+    #[instrument(skip(self, operation))]
+    pub async fn with_membership_mutation_lock<T, F, Fut>(
+        &self,
+        group_id: GroupId,
+        operation: F,
+    ) -> Result<T, RrError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, RrError>>,
+    {
+        let (_, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let _membership_guard = membership_lock.lock().await;
+        operation().await
+    }
+
     /// Bootstrap a multi-node Raft cluster for a group.
     ///
     /// Calls `openraft::Raft::initialize(members)` on the group identified by
@@ -399,6 +422,30 @@ impl RaftGroupManager {
 
         info!(group_id, node_id = self.node_id, "initialized raft cluster");
         Ok(())
+    }
+
+    /// Initialize a group for the formation supervisor.
+    ///
+    /// `AlreadyInitialized` reports OpenRaft's `NotAllowed` outcome only; the
+    /// caller must re-read and verify the actual membership before activation.
+    #[instrument(skip(self, members))]
+    pub async fn initialize_for_formation(
+        &self,
+        group_id: GroupId,
+        members: BTreeMap<u64, BasicNode>,
+    ) -> Result<InitializeOutcome, RrError> {
+        let (raft, membership_lock) = self.membership_mutation_context(group_id).await?;
+        let _membership_guard = membership_lock.lock().await;
+        match raft.initialize(members).await {
+            Ok(()) => {
+                info!(group_id, node_id = self.node_id, "initialized raft cluster");
+                Ok(InitializeOutcome::Initialized)
+            }
+            Err(openraft::error::RaftError::APIError(
+                openraft::error::InitializeError::NotAllowed(_),
+            )) => Ok(InitializeOutcome::AlreadyInitialized),
+            Err(error) => Err(RrError::Application(error.to_string())),
+        }
     }
 
     /// Add a learner node to a Raft group.
@@ -1704,6 +1751,60 @@ mod tests {
             metrics.current_leader
         );
     }
+    #[tokio::test]
+    async fn test_initialize_for_formation_uses_group_lock_and_preserves_actual_membership() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        let members = BTreeMap::from([(
+            1u64,
+            BasicNode {
+                addr: "actual:5000".to_string(),
+            },
+        )]);
+
+        let (_, membership_lock) = mgr.membership_mutation_context(1).await.unwrap();
+        let lock_guard = membership_lock.lock().await;
+        let initializing = {
+            let mgr = Arc::clone(&mgr);
+            let members = members.clone();
+            tokio::spawn(async move { mgr.initialize_for_formation(1, members).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(
+            !initializing.is_finished(),
+            "formation initialization must wait for the per-group membership lock"
+        );
+        drop(lock_guard);
+        assert_eq!(
+            initializing.await.unwrap().unwrap(),
+            InitializeOutcome::Initialized
+        );
+
+        let mut different_members = members;
+        different_members.get_mut(&1).unwrap().addr = "different:5000".to_string();
+        assert_eq!(
+            mgr.initialize_for_formation(1, different_members)
+                .await
+                .unwrap(),
+            InitializeOutcome::AlreadyInitialized,
+            "NotAllowed must map to AlreadyInitialized without claiming roster verification"
+        );
+
+        let raft = mgr.get_raft(1).await.unwrap();
+        let membership = raft
+            .metrics()
+            .borrow_watched()
+            .membership_config
+            .membership()
+            .clone();
+        assert_eq!(
+            membership.voter_ids().collect::<BTreeSet<_>>(),
+            BTreeSet::from([1])
+        );
+        assert_eq!(membership.get_node(&1).unwrap().addr, "actual:5000");
+        mgr.stop_group(1).await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_add_learner_unknown_group() {
         let mgr = RaftGroupManager::new(1, noop_factory());

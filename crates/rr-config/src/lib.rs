@@ -43,5 +43,7 @@
 //! assert_eq!(table.partitions.len(), 1);
 //! ```
 
+pub mod lifecycle;
 pub mod mem;
+pub use lifecycle::MemLifecycleStore;
 pub use mem::MemConfigProvider;

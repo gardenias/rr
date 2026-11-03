@@ -119,6 +119,82 @@ gauge 现在应该是 `0`。Audit log 不再出现 `INSECURE MODE ACTIVE`。
 
 ---
 
+## 收养旧集群到托管生命周期 / Adopt a Legacy Cluster into Managed Formation
+
+Genesis 只用于全新的空节点，不能用来收养已有 Raft 状态。旧集群升级必须选择 `adopt`，并严格区分
+“记录现有状态”和“后续成员收敛”两个阶段。
+
+Genesis is only for fresh pristine nodes. Use `adopt` for an existing Raft group, and keep lifecycle adoption
+separate from subsequent membership convergence. A formation-capable image override is mandatory for both Helm
+and raw Kubernetes; rr 0.2.0 rejects the new configuration fields and must not be deployed.
+
+1. **准备镜像与相同花名册 / Prepare the image and one roster**：必须显式选择包含 managed formation 的
+   镜像；rr 0.2.0 的 strict parser 会拒绝新字段，不能使用。Helm 必须设置非空、非 0.2.0 的
+   `image.tag`，raw manifests 必须替换 `REPLACE_WITH_FORMATION_CAPABLE_TAG`。给所有节点配置相同的
+   `cluster.name`、完整 `cluster.nodes = ["id@advertised_addr", ...]`、`mode = "adopt"` 和 etcd
+   endpoints；移除 `bootstrap` 与 `peers`。花名册是 SeedSpec 和初始路由，不是当前 Raft membership。
+2. **先收养已初始化节点 / Adopt initialized nodes first**：只启动本地所有托管 group 都已初始化的旧节点。
+   第一个节点通过 CAS 创建 `LegacyAdopted + Active` 记录，其余节点加载同一记录。确认原 voter 集合、
+   ACK 数据和分区路由均未改变。混合 initialized/pristine 本地 group 或全 pristine 的首次收养会失败，
+   不会创建生命周期记录。以下命令以 `rr-0` 为唯一 initialized voter；不得依赖 `Parallel` 决定启动顺序。
+
+   Helm phase 1（此阶段不渲染 Job）：
+
+   ```bash
+   helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
+     --set image.tag=<formation-capable-tag> \
+     --set cluster.formation.mode=adopt \
+     --set cluster.formation.adoptionInitializedReplicas=1 --wait
+   kubectl wait --for=condition=ready pod/rr-0 --timeout=300s
+   ```
+
+   Raw phase 1（专用 manifest 只有 ordinal 0，但 SeedSpec 仍是全部三个节点）：
+
+   ```bash
+   kubectl apply -f deploy/k8s/statefulset-adopt.yaml
+   kubectl wait --for=condition=ready pod/rr-0 --timeout=300s
+   ```
+
+3. **再启动空节点 / Then start pristine nodes**：只有阶段 1 readiness 成功后才能执行阶段 2。新节点显示
+   `awaiting_replication` 且 `/ready` 为 503；Active 生命周期下不会调用 initialize，也不会自动添加
+   learner 或 voter。
+
+   Helm phase 2（渲染 Job 并由 `--wait` 等待）：
+
+   ```bash
+   helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
+     --set image.tag=<formation-capable-tag> \
+     --set cluster.formation.mode=adopt \
+     --set cluster.formation.adoptionInitializedReplicas=3 --wait
+   ```
+
+   Raw phase 2（先启动空节点，再运行 Job）：
+
+   ```bash
+   kubectl scale statefulset rr --replicas=3
+   kubectl apply -f deploy/k8s/cluster-form-job.yaml
+   kubectl wait --for=condition=complete job/rr-cluster-form --timeout=300s
+   ```
+
+4. **显式收敛成员 / Converge membership explicitly**：阶段 2 的既有 cluster-form Job 在当前 leader 上逐个
+   `rr-admin group add-learner`，等待追平后执行一次完整 voter 集合的 `change-membership`。Helm `adopt`
+   Job 是普通 resource 而不是 hook；阶段 1 不渲染它，阶段 2 才渲染。Job 名包含 `.Release.Revision`，
+   升级会创建新 Job，不会修改已完成 Job 的 immutable pod template。验证 ACK 数据、partition → group
+   路由、全量 voter 和 `/ready`。只有新 Job 完成且这些检查通过后，才能手工清理旧 revision 的
+   completed Jobs；不要删除当前或仍在运行的 Job。
+5. **保持 P1 边界 / Preserve the P1 boundary**：不要通过修改 `replicaCount` 或 SeedSpec 来扩容。
+   P1 没有动态成员扩缩、副本替换或 resharding；改变花名册会改变 seed identity，而不是更新当前 membership。
+
+lifecycle store 故障时，已初始化节点可依靠本地 Raft 状态继续读写，partition 路由不变，但 readiness
+变为 degraded（HTTP 503）；pristine 节点 fail closed，不会自行初始化。store 恢复后 reconcile 会继续，
+不会把故障窗口当成重新组建集群的授权。
+
+Without formation configuration, the legacy bootstrap, peers, Admin learner, and manual membership behavior is
+unchanged. Fresh Genesis does not render/run the ordinary formation job; that job remains available for legacy
+adoption and manual recovery only.
+
+---
+
 ## Quick Reference
 
 | 阶段 / Phase | `allow_insecure` | TLS | Auth | Notes |

@@ -8,6 +8,7 @@ rr-core = { path = "../../crates/rr-core" }
 rr-server = { path = "../../crates/rr-server" }
 rr-raft = { path = "../../crates/rr-raft" }
 rr-config = { path = "../../crates/rr-config" }
+rr-config-etcd = { path = "../../crates/rr-config-etcd" }
 rr-storage = { path = "../../crates/rr-storage" }
 rr-network = { path = "../../crates/rr-network" }
 rr-router = { path = "../../crates/rr-router" }
@@ -25,13 +26,18 @@ openraft = { workspace = true, features = ["serde"] }
 # before tonic TLS (server + ChannelPool) is configured (`--tls-*` flags).
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
+[dev-dependencies]
+etcd-client.workspace = true
+tempfile.workspace = true
+testcontainers = "0.22"
+
 [features]
 # Default builds without librdkafka / cmake; `--kafka-brokers` then fails
 # fast with a rebuild hint. Add the `rdkafka` feature for real Kafka ingest.
 default = []
 rdkafka = ["dep:rr-ingestor-kafka", "rr-ingestor-kafka/rdkafka"]
-# Durable Raft log (`--data-dir`): RocksDB-backed log storage (ADR A-0016).
-rocks = ["rr-raft/rocks"]
+# Durable Raft log and framework metadata (`--data-dir`), while business KV stays in memory.
+rocks = ["rr-raft/rocks", "rr-storage/rocks"]
 
 [[bin]]
 name = "kv-store"

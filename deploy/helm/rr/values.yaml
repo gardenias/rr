@@ -1,5 +1,6 @@
 image:
   repository: ghcr.io/gardenias/rr
+  # Required: rr 0.2.0 rejects [cluster.formation]. No compatible release is implied.
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -11,11 +12,8 @@ ports:
   metrics: 9100
 
 metrics:
-  # Bind host for the Prometheus/health HTTP server. Leave empty for v0.2.0
-  # images (their metrics server is already reachable cross-pod and the
-  # strict config parser rejects this key). Set to "0.0.0.0" on server
-  # >= 0.3.0, which defaults the HTTP server to loopback.
-  bindHost: ""
+  # Required for kubelet probes and cross-pod Prometheus scraping.
+  bindHost: "0.0.0.0"
 
 storage:
   backend: "rocks"
@@ -29,6 +27,16 @@ cluster:
     minAvailable: 2
   # Raft group hosted by every pod (partition 1 → this group).
   groupId: 1
+  name: "rr"
+  formation:
+    # genesis: concurrently initialize a fresh full-roster cluster.
+    # adopt: record initialized legacy state; the job performs membership.
+    mode: "genesis"
+    # Adoption phase 1: set to the initialized ordinal count (for example, 1).
+    # Phase 2: set to replicaCount to start pristine nodes and render the job.
+    # Null preserves replicaCount; this never changes the SeedSpec roster.
+    adoptionInitializedReplicas: null
+    etcdEndpoints: ["http://rr-etcd:2379"]
 
 auth:
   adminTokenSecret:
@@ -43,7 +51,7 @@ tls:
   enabled: false
   existingSecret: ""
   requireClientCert: false
-  # SNI override for rr-admin clients (the cluster-form hook job) when the
+  # SNI override for rr-admin clients (the cluster-form convergence job) when the
   # server certificates' SANs do not cover the in-cluster pod DNS names.
   domain: ""
 

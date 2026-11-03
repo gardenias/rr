@@ -4,21 +4,20 @@
 //! is set, `RrNode` spawns a minimal hyper server on that port serving:
 //!
 //! - `GET /health` — liveness probe. Returns 200 iff the process is up.
-//! - `GET /ready`  — readiness probe. Returns 200 iff the node finished
-//!   `start()` successfully; 503 otherwise (e.g. during startup or after
-//!   `shutdown()`). Body is JSON:
+//! - `GET /ready`  — readiness probe. Legacy nodes return 200 after `start()`
+//!   succeeds. Managed nodes additionally require every hosted group to be
+//!   formed and have an explicit observed leader. Body is JSON:
 //!
 //!   ```json
-//!   {"ready": true,  "reason": "ready",    "since_unix_secs": 1714128000}
-//!   {"ready": false, "reason": "starting", "since_unix_secs": 1714127990}
+//!   {"ready":true,"reason":"ready","since_unix_secs":1714128000,"phase":"ready","detail":"ready"}
+//!   {"ready":false,"reason":"starting","since_unix_secs":1714127990,"phase":"starting","detail":""}
 //!   ```
 //!
-//!   The `reason` field is free-form and operator-readable
-//!   (`"starting"`, `"ready"`, `"shutting_down"`, `"degraded:<detail>"`,
-//!   etc.). Tools that only care about the boolean should consume the
-//!   HTTP status code; tools that want richer state should parse the
-//!   body. K8s readinessProbe falls into the former bucket — the status
-//!   code alone gates traffic.
+//!   The `reason` field is free-form and operator-readable. `phase` is a
+//!   stable lifecycle category and `detail` carries operator context. Tools
+//!   that only care about the boolean should consume the HTTP status code;
+//!   tools that want richer state should parse the body. K8s readinessProbe
+//!   falls into the former bucket — the status code alone gates traffic.
 //!
 //! - `GET /metrics` — Prometheus scrape endpoint (text format).
 //!
@@ -59,6 +58,8 @@ struct ReadinessState {
     ready: bool,
     reason: String,
     since_unix_secs: u64,
+    phase: String,
+    detail: String,
 }
 
 impl ReadinessFlag {
@@ -67,6 +68,8 @@ impl ReadinessFlag {
             ready: false,
             reason: "starting".to_string(),
             since_unix_secs: now_unix_secs(),
+            phase: "starting".to_string(),
+            detail: String::new(),
         })))
     }
 
@@ -84,10 +87,24 @@ impl ReadinessFlag {
     /// `"draining_for_decommission"` that operators query via
     /// `GET /ready`.
     pub fn set_with_reason(&self, ready: bool, reason: impl Into<String>) {
+        let reason = reason.into();
         if let Ok(mut guard) = self.0.write() {
             guard.ready = ready;
-            guard.reason = reason.into();
+            guard.reason = reason.clone();
             guard.since_unix_secs = now_unix_secs();
+            guard.phase = if ready { "ready" } else { "custom" }.to_string();
+            guard.detail = reason;
+        }
+    }
+
+    pub fn set_phase(&self, ready: bool, phase: impl Into<String>, detail: impl Into<String>) {
+        let phase = phase.into();
+        if let Ok(mut guard) = self.0.write() {
+            guard.ready = ready;
+            guard.reason = if ready { "ready" } else { &phase }.to_string();
+            guard.since_unix_secs = now_unix_secs();
+            guard.phase = phase;
+            guard.detail = detail.into();
         }
     }
 
@@ -104,6 +121,8 @@ impl ReadinessFlag {
                 ready: false,
                 reason: "lock_poisoned".to_string(),
                 since_unix_secs: 0,
+                phase: "failed".to_string(),
+                detail: "readiness lock poisoned".to_string(),
             })
     }
 }
@@ -339,6 +358,23 @@ mod tests {
         let snap = r.snapshot();
         assert!(!snap.ready);
         assert_eq!(snap.reason, "degraded:lost_quorum");
+    }
+
+    #[test]
+    fn readiness_phase_and_detail_extend_the_compatible_json_shape() {
+        let r = ReadinessFlag::new();
+        r.set_phase(
+            false,
+            "awaiting_replication",
+            "group 1 has no local membership",
+        );
+        let snap = r.snapshot();
+        let json = serde_json::to_value(&snap).unwrap();
+        assert_eq!(json["ready"], serde_json::Value::Bool(false));
+        assert_eq!(json["reason"], "awaiting_replication");
+        assert!(json.get("since_unix_secs").is_some());
+        assert_eq!(json["phase"], "awaiting_replication");
+        assert_eq!(json["detail"], "group 1 has no local membership");
     }
 
     #[test]

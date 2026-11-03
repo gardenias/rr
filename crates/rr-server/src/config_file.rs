@@ -13,11 +13,15 @@
 //! `true` back off.
 
 use rr_core::error::ConfigError;
+use rr_core::types::NodeAddr;
+use rr_core::SeedSpec;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::ServeArgs;
+use crate::formation::FormationMode;
 
 /// Module-local result type: config resolution fails with typed
 /// [`ConfigError`]s, keeping `anyhow` out of the library's public surface
@@ -91,6 +95,9 @@ pub struct StorageSection {
 pub struct ClusterSection {
     pub bootstrap: Option<bool>,
     pub peers: Option<Vec<String>>,
+    pub name: Option<String>,
+    pub nodes: Option<Vec<String>>,
+    pub formation: Option<FormationSection>,
     /// Number of Raft groups/partitions the node hosts (stock topology:
     /// partition i → group i, replicas = all peers). Default 1.
     pub groups: Option<u64>,
@@ -102,6 +109,13 @@ pub struct ClusterSection {
     /// (default true; quorum-guarded). Set false to drive membership only
     /// by hand.
     pub auto_promote_learners: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormationSection {
+    pub mode: Option<String>,
+    pub etcd_endpoints: Option<Vec<String>>,
 }
 
 /// `[tls]` section — when present, gRPC runs over TLS.
@@ -179,6 +193,7 @@ pub struct ResolvedConfig {
     pub durability: DurabilityChoice,
     pub bootstrap: bool,
     pub peers: Vec<String>,
+    pub formation: Option<ResolvedFormation>,
     /// Number of Raft groups/partitions the node hosts (stock topology:
     /// partition i → group i, replicas = all peers). Default 1.
     pub groups: u64,
@@ -192,6 +207,13 @@ pub struct ResolvedConfig {
     pub snapshot_logs_since_last: u64,
     /// DANGEROUS — see `NodeConfig::allow_insecure`.
     pub allow_insecure: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedFormation {
+    pub seed: SeedSpec,
+    pub mode: FormationMode,
+    pub etcd_endpoints: Vec<String>,
 }
 
 /// Resolved rate-limit settings. All fields default to `None` = unlimited.
@@ -402,6 +424,14 @@ impl ResolvedConfig {
             ));
         }
         let auto_promote_learners = file.cluster.auto_promote_learners.unwrap_or(true);
+        let formation = resolve_formation(
+            args,
+            &file.cluster,
+            node_id,
+            groups,
+            bootstrap,
+            !peers.is_empty(),
+        )?;
 
         let tls = resolve_tls(args, &file.tls)?;
         let auth = resolve_auth(&file.auth)?;
@@ -476,6 +506,7 @@ impl ResolvedConfig {
             durability,
             bootstrap,
             peers,
+            formation,
             groups,
             auto_promote_learners,
             log_level: args.log_level.clone(),
@@ -502,6 +533,114 @@ impl ResolvedConfig {
         })?;
         Ok(parsed)
     }
+}
+
+fn resolve_formation(
+    args: &ServeArgs,
+    cluster: &ClusterSection,
+    node_id: u64,
+    groups: u64,
+    bootstrap: bool,
+    has_peers: bool,
+) -> Result<Option<ResolvedFormation>> {
+    let file_formation = cluster.formation.as_ref();
+    if args.formation.is_none() && file_formation.is_none() {
+        return Ok(None);
+    }
+    if bootstrap {
+        return Err(invalid(
+            "managed formation and manual bootstrap are mutually exclusive",
+        ));
+    }
+    if has_peers {
+        return Err(invalid(
+            "managed formation and legacy peers are mutually exclusive",
+        ));
+    }
+
+    let mode = match args
+        .formation
+        .as_deref()
+        .or_else(|| file_formation.and_then(|formation| formation.mode.as_deref()))
+    {
+        Some("genesis") => FormationMode::Genesis,
+        Some("adopt") => FormationMode::AdoptLegacy,
+        Some(other) => {
+            return Err(invalid(format!(
+                "invalid formation mode '{other}': expected 'genesis' or 'adopt'"
+            )));
+        }
+        None => {
+            return Err(invalid(
+                "missing formation mode: expected 'genesis' or 'adopt'",
+            ));
+        }
+    };
+    let etcd_endpoints = if !args.etcd_endpoints.is_empty() {
+        args.etcd_endpoints.clone()
+    } else {
+        file_formation
+            .and_then(|formation| formation.etcd_endpoints.clone())
+            .unwrap_or_default()
+    };
+    if etcd_endpoints.is_empty() {
+        return Err(invalid(
+            "managed formation requires at least one etcd_endpoints entry",
+        ));
+    }
+
+    let node_entries = if !args.cluster_nodes.is_empty() {
+        args.cluster_nodes.clone()
+    } else {
+        cluster.nodes.clone().unwrap_or_default()
+    };
+    let mut nodes = BTreeMap::new();
+    for entry in node_entries {
+        let (raw_id, addr) = entry.split_once('@').ok_or_else(|| {
+            invalid(format!(
+                "invalid cluster node '{entry}': expected 'id@advertised_addr'"
+            ))
+        })?;
+        if addr.is_empty() {
+            return Err(invalid(format!(
+                "invalid advertised address in cluster node '{entry}': address is empty"
+            )));
+        }
+        let id = raw_id.parse::<u64>().map_err(|_| {
+            invalid(format!(
+                "invalid cluster node ID '{raw_id}': expected a u64"
+            ))
+        })?;
+        if nodes
+            .insert(
+                id,
+                NodeAddr {
+                    addr: addr.to_string(),
+                },
+            )
+            .is_some()
+        {
+            return Err(invalid(format!("duplicate cluster node ID {id}")));
+        }
+    }
+    if !nodes.contains_key(&node_id) {
+        return Err(invalid(format!(
+            "local node {node_id} is missing from the managed formation roster"
+        )));
+    }
+    let cluster_name = args
+        .cluster_name
+        .clone()
+        .or_else(|| cluster.name.clone())
+        .unwrap_or_default();
+    let seed = SeedSpec::stock(cluster_name, nodes, groups)
+        .map_err(|error| invalid(format!("invalid managed formation seed: {error}")))?;
+
+    Ok(Some(ResolvedFormation {
+        seed,
+        mode,
+        etcd_endpoints,
+    }))
 }
 
 fn resolve_auth(file: &AuthSection) -> Result<ResolvedAuth> {
@@ -770,7 +909,11 @@ mod tests {
             "#,
         );
         let args = args_with_config(f.path().to_path_buf());
-        assert!(ResolvedConfig::resolve(&args).unwrap().auto_promote_learners);
+        assert!(
+            ResolvedConfig::resolve(&args)
+                .unwrap()
+                .auto_promote_learners
+        );
 
         let f = write_toml(
             r#"
@@ -783,7 +926,11 @@ mod tests {
             "#,
         );
         let args = args_with_config(f.path().to_path_buf());
-        assert!(!ResolvedConfig::resolve(&args).unwrap().auto_promote_learners);
+        assert!(
+            !ResolvedConfig::resolve(&args)
+                .unwrap()
+                .auto_promote_learners
+        );
 
         // 0 is rejected — it would start no Raft group at all.
         let args = ServeArgs {
@@ -1106,6 +1253,227 @@ mod tests {
         };
         let err = ResolvedConfig::resolve(&args).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn managed_formation_config_resolves() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 2
+            listen_addr = "0.0.0.0:51002"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@node-1:51001", "2@node-2:51002"]
+            groups = 2
+
+            [cluster.formation]
+            mode = "genesis"
+            etcd_endpoints = ["http://127.0.0.1:2379"]
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        ResolvedConfig::resolve(&args).unwrap();
+    }
+
+    #[test]
+    fn managed_formation_cli_overrides_file_and_preserves_bind_address() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            name = "file-cluster"
+            nodes = ["1@file-node:51001"]
+            groups = 2
+
+            [cluster.formation]
+            mode = "genesis"
+            etcd_endpoints = ["http://file-etcd:2379"]
+            "#,
+        );
+        let mut args = args_with_config(f.path().to_path_buf());
+        args.node_id = Some(2);
+        args.listen_addr = Some("0.0.0.0:52002".to_string());
+        args.cluster_name = Some("cli-cluster".to_string());
+        args.cluster_nodes = vec![
+            "1@advertised-1:52001".to_string(),
+            "2@advertised-2:52002".to_string(),
+        ];
+        args.formation = Some("adopt".to_string());
+        args.etcd_endpoints = vec!["http://cli-etcd:2379".to_string()];
+
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        let formation = resolved.formation.as_ref().unwrap();
+        assert_eq!(resolved.listen_addr, "0.0.0.0:52002");
+        assert_eq!(formation.seed.cluster_name, "cli-cluster");
+        assert_eq!(formation.seed.nodes.len(), 2);
+        assert_eq!(formation.seed.nodes[&2].addr, "advertised-2:52002");
+        assert_eq!(formation.seed.groups.len(), 2);
+        assert_eq!(formation.mode, FormationMode::AdoptLegacy);
+        assert_eq!(formation.etcd_endpoints, vec!["http://cli-etcd:2379"]);
+    }
+
+    #[test]
+    fn managed_formation_conflicts_with_manual_bootstrap() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@node-1:51001"]
+            bootstrap = true
+
+            [cluster.formation]
+            mode = "genesis"
+            etcd_endpoints = ["http://127.0.0.1:2379"]
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("bootstrap"), "got: {message}");
+        assert!(!message.contains("unknown field"), "got: {message}");
+    }
+
+    #[test]
+    fn managed_formation_conflicts_with_legacy_peers() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@node-1:51001"]
+            peers = ["node-1:51001"]
+
+            [cluster.formation]
+            mode = "genesis"
+            etcd_endpoints = ["http://127.0.0.1:2379"]
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("peers"), "got: {message}");
+        assert!(!message.contains("unknown field"), "got: {message}");
+    }
+
+    #[test]
+    fn managed_formation_requires_local_node_in_roster() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 3
+            listen_addr = "127.0.0.1:51003"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@node-1:51001", "2@node-2:51002"]
+
+            [cluster.formation]
+            mode = "genesis"
+            etcd_endpoints = ["http://127.0.0.1:2379"]
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(err.to_string().contains("node 3"), "got: {err}");
+    }
+
+    #[test]
+    fn managed_formation_rejects_duplicate_node_ids() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@node-1:51001", "1@node-1-other:51001"]
+
+            [cluster.formation]
+            mode = "genesis"
+            etcd_endpoints = ["http://127.0.0.1:2379"]
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn managed_formation_rejects_empty_advertised_address() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@"]
+
+            [cluster.formation]
+            mode = "genesis"
+            etcd_endpoints = ["http://127.0.0.1:2379"]
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(err.to_string().contains("address"), "got: {err}");
+    }
+
+    #[test]
+    fn managed_formation_requires_etcd_endpoints() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@node-1:51001"]
+
+            [cluster.formation]
+            mode = "adopt"
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(err.to_string().contains("etcd_endpoints"), "got: {err}");
+    }
+
+    #[test]
+    fn managed_formation_rejects_unknown_mode() {
+        let f = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "127.0.0.1:51001"
+
+            [cluster]
+            name = "stock"
+            nodes = ["1@node-1:51001"]
+
+            [cluster.formation]
+            mode = "automatic"
+            etcd_endpoints = ["http://127.0.0.1:2379"]
+            "#,
+        );
+        let args = args_with_config(f.path().to_path_buf());
+        let err = ResolvedConfig::resolve(&args).unwrap_err();
+        assert!(err.to_string().contains("formation mode"), "got: {err}");
     }
 
     #[test]

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use openraft::type_config::async_runtime::WatchReceiver;
-use openraft::BasicNode;
+use openraft::{BasicNode, LogIdOptionExt};
 use rr_config::mem::MemConfigProvider;
 use rr_core::config::ConfigProvider;
 use rr_core::storage::StorageEngine;
@@ -289,6 +289,37 @@ async fn wait_for_membership(
         if Instant::now() >= deadline {
             anyhow::bail!(
                 "membership did not converge: want voters {expected_voters:?} and learners {expected_learners:?}, last seen voters {voters:?} and learners {learners:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_configuration_settled(mgr: &RaftGroupManager) -> Result<()> {
+    let raft = mgr
+        .get_raft(GROUP_ID)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("missing group {GROUP_ID}"))?;
+    let metrics_rx = raft.metrics();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let metrics = metrics_rx.borrow_watched().clone();
+        let joint_configs = metrics
+            .membership_config
+            .membership()
+            .get_joint_config()
+            .len();
+        let membership_committed = metrics.membership_config.as_ref()
+            == metrics.committed_membership_config.as_ref();
+        let logs_committed = metrics
+            .last_log_index
+            .is_none_or(|last| metrics.local_committed.index() == Some(last));
+        if joint_configs == 1 && membership_committed && logs_committed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "configuration did not settle: joint_configs={joint_configs}, membership_committed={membership_committed}, logs_committed={logs_committed}"
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -622,6 +653,41 @@ async fn test_concurrent_remove_group_member_rechecks_committed_voters() {
     shutdown_all(&nodes).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn test_initialize_for_formation_reentry_releases_membership_lock() {
+    use rr_raft::group_manager::InitializeOutcome;
+
+    let (nodes, _) = build_3node_admin_cluster().await.unwrap();
+    let leader_id = wait_for_cluster_ready(&nodes, GROUP_ID, 8_000)
+        .await
+        .expect("cluster must elect a leader");
+    let mgr = nodes[(leader_id - 1) as usize].group_manager();
+    let raft = mgr.get_raft(GROUP_ID).await.unwrap();
+    let members = raft
+        .metrics()
+        .borrow_watched()
+        .membership_config
+        .membership()
+        .nodes()
+        .map(|(node_id, node)| (*node_id, node.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let (first, second) = tokio::join!(
+        mgr.initialize_for_formation(GROUP_ID, members.clone()),
+        mgr.initialize_for_formation(GROUP_ID, members)
+    );
+    assert_eq!(first.unwrap(), InitializeOutcome::AlreadyInitialized);
+    assert_eq!(second.unwrap(), InitializeOutcome::AlreadyInitialized);
+
+    mgr.add_learner_nonblocking(GROUP_ID, 4, "127.0.0.1:1".to_string())
+        .await
+        .expect("a later membership mutation must acquire the released group lock");
+    wait_for_membership(mgr.as_ref(), BTreeSet::from([1, 2, 3]), BTreeSet::from([4]))
+        .await
+        .unwrap();
+    shutdown_all(&nodes).await;
+}
+
 async fn exceed_learner_catch_up_threshold(mgr: &RaftGroupManager) {
     mgr.write_batch(GROUP_ID, vec![vec![0]; 5_001])
         .await
@@ -726,6 +792,9 @@ async fn test_force_audit_waits_for_authoritative_locked_decision() {
             .await
     });
     wait_for_membership(mgr.as_ref(), remaining, BTreeSet::from([4]))
+        .await
+        .unwrap();
+    wait_for_configuration_settled(mgr.as_ref())
         .await
         .unwrap();
 

@@ -211,6 +211,21 @@ OK
 
 To embed a node programmatically, see [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) and the [Getting Started guide](https://rr-framework.github.io/guide/getting-started). The real API is `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?` (synchronous, single argument) → `node.start().await?`.
 
+## Managed Cluster Formation
+
+Fresh clusters can use homogeneous Genesis formation. Every node receives the same full advertised roster and
+`[cluster.formation]` settings; no ordinal-specific bootstrap or peers list is derived. Genesis initializes the
+full roster only through a linearizable lifecycle record and does not run the ordinary cluster-form job.
+
+Existing initialized groups use `mode = "adopt"` instead. Adopt initialized nodes first, verify that ACK data
+and membership are unchanged, then start pristine nodes and converge them through the existing formation job or
+manual `add-learner` + `change-membership`. Adoption never initializes a group or expands membership by itself.
+
+SeedSpec describes the initial routing/Genesis roster, not current Raft membership. P1 does not support dynamic
+membership expansion, replica replacement, or resharding. During a lifecycle-store outage, initialized nodes can
+continue Raft traffic with unchanged routes but remain unready/degraded; pristine nodes fail closed. See the
+[getting-started guide](docs/docs/guide/getting-started.md) and [upgrade runbook](docs/docs/deployment/upgrading.md).
+
 ## Build Instructions
 
 ### Basic Build

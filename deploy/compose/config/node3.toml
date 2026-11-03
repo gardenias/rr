@@ -16,5 +16,9 @@ backend = "rocks"
 durability = "strict"
 
 [cluster]
-bootstrap = false
-peers = ["rr-1:51001", "rr-2:51001"]
+name = "rr-compose"
+nodes = ["1@rr-1:51001", "2@rr-2:51001", "3@rr-3:51001"]
+
+[cluster.formation]
+mode = "genesis"
+etcd_endpoints = ["http://etcd:2379"]

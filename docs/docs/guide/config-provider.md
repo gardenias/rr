@@ -171,7 +171,31 @@ To implement a custom `ConfigProvider` (e.g., based on ZooKeeper or Consul):
 2. In `watch_changes`, use the backend's notification mechanism (e.g., etcd watch) to return a stream of events.
 3. `RrNode` calls `watch_changes` on startup and automatically reacts to topology changes in a background loop.
 
-## 动态重新配置 / Dynamic Reconfiguration
+## 托管 SeedSpec 与生命周期 / Managed SeedSpec and Lifecycle
+
+托管 formation 从相同 SeedSpec 构造静态路由表，并使用独立的 `LifecycleStore`（生产为 etcd）授权
+Genesis、恢复和旧集群收养。`[cluster.formation].etcd_endpoints` 指向这个生命周期存储；它并不把
+`EtcdConfigProvider` 变成可写成员表。
+
+Managed formation builds a static routing table from an identical SeedSpec and uses a separate linearizable
+`LifecycleStore` (etcd in production) to authorize Genesis, recovery, and legacy adoption. Formation endpoints
+do not turn `EtcdConfigProvider` into a writable membership authority.
+
+- SeedSpec 的 `groups` / `replicas` 是初始路由和 Genesis 初始化授权，**不是当前 Raft membership**。
+  当前 voter/learner 只以 Raft membership 为准。
+- managed 节点禁用旧 watch-loop 的 learner/membership 副作用和自动 learner promotion。Active 记录下的
+  pristine 节点等待复制；legacy adoption 之后的成员收敛仍由 Job/Admin 手工执行。
+- P1 不支持通过 ConfigProvider、修改 `replicaCount` 或修改 SeedSpec 来做动态扩缩容、副本替换或
+  resharding。改变 SeedSpec 会改变 seed identity，并被现有生命周期记录拒绝。
+- store outage 不清空路由：已初始化节点继续 Raft 流量但 readiness degraded；pristine 节点不就绪且
+  不初始化。
+
+## 旧模式动态重新配置 / Legacy Dynamic Reconfiguration
+
+以下行为仅适用于未配置 `[cluster.formation]` 的旧模式 `RrNode`；managed 节点不会执行其中的成员副作用。
+
+The behavior below applies only to legacy nodes without `[cluster.formation]`; managed nodes suppress its
+membership side effects.
 
 `RrNode` 运行一个后台任务来监听配置变更：
 

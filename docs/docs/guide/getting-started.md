@@ -379,6 +379,41 @@ cargo run -p rr-server -- serve --config examples/config/single-node.toml --allo
 
 ---
 
+## 运行 5：同构托管组建 / Run 5: Homogeneous Managed Formation
+
+托管组建要求所有节点使用相同的集群名、完整 `id@advertised_addr` 花名册和 `[cluster.formation]` 配置，
+且不能再设置 `bootstrap` 或 `peers`。etcd 保存线性一致的生命周期记录；它不同于路由用的
+`EtcdConfigProvider`。
+
+Managed formation requires the same cluster name, full advertised roster, and formation settings on every
+node. Do not combine it with `bootstrap` or `peers`. etcd stores the linearizable lifecycle record; this is
+separate from the routing-oriented `EtcdConfigProvider`.
+
+```toml
+[cluster]
+name = "rr-quickstart"
+nodes = ["1@rr-0.rr:51001", "2@rr-1.rr:51001", "3@rr-2.rr:51001"]
+
+[cluster.formation]
+mode = "genesis" # use "adopt" only for an existing initialized legacy group
+etcd_endpoints = ["http://etcd:2379"]
+```
+
+- **全新 Genesis / Fresh Genesis**：并行启动全部空节点。只有一个经 CAS 授权的 Genesis 生命周期记录，
+  初始 voter 集合来自完整花名册；普通 cluster-form Job 不参与。/ Start all pristine nodes concurrently.
+  One CAS-authorized lifecycle record drives full-roster initialization; the ordinary formation job is skipped.
+- **旧集群收养 / Legacy adoption**：先以 `mode = "adopt"` 启动已有初始化状态的节点，确认 ACK 数据和
+  voter 集合未变，再启动空节点，最后通过既有 Job 或手工 `add-learner` + `change-membership` 收敛。
+  收养自身绝不初始化或扩容。详细顺序见 [升级指南](../deployment/upgrading.md)。/ Adopt initialized
+  nodes first, then start pristine nodes, and finally use the existing job or manual learner/membership path.
+  Adoption itself never initializes or expands membership.
+- **SeedSpec 不是当前成员表 / SeedSpec is not current membership**：它描述初始路由和 Genesis 授权；
+  当前 voter/learner 以 Raft membership 为准。P1 不支持动态扩缩容、副本替换或 resharding。
+- **就绪与存储故障 / Readiness and store outage**：空节点等待复制或 store 不可用时不就绪；已初始化节点
+  在 lifecycle store 故障时可继续 Raft 读写并保持分区路由，但 `/ready` 返回 503 degraded。
+
+---
+
 ## 管理端口与指标端口配置 / Admin Port & Metrics Port Configuration
 
 每个 `RrNode` 支持可选的管理 gRPC 端口（Admin gRPC port）和 Prometheus 指标端口（Metrics HTTP port）。

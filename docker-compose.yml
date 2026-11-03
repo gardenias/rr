@@ -5,9 +5,28 @@
 # 仅本地开发 / LOCAL DEV ONLY — never reuse this file outside local dev; real
 # deployments must configure [tls] + admin_token instead.
 services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.13
+    container_name: rr-etcd
+    hostname: etcd
+    command:
+      - etcd
+      - --name=rr-etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+    networks: [rrnet]
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
   rr-1:
     build: .
     image: rr:dev
+    depends_on:
+      etcd:
+        condition: service_healthy
     container_name: rr-1
     hostname: rr-1
     networks: [rrnet]
@@ -33,7 +52,7 @@ services:
   rr-2:
     image: rr:dev
     depends_on:
-      rr-1:
+      etcd:
         condition: service_healthy
     container_name: rr-2
     hostname: rr-2
@@ -58,9 +77,7 @@ services:
   rr-3:
     image: rr:dev
     depends_on:
-      rr-1:
-        condition: service_healthy
-      rr-2:
+      etcd:
         condition: service_healthy
     container_name: rr-3
     hostname: rr-3

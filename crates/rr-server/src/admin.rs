@@ -18,6 +18,7 @@ use rr_core::config::ConfigProvider;
 use rr_core::error::RaftError;
 use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 use rr_core::types::NodeId;
+use rr_core::{FormationState, LifecycleStore};
 use rr_network::audit::AUDIT_TARGET;
 use rr_network::error_convert::IntoStatus;
 use rr_network::proto::admin::admin_service_server::AdminService;
@@ -86,6 +87,7 @@ pub struct AdminServiceImpl {
     listen_addr: String,
     group_manager: Arc<RaftGroupManager>,
     config_provider: Arc<dyn ConfigProvider>,
+    lifecycle_store: Option<Arc<dyn LifecycleStore>>,
     start_time: Instant,
     /// Tracks every spawned `OnlineBackup` streaming task (no
     /// fire-and-forget): each task terminates itself when the client
@@ -110,9 +112,46 @@ impl AdminServiceImpl {
             listen_addr,
             group_manager,
             config_provider,
+            lifecycle_store: None,
             start_time: Instant::now(),
             backup_streams: std::sync::Mutex::new(tokio::task::JoinSet::new()),
             snapshot_stub_warned: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn with_lifecycle_store(mut self, lifecycle_store: Arc<dyn LifecycleStore>) -> Self {
+        self.lifecycle_store = Some(lifecycle_store);
+        self
+    }
+
+    async fn require_active_group(&self, group_id: u64) -> Result<(), Status> {
+        let Some(store) = &self.lifecycle_store else {
+            return Ok(());
+        };
+        let lifecycle = store
+            .load_linearizable()
+            .await
+            .map_err(|error| {
+                Status::failed_precondition(format!(
+                    "group {group_id} lifecycle state unavailable; retry membership change after store recovery: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                Status::failed_precondition(format!(
+                    "group {group_id} lifecycle record unavailable; retry membership change after activation"
+                ))
+            })?;
+        if lifecycle
+            .record
+            .groups
+            .get(&group_id)
+            .is_some_and(|group| group.state == FormationState::Active)
+        {
+            Ok(())
+        } else {
+            Err(Status::failed_precondition(format!(
+                "group {group_id} lifecycle is not Active; retry membership change after activation"
+            )))
         }
     }
 }
@@ -548,6 +587,7 @@ impl AdminService for AdminServiceImpl {
             result = "started",
             "admin rpc — mutation"
         );
+        self.require_active_group(req.group_id).await?;
         let outcome = self
             .group_manager
             .add_learner(req.group_id, req.node_id, req.addr.clone())
@@ -605,6 +645,7 @@ impl AdminService for AdminServiceImpl {
             result = "started",
             "admin rpc — mutation"
         );
+        self.require_active_group(req.group_id).await?;
         // 1. Group existence (same not_found semantics as `get_group_membership`).
         let raft = match self.group_manager.get_raft(req.group_id).await {
             Some(raft) => raft,
@@ -744,6 +785,7 @@ impl AdminService for AdminServiceImpl {
             result = "started",
             "admin rpc — mutation"
         );
+        self.require_active_group(req.group_id).await?;
 
         let _raft = match self.group_manager.get_raft(req.group_id).await {
             Some(raft) => raft,
