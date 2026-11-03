@@ -56,6 +56,7 @@ const sidebars: SidebarsConfig = {
       label: 'Guide',
       items: [
         'guide/getting-started',
+        'guide/playbook',
         'guide/service-trait',
         'guide/state-machine-trait',
         'guide/config-provider',

@@ -289,6 +289,27 @@ Failover (verified): Ctrl-C the leader node — within seconds the survivors ele
 - **生产式路径**：使用 stock `rr-server` + `rr-admin` 显式成员管理（`add-learner` + `change-membership`）的三节点集群同样实测可用，详见 [getting-started 指南](docs/docs/guide/getting-started.md)。注意 stock `rr-server` 内置的是 EchoStateMachine 冒烟服务（`get` 回显 key 本身，非 KV 语义）。/ **Production-style path**: a three-node cluster driven by stock `rr-server` + explicit `rr-admin` membership management (`add-learner` + `change-membership`) is also verified — see the [getting-started guide](docs/docs/guide/getting-started.md). Note the stock `rr-server` ships an EchoStateMachine smoke service (`get` echoes the key itself — not KV semantics).
 - **`examples/config/3node-cluster-node{1,2,3}.toml` 是多机部署模板**（已含 `[tls]`/`[auth]` 段：需要 `rocks` feature 构建、scripts/gen-dev-certs.sh 生成的 TLS 证书、可解析主机名与 `RR_ADMIN_TOKEN`/`RR_CLIENT_TOKEN` 环境变量），不是本地快速启动；成员组建命令见 node1 模板头注释。/ **`examples/config/3node-cluster-node{1,2,3}.toml` are multi-machine deployment templates** (they ship `[tls]`/`[auth]` sections and need a `rocks`-feature build, TLS certs from scripts/gen-dev-certs.sh, resolvable hostnames, and the `RR_ADMIN_TOKEN`/`RR_CLIENT_TOKEN` env vars) — not a local quickstart; the membership commands are in the node1 template's header comment.
 
+## Developer Workflow with just
+
+日常命令已封装在根目录的 [justfile](./justfile)（需安装 [just](https://github.com/casey/just)）。深度操作手册（集群探玩、Genesis/Adoption、故障转移、真实验收）见
+[Operations Playbook](docs/docs/guide/playbook.md)；Java SDK 用法见 [sdks/java/README.md](sdks/java/README.md)。
+
+Common commands are wrapped in the root [justfile](./justfile) (requires [just](https://github.com/casey/just)). For the deep operations walkthrough — cluster exploration, Genesis/adoption, failover, real acceptance suites — see the [Operations Playbook](docs/docs/guide/playbook.md); for the Java SDK see [sdks/java/README.md](sdks/java/README.md).
+
+```bash
+just --list          # 列出全部命令 / list every recipe
+just doctor          # 环境自检（必需与可选工具分开报告）/ environment self-check
+just test            # cargo test 全量测试 / full test suite
+just kv-cluster-up   # 一键三节点内存 KV 集群（--bootstrap 路径）/ 3-node in-memory KV cluster
+just genesis-up      # 一键三节点同构 Genesis 集群（需本地 etcd）/ homogeneous Genesis cluster
+just test-etcd       # 真实 etcd 验收测试 / real-etcd acceptance tests
+just helm-test       # Helm chart 渲染测试 / Helm render tests
+just java-test       # Java SDK 单元测试 / Java SDK unit tests
+```
+
+后台进程的 PID 与日志统一放在 `target/just/`，用 `just kv-cluster-down` / `just genesis-down` / `just etcd-down` 清理。
+Recipes track background processes via PID and log files under `target/just/`; tear them down with `just kv-cluster-down` / `just genesis-down` / `just etcd-down`.
+
 ## Documentation
 
 📖 For detailed API documentation, architectural deep-dives, and advanced configuration, see the [📖 Documentation](https://rr-framework.github.io)
