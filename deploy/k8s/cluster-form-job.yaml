@@ -1,9 +1,10 @@
-# Cluster-formation job for the raw manifests.
+# IMAGE OVERRIDE REQUIRED: replace REPLACE_WITH_FORMATION_CAPABLE_TAG below with
+# an image containing managed formation support; rr 0.2.0 is incompatible.
 #
-# rr-server's [cluster].peers only populates the local routing table — it
-# does NOT create raft membership. Applying statefulset.yaml alone yields
-# one bootstrapped voter (rr-0) and two idle pods. Apply this job AFTER the
-# StatefulSet's pods are created:
+# Legacy adoption/manual recovery job. Do NOT run this for fresh Genesis:
+# the lifecycle supervisor already initializes the full roster. For adoption,
+# first start the initialized legacy nodes with formation mode "adopt", then
+# start pristine nodes and apply this job to converge membership explicitly:
 #
 #   kubectl apply -f deploy/k8s/cluster-form-job.yaml
 #   kubectl logs job/rr-cluster-form -f
@@ -32,7 +33,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: cluster-form
-          image: ghcr.io/gardenias/rr:0.2.0
+          image: ghcr.io/gardenias/rr:REPLACE_WITH_FORMATION_CAPABLE_TAG
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

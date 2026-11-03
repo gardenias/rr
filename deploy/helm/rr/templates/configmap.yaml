@@ -11,20 +11,25 @@ data:
     listen_addr = "0.0.0.0:{{ .Values.ports.grpc }}"
     data_dir = "/var/lib/rr/data"
     admin_port = {{ .Values.ports.admin }}
+    admin_bind_host = "0.0.0.0"
     metrics_port = {{ .Values.ports.metrics }}
-    {{- if .Values.metrics.bindHost }}
-    # Requires server >= 0.3.0 — v0.2.0's strict config parser rejects this
-    # key (deny_unknown_fields) and the pod CrashLoops.
     metrics_bind_host = "{{ .Values.metrics.bindHost }}"
-    {{- end }}
 
     [storage]
     backend = "{{ .Values.storage.backend }}"
     durability = "{{ .Values.storage.durability }}"
 
     [cluster]
-    bootstrap = {{`{{BOOTSTRAP}}`}}
-    peers = {{`{{PEERS}}`}}
+    name = "{{ .Values.cluster.name }}"
+    nodes = [
+    {{- range $ordinal := until (int .Values.replicaCount) }}
+      "{{ add $ordinal 1 }}@{{ include "rr.fullname" $ }}-{{ $ordinal }}.{{ include "rr.fullname" $ }}:{{ $.Values.ports.grpc }}",
+    {{- end }}
+    ]
+
+    [cluster.formation]
+    mode = "{{ .Values.cluster.formation.mode }}"
+    etcd_endpoints = {{ required "cluster.formation.etcdEndpoints is required" .Values.cluster.formation.etcdEndpoints | toJson }}
 
     {{- if .Values.auth.adminTokenSecret.name }}
 

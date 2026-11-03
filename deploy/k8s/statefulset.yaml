@@ -1,6 +1,10 @@
 # rr — 3-node multi-Raft StatefulSet (raw manifests; the Helm chart lives in
 # deploy/helm/rr).
 #
+# IMAGE OVERRIDE REQUIRED: rr 0.2.0 rejects the managed formation fields below.
+# Replace REPLACE_WITH_FORMATION_CAPABLE_TAG in this file and cluster-form-job.yaml
+# with an image tag that contains managed formation support before applying.
+#
 # DEFAULT = SECURE-ON. rr-server runs startup security gates
 # (validate_security_invariants in crates/rr-server/src/node.rs): five gates
 # (G1-G5) guard the gRPC transport — RaftService without TLS, TLS without mTLS
@@ -38,30 +42,29 @@ metadata:
     app.kubernetes.io/name: rr
 data:
   config.toml.tmpl: |
-    # Each pod renders its own config from this template using the POD_NAME.
-    # NODE_ID is derived from the StatefulSet ordinal (rr-0 → 1, rr-1 → 2, ...).
-    # BOOTSTRAP is true only for rr-0.
+    # Only NODE_ID differs between pods. Every pod receives the same advertised
+    # roster and Genesis formation settings; no ordinal bootstrap/peers variant.
     [node]
     id = {{NODE_ID}}
     listen_addr = "0.0.0.0:51001"
     data_dir = "/var/lib/rr/data"
     admin_port = 52001
+    admin_bind_host = "0.0.0.0"
     metrics_port = 9100
-    # NOTE: no metrics_bind_host here — that key only exists in server >= 0.3.0;
-    # v0.2.0's strict parser (deny_unknown_fields) refuses to boot on it, and
-    # v0.2.0's metrics server is already reachable cross-pod without it.
+    metrics_bind_host = "0.0.0.0"
 
     [storage]
     backend = "rocks"
     durability = "strict"
 
     [cluster]
-    # peers only populates the LOCAL ROUTING TABLE — it does NOT create raft
-    # membership. The cluster-form Job (deploy/k8s/cluster-form-job.yaml)
-    # performs add-learner + change-membership; without it rr-0 stays the
-    # sole voter and the other pods idle forever.
-    bootstrap = {{BOOTSTRAP}}
-    peers = {{PEERS}}
+    name = "rr"
+    nodes = ["1@rr-0.rr:51001", "2@rr-1.rr:51001", "3@rr-2.rr:51001"]
+
+    [cluster.formation]
+    mode = "genesis"
+    # The manifests expect an etcd Service named etcd on port 2379.
+    etcd_endpoints = ["http://etcd:2379"]
 
     [auth]
     admin_token_env = "RR_ADMIN_TOKEN"
@@ -132,7 +135,8 @@ metadata:
 spec:
   serviceName: rr
   replicas: 3
-  podManagementPolicy: OrderedReady
+  # Genesis needs all voters started before any single pod can become ready.
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app.kubernetes.io/name: rr
@@ -169,22 +173,8 @@ spec:
               set -eu
               ORDINAL="${POD_NAME##*-}"
               NODE_ID=$((ORDINAL + 1))
-              if [ "$ORDINAL" = "0" ]; then
-                BOOTSTRAP=true
-                PEERS="[]"
-              else
-                BOOTSTRAP=false
-                PEERS_JSON="["
-                for i in $(seq 0 $((ORDINAL - 1))); do
-                  [ $i -gt 0 ] && PEERS_JSON="${PEERS_JSON},"
-                  PEERS_JSON="${PEERS_JSON}\"rr-${i}.rr:51001\""
-                done
-                PEERS="${PEERS_JSON}]"
-              fi
               sed \
                 -e "s|{{NODE_ID}}|${NODE_ID}|g" \
-                -e "s|{{BOOTSTRAP}}|${BOOTSTRAP}|g" \
-                -e "s|{{PEERS}}|${PEERS}|g" \
                 /tmpl/config.toml.tmpl > /rendered/config.toml
               echo "--- rendered config for ${POD_NAME} ---"
               cat /rendered/config.toml
@@ -200,10 +190,8 @@ spec:
               mountPath: /rendered
       containers:
         - name: rr-server
-          # Pinned release — never `latest`: pods must not silently run
-          # different builds (rolling restarts would mix wire/format
-          # versions). Bump deliberately and read the CHANGELOG first.
-          image: ghcr.io/gardenias/rr:0.2.0
+          # Mandatory override: pin a formation-capable image, never `latest`.
+          image: ghcr.io/gardenias/rr:REPLACE_WITH_FORMATION_CAPABLE_TAG
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

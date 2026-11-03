@@ -909,6 +909,59 @@ gRPC 平面的五个 gate 全部通过才允许 `RrNode` 构造成功;`allow_ins
   `rr_auth_rejects_total` 的真实实现(auth 拒绝计数)排入 RC 批次,届时 panel 随真实 metric
   一并恢复。
 
+## INV-9 Homogeneous Formation Safety — 组建授权与旧集群收养
+
+### 不变量陈述
+
+相同 SeedSpec 下，只有 `Genesis + Forming` 可以按完整 seed roster 初始化；`Active` 记录下的 pristine
+本地 group 只能等待复制。`AdoptLegacy` 首次创建记录前要求本地所有托管 group 已初始化，并直接写入
+`LegacyAdopted + Active`，不得 initialize 或改变 voter/learner。后续成员收敛只能走显式 Job/Admin
+learner + change-membership 路径。SeedSpec 是初始路由/Genesis 授权，不是当前 membership；P1 不提供
+动态扩缩容、副本替换或 resharding。
+
+lifecycle store 不可用时，已初始化节点可使用本地 Raft 状态继续服务但 readiness 必须为 degraded；
+pristine 节点必须 fail closed，不得把 store outage 当成初始化授权。
+
+### 不变量链
+
+1. TOML/CLI 解析要求完整 `id@advertised_addr` roster、本节点在 roster 内、非空 etcd endpoints，并拒绝
+   managed formation 与 bootstrap/peers 混用。
+2. `FormationSupervisor::authorize_or_create` 区分 Genesis 与 AdoptLegacy，校验本地状态和 seed/origin，
+   通过 `LifecycleStore` CAS 创建唯一记录。
+3. `FormationSupervisor::reconcile_inner` 只允许 Genesis/Forming 初始化并核对实际 seed membership；
+   Active/pristine 返回 `AwaitingReplication`，AdoptLegacy 只报告现有状态，不调用 membership API。
+4. managed `RrNode` 禁用旧 watch-loop 成员副作用和自动 promotion；readiness 要求 formed + observed
+   leader，store outage 使用 degraded/not-ready。
+
+### 强制点
+
+| # | 位置 | 强制内容 |
+|---|---|---|
+| 1 | `crates/rr-server/src/config_file.rs:538-644` | 解析相同 roster/formation；拒绝 bootstrap/peers 冲突、缺本节点、空 endpoint |
+| 2 | `crates/rr-server/src/formation.rs:245-307` | Genesis/AdoptLegacy 本地状态门槛、origin/state 与 CAS 创建 |
+| 3 | `crates/rr-server/src/formation.rs:96-243` | Active/pristine 不初始化；Genesis 初始化后核对 seed；AdoptLegacy 不改 membership |
+| 4 | `crates/rr-server/src/node.rs:906-935` | managed reconcile 与 readiness 循环 |
+| 5 | `crates/rr-server/src/formation.rs:390-419` | awaiting/degraded/leader readiness 判定 |
+
+### 现有测试
+
+- `tests/integration/src/homogeneous_formation.rs`
+  `homogeneous_active_and_pristine_never_initializes`、
+  `legacy_adoption_preserves_ack_and_expands_only_through_manual_membership`、
+  `legacy_adoption_rejects_mixed_initialized_and_pristine_groups`、
+  `legacy_adoption_rejects_pristine_only_local_state`
+  —— Active/pristine 零初始化；单 voter ACK 收养后经显式 learner/full membership 收敛；混合与全空首次收养失败。
+- `tests/integration/src/homogeneous_formation.rs`
+  `homogeneous_store_outage_keeps_writes_and_partition_routes_unchanged`
+  —— store outage 下 ACK 写和路由保持，readiness degraded。
+- `crates/rr-server/src/formation.rs` formation 单元测试覆盖 CAS conflict、seed/origin/identity 校验、
+  store outage、实际 membership 不匹配和 managed watch 副作用禁用。
+
+### 已知缺口
+
+- real-etcd 进程级场景需要本地 etcd 容器镜像；镜像缺失时这些场景不执行，不能以 Mem/etcd 单元测试
+  替代声明其通过。P1 的动态成员、替换和 resharding 不在本不变量承诺范围内。
+
 ---
 
 ## 缺口 → 修复工作流对照表

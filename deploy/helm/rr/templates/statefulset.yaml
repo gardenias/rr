@@ -1,3 +1,8 @@
+{{- if .Values.cluster.formation -}}
+{{- if or (not .Values.image.tag) (eq .Values.image.tag "0.2.0") -}}
+{{- fail "rr chart: managed formation requires an explicit compatible image; explicitly set image.tag to a formation-capable image (rr 0.2.0 rejects [cluster.formation] fields)" -}}
+{{- end -}}
+{{- end -}}
 {{- /*
 Security gate: keep the rendered manifest consistent with rr-server's
 startup security validation (validate_security_invariants, gates G1-G7).
@@ -24,6 +29,13 @@ never enables the TCP raft transport.
 {{- if and (not .Values.security.allowInsecure) (not .Values.auth.adminTokenSecret.name) -}}
 {{- fail "rr chart: auth.adminTokenSecret.name is empty and security.allowInsecure=false; rr-server refuses to boot with AdminService enabled and no admin token (gate G5). Set auth.adminTokenSecret.name to an existing Secret" -}}
 {{- end -}}
+{{- $rolloutReplicas := .Values.replicaCount -}}
+{{- if eq .Values.cluster.formation.mode "adopt" -}}
+{{- $rolloutReplicas = default .Values.replicaCount .Values.cluster.formation.adoptionInitializedReplicas -}}
+{{- if or (lt (int $rolloutReplicas) 1) (gt (int $rolloutReplicas) (int .Values.replicaCount)) -}}
+{{- fail "rr chart: cluster.formation.adoptionInitializedReplicas must be between 1 and replicaCount" -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -32,8 +44,8 @@ metadata:
     {{- include "rr.labels" . | nindent 4 }}
 spec:
   serviceName: {{ include "rr.fullname" . }}
-  replicas: {{ .Values.replicaCount }}
-  podManagementPolicy: OrderedReady
+  replicas: {{ $rolloutReplicas }}
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       {{- include "rr.selectorLabels" . | nindent 6 }}
@@ -68,22 +80,8 @@ spec:
               set -eu
               ORDINAL="${POD_NAME##*-}"
               NODE_ID=$((ORDINAL + 1))
-              if [ "$ORDINAL" = "0" ]; then
-                BOOTSTRAP=true
-                PEERS="[]"
-              else
-                BOOTSTRAP=false
-                PEERS_JSON="["
-                for i in $(seq 0 $((ORDINAL - 1))); do
-                  [ $i -gt 0 ] && PEERS_JSON="${PEERS_JSON},"
-                  PEERS_JSON="${PEERS_JSON}\"{{ include "rr.fullname" . }}-${i}.{{ include "rr.fullname" . }}:{{ .Values.ports.grpc }}\""
-                done
-                PEERS="${PEERS_JSON}]"
-              fi
               sed \
                 -e "s|{{`{{NODE_ID}}`}}|${NODE_ID}|g" \
-                -e "s|{{`{{BOOTSTRAP}}`}}|${BOOTSTRAP}|g" \
-                -e "s|{{`{{PEERS}}`}}|${PEERS}|g" \
                 /tmpl/config.toml.tmpl > /rendered/config.toml
               cat /rendered/config.toml
           env:

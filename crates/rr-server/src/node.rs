@@ -28,6 +28,7 @@ use rr_router::router::ShardRouter;
 
 use crate::admin::AdminServiceImpl;
 use crate::config::{NodeConfig, RaftTransport};
+use crate::formation::{FormationConfig, FormationSupervisor};
 use crate::health::{spawn_http_server, ReadinessFlag};
 
 /// Validate the production security invariants. Returns `Err` describing
@@ -202,11 +203,7 @@ fn listener_incoming(
 /// Start the quorum-guarded learner promoter on a locally running group
 /// when [`NodeConfig::auto_promote_learners`] is on. Failures are logged,
 /// never fatal: membership can always be driven manually via rr-admin.
-async fn start_promoter_if_enabled(
-    gm: &Arc<RaftGroupManager>,
-    group_id: GroupId,
-    enabled: bool,
-) {
+async fn start_promoter_if_enabled(gm: &Arc<RaftGroupManager>, group_id: GroupId, enabled: bool) {
     if !enabled {
         return;
     }
@@ -247,6 +244,8 @@ pub struct RrNode {
     admin_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Handle to the HTTP observability server (/health /ready /metrics); `None` if disabled.
     http_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    formation: Option<Arc<FormationSupervisor>>,
+    formation_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Port for the admin gRPC service, if enabled.
     admin_port: Option<u16>,
     /// Port for HTTP observability endpoints (/health /ready /metrics).
@@ -376,6 +375,8 @@ impl RrNode {
             watch_handle: Mutex::new(None),
             admin_handle: Mutex::new(None),
             http_handle: Mutex::new(None),
+            formation: None,
+            formation_handle: Mutex::new(None),
             admin_port: config.admin_port,
             metrics_port: config.metrics_port,
             auto_promote_learners: config.auto_promote_learners,
@@ -392,26 +393,59 @@ impl RrNode {
         })
     }
 
+    pub fn new_with_formation(
+        mut config: NodeConfig,
+        formation: FormationConfig,
+    ) -> Result<Self, RrError> {
+        formation.seed.validate()?;
+        if !formation.seed.nodes.contains_key(&config.node_id) {
+            return Err(rr_core::error::LifecycleError::InvalidSeed(format!(
+                "node {} is not present in the formation seed",
+                config.node_id
+            ))
+            .into());
+        }
+        config.auto_promote_learners = false;
+        let storage = Arc::clone(&config.storage_engine);
+        let mut node = Self::new(config)?;
+        let supervisor = FormationSupervisor::new(
+            node.node_id,
+            storage,
+            Arc::clone(&node.group_manager),
+            formation,
+            node.readiness.clone(),
+        );
+        node.formation = Some(Arc::new(supervisor));
+        node.readiness
+            .set_phase(false, "forming", "managed formation has not reconciled");
+        Ok(node)
+    }
+
     /// Start the node.
     ///
-    /// 1. Loads the routing table.
-    /// 2. Starts Raft groups assigned to this node.
-    /// 3. Spawns a config-change watch loop.
-    /// 4. Spawns a gRPC server if both `raft_lookup` and `client_dispatch`
-    ///    are present.
+    /// Legacy nodes load the routing table, start assigned groups, and spawn
+    /// the dynamic membership watch. Managed nodes bind all configured
+    /// listeners before running seed-driven formation and never apply legacy
+    /// membership-watch side effects.
     #[instrument(skip(self))]
     pub async fn start(&self) -> Result<(), RrError> {
         // ── 1. Load routing table and start assigned groups ─────────────────
-        let table = self.router.routing_table().await?;
+        if self.formation.is_none() {
+            let table = self.router.routing_table().await?;
 
-        for (group_id, meta) in &table.groups {
-            if meta.replicas.contains(&self.node_id) {
-                self.group_manager.start_group(*group_id).await?;
-                self.group_manager.start_metrics_ticker(*group_id).await?;
-                start_promoter_if_enabled(&self.group_manager, *group_id, self.auto_promote_learners)
+            for (group_id, meta) in &table.groups {
+                if meta.replicas.contains(&self.node_id) {
+                    self.group_manager.start_group(*group_id).await?;
+                    self.group_manager.start_metrics_ticker(*group_id).await?;
+                    start_promoter_if_enabled(
+                        &self.group_manager,
+                        *group_id,
+                        self.auto_promote_learners,
+                    )
                     .await;
-                info!(node_id = self.node_id, group_id, "started Raft group");
-                counter!("node.group.started").increment(1);
+                    info!(node_id = self.node_id, group_id, "started Raft group");
+                    counter!("node.group.started").increment(1);
+                }
             }
         }
 
@@ -426,10 +460,14 @@ impl RrNode {
         let cp = Arc::clone(&self.config_provider);
         let node_id = self.node_id;
         let auto_promote = self.auto_promote_learners;
+        let managed = self.formation.is_some();
 
         let watch_handle = tokio::spawn(async move {
             let mut stream = watch_stream;
             while let Some(change) = stream.next().await {
+                if managed {
+                    continue;
+                }
                 match change {
                     RoutingTableChange::PartitionAdded { group_id, .. } => {
                         // The PartitionAdded variant doesn't carry replicas directly —
@@ -758,14 +796,20 @@ impl RrNode {
                 first: self.auth_config.admin_interceptor(),
                 second: self.rate_limit_config.admin_interceptor(),
             };
+            let admin = AdminServiceImpl::new(
+                self.node_id,
+                self.listen_addr.clone(),
+                Arc::clone(&self.group_manager),
+                Arc::clone(&self.config_provider),
+            );
+            let admin = if let Some(formation) = &self.formation {
+                admin.with_lifecycle_store(formation.lifecycle_store())
+            } else {
+                admin
+            };
             let admin_svc = tonic::service::interceptor::InterceptedService::new(
-                AdminServiceServer::new(AdminServiceImpl::new(
-                    self.node_id,
-                    self.listen_addr.clone(),
-                    Arc::clone(&self.group_manager),
-                    Arc::clone(&self.config_provider),
-                ))
-                .max_decoding_message_size(rr_network::CLIENT_MAX_DECODING_MESSAGE_SIZE),
+                AdminServiceServer::new(admin)
+                    .max_decoding_message_size(rr_network::CLIENT_MAX_DECODING_MESSAGE_SIZE),
                 admin_chain,
             );
             if self.auth_config.admin_required() {
@@ -855,17 +899,53 @@ impl RrNode {
             );
         }
 
-        self.readiness.set(true);
+        if self.formation.is_some() {
+            self.start_managed_formation().await?;
+        } else {
+            self.readiness.set(true);
+        }
         info!(node_id = self.node_id, "RrNode started");
         counter!("node.started").increment(1);
         Ok(())
     }
 
+    async fn start_managed_formation(&self) -> Result<(), RrError> {
+        let formation = self.formation.as_ref().expect("managed formation");
+        for group_id in formation.hosted_groups() {
+            if !self.group_manager.group_ids().await.contains(&group_id) {
+                self.group_manager.start_group(group_id).await?;
+                counter!("node.group.started").increment(1);
+            }
+            self.group_manager.start_metrics_ticker(group_id).await?;
+        }
+        formation.reconcile().await?;
+
+        let supervisor = Arc::clone(formation);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    _ = interval.tick() => {
+                        if let Err(error) = supervisor.reconcile().await {
+                            warn!(error = %error, "managed formation reconciliation failed");
+                        }
+                    }
+                }
+            }
+        });
+        *self.formation_handle.lock().await = Some(handle);
+        Ok(())
+    }
+
     /// Shutdown the node gracefully.
     ///
-    /// 1. Signals the gRPC server to stop (5 s timeout).
+    /// 1. Signals the gRPC server and formation supervisor to stop.
     /// 2. Aborts the config watch loop (2 s timeout).
-    /// 3. Stops all active Raft groups.
+    /// 3. Stops all active Raft groups after formation is cancelled.
     #[instrument(skip(self))]
     pub async fn shutdown(&self) -> Result<(), RrError> {
         info!(node_id = self.node_id, "RrNode shutting down");
@@ -879,6 +959,16 @@ impl RrNode {
 
         // ── 1. Stop gRPC server ──────────────────────────────────────────────
         let _ = self.shutdown_tx.send(true);
+
+        if let Some(handle) = self.formation_handle.lock().await.take() {
+            handle.abort();
+            match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+                Ok(Ok(())) => info!("formation supervisor stopped"),
+                Ok(Err(e)) if e.is_cancelled() => info!("formation supervisor aborted"),
+                Ok(Err(e)) => warn!("formation supervisor panicked: {e}"),
+                Err(_) => warn!("formation supervisor stop timed out after 2s"),
+            }
+        }
 
         if let Some(handle) = self.server_handle.lock().await.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
@@ -941,6 +1031,10 @@ impl RrNode {
     /// Return this node's ID.
     pub fn node_id(&self) -> NodeId {
         self.node_id
+    }
+
+    pub fn readiness(&self) -> ReadinessFlag {
+        self.readiness.clone()
     }
 }
 

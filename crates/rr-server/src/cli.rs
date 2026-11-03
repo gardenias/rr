@@ -131,6 +131,30 @@ pub struct ServeArgs {
     #[arg(long = "peers", env = "RR_PEERS", value_delimiter = ',')]
     pub peers: Vec<String>,
 
+    /// Cluster name used for the managed formation lifecycle record in etcd.
+    #[arg(long = "cluster-name", env = "RR_CLUSTER_NAME")]
+    pub cluster_name: Option<String>,
+
+    /// Comma-separated managed roster entries in `id@advertised_addr` form.
+    #[arg(
+        long = "cluster-nodes",
+        env = "RR_CLUSTER_NODES",
+        value_delimiter = ','
+    )]
+    pub cluster_nodes: Vec<String>,
+
+    /// Managed cluster formation mode: `genesis` or `adopt`.
+    #[arg(long = "formation", env = "RR_FORMATION")]
+    pub formation: Option<String>,
+
+    /// Comma-separated etcd endpoints used by managed formation.
+    #[arg(
+        long = "etcd-endpoints",
+        env = "RR_ETCD_ENDPOINTS",
+        value_delimiter = ','
+    )]
+    pub etcd_endpoints: Vec<String>,
+
     /// Number of Raft groups (and partitions) the node hosts. The stock
     /// topology maps partition i → group i with all peers as replicas;
     /// default 1. Multi-group setups exist for benchmarking and demos —
@@ -300,6 +324,62 @@ mod tests {
     #[test]
     fn clap_cli_definition_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    struct FormationEnvGuard;
+
+    impl Drop for FormationEnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("RR_CLUSTER_NAME");
+            std::env::remove_var("RR_CLUSTER_NODES");
+            std::env::remove_var("RR_FORMATION");
+            std::env::remove_var("RR_ETCD_ENDPOINTS");
+        }
+    }
+
+    #[test]
+    fn cli_parses_managed_formation_flags() {
+        let cli = Cli::try_parse_from([
+            "rr-server",
+            "serve",
+            "--cluster-name",
+            "stock",
+            "--cluster-nodes",
+            "1@node-1:51001,2@node-2:51002",
+            "--formation",
+            "genesis",
+            "--etcd-endpoints",
+            "http://etcd-1:2379,http://etcd-2:2379",
+        ])
+        .expect("parse");
+        let Command::Serve(args) = cli.command else {
+            panic!("expected Serve");
+        };
+        assert_eq!(args.cluster_name.as_deref(), Some("stock"));
+        assert_eq!(args.cluster_nodes, vec!["1@node-1:51001", "2@node-2:51002"]);
+        assert_eq!(args.formation.as_deref(), Some("genesis"));
+        assert_eq!(
+            args.etcd_endpoints,
+            vec!["http://etcd-1:2379", "http://etcd-2:2379"]
+        );
+    }
+
+    #[test]
+    fn cli_reads_managed_formation_from_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _cleanup = FormationEnvGuard;
+        std::env::set_var("RR_CLUSTER_NAME", "stock-env");
+        std::env::set_var("RR_CLUSTER_NODES", "1@node-1:51001");
+        std::env::set_var("RR_FORMATION", "adopt");
+        std::env::set_var("RR_ETCD_ENDPOINTS", "http://etcd:2379");
+        let cli = Cli::try_parse_from(["rr-server", "serve"]).expect("parse with env");
+        let Command::Serve(args) = cli.command else {
+            panic!("expected Serve");
+        };
+        assert_eq!(args.cluster_name.as_deref(), Some("stock-env"));
+        assert_eq!(args.cluster_nodes, vec!["1@node-1:51001"]);
+        assert_eq!(args.formation.as_deref(), Some("adopt"));
+        assert_eq!(args.etcd_endpoints, vec!["http://etcd:2379"]);
     }
 
     #[test]

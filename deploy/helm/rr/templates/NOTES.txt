@@ -1,12 +1,29 @@
-rr has been deployed as a StatefulSet named {{ include "rr.fullname" . }} with {{ .Values.replicaCount }} replica(s).
+{{- $rolloutReplicas := default .Values.replicaCount .Values.cluster.formation.adoptionInitializedReplicas -}}
+rr has deployed {{ $rolloutReplicas }} of {{ .Values.replicaCount }} roster replica(s) as StatefulSet
+{{ include "rr.fullname" . }}.
 
-A post-install hook job ({{ include "rr.fullname" . }}-cluster-form) forms the
-raft group: it adds every pod as a learner on the bootstrap node and then
-sets the full voter set — [cluster].peers alone only fills routing tables
-and would otherwise leave {{ sub (int64 .Values.replicaCount) 1 }} node(s) idle.
+Formation mode: {{ .Values.cluster.formation.mode }}.
+{{- if eq .Values.cluster.formation.mode "adopt" }}
+{{- if lt (int $rolloutReplicas) (int .Values.replicaCount) }}
+Adoption phase 1 is running initialized replicas only; no convergence Job is rendered.
+Wait for these adopters to become ready, then start phase 2 with the same values plus:
+  --set cluster.formation.adoptionInitializedReplicas={{ .Values.replicaCount }}
+Do not start pristine replicas before phase 1 is ready.
+{{- else }}
+Adoption phase 2 includes the ordinary convergence Job
+({{ include "rr.fullname" . }}-cluster-form-{{ .Release.Revision }}). It adds pristine nodes as learners
+and sets the full voter set. Adoption itself never initializes or expands Raft membership.
 
-Watch formation:
-  kubectl -n {{ .Release.Namespace }} logs job/{{ include "rr.fullname" . }}-cluster-form -f
+Watch manual membership convergence:
+  kubectl -n {{ .Release.Namespace }} logs job/{{ include "rr.fullname" . }}-cluster-form-{{ .Release.Revision }} -f
+
+After the current revision is ready, older completed cluster-form Jobs from prior
+revisions may be deleted manually. Confirm the replacement Job completed first;
+do not delete the current or any running convergence Job.
+{{- end }}
+{{- else }}
+Genesis uses the lifecycle supervisor; no ordinary cluster-form job is rendered.
+{{- end }}
 
 Verify group status (leader elected, membership = all pods):
   kubectl -n {{ .Release.Namespace }} exec {{ include "rr.fullname" . }}-0 -- \

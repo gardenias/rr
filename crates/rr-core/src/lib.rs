@@ -18,6 +18,7 @@
 //! | `config` | [`ConfigProvider`], [`RoutingTableChange`] |
 //! | `codec` | [`Codec`], [`BincodeCodec`] — **deprecated** (unbounded decode; use `bounded_decode` / frame codecs) |
 //! | `error` | [`RrError`] and domain-specific error enums |
+//! | `lifecycle` | [`SeedSpec`], [`ClusterLifecycle`], [`LifecycleStore`] |
 //! | `membership` | [`MIN_VOTERS_AFTER_REMOVAL`] — change-membership quorum policy |
 //! | `types` | [`NodeId`], [`GroupId`], [`RoutingTable`], … |
 //!
@@ -55,6 +56,7 @@ pub mod framed_snapshot;
 pub mod idempotency;
 pub mod ingestor;
 pub mod ingress;
+pub mod lifecycle;
 pub mod membership;
 pub mod output;
 pub mod service;
@@ -72,7 +74,8 @@ pub use codec::{BincodeCodec, Codec};
 pub use config::{ConfigProvider, RoutingTableChange};
 pub use deferred::{CompletedResponse, CorrelationId, DeferredApply, DeferredHandleResult};
 pub use error::{
-    CodecError, ConfigError, NetworkError, RaftError, RouterError, RrError, StorageError,
+    CodecError, ConfigError, LifecycleError, NetworkError, RaftError, RouterError, RrError,
+    StorageError,
 };
 pub use framed_entry::{FramedEntry, FRAMED_ENTRY_MAGIC};
 pub use framed_snapshot::{
@@ -81,6 +84,10 @@ pub use framed_snapshot::{
 };
 pub use idempotency::{ApplyOutcome, IdempotencyDecision, IdempotencyError, IdempotencyKey};
 pub use ingestor::{CommandIngestor, DynCommandIngestor, DynIngressCommand, IngressCommand};
+pub use lifecycle::{
+    CasOutcome, ClusterLifecycle, ClusterOrigin, FormationState, GroupFormation, LifecycleStore,
+    SeedGroup, SeedPartition, SeedSpec, VersionedLifecycle,
+};
 pub use membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 pub use output::{HandleResult, Output, OutputTarget};
 pub use service::Service;

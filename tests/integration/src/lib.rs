@@ -29,6 +29,8 @@ pub mod fault_injection;
 #[cfg(test)]
 pub mod fault_schedule;
 #[cfg(test)]
+mod homogeneous_formation;
+#[cfg(test)]
 mod leader_redirect_failover;
 pub mod linearizability;
 #[cfg(test)]

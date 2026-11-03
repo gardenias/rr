@@ -14,6 +14,13 @@
 //! cargo run -p kv-store -- --node-id 3 --port 51003 --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
 //! ```
 //!
+//! ## Managed Genesis — no manual bootstrap; every node uses the same seed roster:
+//! ```text
+//! kv-store --node-id 1 --port 51001 --formation genesis --cluster-name example \
+//!     --etcd-endpoints http://127.0.0.1:2379 \
+//!     --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
+//! ```
+//!
 //! ## Container-style run — bind all interfaces, advertise via the roster:
 //! ```text
 //! kv-store --node-id 1 --listen-addr 0.0.0.0 --port 51001 --metrics-port 9100 \
@@ -62,8 +69,12 @@
 //!   Requires a binary built with `--features rdkafka`.
 //! - `--kafka-topic-prefix <P>` — Topic prefix; group 1 consumes `{P}1`. Default `input_`.
 //! - `--data-dir <PATH>`        — Durable mode (ADR A-0016): the Raft log is persisted
-//!   to `{PATH}/raft-log/{group_id}`. Requires a binary built with `--features rocks`.
-//!   Unset = in-memory log (historical behavior).
+//!   to `{PATH}/raft-log/{group_id}`; managed formation also persists framework identity
+//!   under `{PATH}/framework`. Requires `--features rocks`. Unset = in-memory log/metadata.
+//! - `--formation <MODE>`       — Managed formation: `genesis` or `adopt` (legacy adoption).
+//!   Requires `--cluster-name` and `--etcd-endpoints`; cannot be combined with `--bootstrap`.
+//! - `--cluster-name <NAME>`    — Managed cluster identity used for the Etcd lifecycle key.
+//! - `--etcd-endpoints <A,...>` — Comma-separated Etcd endpoints for managed formation.
 //! - `--tls-cert <PATH>`        — Server identity PEM; also presented as the client
 //!   identity when dialing peers. Requires `--tls-key` and `--tls-ca` (all-or-nothing).
 //! - `--tls-key <PATH>`         — Private key matching `--tls-cert`.
@@ -79,7 +90,7 @@
 //!   Admin/Client services. REQUIRED in TLS mode (secrets come from the
 //!   environment, never argv — same convention as rr-server's
 //!   `auth.*_token_env`); ignored in plaintext dev mode.
-//! - `--bootstrap`              — Initialize Raft membership (run on exactly one node).
+//! - `--bootstrap`              — Manual-only Raft initialization (run on exactly one legacy node).
 //! - `--demo`                   — Run KV demo writes and exit (default when no args given).
 //!
 //! Invalid arguments (unknown flags, missing or malformed values) print a
@@ -89,9 +100,8 @@
 //! # Architecture
 //!
 //! Each node is an `RrNode` with:
-//! - `MemStorage` for key/value data (the business KV stays in memory; with
-//!   `--data-dir` the *Raft log* is persisted to RocksDB — snapshots plus the
-//!   durable log give full restart recovery)
+//! - In-memory business KV state; with `--data-dir`, RocksDB persists the Raft log
+//!   and (in managed mode only) framework identity metadata, never the business KV map
 //! - `KvService` wrapped in `ServiceStateMachineAdapter` as the state machine
 //! - `RaftGroupLookupImpl` for intra-cluster Raft RPCs
 //! - `ClientDispatchImpl` for client write routing
@@ -104,10 +114,12 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
+use rr_config_etcd::EtcdLifecycleStore;
 use rr_core::config::ConfigProvider;
 use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
-use rr_core::types::{NodeId, PartitionConfig};
+use rr_core::types::{NodeAddr, NodeId, PartitionConfig};
+use rr_core::{LifecycleStore, SeedSpec};
 use rr_network::auth::AuthConfig;
 use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
@@ -116,6 +128,7 @@ use rr_raft::service_adapter::ServiceStateMachineAdapter;
 use rr_router::router::ShardRouter;
 use rr_server::config::NodeConfig;
 use rr_server::dispatch::ClientDispatchImpl;
+use rr_server::formation::{FormationConfig, FormationMode};
 use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::node::RrNode;
 use rr_storage::mem::MemStorage;
@@ -143,6 +156,9 @@ struct CliConfig {
     tls_ca: Option<String>,
     tls_domain: Option<String>,
     snapshot_logs_since_last: Option<u64>,
+    formation: Option<FormationMode>,
+    cluster_name: Option<String>,
+    etcd_endpoints: Vec<String>,
     bootstrap: bool,
     demo: bool,
 }
@@ -168,6 +184,9 @@ impl CliConfig {
                 tls_ca: None,
                 tls_domain: None,
                 snapshot_logs_since_last: None,
+                formation: None,
+                cluster_name: None,
+                etcd_endpoints: vec![],
                 bootstrap: false,
                 demo: true,
             };
@@ -187,6 +206,9 @@ impl CliConfig {
         let mut tls_ca: Option<String> = None;
         let mut tls_domain: Option<String> = None;
         let mut snapshot_logs_since_last: Option<u64> = None;
+        let mut formation = None;
+        let mut cluster_name = None;
+        let mut etcd_endpoints = vec![];
         let mut bootstrap = false;
         let mut demo = false;
         let mut i = 0;
@@ -259,6 +281,31 @@ impl CliConfig {
                     snapshot_logs_since_last =
                         Some(parse_flag_value(&args, i, "--snapshot-logs-since-last"));
                 }
+                "--formation" => {
+                    i += 1;
+                    formation = Some(match flag_value(&args, i, "--formation") {
+                        "genesis" => FormationMode::Genesis,
+                        "adopt" => FormationMode::AdoptLegacy,
+                        other => {
+                            eprintln!(
+                                "error: invalid --formation '{other}': expected 'genesis' or 'adopt'"
+                            );
+                            usage();
+                        }
+                    });
+                }
+                "--cluster-name" => {
+                    i += 1;
+                    cluster_name = Some(flag_value(&args, i, "--cluster-name").to_string());
+                }
+                "--etcd-endpoints" => {
+                    i += 1;
+                    etcd_endpoints = flag_value(&args, i, "--etcd-endpoints")
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
                 "--bootstrap" => bootstrap = true,
                 "--demo" => demo = true,
                 other => {
@@ -294,6 +341,9 @@ impl CliConfig {
             tls_ca,
             tls_domain,
             snapshot_logs_since_last,
+            formation,
+            cluster_name,
+            etcd_endpoints,
             bootstrap,
             demo,
         }
@@ -307,7 +357,8 @@ fn usage() -> ! {
          [--peers ID@ADDR,...] [--metrics-port PORT] [--metrics-bind-host IP] \
          [--kafka-brokers A,...] [--kafka-topic-prefix P] [--data-dir PATH] \
          [--tls-cert PATH --tls-key PATH --tls-ca PATH [--tls-domain NAME]] \
-         [--snapshot-logs-since-last N] [--bootstrap] [--demo]"
+         [--snapshot-logs-since-last N] [--formation genesis|adopt \
+         --cluster-name NAME --etcd-endpoints URL,...] [--bootstrap] [--demo]"
     );
     std::process::exit(2);
 }
@@ -449,6 +500,39 @@ async fn run_node(cli: CliConfig) -> Result<()> {
     // Parse the full cluster roster (`id@addr` pairs, including this node).
     let roster = parse_roster(&cli.peers, cli.node_id, &self_advertise)?;
 
+    let formation = match cli.formation {
+        Some(mode) => {
+            if cli.bootstrap {
+                return Err(anyhow!(
+                    "managed formation and manual --bootstrap are mutually exclusive"
+                ));
+            }
+            let cluster_name = cli
+                .cluster_name
+                .clone()
+                .ok_or_else(|| anyhow!("managed formation requires --cluster-name"))?;
+            if cli.etcd_endpoints.is_empty() {
+                return Err(anyhow!("managed formation requires --etcd-endpoints"));
+            }
+            let nodes = roster
+                .iter()
+                .map(|(id, addr)| (*id, NodeAddr { addr: addr.clone() }))
+                .collect();
+            let seed = SeedSpec::stock(cluster_name.clone(), nodes, 1)?;
+            let store: Arc<dyn LifecycleStore> =
+                Arc::new(EtcdLifecycleStore::new(cli.etcd_endpoints.clone(), cluster_name).await?);
+            Some(FormationConfig { seed, store, mode })
+        }
+        None => {
+            if cli.cluster_name.is_some() || !cli.etcd_endpoints.is_empty() {
+                return Err(anyhow!(
+                    "--cluster-name and --etcd-endpoints require --formation"
+                ));
+            }
+            None
+        }
+    };
+
     info!(
         node_id = cli.node_id,
         bind_addr = %bind_addr,
@@ -506,6 +590,13 @@ async fn run_node(cli: CliConfig) -> Result<()> {
 
     // ── Build and start RrNode ────────────────────────────────────────────────
     let storage: Arc<dyn StorageEngine> = Arc::new(MemStorage::new());
+    #[cfg(feature = "rocks")]
+    let storage: Arc<dyn StorageEngine> = match &cli.data_dir {
+        Some(dir) if cli.formation.is_some() => Arc::new(
+            rr_storage::rocks::RocksStorage::open_default(&format!("{dir}/framework"))?,
+        ),
+        _ => storage,
+    };
     let dummy_factory = Box::new(|group_id| -> Box<dyn StateMachine> {
         Box::new(ServiceStateMachineAdapter::new(group_id, KvService::new()))
     });
@@ -550,7 +641,10 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         None => config,
     };
 
-    let node = Arc::new(RrNode::new(config)?);
+    let node = match formation {
+        Some(formation) => Arc::new(RrNode::new_with_formation(config, formation)?),
+        None => Arc::new(RrNode::new(config)?),
+    };
     node.start().await?;
     info!(
         "Node {} started — binding {bind_addr}, advertising {}",
@@ -634,7 +728,7 @@ fn check_kafka_support(_cli: &CliConfig) -> Result<()> {
 }
 
 /// Fail fast when `--data-dir` was passed to a binary built without the
-/// `rocks` feature — there is no RocksDB raft-log backend (ADR A-0016).
+/// `rocks` feature — durable Raft logs and managed identity are unavailable.
 #[cfg(not(feature = "rocks"))]
 fn check_raft_log_support(cli: &CliConfig) -> Result<()> {
     if cli.data_dir.is_some() {

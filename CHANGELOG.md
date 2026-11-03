@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-11-01 homogeneous cluster formation
+
+- Added versioned `SeedSpec` and linearizable lifecycle state with Mem and etcd stores, local cluster identity,
+  and managed `genesis` / `adopt` modes for stock `rr-server` and the kv-store example. Fresh Genesis
+  concurrently initializes an identical full advertised roster; late or pristine nodes under an Active record
+  wait for replication instead of initializing. Mem/Rocks rolling recovery and store-outage readiness are
+  covered by integration tests.
+- Legacy adoption records initialized local groups as `LegacyAdopted + Active` without changing Raft
+  membership. Mixed or pristine-only initial adoption fails before the lifecycle CAS. The existing
+  learner/change-membership job remains the explicit convergence path and preserves ACK data and routes.
+- Helm, raw Kubernetes, and Compose now render identical managed rosters/settings on every node and start
+  Genesis pods concurrently. The Helm formation job is an ordinary resource rendered only for `adopt`, so
+  `--wait` can complete convergence; revision-specific names avoid immutable-template upgrade conflicts, and
+  fresh Genesis does not run it. Helm requires an explicit formation-capable
+  image tag and raw manifests carry a mandatory override placeholder because rr 0.2.0 rejects the new fields.
+  P1 documents no dynamic expansion, replica replacement, or resharding, and SeedSpec is not current membership.
+
 ### Added — 2026-10-22 INV-4 outbox failover e2e
 
 - **Cluster-level outbox failover e2e suite** — closes the last INV-4 coverage

@@ -15,6 +15,9 @@ pub enum RrError {
     /// Configuration provider error.
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
+    /// Cluster formation lifecycle error.
+    #[error("lifecycle error: {0}")]
+    Lifecycle(#[from] LifecycleError),
     /// Routing error.
     #[error("router error: {0}")]
     Router(#[from] RouterError),
@@ -135,6 +138,38 @@ pub enum ConfigError {
     /// The change-watch stream disconnected; re-fetch and re-subscribe.
     #[error("watch disconnected")]
     WatchDisconnected,
+}
+
+/// Errors raised by seed validation and cluster lifecycle coordination.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LifecycleError {
+    /// The lifecycle store cannot provide an authoritative answer.
+    #[error("lifecycle store unavailable: {0}")]
+    Unavailable(String),
+    /// Persisted lifecycle data is malformed or violates its schema.
+    #[error("corrupt lifecycle data: {0}")]
+    CorruptData(String),
+    /// The record uses an unsupported schema version.
+    #[error("unsupported {schema} schema version {version}")]
+    UnsupportedSchema {
+        /// Schema being decoded or validated.
+        schema: &'static str,
+        /// Unsupported version number.
+        version: u32,
+    },
+    /// A lifecycle update violates an immutable field or state transition.
+    #[error("invalid lifecycle transition: {0}")]
+    InvalidTransition(String),
+    /// The cluster identity differs from the authorized identity.
+    #[error("cluster identity mismatch")]
+    IdentityMismatch,
+    /// The seed differs from the authorized seed.
+    #[error("seed hash mismatch")]
+    SeedMismatch,
+    /// A seed violates genesis invariants.
+    #[error("invalid seed: {0}")]
+    InvalidSeed(String),
 }
 
 /// Errors raised while routing a request to a Raft group.

@@ -1,25 +1,16 @@
-# Post-install/upgrade cluster-formation job.
-#
-# rr-server's [cluster].peers only populates the local routing table — it
-# does NOT create raft membership (see getting-started: membership is formed
-# explicitly via rr-admin add-learner + change-membership on the leader).
-# Without this job, `helm install` yields one bootstrapped voter (rr-0) and
-# replicaCount-1 idle nodes forever.
-#
-# The job is idempotent: add-learner errors for nodes that are already
-# members are tolerated, and change-membership to the full voter set is the
-# authoritative converging step (change_membership is idempotent server-side).
-# On failure the job exits non-zero and Kubernetes retries (backoffLimit).
+# Legacy adoption/manual recovery only. Genesis forms through the lifecycle
+# supervisor and must not run an ordinary membership job. Adoption records
+# existing Raft state without expanding it; this job performs the explicit
+# learner + full-roster membership convergence afterwards. Revision-specific
+# names avoid mutating a completed Job's immutable pod template on upgrade.
+{{- $rolloutReplicas := default .Values.replicaCount .Values.cluster.formation.adoptionInitializedReplicas -}}
+{{- if and (eq .Values.cluster.formation.mode "adopt") (eq (int $rolloutReplicas) (int .Values.replicaCount)) }}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "rr.fullname" . }}-cluster-form
+  name: {{ include "rr.fullname" . }}-cluster-form-{{ .Release.Revision }}
   labels:
     {{- include "rr.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 10
   template:
@@ -97,3 +88,4 @@ spec:
           secret:
             secretName: {{ required "tls.existingSecret is required when tls.enabled=true" .Values.tls.existingSecret }}
       {{- end }}
+{{- end }}
