@@ -68,6 +68,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract (whose exception list now records the `ConfigError::InvalidConfig`
   authoring rule: framework-authored, no absolute paths or secrets).
 
+### Added — 2026-11-04 formation & admin observability (review C-1/C-2)
+
+- **Formation lifecycle is now observable** — `rr_formation_cas_total{result}`
+  (applied|conflict), per-group `rr_formation_state{group_id}` gauge
+  (0=Forming, 1=Active), and `rr_formation_duration_seconds` histogram, plus
+  info!/warn! lifecycle events (genesis/adoption start & complete, per-group
+  Forming→Active, CAS conflict retries). The previously log-free, metric-free
+  `formation.rs` is the P1 flagship — a forming cluster is no longer a black
+  box.
+- **`GetFormationStatus` Admin RPC + `rr-admin formation status`** (one-shot
+  CLI with human/JSON output and REPL): origin (Genesis / LegacyAdopted /
+  Untracked), aggregate state, cluster UUID, topology + store CAS revisions,
+  and a per-group table. `Untracked` is a first-class answer for pre-formation
+  clusters, with a pointer to the playbook's new Troubleshooting › Formation
+  section (adoption link, stuck-Forming checklist, "lifecycle is not Active").
+- **Snapshot transfer metrics on both sides** —
+  `rr_snapshot_transfer_bytes{direction,group_id}` and
+  `rr_snapshot_transfer_duration_seconds{direction,group_id}`. Send counts
+  bytes actually handed to the transport (partial sends on cancel/timeout
+  included; duration is success-only); recv counts installed payload bytes and
+  install wall time (startup rebuilds from the local SnapshotStore included,
+  same convention as `rr_snapshot_installs_total`). One send seam covers both
+  transports (the experimental TCP transport delegates to gRPC for snapshots).
+- **Admin operation counters** — `rr_admin_membership_changes_total{op,result}`
+  (change_membership | remove_group_member | add_learner),
+  `rr_admin_transfer_leader_total{result}`, and
+  `rr_admin_snapshot_trigger_total{result}`, recorded exactly once per RPC
+  including validation/failed-precondition rejections.
+
+### Added — 2026-11-04 hot-path microbenchmarks (review D-2)
+
+- Five criterion targets close the blind spots the 15% bench gate could not
+  see: `dispatch_pipeline` (submit_write keyed/unkeyed + dispatch-level
+  linearizable read through a single-node in-memory raft round trip),
+  `shard_router_route` (64/256-partition hit/miss via the copy-on-write
+  snapshot path), `batch_frame` (encode/decode/validate at 1/8/64/256 items),
+  `read_index` (`linearizable_read` vs a `local_read` baseline on a
+  single-node quorum), and `snapshot_build` (in-memory build at 1/4/16 MiB,
+  durable SnapshotStore persist, FramedSnapshot encode/decode throughput).
+  `scripts/bench-compare.sh` picks them up automatically — no explicit list.
+
+### Added — 2026-11-04 decision records & release hygiene (review D-3/F-1/F-2)
+
+- **ADR A-0019 (G2 rulings)**: the `BatchConfig::ordered` knob is deferred to
+  the v0.3.0 kickoff (opt-out of cross-batch ordering needs an interaction
+  analysis with deferred services first; batch64+fanout4 already measured
+  121.2k TPS without weakening semantics); the post-fanout multi-group retest
+  is folded into the D-1 re-baseline; "single-group 100k" stays an
+  aspirational goal with its honest current status recorded.
+- **`.sisyphus/plans/rr-v030-scope.md`** — one-page v0.3.0 scope note
+  (candidates: A-0017 Bytes migration, the ordered-knob decision, version
+  bumps incl. sdks/java sync, roadmap-100k leftovers).
+- **`docs/docs/operations/release-checklist.md`** — pre-release hygiene
+  checklist (workspace + sdks/java version sync, CHANGELOG cut, breaking-change
+  migration notes, docs sweep, tag + release-notes).
+
+### Fixed — 2026-11-04 documentation & template debt (review C-3, E-1..E-4)
+
+- **`deploy/compose/docker-compose.yml` now exists** — the compose template
+  intro.md and this changelog referenced was never committed. Three rr-server
+  nodes + etcd with managed genesis formation, healthchecks,
+  `depends_on: service_healthy` gating, loopback-only host publishes
+  (admin 5200N / metrics 910N per the config contract), and a README.
+  Smoke-verified: genesis CAS → Active, leader elected, `/ready` 200 ×3,
+  `rr-admin formation status` Active, clean `down -v`.
+- **Java SDK documented** — `docs/docs/guide/client-sdk.md` gains an install /
+  quick-start / capability-matrix section with a code-verified 14-row
+  Rust-vs-Java comparison and the gap list (client-side batching and channel
+  fanout are Rust-only; parity tracked, not scheduled).
+- **rr-admin connection errors carry prescriptions** — connect timeout,
+  transport connect failure, REPL member-discovery failure, and reconnect
+  failure now append the next steps (port role admin vs client, process
+  liveness, TLS + admin token, playbook pointer) while preserving the anyhow
+  cause chain (`Caused by:`) for the underlying transport error.
+- **Observability docs calibrated** — metrics-reference.md now documents the
+  previously missing `rr_deferred_pending_via_non_deferred_total` and
+  `rr_idempotency_namespace_rejects_total` (plus the
+  `idempotency_namespace_limit` outcome value) and every metric family added
+  in this release; deploy/observability/README.md thresholds now agree with
+  `rr-alerts.yml` (8000 not 45k; 1 not 0.5 elections/min; two missing critical
+  alerts documented). New `scripts/check-metrics-docs.sh` bidirectional
+  code↔docs drift gate, wired as `just metrics-check` and into the nightly
+  quality-gate suite.
+- **Baseline writebacks** — intro.md registers the formation subsystem;
+  `.sisyphus/plans/rr-quality-hardening.md` and `rr-prod-perf.md` headers
+  reconciled with actual state; the crash harness's stale gap-2 comment now
+  reflects post-ADR-A-0016 facts; `examples/kv-store/README.md` added.
+- **`require_active_group` sanitized** — the admin membership guard no longer
+  interpolates the raw lifecycle-store error into the client-facing gRPC
+  Status; detail goes to tracing (error_convert contract).
+
 ### Added — 2026-11-01 homogeneous cluster formation
 
 
