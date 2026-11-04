@@ -61,12 +61,14 @@ Existing recording rules are preserved. Added rules:
 
 The defaults in `rr-alerts.yml` are tuned for a healthy 3-5 node cluster on a stable network:
 
-- `RrLeaderFlapping`: > 0.5 elections/min for 2m → warning.
+- `RrLeaderFlapping`: > 1 election/min for 2m → warning.
 - `RrReplicationLagHigh`: max follower lag > 1000 entries for 5m → warning.
 - `RrNoLeader`: no node has `is_leader=1` for 30s → critical.
-- `RrInsecureModeInProduction`: `allow_insecure=1` ever → critical.
+- `RrInsecureModeInProduction`: `allow_insecure=1` for 30s → critical.
 - `RrIdempotencyCollisionsObserved`: any collision rate > 0 for 5m → warning (indicates uncoordinated request_id allocation).
 - `RrIngestorSeedFailures`: any seed failure → critical (supervisor exited; ingestor offline).
+- `RrIngestorOffsetMapFailures`: any offset→request_id mapping failure for 1m → critical (fail-closed).
+- `RrStorageWalFlushErrors`: any WAL fsync failure for 1m → critical (durability degrading; check disk).
 
 Adjust to your SLOs. The recording-rules + alerts split lets you tune thresholds without rewriting the queries.
 
@@ -74,7 +76,7 @@ Adjust to your SLOs. The recording-rules + alerts split lets you tune thresholds
 
 Existing alert rules are preserved. Added alerts:
 
-- `RrIdempotencyCacheNearFull` (`warning`) — idempotency cache stayed above 45k entries for 10m; near eviction pressure.
+- `RrIdempotencyCacheNearFull` (`warning`) — idempotency cache > 8000 for 10m (cap 10000); near eviction pressure.
 - `RrIngestorOffsetDrift` (`warning`) — ingestor repeatedly seeks outside Kafka watermark range for 10m.
 - `RrFramingDecodeFailures` (`critical`) — non-zero framing decode failure rate for 5m; possible wire-format incompatibility or corruption.
 
@@ -83,4 +85,4 @@ Existing alert rules are preserved. Added alerts:
 - [`docs/docs/reference/metrics-reference.md`](../../docs/docs/reference/metrics-reference.md) — full per-metric reference.
 - [`docs/docs/operations/runbooks/`](../../docs/docs/operations/runbooks/) — runbooks for triggered alerts.
 
-Last updated: 2026-09-23
+Last updated: 2026-11-04

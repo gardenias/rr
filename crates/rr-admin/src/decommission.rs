@@ -700,10 +700,10 @@ mod tests {
 
     use rr_network::proto::admin::admin_service_server::{AdminService, AdminServiceServer};
     use rr_network::proto::admin::{
-        AddLearnerRequest, ChangeMembershipRequest, DrainResult, GroupList, GroupMembership,
-        GroupStatus, MetricsSummary, NodeStatus, OnlineBackupChunk, OnlineBackupRequest,
-        RemoveGroupMemberRequest, ResetIngestorOffsetRequest, RoutingTableSnapshot, SnapshotStatus,
-        TransferLeaderRequest,
+        AddLearnerRequest, ChangeMembershipRequest, DrainResult, FormationStatus, GroupList,
+        GroupMembership, GroupStatus, MetricsSummary, NodeStatus, OnlineBackupChunk,
+        OnlineBackupRequest, RemoveGroupMemberRequest, ResetIngestorOffsetRequest,
+        RoutingTableSnapshot, SnapshotStatus, TransferLeaderRequest,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -908,6 +908,13 @@ mod tests {
             &self,
             _request: Request<Empty>,
         ) -> std::result::Result<Response<MetricsSummary>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_formation_status(
+            &self,
+            _request: Request<Empty>,
+        ) -> std::result::Result<Response<FormationStatus>, Status> {
             Err(Status::unimplemented("not used"))
         }
     }

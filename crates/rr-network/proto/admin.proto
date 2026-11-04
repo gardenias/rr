@@ -55,6 +55,10 @@ service AdminService {
     /// Prometheus /metrics HTTP endpoint instead. Field numbers are
     /// retained for wire compatibility; do not reuse them.
     rpc GetMetricsSummary(Empty) returns (MetricsSummary);
+    /// Get the cluster formation lifecycle status: origin, identity,
+    /// per-group formation state, and the lifecycle store CAS revision.
+    /// Returns OK on success; failures are returned as gRPC Status.
+    rpc GetFormationStatus(Empty) returns (FormationStatus);
 }
 
 message Empty {}
@@ -199,4 +203,32 @@ message PartitionRoute {
     uint64 partition_id = 1;
     uint64 group_id = 2;
     repeated uint64 replica_node_ids = 3;
+}
+
+message FormationStatus {
+    /// Cluster lifecycle origin: "Genesis", "LegacyAdopted", or
+    /// "Untracked" when no lifecycle record exists (cluster predates
+    /// formation tracking and has not been adopted; see the operations
+    /// playbook).
+    string origin = 1;
+    /// Cluster identity minted at genesis (hyphenated UUID);
+    /// empty when origin is "Untracked".
+    string cluster_uuid = 2;
+    /// Monotonic topology revision from the lifecycle record;
+    /// 0 when untracked.
+    uint64 topology_revision = 3;
+    /// Lifecycle store CAS revision; 0 when untracked.
+    uint64 store_revision = 4;
+    /// Aggregate formation state: "Forming" while any group is forming,
+    /// "Active" when every group is active, "Untracked" without a record.
+    string state = 5;
+    /// Per-group formation state (empty when untracked).
+    repeated GroupFormationStatus groups = 6;
+}
+
+message GroupFormationStatus {
+    uint64 group_id = 1;
+    uint64 bootstrap_epoch = 2;
+    /// "Forming" or "Active".
+    string state = 3;
 }

@@ -221,6 +221,51 @@ Latency of the etcd prefix-fingerprint probe guarding the revision cache
 
 ---
 
+#### `rr_formation_duration_seconds`
+
+formation reconcile（genesis / adopt-legacy / 启动对齐）的墙钟耗时（秒），
+成功与失败都记录。genesis 首 reconcile 的耗时即集群成形时间。
+
+---
+
+Wall duration of a formation reconcile pass (genesis / legacy adoption /
+startup alignment), in seconds, recorded on success and failure alike. The
+first genesis reconcile's duration is the cluster formation time.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-server/src/formation.rs` — `FormationSupervisor::reconcile()` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_snapshot_transfer_duration_seconds`
+
+快照传输耗时（秒）。`direction="send"` 为 leader 侧从流式发送开始到对端确认的墙钟时间，
+仅记录成功完成的传输；`direction="recv"` 为接收侧安装耗时（fail-closed 落盘 +
+状态机恢复）。注意 recv 语义：节点启动时从本地 SnapshotStore 重建也计入（与
+`rr_snapshot_installs_total` 同口径）。
+
+---
+
+Snapshot transfer duration (seconds). `direction="send"` is the leader-side wall
+time from streaming start to peer acknowledgement, recorded for successful
+transfers only; `direction="recv"` is the receiver-side install time
+(fail-closed persist + state-machine restore). Note the recv semantics:
+startup rebuilds from the local SnapshotStore are also counted (same
+convention as `rr_snapshot_installs_total`).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Histogram |
+| 标签 / Labels | `direction` (`send`\|`recv`), `group_id` |
+| 记录位置 / Recorded in | send: `rr-raft/src/network_factory.rs` `full_snapshot()`；recv: `rr-raft/src/sm_adapter.rs` `install_snapshot()` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
 ### Gauges (仪表盘)
 
 #### `rr_raft_is_leader`
@@ -368,6 +413,28 @@ overflow is counted by `rr_raft_pending_deferred_overflow_total`.
 
 ---
 
+#### `rr_formation_state`
+
+每个 raft 组的 formation 状态：`0` = Forming（已初始化、尚未达到激活条件），
+`1` = Active（可正常服务成员变更等管控操作）。启动加载/创建 lifecycle 记录时发布，
+每次 Forming→Active 迁移时更新。
+
+---
+
+Per-group formation state: `0` = Forming (initialized, activation conditions
+not yet met), `1` = Active (serving administrative operations such as
+membership changes). Published when the lifecycle record is loaded/created
+and updated on every Forming→Active transition.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Gauge |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-server/src/formation.rs` — `FormationSupervisor` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
 ### Counters (计数器)
 
 #### `rr_snapshot_installs_total`
@@ -384,6 +451,76 @@ a node catches up via snapshot after falling behind.
 | 类型 / Type | Counter |
 | 标签 / Labels | `group_id` |
 | 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `restore()` |
+
+---
+
+#### `rr_snapshot_transfer_bytes`
+
+快照传输字节数。`direction="send"` 统计实际交给传输层的字节（取消/超时已发出的
+部分也计入，可观测部分发送）；`direction="recv"` 统计成功安装的载荷字节
+（含启动时本地 SnapshotStore 重建，与 `rr_snapshot_installs_total` 同口径）。
+
+---
+
+Snapshot transfer payload bytes. `direction="send"` counts bytes actually
+handed to the transport (partial sends on cancel/timeout are included);
+`direction="recv"` counts successfully installed payload bytes (startup
+rebuilds from the local SnapshotStore included, same convention as
+`rr_snapshot_installs_total`).
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `direction` (`send`\|`recv`), `group_id` |
+| 记录位置 / Recorded in | send: `rr-raft/src/network_factory.rs` `full_snapshot()`；recv: `rr-raft/src/sm_adapter.rs` `install_snapshot()` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_formation_cas_total`
+
+formation lifecycle store 的 CAS 写结果计数：`result="applied"` 成功写入，
+`result="conflict"` 竞争失败（会重载对端记录重试，属正常的多节点并发 genesis）。
+持续增长且不收敛 = 节点间 seed/roster 不一致或 lifecycle store 分区。
+
+---
+
+Formation lifecycle-store CAS write outcomes: `result="applied"` for a
+committed write, `result="conflict"` for a lost race (the record is reloaded
+and retried — normal when several nodes race genesis). Sustained conflicts
+without convergence mean divergent seeds/rosters across nodes or a
+partitioned lifecycle store.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `result` (`applied`\|`conflict`) |
+| 记录位置 / Recorded in | `rr-server/src/formation.rs` — `create_if_absent` / `compare_and_swap` 调用点 |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_admin_membership_changes_total` / `rr_admin_transfer_leader_total` / `rr_admin_snapshot_trigger_total`
+
+Admin RPC 管控操作结果计数，每个 RPC 恰好记录一次（含校验/前置条件拒绝等
+错误路径）：成员变更按 `op` 区分（`change_membership`\|`remove_group_member`\|
+`add_learner`），leader 转移与手动快照各自独立成指标；`result` 均为
+`ok`\|`error`。
+
+---
+
+Admin RPC administrative-operation outcomes, recorded exactly once per RPC
+(validation and failed-precondition rejections count as errors): membership
+operations are split by `op` (`change_membership`\|`remove_group_member`\|
+`add_learner`); leader transfer and manual snapshot trigger have their own
+counters. `result` is `ok`\|`error` throughout.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `rr_admin_membership_changes_total`: `op`, `result`；其余两个: `result` |
+| 记录位置 / Recorded in | `rr-server/src/admin.rs` — 各 RPC 入口包装 |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
 
 ---
 
@@ -407,20 +544,26 @@ how often the connection pool detects and recovers from stale connections.
 #### `rr_server_requests_total`
 
 服务端客户端协议边界的请求总数，`op` 区分操作类型，`outcome` 区分结果
-（`redirect` = 非 leader，返回 leader 地址给客户端）。`rate()` 即按操作
-类型的 TPS。
+（`redirect` = 非 leader，返回 leader 地址给客户端；`idempotency_expired` /
+`idempotency_namespace_limit` = 幂等层的类型化拒绝，仅 keyed write——条目
+正常 apply，不走 group-fatal 的 apply error，客户端收到类型化错误）。
+`rate()` 即按操作类型的 TPS。
 
 ---
 
 Total requests at the server's client-protocol boundary, with `op` for the operation
 kind and `outcome` for the result (`redirect` = not leader; the client gets the leader
 address when known, or a retriable `Unavailable` when the node is mid-election and
-cannot name one). `rate()` gives TPS by operation type.
+cannot name one; `idempotency_expired` / `idempotency_namespace_limit` = typed
+idempotency-layer rejections on keyed writes — the entry still applies cleanly,
+never an apply error, and the client receives a typed error). `rate()` gives TPS by
+operation type.
 
 | 属性 / Attribute | 值 / Value |
 | :--- | :--- |
 | 类型 / Type | Counter |
-| 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`), `outcome` (`success` \| `redirect` \| `error` \| `idempotency_expired`) |
+| 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`) |
+|  | `outcome` (`success` \| `redirect` \| `error` \| `idempotency_expired` \| `idempotency_namespace_limit`) |
 | 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()` / `submit_read()` / `submit_linearizable_read()` |
 | 可用版本 / Available since | v0.2.0 |
 
@@ -595,6 +738,42 @@ a client key-generation bug.
 
 ---
 
+#### `rr_idempotency_namespace_rejects_total`
+
+幂等层拒绝**新** `request_type`（namespace）的计数：该组的 namespace 数已达
+上限（`MAX_IDEMPO_NAMESPACES` = 1024）。与 `Expired` 路径同构——拒绝被编码为
+apply outcome（条目在每个节点干净 apply，不走 group-fatal 的 apply error，
+见 ADR A-0018），客户端收到类型化的 `NamespaceLimitError`。注意：换一个新的
+`request_id` 无用——只要组处于上限，该 namespace 内所有 ID 都会被拒；
+修复方向是复用已有 `request_type`、提高上限或回收 namespace。持续增长 =
+客户端 `request_type` 生成失控（如把 user id / Kafka topic 拼进 namespace）。
+dispatch 侧对应 `rr_server_requests_total{outcome="idempotency_namespace_limit"}`，
+并伴随一条 `rr::audit` warn 日志。
+
+---
+
+Idempotency-layer rejections of a NEW `request_type` (namespace) while the
+group is at its namespace cap (`MAX_IDEMPO_NAMESPACES` = 1024). Mirrors the
+`Expired` path: the rejection is encoded as an apply outcome — the entry
+applies cleanly on every node instead of poisoning the log with a group-fatal
+apply error (ADR A-0018) — and the caller receives a typed
+`NamespaceLimitError`. Picking a fresh `request_id` does NOT help: every ID
+in the rejected namespace is refused while the group is at cap; remediation
+is reusing a tracked `request_type`, raising the cap, or retiring namespaces.
+A growing rate means client-side `request_type` fan-out (e.g. embedding user
+ids / Kafka topics in the namespace). Also surfaced as
+`rr_server_requests_total{outcome="idempotency_namespace_limit"}` at the
+dispatch boundary, plus an `rr::audit` warn log.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | `group_id` |
+| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply_keyed()` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
 #### `rr_learner_promotions_total` / `rr_learner_promotion_failures_total`
 
 learner 自动提升为 voter 的成功/失败计数（`learner_promoter`，仅 leader 发射）。
@@ -747,6 +926,39 @@ Both should be rare — nonzero means a `Service` implementation bug.
 | 类型 / Type | Counter |
 | 标签 / Labels | — (无标签；组上下文见同位置的 `rr_raft_pending_deferred` gauge / no labels — see the `rr_raft_pending_deferred` gauge for per-group depth) |
 | 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
+| 可用版本 / Available since | Unreleased (v0.3.0) |
+
+---
+
+#### `rr_deferred_pending_via_non_deferred_total`
+
+`DeferredApply::Pending` 到达非 deferred 响应路径（`into_response()`）的防御性
+计数。非 deferred 的 `apply` / `apply_with_ctx` 入口从不走两阶段分发，出现
+`Pending` 意味着一个会 defer 的 Service 应答了从未挂起 deferred responder 的
+调用方——这是 Service 接线的编程错误信号（R-2 / A-0033），不是客户端故障。
+框架防御性映射为空字节响应以保持 apply 循环不被卡死，同时以 warn 日志 +
+本计数保持可观测。非零即检查 Service 实现（该调用的客户端收到的是空的成功
+响应）。与 `rr_raft_pending_deferred_*` 不同：那些是注册表容量/重复异常，
+本指标是错误路径防御。
+
+---
+
+Defensive count of `DeferredApply::Pending` reaching the non-deferred response
+path (`into_response()`). The non-deferred `apply` / `apply_with_ctx` entry
+points never dispatch through the two-phase path, so a `Pending` here means a
+deferring service answered a caller that never parked a deferred responder —
+a programming-error signal in `Service` wiring (R-2 / A-0033), not a client
+fault. The framework defensively maps it to empty response bytes to keep the
+apply loop alive, staying observable via a warn log plus this counter. Nonzero
+means: inspect the `Service` wiring (that call's client receives an empty
+success response). Distinct from `rr_raft_pending_deferred_*`: those are
+registry capacity/duplication anomalies; this one guards a wrong-path defense.
+
+| 属性 / Attribute | 值 / Value |
+| :--- | :--- |
+| 类型 / Type | Counter |
+| 标签 / Labels | — |
+| 记录位置 / Recorded in | `rr-core/src/deferred.rs` — `DeferredApply::into_response()` |
 | 可用版本 / Available since | Unreleased (v0.3.0) |
 
 ---

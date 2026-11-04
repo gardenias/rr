@@ -44,6 +44,10 @@ pub use idempotency::{IdempotencyLayer, DEFAULT_IDEMPOTENCY_CACHE_SIZE};
 mod idempotency_proptest;
 #[cfg(all(test, feature = "rocks"))]
 mod io_batcher_proptest;
+// C-2: shared metric-test recorder — `metrics` allows exactly one global
+// recorder per process, so every metric-assertion test renders this one.
+#[cfg(test)]
+pub(crate) mod test_metrics;
 // R-4 storage fault-injection consumer tests (test-only; rocks-gated like
 // the batcher/log-storage modules they exercise).
 #[cfg(all(test, feature = "rocks"))]

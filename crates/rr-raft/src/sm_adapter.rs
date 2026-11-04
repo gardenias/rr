@@ -533,7 +533,9 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         meta: &SnapshotMetaOf<RrTypeConfig>,
         snapshot: Self::SnapshotData,
     ) -> Result<(), io::Error> {
+        let install_started = std::time::Instant::now();
         let data = snapshot.into_inner();
+        let data_len = data.len() as u64;
 
         // T1 / R-P0: persist the incoming snapshot BEFORE mutating any
         // in-memory state. OpenRaft purges this node's log up to
@@ -554,6 +556,35 @@ impl RaftStateMachine<RrTypeConfig> for RrStateMachine {
         self.snapshot_bytes = data;
         self.snapshot_meta = Some(meta.clone());
         self.snapshot_idx += 1;
+        // C-2: receive-side transfer metrics — installed payload bytes and
+        // install wall time (persist + restore). Success-only, mirroring
+        // `rr_snapshot_installs_total`. `group_id` is attached in production
+        // via `raft_node.rs`; direct unit tests emit the series unlabeled,
+        // mirroring `emit_pending_deferred_gauge`.
+        let elapsed = install_started.elapsed().as_secs_f64();
+        match self.group_id {
+            Some(g) => {
+                let label = crate::network_factory::intern_id_label(g);
+                metrics::counter!(
+                    "rr_snapshot_transfer_bytes",
+                    "direction" => "recv",
+                    "group_id" => label
+                )
+                .increment(data_len);
+                metrics::histogram!(
+                    "rr_snapshot_transfer_duration_seconds",
+                    "direction" => "recv",
+                    "group_id" => label
+                )
+                .record(elapsed);
+            }
+            None => {
+                metrics::counter!("rr_snapshot_transfer_bytes", "direction" => "recv")
+                    .increment(data_len);
+                metrics::histogram!("rr_snapshot_transfer_duration_seconds", "direction" => "recv")
+                    .record(elapsed);
+            }
+        }
         Ok(())
     }
 
@@ -834,6 +865,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sm.snapshot_idx, 2);
+    }
+
+    // ── C-2: snapshot transfer metrics (receive direction) ───────────────
+
+    /// C-2: installing a received snapshot records the recv-direction byte
+    /// counter with the exact payload size and one duration-histogram sample,
+    /// both labeled with the group id. The group label keeps this series
+    /// distinct from every other metric test sharing the process-global
+    /// recorder (see `crate::test_metrics`).
+    #[tokio::test]
+    async fn test_install_snapshot_records_recv_transfer_metrics() {
+        let handle = crate::test_metrics::shared_prometheus_recorder();
+        let group_label = "424242";
+
+        let mut sm = RrStateMachine::new(Box::new(VecSM { state: vec![] })).with_group_id(424_242);
+        let snap_data: Vec<u8> = (0u8..=255).cycle().take(10_000).collect();
+        let meta: SnapshotMetaOf<RrTypeConfig> = SnapshotMeta {
+            last_log_id: Some(LogId::new(CommittedLeaderId::new(1, 1), 10)),
+            last_membership: StoredMembership::default(),
+        };
+        sm.install_snapshot(&meta, Cursor::new(snap_data.clone()))
+            .await
+            .unwrap();
+
+        let rendered = handle.render();
+        let group_frag = format!("group_id=\"{group_label}\"");
+        let bytes = crate::test_metrics::series_value(
+            &rendered,
+            "rr_snapshot_transfer_bytes",
+            &["direction=\"recv\"", &group_frag],
+        );
+        assert_eq!(
+            bytes,
+            Some(snap_data.len() as f64),
+            "recv byte counter must equal the installed payload size; rendered:\n{rendered}"
+        );
+        let samples = crate::test_metrics::series_value(
+            &rendered,
+            "rr_snapshot_transfer_duration_seconds_count",
+            &["direction=\"recv\"", &group_frag],
+        );
+        assert_eq!(
+            samples,
+            Some(1.0),
+            "recv duration histogram must record exactly one sample; rendered:\n{rendered}"
+        );
     }
 
     // ── T5: snapshot failure propagation (ADR A-0011 C6) ─────────────────

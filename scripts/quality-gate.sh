@@ -8,7 +8,7 @@
 #   scripts/quality-gate.sh [nightly|bench|soak|all]
 #
 # Suites:
-#   nightly  gate-invariants + gate-test + gate-crash + gate-fuzz + gate-formal
+#   nightly  gate-invariants + metrics-check + gate-test + gate-crash + gate-fuzz + gate-formal
 #   bench    bench-gate (criterion vs the saved "main" baseline)
 #   soak     soak-smoke (short seeded soak)
 #   all      nightly + bench + soak
@@ -25,10 +25,10 @@ cd "$ROOT"
 
 suite="${1:-nightly}"
 case "$suite" in
-  nightly) steps=(gate-invariants gate-test gate-crash gate-fuzz gate-formal) ;;
+  nightly) steps=(gate-invariants metrics-check gate-test gate-crash gate-fuzz gate-formal) ;;
   bench)   steps=(bench-gate) ;;
   soak)    steps=(soak-smoke) ;;
-  all)     steps=(gate-invariants gate-test gate-crash gate-fuzz gate-formal bench-gate soak-smoke) ;;
+  all)     steps=(gate-invariants metrics-check gate-test gate-crash gate-fuzz gate-formal bench-gate soak-smoke) ;;
   *) echo "usage: quality-gate.sh [nightly|bench|soak|all]" >&2; exit 2 ;;
 esac
 

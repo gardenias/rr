@@ -1,12 +1,13 @@
 //! `rr-admin` — Command-line tool for administering an `rr` cluster.
 //!
-//! 提供命令行界面，用于查询节点状态、Raft 组状态、触发快照、转移领导者和查看指标摘要。
+//! 提供命令行界面，用于查询节点状态、Raft 组状态、集群 formation 生命周期状态、触发快照、转移领导者和查看指标摘要。
 //! 支持人类可读的表格输出和 `--output json` 机器可读模式，以及交互式 REPL。
 //!
 //! ---
 //!
-//! Provides a CLI for querying node status, Raft group status, triggering snapshots,
-//! transferring leadership, and viewing metrics summaries.
+//! Provides a CLI for querying node status, Raft group status, cluster formation
+//! status, triggering snapshots, transferring leadership, and viewing metrics
+//! summaries.
 //! Supports human-readable table output, `--output json` machine-readable mode,
 //! and an interactive REPL for kv-store operations.
 
@@ -16,7 +17,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rr_network::proto::admin::admin_service_client::AdminServiceClient;
 use rr_network::proto::admin::{
     online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
-    DrainRequest, Empty, GroupId, OnlineBackupRequest, ResetIngestorOffsetRequest,
+    DrainRequest, Empty, FormationStatus, GroupId, OnlineBackupRequest, ResetIngestorOffsetRequest,
     TransferLeaderRequest,
 };
 use rr_network::proto::client::client_service_client::ClientServiceClient;
@@ -82,10 +83,67 @@ async fn connect(addr: &str, tls: Option<&TlsConfig>) -> Result<Channel> {
         )?,
         None => endpoint,
     };
-    let channel = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect())
-        .await
-        .map_err(|_| anyhow::anyhow!("connect to {addr} timed out after {CONNECT_TIMEOUT:?}"))??;
+    let channel = match tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect()).await {
+        Ok(Ok(channel)) => channel,
+        Ok(Err(e)) => return Err(connect_error(addr, e)),
+        Err(_) => return Err(connect_timeout_error(addr)),
+    };
     Ok(channel)
+}
+
+/// Remediation checklist appended to every connection-failure message: the
+/// operator gets the next steps, not just the symptom — the same
+/// problem-plus-fix convention as the rr-server startup safety-gate errors.
+const CONNECT_REMEDY: &str = concat!(
+    "next steps: (1) verify the target process is alive and listening on the dialed address; ",
+    "(2) confirm the port role — the admin port and the kv client port are different listeners ",
+    "(kv-store convention: admin port = client port + 1000); ",
+    "(3) check TLS (--tls-ca/--tls-cert/--tls-key) and the admin token (--token-env); ",
+    "(4) see playbook › Troubleshooting (docs/docs/guide/playbook.md)"
+);
+
+/// Connect-timeout error with remediation guidance.
+fn connect_timeout_error(addr: &str) -> anyhow::Error {
+    anyhow::anyhow!("connect to {addr} timed out after {CONNECT_TIMEOUT:?}\n{CONNECT_REMEDY}")
+}
+
+/// Transport-level connect failure (refused/reset/TLS handshake) with
+/// remediation guidance. The source chain is preserved so the concrete cause
+/// still shows up as `Caused by:` under the context + remedy.
+fn connect_error(addr: &str, err: impl std::error::Error + Send + Sync + 'static) -> anyhow::Error {
+    anyhow::Error::new(err).context(format!("connect to {addr} failed\n{CONNECT_REMEDY}"))
+}
+
+/// One-line rendering of a `connect()` failure for per-channel status lines:
+/// first message line plus the root cause, WITHOUT the remediation checklist
+/// (the caller prints that once at the summary/site level).
+fn connect_error_brief(err: &anyhow::Error) -> String {
+    let first_line = err
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    match err.chain().nth(1) {
+        Some(cause) => format!("{first_line}: {cause}"),
+        None => first_line,
+    }
+}
+
+/// REPL member-discovery failure message with remediation guidance. Failover
+/// stays limited to the dialed --addr until the admin endpoint answers.
+fn member_discovery_message(err: &Status, addr: &str) -> String {
+    format!(
+        "member discovery failed: {err}; automatic failover is limited to {addr}\n{CONNECT_REMEDY}"
+    )
+}
+
+/// REPL reconnect-failure message naming both port roles, with remediation
+/// guidance.
+fn reconnect_failed_message(kv_addr: &str, admin_addr: &str) -> String {
+    format!(
+        "reconnect failed (will retry on next command): client port {kv_addr}, admin port {admin_addr}\n{CONNECT_REMEDY}"
+    )
 }
 
 fn make_admin_client(channel: Channel, token: &Option<Arc<str>>) -> AdminClient {
@@ -231,6 +289,11 @@ enum Commands {
     Config {
         #[command(subcommand)]
         cmd: ConfigCommands,
+    },
+    /// Cluster formation lifecycle inspection commands.
+    Formation {
+        #[command(subcommand)]
+        cmd: FormationCommands,
     },
     /// Show top-level metrics summary.
     Metrics,
@@ -442,6 +505,16 @@ enum GroupCommands {
 enum ConfigCommands {
     /// Show current routing table snapshot.
     Show,
+}
+
+#[derive(Subcommand, Debug)]
+enum FormationCommands {
+    /// Show cluster formation lifecycle status: origin, aggregate state,
+    /// cluster identity, lifecycle-store revisions, and per-group
+    /// formation state (Forming/Active). `Untracked` means the cluster
+    /// predates formation tracking — see playbook › Troubleshooting ›
+    /// Formation for the adoption path.
+    Status,
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -1131,6 +1204,32 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Commands::Formation {
+                    cmd: FormationCommands::Status,
+                } => {
+                    let mut resp = client.get_formation_status(Empty {}).await?.into_inner();
+                    resp.groups.sort_unstable_by_key(|g| g.group_id);
+                    match cli.output {
+                        OutputFormat::Json => {
+                            let val = serde_json::json!({
+                                "origin": resp.origin,
+                                "cluster_uuid": resp.cluster_uuid,
+                                "topology_revision": resp.topology_revision,
+                                "store_revision": resp.store_revision,
+                                "state": resp.state,
+                                "groups": resp.groups.iter().map(|g| serde_json::json!({
+                                    "group_id": g.group_id,
+                                    "bootstrap_epoch": g.bootstrap_epoch,
+                                    "state": g.state,
+                                })).collect::<Vec<_>>(),
+                            });
+                            println!("{}", serde_json::to_string_pretty(&val)?);
+                        }
+                        OutputFormat::Human => {
+                            println!("{}", format_formation_status(&resp));
+                        }
+                    }
+                }
                 Commands::Repl { .. }
                 | Commands::Backup { .. }
                 | Commands::Restore { .. }
@@ -1144,6 +1243,49 @@ async fn main() -> Result<()> {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
+
+/// Render formation lifecycle status as human-readable text — shared by the
+/// `formation status` subcommand and the REPL `formation status` command.
+/// An untracked cluster (a legacy cluster predating formation tracking) gets
+/// a playbook pointer instead of an empty group table.
+fn format_formation_status(resp: &FormationStatus) -> String {
+    let uuid = if resp.cluster_uuid.is_empty() {
+        "(none)"
+    } else {
+        resp.cluster_uuid.as_str()
+    };
+    let mut out = format!(
+        "Formation Status\n  {:<17}: {}\n  {:<17}: {}\n  {:<17}: {}\n  {:<17}: {}\n  {:<17}: {}",
+        "origin",
+        resp.origin,
+        "state",
+        resp.state,
+        "cluster_uuid",
+        uuid,
+        "topology_revision",
+        resp.topology_revision,
+        "store_revision",
+        resp.store_revision,
+    );
+    if resp.origin == "Untracked" || resp.state == "Untracked" {
+        out.push_str(
+            "\ncluster is not tracked by formation lifecycle (legacy cluster); \
+             see playbook › Troubleshooting › Formation",
+        );
+    } else {
+        out.push_str(&format!(
+            "\n  {:<10} {:<15} state",
+            "group_id", "bootstrap_epoch"
+        ));
+        for g in &resp.groups {
+            out.push_str(&format!(
+                "\n  {:<10} {:<15} {}",
+                g.group_id, g.bootstrap_epoch, g.state
+            ));
+        }
+    }
+    out
+}
 
 fn admin_action_outcome<T>(
     result: Result<Response<T>, Status>,
@@ -1189,6 +1331,8 @@ enum ReplCommand {
     },
     Status,
     Members,
+    /// `formation status` — cluster formation lifecycle status (admin RPC).
+    FormationStatus,
     Help,
     /// User typed "reconnect" explicitly.
     Reconnect,
@@ -1257,6 +1401,20 @@ fn parse_repl_line(line: &str) -> ReplCommand {
         }
         "status" => ReplCommand::Status,
         "members" => ReplCommand::Members,
+        "formation" => {
+            if tokens.len() < 2 {
+                ReplCommand::MissingArg {
+                    cmd: "formation",
+                    usage: "formation status",
+                }
+            } else if tokens[1] == "status" {
+                ReplCommand::FormationStatus
+            } else {
+                ReplCommand::Unknown {
+                    cmd: tokens[0].to_string(),
+                }
+            }
+        }
         "help" => ReplCommand::Help,
         "reconnect" => ReplCommand::Reconnect,
         other => ReplCommand::Unknown {
@@ -1370,9 +1528,11 @@ async fn kv_call(
                 }
                 Err(e) => {
                     last_response = None;
-                    last_error = Some(Status::unavailable(format!(
-                        "connect to peer {addr} failed: {e}"
-                    )));
+                    // The connect() error already names the address and
+                    // carries the remediation checklist — pass its message
+                    // through verbatim instead of adding a second
+                    // "connect ... failed" prefix around it.
+                    last_error = Some(Status::unavailable(e.to_string()));
                 }
             }
         }
@@ -1421,8 +1581,9 @@ async fn follow_admin_after_redirect(
                 );
             }
             Err(e) => println!(
-                "admin channel could not follow the leader redirect ({new_admin}): {e} — \
-                 status/members still target {admin_addr}"
+                "admin channel could not follow the leader redirect ({new_admin}): {} — \
+                 status/members still target {admin_addr}\n{CONNECT_REMEDY}",
+                connect_error_brief(&e)
             ),
         },
     }
@@ -1473,17 +1634,18 @@ fn handle_rpc_error(e: &Status, service: &str, dialed: &str, needs_reconnect: &m
 
 /// Run the interactive REPL.
 ///
-/// 支持 7 个命令：get、put、delete、status、members、help、reconnect。
+/// 支持 8 个命令：get、put、delete、status、members、formation status、help、reconnect。
 /// get/put/delete 使用 kv-store 的 bincode wire 格式，发往 ClientService
-/// 端口（--addr）；status/members 发往 AdminService 端口（--admin-addr，
-/// 默认为客户端端口 + 1000）。
+/// 端口（--addr）；status/members/formation status 发往 AdminService 端口
+/// （--admin-addr，默认为客户端端口 + 1000）。
 ///
 /// ---
 ///
-/// Supports 7 commands: get, put, delete, status, members, help, reconnect.
+/// Supports 8 commands: get, put, delete, status, members, formation status,
+/// help, reconnect.
 /// get/put/delete use the kv-store bincode wire format and go to the
-/// ClientService port (`--addr`); status/members go to the AdminService
-/// port (`--admin-addr`, default: client port + 1000).
+/// ClientService port (`--addr`); status/members/formation status go to the
+/// AdminService port (`--admin-addr`, default: client port + 1000).
 async fn run_repl(
     addr: &str,
     admin_addr: Option<String>,
@@ -1521,7 +1683,7 @@ async fn run_repl(
                 }
             }
         }
-        Err(e) => println!("member discovery failed: {e}; automatic failover is limited to {addr}"),
+        Err(e) => println!("{}", member_discovery_message(&e, addr)),
     }
     let mut needs_reconnect = false;
     println!("connected: client={addr} admin={admin_addr} group={group}");
@@ -1556,12 +1718,18 @@ async fn run_repl(
                 }
                 (kv, admin) => {
                     if let Err(e) = kv {
-                        println!("kv reconnect to {kv_addr} failed: {e}");
+                        println!(
+                            "kv reconnect to {kv_addr} failed: {}",
+                            connect_error_brief(&e)
+                        );
                     }
                     if let Err(e) = admin {
-                        println!("admin reconnect to {admin_addr} failed: {e}");
+                        println!(
+                            "admin reconnect to {admin_addr} failed: {}",
+                            connect_error_brief(&e)
+                        );
                     }
-                    println!("reconnect failed  (will retry on next command)");
+                    println!("{}", reconnect_failed_message(&kv_addr, &admin_addr));
                     continue;
                 }
             }
@@ -1703,6 +1871,18 @@ async fn run_repl(
                     }
                 }
             }
+            ReplCommand::FormationStatus => {
+                match admin_client.get_formation_status(Empty {}).await {
+                    Ok(resp) => {
+                        let mut s = resp.into_inner();
+                        s.groups.sort_unstable_by_key(|g| g.group_id);
+                        println!("{}", format_formation_status(&s));
+                    }
+                    Err(e) => {
+                        handle_rpc_error(&e, "AdminService", &admin_addr, &mut needs_reconnect)
+                    }
+                }
+            }
             ReplCommand::Help => {
                 println!("Available commands:");
                 println!("  get <key>             — fetch a value");
@@ -1710,13 +1890,15 @@ async fn run_repl(
                 println!("  delete <key>          — remove a key");
                 println!("  status                — show node status (via admin RPC)");
                 println!("  members               — show group membership (via admin RPC)");
+                println!("  formation status      — show cluster formation lifecycle status (via admin RPC)");
                 println!("  help                  — show this help");
                 println!();
                 println!(
                     "Note: get/put/delete use kv-store wire format \
                      (bincode-encoded KvRequest/KvResponse) and go to --addr \
-                     (client port); status/members go to --admin-addr \
-                     (default: client port + 1000). A kv leader redirect moves \
+                     (client port); status/members/formation status go to \
+                     --admin-addr (default: client port + 1000). A kv leader \
+                     redirect moves \
                      the derived admin channel along (an explicit --admin-addr \
                      stays pinned); 'status' is node-level and then describes \
                      the leader node."
@@ -2436,6 +2618,228 @@ mod tests {
     #[test]
     fn test_decode_kv_response_invalid_bytes() {
         assert!(decode_kv_response(&[0xFF, 0xFF, 0xFF]).is_err());
+    }
+
+    // ── formation status tests ───────────────────────────────────────────────
+
+    /// Verify formation status subcommand parses correctly.
+    #[test]
+    fn test_parse_formation_status() {
+        let cli = Cli::try_parse_from(["rr-admin", "formation", "status"])
+            .expect("should parse formation status");
+        assert!(matches!(
+            cli.command,
+            Commands::Formation {
+                cmd: FormationCommands::Status
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_repl_formation_status() {
+        assert_eq!(
+            parse_repl_line("formation status"),
+            ReplCommand::FormationStatus
+        );
+    }
+
+    #[test]
+    fn test_parse_repl_formation_missing_subcommand() {
+        assert!(matches!(
+            parse_repl_line("formation"),
+            ReplCommand::MissingArg {
+                cmd: "formation",
+                usage: "formation status"
+            }
+        ));
+    }
+
+    /// An unknown formation subcommand echoes the first token, matching the
+    /// established Unknown convention for every other command.
+    #[test]
+    fn test_parse_repl_formation_unknown_subcommand() {
+        assert_eq!(
+            parse_repl_line("formation foo"),
+            ReplCommand::Unknown {
+                cmd: "formation".to_string()
+            }
+        );
+    }
+
+    /// Tracked cluster: identity/revision fields first, then the per-group
+    /// table (group_id, bootstrap_epoch, state).
+    #[test]
+    fn test_format_formation_status_tracked_renders_fields_and_table() {
+        let resp = FormationStatus {
+            origin: "Genesis".to_string(),
+            cluster_uuid: "3f8c9d2e-1111-4222-8333-abcdef012345".to_string(),
+            topology_revision: 3,
+            store_revision: 12,
+            state: "Active".to_string(),
+            groups: vec![
+                rr_network::proto::admin::GroupFormationStatus {
+                    group_id: 1,
+                    bootstrap_epoch: 7,
+                    state: "Active".to_string(),
+                },
+                rr_network::proto::admin::GroupFormationStatus {
+                    group_id: 2,
+                    bootstrap_epoch: 7,
+                    state: "Forming".to_string(),
+                },
+            ],
+        };
+        let out = format_formation_status(&resp);
+        assert!(out.contains("origin"));
+        assert!(out.contains("Genesis"));
+        assert!(out.contains("cluster_uuid"));
+        assert!(out.contains("3f8c9d2e-1111-4222-8333-abcdef012345"));
+        assert!(out.contains("topology_revision: 3"));
+        assert!(out.contains("store_revision   : 12"));
+        assert!(out.contains("group_id"));
+        assert!(out.contains("bootstrap_epoch"));
+        assert!(out.contains("Active"));
+        assert!(out.contains("Forming"));
+        assert!(!out.contains("not tracked"));
+    }
+
+    /// Untracked cluster: the output must point at the playbook instead of
+    /// rendering an empty group table.
+    #[test]
+    fn test_format_formation_status_untracked_shows_playbook_hint() {
+        let resp = FormationStatus {
+            origin: "Untracked".to_string(),
+            cluster_uuid: String::new(),
+            topology_revision: 0,
+            store_revision: 0,
+            state: "Untracked".to_string(),
+            groups: vec![],
+        };
+        let out = format_formation_status(&resp);
+        assert!(out.contains("not tracked by formation lifecycle"));
+        assert!(out.contains("legacy cluster"));
+        assert!(out.contains("playbook"));
+        assert!(!out.contains("bootstrap_epoch"));
+    }
+
+    /// Proto contract arm: the aggregate `state` can be "Untracked" even when
+    /// `origin` carries a real value — the hint must still appear and the
+    /// group table must not render.
+    #[test]
+    fn test_format_formation_status_cluster_level_untracked_state() {
+        let resp = FormationStatus {
+            origin: "Genesis".to_string(),
+            cluster_uuid: "3f8c9d2e-1111-4222-8333-abcdef012345".to_string(),
+            topology_revision: 0,
+            store_revision: 0,
+            state: "Untracked".to_string(),
+            groups: vec![],
+        };
+        let out = format_formation_status(&resp);
+        assert!(out.contains("Genesis"));
+        assert!(out.contains("not tracked by formation lifecycle"));
+        assert!(out.contains("playbook"));
+        assert!(!out.contains("bootstrap_epoch"));
+    }
+
+    // ── E-3 connection-error remediation tests ──────────────────────────────
+
+    /// Every connection failure must carry the remediation checklist: port
+    /// role (admin vs client port), process liveness, TLS/admin_token, and a
+    /// playbook pointer.
+    #[test]
+    fn test_connect_timeout_error_carries_remediation() {
+        let msg = connect_timeout_error("127.0.0.1:52001").to_string();
+        assert!(msg.contains("timed out"));
+        assert!(msg.contains("127.0.0.1:52001"));
+        for kw in [
+            "admin port",
+            "client port",
+            "alive",
+            "TLS",
+            "token",
+            "playbook",
+        ] {
+            assert!(msg.contains(kw), "missing {kw:?} in: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_connect_error_carries_remediation() {
+        let source =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let err = connect_error("127.0.0.1:52001", source);
+        let msg = err.to_string();
+        assert!(msg.contains("connect to 127.0.0.1:52001 failed"));
+        for kw in [
+            "admin port",
+            "client port",
+            "alive",
+            "TLS",
+            "token",
+            "playbook",
+        ] {
+            assert!(msg.contains(kw), "missing {kw:?} in: {msg}");
+        }
+        // The source chain is preserved: the concrete cause (refused/TLS/DNS)
+        // stays visible as `Caused by:` in the debug rendering.
+        let debug = format!("{err:?}");
+        assert!(
+            debug.contains("Caused by"),
+            "missing cause chain in: {debug}"
+        );
+        assert!(debug.contains("connection refused"));
+    }
+
+    /// Per-channel status lines use the brief rendering: first message line
+    /// plus root cause, never the remediation checklist (printed once at the
+    /// summary/site level).
+    #[test]
+    fn test_connect_error_brief_strips_remedy_keeps_cause() {
+        let source =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let err = connect_error("127.0.0.1:52001", source);
+        let brief = connect_error_brief(&err);
+        assert!(brief.contains("connect to 127.0.0.1:52001 failed"));
+        assert!(brief.contains("connection refused"));
+        assert!(
+            !brief.contains("next steps"),
+            "brief must not carry the remedy: {brief}"
+        );
+        // The timeout error has no source — the brief falls back to its
+        // first message line.
+        let timeout = connect_timeout_error("127.0.0.1:52001");
+        let brief = connect_error_brief(&timeout);
+        assert!(brief.contains("timed out"));
+        assert!(!brief.contains("next steps"));
+    }
+
+    #[test]
+    fn test_member_discovery_message_carries_remediation() {
+        let msg = member_discovery_message(&Status::unavailable("refused"), "127.0.0.1:51001");
+        assert!(msg.contains("member discovery failed"));
+        assert!(msg.contains("automatic failover is limited to 127.0.0.1:51001"));
+        for kw in [
+            "admin port",
+            "client port",
+            "alive",
+            "TLS",
+            "token",
+            "playbook",
+        ] {
+            assert!(msg.contains(kw), "missing {kw:?} in: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_reconnect_failed_message_carries_remediation() {
+        let msg = reconnect_failed_message("127.0.0.1:51001", "127.0.0.1:52001");
+        assert!(msg.contains("will retry on next command"));
+        assert!(msg.contains("client port 127.0.0.1:51001"));
+        assert!(msg.contains("admin port 127.0.0.1:52001"));
+        for kw in ["alive", "TLS", "token", "playbook"] {
+            assert!(msg.contains(kw), "missing {kw:?} in: {msg}");
+        }
     }
 
     struct StaticClientService;

@@ -12,6 +12,7 @@ use rr_core::{
 };
 use rr_raft::group_manager::{InitializeOutcome, RaftGroupManager};
 use tokio::sync::Mutex;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::health::ReadinessFlag;
@@ -44,6 +45,10 @@ pub(crate) struct FormationSupervisor {
     config: FormationConfig,
     readiness: ReadinessFlag,
     reconcile_lock: Mutex<()>,
+    /// Interned `group_id` metric labels, one per seed group: leaking a few
+    /// bytes once per group avoids allocating a `String` per gauge update
+    /// (same convention as `ClientDispatchImpl::group_label`).
+    group_labels: BTreeMap<GroupId, &'static str>,
 }
 
 #[derive(Debug)]
@@ -69,6 +74,15 @@ impl FormationSupervisor {
         config: FormationConfig,
         readiness: ReadinessFlag,
     ) -> Self {
+        let group_labels = config
+            .seed
+            .groups
+            .keys()
+            .map(|group_id| {
+                let label: &'static str = Box::leak(group_id.to_string().into_boxed_str());
+                (*group_id, label)
+            })
+            .collect();
         Self {
             node_id,
             storage,
@@ -76,6 +90,7 @@ impl FormationSupervisor {
             config,
             readiness,
             reconcile_lock: Mutex::new(()),
+            group_labels,
         }
     }
 
@@ -89,7 +104,9 @@ impl FormationSupervisor {
 
     pub async fn reconcile(&self) -> Result<FormationReport, RrError> {
         let _guard = self.reconcile_lock.lock().await;
+        let start = std::time::Instant::now();
         let result = self.reconcile_inner().await;
+        metrics::histogram!("rr_formation_duration_seconds").record(start.elapsed().as_secs_f64());
         match &result {
             Ok(report) => self.publish_readiness(report),
             Err(error) => self.readiness.set_phase(false, "failed", error.to_string()),
@@ -129,6 +146,7 @@ impl FormationSupervisor {
         };
 
         let mut versioned = self.authorize_or_create(loaded, &local).await?;
+        self.publish_formation_state_gauges(&versioned.record);
         identity::store(
             self.storage.as_ref(),
             &LocalClusterIdentity {
@@ -219,6 +237,7 @@ impl FormationSupervisor {
                                 .map_err(RrError::from)
                         })
                         .await?;
+                    record_cas_outcome(activation);
                     match activation {
                         CasOutcome::Applied => {
                             versioned.revision =
@@ -228,9 +247,26 @@ impl FormationSupervisor {
                                     )
                                 })?;
                             versioned.record = next;
+                            let formation = versioned.record.groups[&group_id];
+                            info!(
+                                group_id,
+                                bootstrap_epoch = formation.bootstrap_epoch,
+                                revision = versioned.revision,
+                                "formation: group transitioned Forming -> Active"
+                            );
+                            self.set_formation_state_gauge(group_id, formation.state);
                         }
                         CasOutcome::Conflict => {
+                            warn!(
+                                group_id,
+                                revision = versioned.revision,
+                                "formation: lifecycle activation CAS conflict; reloading and retrying"
+                            );
                             versioned = self.load_required().await?;
+                            // The winning record may already show groups
+                            // Active; republish so the gauge tracks the peer's
+                            // transition within this reconcile.
+                            self.publish_formation_state_gauges(&versioned.record);
                             continue;
                         }
                     }
@@ -320,9 +356,41 @@ impl FormationSupervisor {
                 })
                 .collect(),
         };
-        match self.config.store.create_if_absent(record).await? {
-            CasOutcome::Applied | CasOutcome::Conflict => self.load_required().await,
+        match self.config.mode {
+            FormationMode::Genesis => info!(
+                cluster_uuid = %record.cluster_uuid,
+                groups = record.groups.len(),
+                "formation: genesis started; creating cluster lifecycle record"
+            ),
+            FormationMode::AdoptLegacy => info!(
+                cluster_uuid = %record.cluster_uuid,
+                groups = record.groups.len(),
+                "formation: legacy cluster adoption started; creating lifecycle record"
+            ),
         }
+        let cluster_uuid = record.cluster_uuid;
+        let outcome = self.config.store.create_if_absent(record).await?;
+        record_cas_outcome(outcome);
+        if outcome == CasOutcome::Conflict {
+            warn!(
+                cluster_uuid = %cluster_uuid,
+                "formation: lifecycle record create CAS conflict; loading the winning record"
+            );
+        }
+        let versioned = self.load_required().await?;
+        match self.config.mode {
+            FormationMode::Genesis => info!(
+                cluster_uuid = %versioned.record.cluster_uuid,
+                revision = versioned.revision,
+                "formation: genesis complete"
+            ),
+            FormationMode::AdoptLegacy => info!(
+                cluster_uuid = %versioned.record.cluster_uuid,
+                revision = versioned.revision,
+                "formation: legacy cluster adoption complete"
+            ),
+        }
+        Ok(versioned)
     }
 
     async fn load_required(&self) -> Result<VersionedLifecycle, RrError> {
@@ -406,6 +474,31 @@ impl FormationSupervisor {
             .collect()
     }
 
+    /// Export every group's formation state as `rr_formation_state{group_id}`
+    /// (0 = Forming, 1 = Active). Called on each reconcile right after the
+    /// lifecycle record is loaded or created, so a restarted node republishes
+    /// the stored state on startup.
+    fn publish_formation_state_gauges(&self, record: &ClusterLifecycle) {
+        for (group_id, formation) in &record.groups {
+            self.set_formation_state_gauge(*group_id, formation.state);
+        }
+    }
+
+    fn set_formation_state_gauge(&self, group_id: GroupId, state: FormationState) {
+        let value = match state {
+            FormationState::Forming => 0.0,
+            FormationState::Active => 1.0,
+        };
+        // The record is validated against the seed before any gauge update,
+        // so the interned label always exists.
+        let label = self
+            .group_labels
+            .get(&group_id)
+            .copied()
+            .expect("group label interned for every seed group");
+        metrics::gauge!("rr_formation_state", "group_id" => label).set(value);
+    }
+
     fn publish_readiness(&self, report: &FormationReport) {
         if report.store_degraded {
             self.readiness.set_phase(
@@ -440,6 +533,16 @@ impl FormationSupervisor {
 
 fn invalid_formation(message: impl Into<String>) -> LifecycleError {
     LifecycleError::InvalidTransition(message.into())
+}
+
+/// Count one LifecycleStore CAS outcome as `rr_formation_cas_total{result}`.
+/// Store errors are not counted: they propagate before an outcome exists.
+fn record_cas_outcome(outcome: CasOutcome) {
+    let result = match outcome {
+        CasOutcome::Applied => "applied",
+        CasOutcome::Conflict => "conflict",
+    };
+    metrics::counter!("rr_formation_cas_total", "result" => result).increment(1);
 }
 
 #[cfg(test)]
@@ -816,6 +919,10 @@ mod tests {
 
     #[tokio::test]
     async fn genesis_create_cas_conflict_with_different_seed_fails_closed() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
         let winner_seed = seed(&[1], 1);
         let mut winner = lifecycle(
             &winner_seed,
@@ -838,6 +945,19 @@ mod tests {
             RrError::Lifecycle(LifecycleError::SeedMismatch)
         ));
         assert!(voters(&fixture.group_manager, 1).await.is_empty());
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("rr_formation_cas_total{result=\"conflict\"} 1"),
+            "losing the create race must count exactly one conflict: {rendered}"
+        );
+        assert!(
+            !rendered.contains("rr_formation_cas_total{result=\"applied\"}"),
+            "the losing node must not count any applied CAS: {rendered}"
+        );
+        assert!(
+            rendered.contains("rr_formation_duration_seconds"),
+            "reconcile wall duration histogram missing: {rendered}"
+        );
     }
 
     #[tokio::test]
@@ -1268,5 +1388,131 @@ mod tests {
             BTreeSet::from([1])
         );
         node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn genesis_reconcile_emits_formation_metrics() {
+        // Thread-local recorder (documented for single-threaded runtimes):
+        // deterministic capture regardless of any process-global recorder
+        // installed by other tests in this binary.
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        let store = Arc::new(MemLifecycleStore::new());
+        let fixture = fixture(FormationMode::Genesis, 1, &[1], 1, store.clone()).await;
+
+        let report = fixture.supervisor.reconcile().await.unwrap();
+        assert_eq!(report.outcomes[&1], GroupFormationOutcome::Initialized);
+
+        let rendered = handle.render();
+        // create_if_absent (genesis) + activation compare_and_swap both applied.
+        assert!(
+            rendered.contains("rr_formation_cas_total{result=\"applied\"} 2"),
+            "genesis must count both CAS applications: {rendered}"
+        );
+        assert!(
+            rendered.contains("rr_formation_state{group_id=\"1\"} 1"),
+            "group 1 gauge must read Active (1) after genesis: {rendered}"
+        );
+        assert!(
+            rendered.contains("rr_formation_duration_seconds"),
+            "reconcile wall duration histogram missing: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn adoption_reconcile_emits_formation_metrics() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        let store = Arc::new(MemLifecycleStore::new());
+        let fixture = fixture(FormationMode::AdoptLegacy, 1, &[1, 2, 3], 1, store.clone()).await;
+        initialize_legacy(&fixture.group_manager, 1, 1).await;
+
+        let report = fixture.supervisor.reconcile().await.unwrap();
+        assert_eq!(report.outcomes[&1], GroupFormationOutcome::AdoptedExisting);
+
+        let rendered = handle.render();
+        // Adoption creates the record already Active: one create CAS, no
+        // activation CAS.
+        assert!(
+            rendered.contains("rr_formation_cas_total{result=\"applied\"} 1"),
+            "adoption must count exactly the record create: {rendered}"
+        );
+        assert!(
+            rendered.contains("rr_formation_state{group_id=\"1\"} 1"),
+            "adopted group 1 gauge must read Active (1): {rendered}"
+        );
+        assert!(
+            rendered.contains("rr_formation_duration_seconds"),
+            "reconcile wall duration histogram missing: {rendered}"
+        );
+    }
+
+    /// Store that plays the peer winning the activation race: the first
+    /// compare_and_swap stores the incoming (Active) record but reports
+    /// Conflict, so the reload observes the peer's transition.
+    struct PeerWinsActivationStore {
+        record: std::sync::Mutex<VersionedLifecycle>,
+    }
+
+    #[async_trait]
+    impl LifecycleStore for PeerWinsActivationStore {
+        async fn load_linearizable(&self) -> Result<Option<VersionedLifecycle>, LifecycleError> {
+            Ok(Some(self.record.lock().unwrap().clone()))
+        }
+
+        async fn create_if_absent(
+            &self,
+            _record: ClusterLifecycle,
+        ) -> Result<CasOutcome, LifecycleError> {
+            Ok(CasOutcome::Conflict)
+        }
+
+        async fn compare_and_swap(
+            &self,
+            _expected_revision: u64,
+            record: ClusterLifecycle,
+        ) -> Result<CasOutcome, LifecycleError> {
+            let mut current = self.record.lock().unwrap();
+            current.revision += 1;
+            current.record = record;
+            Ok(CasOutcome::Conflict)
+        }
+    }
+
+    #[tokio::test]
+    async fn activation_cas_conflict_republishes_peer_active_state() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        let seed = seed(&[1], 1);
+        let store = Arc::new(PeerWinsActivationStore {
+            record: std::sync::Mutex::new(VersionedLifecycle {
+                revision: 1,
+                record: lifecycle(&seed, ClusterOrigin::Genesis, FormationState::Forming),
+            }),
+        });
+        let fixture = fixture(FormationMode::Genesis, 1, &[1], 1, store.clone()).await;
+
+        let report = fixture.supervisor.reconcile().await.unwrap();
+
+        assert_eq!(report.outcomes[&1], GroupFormationOutcome::Recovered);
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("rr_formation_cas_total{result=\"conflict\"} 1"),
+            "the lost activation race must count one conflict: {rendered}"
+        );
+        assert!(
+            !rendered.contains("rr_formation_cas_total{result=\"applied\"}"),
+            "no CAS may be counted as applied on the losing node: {rendered}"
+        );
+        assert!(
+            rendered.contains("rr_formation_state{group_id=\"1\"} 1"),
+            "gauge must reflect the peer's Active transition within this reconcile: {rendered}"
+        );
     }
 }

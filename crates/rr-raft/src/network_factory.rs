@@ -620,6 +620,17 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             len.div_ceil(chunk_size)
         };
         let group_id = self.group_id;
+        let group_label = intern_id_label(group_id);
+        // C-2: register the send-side byte counter once up front (the handle
+        // is 'static, unlike the macro expansion which declares an inline
+        // `static` that breaks the closure's lifetime bound); counting per
+        // chunk as it is yielded to the transport means a timeout/cancel
+        // mid-flight still reports the bytes actually sent.
+        let send_bytes = metrics::counter!(
+            "rr_snapshot_transfer_bytes",
+            "direction" => "send",
+            "group_id" => group_label
+        );
 
         // Lazy chunk stream: each chunk is copied only as it is yielded, so
         // the transfer stays cancelable / time-outable mid-flight instead of
@@ -628,6 +639,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             let is_last = i == total - 1;
             let start = i * chunk_size;
             let end = ((i + 1) * chunk_size).min(len);
+            send_bytes.increment((end - start) as u64);
             ProtoSnapshotChunk {
                 group_id,
                 offset: start as u64,
@@ -649,6 +661,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         let mut client = RaftGrpcClient::new(channel);
         let send = client.install_snapshot(stream);
         let ttl = option.soft_ttl();
+        let transfer_started = std::time::Instant::now();
 
         // Honor openraft's cancel signal (RaftCore dropped / leadership lost)
         // and the RPC soft TTL: a wedged receiver must not stall the
@@ -679,6 +692,17 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
                 }
             }
         };
+
+        // C-2: the peer acknowledged the full stream — record send-side wall
+        // time. Canceled/timed-out transfers return above and are not mixed
+        // into the duration distribution (their partial bytes are still
+        // counted as the stream was yielded).
+        metrics::histogram!(
+            "rr_snapshot_transfer_duration_seconds",
+            "direction" => "send",
+            "group_id" => group_label
+        )
+        .record(transfer_started.elapsed().as_secs_f64());
 
         // Deserialize the payload to get the InstallSnapshotResponse.
         // For backward compatibility, if payload is empty, use a default vote.
@@ -1065,5 +1089,291 @@ mod tests {
                 bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap();
             assert_eq!(bytes, reencoded);
         }
+    }
+
+    // ── C-2: snapshot transfer metrics over a real gRPC round trip ───────
+
+    /// Inner state machine that stores restored bytes, so the mock server
+    /// drives a real `RrStateMachine::install_snapshot` (the recv seam) and
+    /// the test can verify the installed payload.
+    #[derive(Default)]
+    struct SinkSM {
+        state: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl rr_core::state_machine::StateMachine for SinkSM {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, rr_core::error::RrError> {
+            Ok(entry.to_vec())
+        }
+        async fn snapshot(&self) -> Result<Vec<u8>, rr_core::error::RrError> {
+            Ok(self.state.clone())
+        }
+        async fn restore(&mut self, snapshot: &[u8]) -> Result<(), rr_core::error::RrError> {
+            self.state = snapshot.to_vec();
+            Ok(())
+        }
+        async fn last_applied(&self) -> Option<rr_core::types::LogIndex> {
+            None
+        }
+    }
+
+    /// Minimal hand-rolled gRPC server implementing only
+    /// `/rr.raft.RaftService/InstallSnapshot` (client-streaming), mirroring
+    /// the tonic-build output rr-network uses (`rr-network` is not an rr-raft
+    /// dependency, so the generated server cannot be reused here). The
+    /// collected snapshot is installed into a real
+    /// [`crate::sm_adapter::RrStateMachine`] so a single transfer exercises
+    /// both metric seams: the send side (`GrpcRaftNetwork::full_snapshot`)
+    /// and the receive side (`RrStateMachine::install_snapshot`).
+    #[derive(Clone)]
+    struct InstallSnapshotServer {
+        sm: Arc<tokio::sync::Mutex<crate::sm_adapter::RrStateMachine>>,
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>>
+        for InstallSnapshotServer
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut tonic::codegen::Context<'_>,
+        ) -> tonic::codegen::Poll<Result<(), Self::Error>> {
+            tonic::codegen::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: tonic::codegen::http::Request<tonic::body::Body>) -> Self::Future {
+            match req.uri().path() {
+                "/rr.raft.RaftService/InstallSnapshot" => {
+                    struct Svc(Arc<tokio::sync::Mutex<crate::sm_adapter::RrStateMachine>>);
+                    impl tonic::server::ClientStreamingService<ProtoSnapshotChunk> for Svc {
+                        type Response = ProtoSnapshotResp;
+                        type Future = tonic::codegen::BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<tonic::Streaming<ProtoSnapshotChunk>>,
+                        ) -> Self::Future {
+                            let sm = Arc::clone(&self.0);
+                            Box::pin(async move {
+                                let mut stream = request.into_inner();
+                                let mut group_id = 0u64;
+                                let mut data: Vec<u8> = Vec::new();
+                                let mut metadata: Option<Vec<u8>> = None;
+                                while let Some(chunk) = stream.next().await {
+                                    let chunk = chunk?;
+                                    group_id = chunk.group_id;
+                                    data.extend_from_slice(&chunk.data);
+                                    if chunk.done {
+                                        metadata = Some(chunk.metadata);
+                                    }
+                                }
+                                let metadata = metadata.ok_or_else(|| {
+                                    tonic::Status::invalid_argument("no final chunk in stream")
+                                })?;
+                                let (vote, meta): (
+                                    VoteOf<RrTypeConfig>,
+                                    openraft::type_config::alias::SnapshotMetaOf<RrTypeConfig>,
+                                ) = bincode::serde::decode_from_slice(
+                                    &metadata,
+                                    bincode::config::standard(),
+                                )
+                                .map(|(decoded, _)| decoded)
+                                .map_err(|e| {
+                                    tonic::Status::invalid_argument(format!("metadata decode: {e}"))
+                                })?;
+                                {
+                                    use openraft::storage::RaftStateMachine;
+                                    sm.lock()
+                                        .await
+                                        .install_snapshot(&meta, Cursor::new(data))
+                                        .await
+                                        .map_err(|e| {
+                                            tonic::Status::internal(format!("install: {e}"))
+                                        })?;
+                                }
+                                let resp = SnapshotResponse::<RrTypeConfig>::new(vote);
+                                let payload = bincode::serde::encode_to_vec(
+                                    &resp,
+                                    bincode::config::standard(),
+                                )
+                                .map_err(|e| tonic::Status::internal(format!("encode: {e}")))?;
+                                Ok(tonic::Response::new(ProtoSnapshotResp {
+                                    group_id,
+                                    success: true,
+                                    payload,
+                                }))
+                            })
+                        }
+                    }
+                    let sm = Arc::clone(&self.sm);
+                    Box::pin(async move {
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec);
+                        let res = grpc.client_streaming(Svc(sm), req).await;
+                        Ok(res)
+                    })
+                }
+                _ => Box::pin(async move {
+                    let mut response =
+                        tonic::codegen::http::Response::new(tonic::body::Body::default());
+                    let headers = response.headers_mut();
+                    headers.insert(
+                        tonic::Status::GRPC_STATUS,
+                        (tonic::Code::Unimplemented as i32).into(),
+                    );
+                    headers.insert(
+                        tonic::codegen::http::header::CONTENT_TYPE,
+                        tonic::metadata::GRPC_CONTENT_TYPE,
+                    );
+                    Ok(response)
+                }),
+            }
+        }
+    }
+
+    impl tonic::server::NamedService for InstallSnapshotServer {
+        const NAME: &'static str = "rr.raft.RaftService";
+    }
+
+    /// C-2: a full snapshot transfer over a real in-process gRPC round trip
+    /// increments the send-side byte counter by exactly the payload size and
+    /// records one send-side duration sample, and the receiving
+    /// `RrStateMachine` records the matching recv-direction series. The
+    /// `group_id` label value is unique to this test so its series cannot be
+    /// polluted by other tests sharing the process-global recorder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_full_snapshot_round_trip_records_transfer_metrics() {
+        use openraft::storage::RaftStateMachine;
+        use openraft::vote::leader_id_adv::CommittedLeaderId;
+        use openraft::vote::RaftLeaderId;
+        use openraft::{LogId, StoredMembership};
+
+        let handle = crate::test_metrics::shared_prometheus_recorder();
+        let group_id: u64 = 434_343;
+        let group_frag = "group_id=\"434343\"";
+
+        // Server side: a real RrStateMachine (recv seam) behind the mock
+        // gRPC server.
+        let server_sm = crate::sm_adapter::RrStateMachine::new(Box::new(SinkSM::default()))
+            .with_group_id(group_id);
+        let server_sm = Arc::new(tokio::sync::Mutex::new(server_sm));
+        let server = InstallSnapshotServer {
+            sm: Arc::clone(&server_sm),
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let serve = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(server)
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async move {
+                        let _ = stop_rx.await;
+                    },
+                )
+                .await
+                .expect("mock raft gRPC server failed");
+        });
+
+        // Client side: the real send path. 150 000 bytes → 3 chunks at the
+        // default 64 KiB chunk size.
+        let mut network = GrpcRaftNetwork {
+            target: 77,
+            target_addr: addr.to_string(),
+            channel_pool: Arc::new(ChannelPool::new()) as Arc<dyn ChannelPoolLike>,
+            group_id,
+        };
+        let snapshot_bytes: Vec<u8> = (0u8..=255).cycle().take(150_000).collect();
+        let vote = Vote::new(2, 1);
+        let meta: openraft::type_config::alias::SnapshotMetaOf<RrTypeConfig> =
+            openraft::SnapshotMeta {
+                last_log_id: Some(LogId::new(CommittedLeaderId::new(2, 1), 10)),
+                last_membership: StoredMembership::default(),
+            };
+
+        let resp = network
+            .full_snapshot(
+                vote,
+                openraft::Snapshot {
+                    meta,
+                    snapshot: Cursor::new(snapshot_bytes.clone()),
+                },
+                std::future::pending::<openraft::error::ReplicationClosed>(),
+                RPCOption::new(Duration::from_secs(10)),
+            )
+            .await
+            .expect("snapshot transfer must succeed against the mock server");
+        assert_eq!(resp.vote, vote, "the follower's vote must round-trip");
+
+        let rendered = handle.render();
+        let send_bytes = crate::test_metrics::series_value(
+            &rendered,
+            "rr_snapshot_transfer_bytes",
+            &["direction=\"send\"", group_frag],
+        );
+        assert_eq!(
+            send_bytes,
+            Some(snapshot_bytes.len() as f64),
+            "send byte counter must equal the snapshot payload size; rendered:\n{rendered}"
+        );
+        let send_samples = crate::test_metrics::series_value(
+            &rendered,
+            "rr_snapshot_transfer_duration_seconds_count",
+            &["direction=\"send\"", group_frag],
+        );
+        assert_eq!(
+            send_samples,
+            Some(1.0),
+            "send duration histogram must record exactly one sample; rendered:\n{rendered}"
+        );
+        let recv_bytes = crate::test_metrics::series_value(
+            &rendered,
+            "rr_snapshot_transfer_bytes",
+            &["direction=\"recv\"", group_frag],
+        );
+        assert_eq!(
+            recv_bytes,
+            Some(snapshot_bytes.len() as f64),
+            "recv byte counter must equal the installed payload size; rendered:\n{rendered}"
+        );
+        let recv_samples = crate::test_metrics::series_value(
+            &rendered,
+            "rr_snapshot_transfer_duration_seconds_count",
+            &["direction=\"recv\"", group_frag],
+        );
+        assert_eq!(
+            recv_samples,
+            Some(1.0),
+            "recv duration histogram must record exactly one sample; rendered:\n{rendered}"
+        );
+
+        // The receiving state machine installed the exact payload bytes.
+        let installed = {
+            let mut guard = server_sm.lock().await;
+            guard
+                .get_current_snapshot()
+                .await
+                .unwrap()
+                .map(|s| s.snapshot.into_inner())
+        };
+        assert_eq!(
+            installed.as_deref(),
+            Some(snapshot_bytes.as_slice()),
+            "the server-side state machine must hold the transferred payload"
+        );
+
+        // Drop the client's pooled channel so the server's graceful shutdown
+        // is not held open by the pooled HTTP/2 connection.
+        drop(network);
+        let _ = stop_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(5), serve).await;
     }
 }

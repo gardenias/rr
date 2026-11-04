@@ -359,6 +359,10 @@ gate-invariants:
     ./scripts/check-invariants.sh
 
 [group("gates")]
+metrics-check:
+    ./scripts/check-metrics-docs.sh
+
+[group("gates")]
 gate-test:
     cargo test --workspace
 

@@ -18,16 +18,17 @@ use rr_core::config::ConfigProvider;
 use rr_core::error::RaftError;
 use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
 use rr_core::types::NodeId;
-use rr_core::{FormationState, LifecycleStore};
+use rr_core::{ClusterOrigin, FormationState, LifecycleStore, VersionedLifecycle};
 use rr_network::audit::AUDIT_TARGET;
 use rr_network::error_convert::IntoStatus;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
     online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
-    DrainRequest, DrainResult, Empty, GroupDrainStatus, GroupId, GroupList, GroupMembership,
-    GroupStatus, GroupSummary, MetricsSummary, NodeMember, NodeStatus, OnlineBackupChunk,
-    OnlineBackupMetadata, OnlineBackupRequest, PartitionRoute, RemoveGroupMemberRequest,
-    ResetIngestorOffsetRequest, RoutingTableSnapshot, SnapshotStatus, TransferLeaderRequest,
+    DrainRequest, DrainResult, Empty, FormationStatus, GroupDrainStatus, GroupFormationStatus,
+    GroupId, GroupList, GroupMembership, GroupStatus, GroupSummary, MetricsSummary, NodeMember,
+    NodeStatus, OnlineBackupChunk, OnlineBackupMetadata, OnlineBackupRequest, PartitionRoute,
+    RemoveGroupMemberRequest, ResetIngestorOffsetRequest, RoutingTableSnapshot, SnapshotStatus,
+    TransferLeaderRequest,
 };
 use rr_raft::group_manager::RaftGroupManager;
 use std::collections::BTreeSet;
@@ -79,6 +80,66 @@ async fn wait_for_snapshot(
             continue;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// `FormationStatus` shape for a node that holds no lifecycle record — either
+/// the node runs without formation tracking (legacy cluster that was never
+/// adopted) or the store is empty. This is a normal state, not an error.
+fn untracked_formation_status() -> FormationStatus {
+    FormationStatus {
+        origin: "Untracked".to_string(),
+        cluster_uuid: String::new(),
+        topology_revision: 0,
+        store_revision: 0,
+        state: "Untracked".to_string(),
+        groups: Vec::new(),
+    }
+}
+
+/// Map the stored lifecycle record onto the wire shape. Aggregate state is
+/// "Forming" while any group is still forming, "Active" once all are active.
+fn formation_status_from_record(versioned: VersionedLifecycle) -> FormationStatus {
+    let record = versioned.record;
+    let origin = match record.origin {
+        ClusterOrigin::Genesis => "Genesis",
+        ClusterOrigin::LegacyAdopted => "LegacyAdopted",
+    }
+    .to_string();
+    let any_forming = record
+        .groups
+        .values()
+        .any(|group| group.state == FormationState::Forming);
+    let groups = record
+        .groups
+        .iter()
+        .map(|(group_id, formation)| GroupFormationStatus {
+            group_id: *group_id,
+            bootstrap_epoch: formation.bootstrap_epoch,
+            state: match formation.state {
+                FormationState::Forming => "Forming",
+                FormationState::Active => "Active",
+            }
+            .to_string(),
+        })
+        .collect();
+    FormationStatus {
+        origin,
+        cluster_uuid: record.cluster_uuid.hyphenated().to_string(),
+        topology_revision: record.topology_revision,
+        store_revision: versioned.revision,
+        state: if any_forming { "Forming" } else { "Active" }.to_string(),
+        groups,
+    }
+}
+
+/// Label value for admin operation counters: "ok" when the RPC returned
+/// success, "error" otherwise (including validation rejections).
+fn admin_result_label(result: &Result<Response<Empty>, Status>) -> &'static str {
+    if result.is_ok() {
+        "ok"
+    } else {
+        "error"
     }
 }
 
@@ -135,8 +196,14 @@ impl AdminServiceImpl {
             .load_linearizable()
             .await
             .map_err(|error| {
+                tracing::warn!(
+                    node_id = self.node_id,
+                    group_id,
+                    %error,
+                    "require_active_group: lifecycle store load failed (detail sanitized for client)"
+                );
                 Status::failed_precondition(format!(
-                    "group {group_id} lifecycle state unavailable; retry membership change after store recovery: {error}"
+                    "group {group_id} lifecycle state unavailable; retry membership change after store recovery"
                 ))
             })?
             .ok_or_else(|| {
@@ -155,6 +222,434 @@ impl AdminServiceImpl {
             Err(Status::failed_precondition(format!(
                 "group {group_id} lifecycle is not Active; retry membership change after activation"
             )))
+        }
+    }
+
+    async fn trigger_snapshot_inner(
+        &self,
+        request: Request<GroupId>,
+    ) -> Result<Response<Empty>, Status> {
+        let peer = peer_from_request(&request);
+        let group_id = request.into_inner().group_id;
+        info!(
+            target: AUDIT_TARGET,
+            op = "TriggerSnapshot",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id,
+            "admin rpc — mutation"
+        );
+        let raft = self
+            .group_manager
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
+
+        match raft.trigger().snapshot().await {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TriggerSnapshot",
+                    peer = %peer,
+                    group_id,
+                    success = true,
+                    message = "snapshot triggered",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let message = e.to_string();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TriggerSnapshot",
+                    peer = %peer,
+                    group_id,
+                    success = false,
+                    message = %message,
+                    "admin rpc result"
+                );
+                Err(Status::internal(message))
+            }
+        }
+    }
+
+    async fn transfer_leader_inner(
+        &self,
+        request: Request<TransferLeaderRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        info!(
+            target: AUDIT_TARGET,
+            op = "TransferLeader",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            target_node_id = req.target_node_id,
+            result = "started",
+            "admin rpc — mutation"
+        );
+        let raft = match self.group_manager.get_raft(req.group_id).await {
+            Some(r) => r,
+            None => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TransferLeader",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.target_node_id,
+                    success = false,
+                    result = "failed",
+                    reason = "group_not_found",
+                    "admin rpc result"
+                );
+                return Err(Status::not_found(format!(
+                    "group {} not found",
+                    req.group_id
+                )));
+            }
+        };
+
+        if req.target_node_id != self.node_id {
+            let message = format!(
+                "transfer to remote node {} not supported; call the target node's admin API",
+                req.target_node_id
+            );
+            info!(
+                target: AUDIT_TARGET,
+                op = "TransferLeader",
+                peer = %peer,
+                group_id = req.group_id,
+                target_node_id = req.target_node_id,
+                success = false,
+                result = "failed",
+                message = %message,
+                "admin rpc result"
+            );
+            return Err(Status::failed_precondition(message));
+        }
+
+        match raft.trigger().elect(false).await {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TransferLeader",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.target_node_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "election triggered on this node",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let message = e.to_string();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "TransferLeader",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.target_node_id,
+                    success = false,
+                    result = "failed",
+                    message = %message,
+                    "admin rpc result"
+                );
+                Err(Status::internal(message))
+            }
+        }
+    }
+
+    async fn add_learner_inner(
+        &self,
+        request: Request<AddLearnerRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        info!(
+            target: AUDIT_TARGET,
+            op = "AddLearner",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            target_node_id = req.node_id,
+            target_addr = %req.addr,
+            result = "started",
+            "admin rpc — mutation"
+        );
+        self.require_active_group(req.group_id).await?;
+        let outcome = self
+            .group_manager
+            .add_learner(req.group_id, req.node_id, req.addr.clone())
+            .await;
+        match outcome {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "AddLearner",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "learner added",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let status = e.into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "AddLearner",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                Err(status)
+            }
+        }
+    }
+
+    async fn change_membership_inner(
+        &self,
+        request: Request<ChangeMembershipRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        let voters: BTreeSet<NodeId> = req.voter_node_ids.iter().copied().collect();
+        let force = req.force;
+        info!(
+            target: AUDIT_TARGET,
+            op = "ChangeMembership",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            voter_count = voters.len(),
+            force,
+            result = "started",
+            "admin rpc — mutation"
+        );
+        self.require_active_group(req.group_id).await?;
+        // 1. Group existence (same not_found semantics as `get_group_membership`).
+        let raft = match self.group_manager.get_raft(req.group_id).await {
+            Some(raft) => raft,
+            None => {
+                let status = Status::not_found(format!("group {} not found", req.group_id));
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                return Err(status);
+            }
+        };
+        // 2. Empty voter set: rejected unconditionally. `force` does NOT
+        //    bypass this — n→0 is group teardown and must go through
+        //    `node-reset`, not change-membership (ADR A-0012 §4).
+        if voters.is_empty() {
+            let msg = "voter_node_ids must not be empty";
+            info!(
+                target: AUDIT_TARGET,
+                op = "ChangeMembership",
+                peer = %peer,
+                group_id = req.group_id,
+                success = false,
+                result = "failed",
+                reason = %msg,
+                "admin rpc result"
+            );
+            return Err(Status::invalid_argument(msg));
+        }
+        // 3. Quorum guard (ADR A-0012): reject target voter sets below
+        //    MIN_VOTERS_AFTER_REMOVAL unless the operator passed `force`.
+        //    The membership view is read from the same source as
+        //    `GetGroupMembership` (leader's `raft.metrics()`); the
+        //    decision itself depends only on the target size — openraft's
+        //    full-replacement semantics make each applied request
+        //    self-sufficient, so no TOCTOU composition is possible.
+        let current_voters = {
+            let metrics = raft.metrics().borrow_watched().clone();
+            metrics.membership_config.membership().voter_ids().count()
+        };
+        if !membership_change_is_safe(voters.len()) {
+            if force {
+                warn!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    node_id = self.node_id,
+                    group_id = req.group_id,
+                    force = true,
+                    current_voters,
+                    target_voters = voters.len(),
+                    // The exact set being forced, not just its size — the
+                    // audit trail must reconstruct WHICH voters were forced.
+                    voters = ?voters,
+                    result = "force_accepted",
+                    "quorum guard overridden by operator"
+                );
+            } else {
+                let status = RaftError::UnsafeMembershipChange {
+                    target_voters: voters.len(),
+                    min: MIN_VOTERS_AFTER_REMOVAL,
+                }
+                .into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                return Err(status);
+            }
+        }
+        // 4. Guard passed — apply through the manager.
+        let outcome = self
+            .group_manager
+            .change_membership(req.group_id, voters)
+            .await;
+        match outcome {
+            Ok(()) => {
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "membership changed",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let status = e.into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "ChangeMembership",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                Err(status)
+            }
+        }
+    }
+
+    async fn remove_group_member_inner(
+        &self,
+        request: Request<RemoveGroupMemberRequest>,
+    ) -> Result<Response<Empty>, Status> {
+        let peer = peer_from_request(&request);
+        let req = request.into_inner();
+        let force = req.force;
+        info!(
+            target: AUDIT_TARGET,
+            op = "RemoveGroupMember",
+            peer = %peer,
+            node_id = self.node_id,
+            group_id = req.group_id,
+            target_node_id = req.node_id,
+            force,
+            result = "started",
+            "admin rpc — mutation"
+        );
+        self.require_active_group(req.group_id).await?;
+
+        let _raft = match self.group_manager.get_raft(req.group_id).await {
+            Some(raft) => raft,
+            None => {
+                let status = Status::not_found(format!("group {} not found", req.group_id));
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "RemoveGroupMember",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                return Err(status);
+            }
+        };
+
+        match self
+            .group_manager
+            .remove_node_with_policy_report(req.group_id, req.node_id, req.force)
+            .await
+        {
+            Ok(outcome) => {
+                if outcome.forced {
+                    warn!(
+                        target: AUDIT_TARGET,
+                        op = "RemoveGroupMember",
+                        peer = %peer,
+                        node_id = self.node_id,
+                        group_id = req.group_id,
+                        target_node_id = req.node_id,
+                        force = true,
+                        current_voters = outcome.current_voters,
+                        target_voters = outcome.target_voters,
+                        result = "force_accepted",
+                        "quorum guard overridden by operator"
+                    );
+                }
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "RemoveGroupMember",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = true,
+                    result = "succeeded",
+                    message = "group member removed",
+                    "admin rpc result"
+                );
+                Ok(Response::new(Empty {}))
+            }
+            Err(e) => {
+                let status = e.into_status();
+                info!(
+                    target: AUDIT_TARGET,
+                    op = "RemoveGroupMember",
+                    peer = %peer,
+                    group_id = req.group_id,
+                    target_node_id = req.node_id,
+                    success = false,
+                    result = "failed",
+                    grpc_code = ?status.code(),
+                    message = %status.message(),
+                    "admin rpc result"
+                );
+                Err(status)
+            }
         }
     }
 }
@@ -302,138 +797,26 @@ impl AdminService for AdminServiceImpl {
     }
 
     async fn trigger_snapshot(&self, request: Request<GroupId>) -> Result<Response<Empty>, Status> {
-        let peer = peer_from_request(&request);
-        let group_id = request.into_inner().group_id;
-        info!(
-            target: AUDIT_TARGET,
-            op = "TriggerSnapshot",
-            peer = %peer,
-            node_id = self.node_id,
-            group_id,
-            "admin rpc — mutation"
-        );
-        let raft = self
-            .group_manager
-            .get_raft(group_id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
-
-        match raft.trigger().snapshot().await {
-            Ok(()) => {
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "TriggerSnapshot",
-                    peer = %peer,
-                    group_id,
-                    success = true,
-                    message = "snapshot triggered",
-                    "admin rpc result"
-                );
-                Ok(Response::new(Empty {}))
-            }
-            Err(e) => {
-                let message = e.to_string();
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "TriggerSnapshot",
-                    peer = %peer,
-                    group_id,
-                    success = false,
-                    message = %message,
-                    "admin rpc result"
-                );
-                Err(Status::internal(message))
-            }
-        }
+        let result = self.trigger_snapshot_inner(request).await;
+        metrics::counter!(
+            "rr_admin_snapshot_trigger_total",
+            "result" => admin_result_label(&result)
+        )
+        .increment(1);
+        result
     }
 
     async fn transfer_leader(
         &self,
         request: Request<TransferLeaderRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let peer = peer_from_request(&request);
-        let req = request.into_inner();
-        info!(
-            target: AUDIT_TARGET,
-            op = "TransferLeader",
-            peer = %peer,
-            node_id = self.node_id,
-            group_id = req.group_id,
-            target_node_id = req.target_node_id,
-            result = "started",
-            "admin rpc — mutation"
-        );
-        let raft = match self.group_manager.get_raft(req.group_id).await {
-            Some(r) => r,
-            None => {
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "TransferLeader",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.target_node_id,
-                    success = false,
-                    result = "failed",
-                    reason = "group_not_found",
-                    "admin rpc result"
-                );
-                return Err(Status::not_found(format!(
-                    "group {} not found",
-                    req.group_id
-                )));
-            }
-        };
-
-        if req.target_node_id != self.node_id {
-            let message = format!(
-                "transfer to remote node {} not supported; call the target node's admin API",
-                req.target_node_id
-            );
-            info!(
-                target: AUDIT_TARGET,
-                op = "TransferLeader",
-                peer = %peer,
-                group_id = req.group_id,
-                target_node_id = req.target_node_id,
-                success = false,
-                result = "failed",
-                message = %message,
-                "admin rpc result"
-            );
-            return Err(Status::failed_precondition(message));
-        }
-
-        match raft.trigger().elect(false).await {
-            Ok(()) => {
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "TransferLeader",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.target_node_id,
-                    success = true,
-                    result = "succeeded",
-                    message = "election triggered on this node",
-                    "admin rpc result"
-                );
-                Ok(Response::new(Empty {}))
-            }
-            Err(e) => {
-                let message = e.to_string();
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "TransferLeader",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.target_node_id,
-                    success = false,
-                    result = "failed",
-                    message = %message,
-                    "admin rpc result"
-                );
-                Err(Status::internal(message))
-            }
-        }
+        let result = self.transfer_leader_inner(request).await;
+        metrics::counter!(
+            "rr_admin_transfer_leader_total",
+            "result" => admin_result_label(&result)
+        )
+        .increment(1);
+        result
     }
 
     async fn drain_node(
@@ -577,290 +960,42 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<AddLearnerRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let peer = peer_from_request(&request);
-        let req = request.into_inner();
-        info!(
-            target: AUDIT_TARGET,
-            op = "AddLearner",
-            peer = %peer,
-            node_id = self.node_id,
-            group_id = req.group_id,
-            target_node_id = req.node_id,
-            target_addr = %req.addr,
-            result = "started",
-            "admin rpc — mutation"
-        );
-        self.require_active_group(req.group_id).await?;
-        let outcome = self
-            .group_manager
-            .add_learner(req.group_id, req.node_id, req.addr.clone())
-            .await;
-        match outcome {
-            Ok(()) => {
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "AddLearner",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.node_id,
-                    success = true,
-                    result = "succeeded",
-                    message = "learner added",
-                    "admin rpc result"
-                );
-                Ok(Response::new(Empty {}))
-            }
-            Err(e) => {
-                let status = e.into_status();
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "AddLearner",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.node_id,
-                    success = false,
-                    result = "failed",
-                    grpc_code = ?status.code(),
-                    message = %status.message(),
-                    "admin rpc result"
-                );
-                Err(status)
-            }
-        }
+        let result = self.add_learner_inner(request).await;
+        metrics::counter!(
+            "rr_admin_membership_changes_total",
+            "op" => "add_learner",
+            "result" => admin_result_label(&result)
+        )
+        .increment(1);
+        result
     }
 
     async fn change_membership(
         &self,
         request: Request<ChangeMembershipRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let peer = peer_from_request(&request);
-        let req = request.into_inner();
-        let voters: BTreeSet<NodeId> = req.voter_node_ids.iter().copied().collect();
-        let force = req.force;
-        info!(
-            target: AUDIT_TARGET,
-            op = "ChangeMembership",
-            peer = %peer,
-            node_id = self.node_id,
-            group_id = req.group_id,
-            voter_count = voters.len(),
-            force,
-            result = "started",
-            "admin rpc — mutation"
-        );
-        self.require_active_group(req.group_id).await?;
-        // 1. Group existence (same not_found semantics as `get_group_membership`).
-        let raft = match self.group_manager.get_raft(req.group_id).await {
-            Some(raft) => raft,
-            None => {
-                let status = Status::not_found(format!("group {} not found", req.group_id));
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "ChangeMembership",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    success = false,
-                    result = "failed",
-                    grpc_code = ?status.code(),
-                    message = %status.message(),
-                    "admin rpc result"
-                );
-                return Err(status);
-            }
-        };
-        // 2. Empty voter set: rejected unconditionally. `force` does NOT
-        //    bypass this — n→0 is group teardown and must go through
-        //    `node-reset`, not change-membership (ADR A-0012 §4).
-        if voters.is_empty() {
-            let msg = "voter_node_ids must not be empty";
-            info!(
-                target: AUDIT_TARGET,
-                op = "ChangeMembership",
-                peer = %peer,
-                group_id = req.group_id,
-                success = false,
-                result = "failed",
-                reason = %msg,
-                "admin rpc result"
-            );
-            return Err(Status::invalid_argument(msg));
-        }
-        // 3. Quorum guard (ADR A-0012): reject target voter sets below
-        //    MIN_VOTERS_AFTER_REMOVAL unless the operator passed `force`.
-        //    The membership view is read from the same source as
-        //    `GetGroupMembership` (leader's `raft.metrics()`); the
-        //    decision itself depends only on the target size — openraft's
-        //    full-replacement semantics make each applied request
-        //    self-sufficient, so no TOCTOU composition is possible.
-        let current_voters = {
-            let metrics = raft.metrics().borrow_watched().clone();
-            metrics.membership_config.membership().voter_ids().count()
-        };
-        if !membership_change_is_safe(voters.len()) {
-            if force {
-                warn!(
-                    target: AUDIT_TARGET,
-                    op = "ChangeMembership",
-                    peer = %peer,
-                    node_id = self.node_id,
-                    group_id = req.group_id,
-                    force = true,
-                    current_voters,
-                    target_voters = voters.len(),
-                    // The exact set being forced, not just its size — the
-                    // audit trail must reconstruct WHICH voters were forced.
-                    voters = ?voters,
-                    result = "force_accepted",
-                    "quorum guard overridden by operator"
-                );
-            } else {
-                let status = RaftError::UnsafeMembershipChange {
-                    target_voters: voters.len(),
-                    min: MIN_VOTERS_AFTER_REMOVAL,
-                }
-                .into_status();
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "ChangeMembership",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    success = false,
-                    result = "failed",
-                    grpc_code = ?status.code(),
-                    message = %status.message(),
-                    "admin rpc result"
-                );
-                return Err(status);
-            }
-        }
-        // 4. Guard passed — apply through the manager.
-        let outcome = self
-            .group_manager
-            .change_membership(req.group_id, voters)
-            .await;
-        match outcome {
-            Ok(()) => {
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "ChangeMembership",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    success = true,
-                    result = "succeeded",
-                    message = "membership changed",
-                    "admin rpc result"
-                );
-                Ok(Response::new(Empty {}))
-            }
-            Err(e) => {
-                let status = e.into_status();
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "ChangeMembership",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    success = false,
-                    result = "failed",
-                    grpc_code = ?status.code(),
-                    message = %status.message(),
-                    "admin rpc result"
-                );
-                Err(status)
-            }
-        }
+        let result = self.change_membership_inner(request).await;
+        metrics::counter!(
+            "rr_admin_membership_changes_total",
+            "op" => "change_membership",
+            "result" => admin_result_label(&result)
+        )
+        .increment(1);
+        result
     }
 
     async fn remove_group_member(
         &self,
         request: Request<RemoveGroupMemberRequest>,
     ) -> Result<Response<Empty>, Status> {
-        let peer = peer_from_request(&request);
-        let req = request.into_inner();
-        let force = req.force;
-        info!(
-            target: AUDIT_TARGET,
-            op = "RemoveGroupMember",
-            peer = %peer,
-            node_id = self.node_id,
-            group_id = req.group_id,
-            target_node_id = req.node_id,
-            force,
-            result = "started",
-            "admin rpc — mutation"
-        );
-        self.require_active_group(req.group_id).await?;
-
-        let _raft = match self.group_manager.get_raft(req.group_id).await {
-            Some(raft) => raft,
-            None => {
-                let status = Status::not_found(format!("group {} not found", req.group_id));
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "RemoveGroupMember",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.node_id,
-                    success = false,
-                    result = "failed",
-                    grpc_code = ?status.code(),
-                    message = %status.message(),
-                    "admin rpc result"
-                );
-                return Err(status);
-            }
-        };
-
-        match self
-            .group_manager
-            .remove_node_with_policy_report(req.group_id, req.node_id, req.force)
-            .await
-        {
-            Ok(outcome) => {
-                if outcome.forced {
-                    warn!(
-                        target: AUDIT_TARGET,
-                        op = "RemoveGroupMember",
-                        peer = %peer,
-                        node_id = self.node_id,
-                        group_id = req.group_id,
-                        target_node_id = req.node_id,
-                        force = true,
-                        current_voters = outcome.current_voters,
-                        target_voters = outcome.target_voters,
-                        result = "force_accepted",
-                        "quorum guard overridden by operator"
-                    );
-                }
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "RemoveGroupMember",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.node_id,
-                    success = true,
-                    result = "succeeded",
-                    message = "group member removed",
-                    "admin rpc result"
-                );
-                Ok(Response::new(Empty {}))
-            }
-            Err(e) => {
-                let status = e.into_status();
-                info!(
-                    target: AUDIT_TARGET,
-                    op = "RemoveGroupMember",
-                    peer = %peer,
-                    group_id = req.group_id,
-                    target_node_id = req.node_id,
-                    success = false,
-                    result = "failed",
-                    grpc_code = ?status.code(),
-                    message = %status.message(),
-                    "admin rpc result"
-                );
-                Err(status)
-            }
-        }
+        let result = self.remove_group_member_inner(request).await;
+        metrics::counter!(
+            "rr_admin_membership_changes_total",
+            "op" => "remove_group_member",
+            "result" => admin_result_label(&result)
+        )
+        .increment(1);
+        result
     }
 
     async fn reset_ingestor_offset(
@@ -1156,6 +1291,42 @@ impl AdminService for AdminServiceImpl {
              (rr_server_requests_total, rr_raft_applied_entries_total, ...)",
         ))
     }
+
+    /// Return the cluster formation lifecycle status.
+    ///
+    /// A node without a lifecycle record (no store wired, or the store holds
+    /// no record — a legacy cluster that was never adopted) reports the
+    /// "Untracked" shape with zeroed fields; that is a normal state, not an
+    /// error. A store failure is sanitized: the client gets a fixed
+    /// action-oriented message, the detail goes to the logs.
+    async fn get_formation_status(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<FormationStatus>, Status> {
+        let peer = peer_from_request(&request);
+        info!(
+            target: AUDIT_TARGET,
+            op = "GetFormationStatus",
+            peer = %peer,
+            node_id = self.node_id,
+            "admin rpc"
+        );
+        let Some(store) = &self.lifecycle_store else {
+            return Ok(Response::new(untracked_formation_status()));
+        };
+        let versioned = store.load_linearizable().await.map_err(|error| {
+            tracing::warn!(
+                node_id = self.node_id,
+                error = %error,
+                "get_formation_status: lifecycle store load failed (detail sanitized for client)"
+            );
+            Status::failed_precondition("formation status unavailable; retry after store recovery")
+        })?;
+        let Some(versioned) = versioned else {
+            return Ok(Response::new(untracked_formation_status()));
+        };
+        Ok(Response::new(formation_status_from_record(versioned)))
+    }
 }
 
 #[cfg(test)]
@@ -1164,12 +1335,15 @@ mod tests {
     use async_trait::async_trait;
     use bincode::config::standard;
     use rr_config::mem::MemConfigProvider;
-    use rr_core::error::RrError;
+    use rr_config::MemLifecycleStore;
+    use rr_core::error::{LifecycleError, RrError};
     use rr_core::service::Service;
     use rr_core::state_machine::StateMachine;
     use rr_core::types::LogIndex;
+    use rr_core::{CasOutcome, ClusterLifecycle, GroupFormation};
     use rr_raft::group_manager::StateMachineFactory;
     use rr_raft::service_adapter::ServiceStateMachineAdapter;
+    use uuid::Uuid;
 
     struct NoopSM;
 
@@ -1657,5 +1831,313 @@ mod tests {
         .await
         .unwrap();
         assert!(mgr.latest_ingestor_offset(1).await.unwrap().is_none());
+    }
+
+    fn formation_record(
+        origin: ClusterOrigin,
+        states: &[(u64, FormationState)],
+    ) -> ClusterLifecycle {
+        ClusterLifecycle {
+            version: 1,
+            cluster_uuid: Uuid::from_u128(0x1234),
+            topology_revision: 7,
+            seed_hash: [9; 32],
+            origin,
+            groups: states
+                .iter()
+                .map(|(group_id, state)| {
+                    (
+                        *group_id,
+                        GroupFormation {
+                            bootstrap_epoch: group_id + 10,
+                            state: *state,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    struct FailingLifecycleStore;
+
+    #[async_trait]
+    impl LifecycleStore for FailingLifecycleStore {
+        async fn load_linearizable(&self) -> Result<Option<VersionedLifecycle>, LifecycleError> {
+            Err(LifecycleError::Unavailable(
+                "etcd endpoint 10.0.0.5:2379 unreachable".to_string(),
+            ))
+        }
+
+        async fn create_if_absent(
+            &self,
+            _record: ClusterLifecycle,
+        ) -> Result<CasOutcome, LifecycleError> {
+            Err(LifecycleError::Unavailable("injected outage".to_string()))
+        }
+
+        async fn compare_and_swap(
+            &self,
+            _expected_revision: u64,
+            _record: ClusterLifecycle,
+        ) -> Result<CasOutcome, LifecycleError> {
+            Err(LifecycleError::Unavailable("injected outage".to_string()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_formation_status_without_store_reports_untracked() {
+        let svc = make_admin_service();
+        let resp = svc
+            .get_formation_status(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.origin, "Untracked");
+        assert_eq!(resp.state, "Untracked");
+        assert!(resp.cluster_uuid.is_empty());
+        assert_eq!(resp.topology_revision, 0);
+        assert_eq!(resp.store_revision, 0);
+        assert!(resp.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_formation_status_with_empty_store_reports_untracked() {
+        let store = Arc::new(MemLifecycleStore::new());
+        let svc = make_admin_service().with_lifecycle_store(store);
+        let resp = svc
+            .get_formation_status(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.origin, "Untracked");
+        assert_eq!(resp.state, "Untracked");
+        assert!(resp.cluster_uuid.is_empty());
+        assert_eq!(resp.topology_revision, 0);
+        assert_eq!(resp.store_revision, 0);
+        assert!(resp.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_formation_status_maps_populated_record() {
+        let store = Arc::new(MemLifecycleStore::new());
+        store
+            .create_if_absent(formation_record(
+                ClusterOrigin::Genesis,
+                &[(1, FormationState::Active), (2, FormationState::Forming)],
+            ))
+            .await
+            .unwrap();
+        let svc = make_admin_service().with_lifecycle_store(store);
+
+        let resp = svc
+            .get_formation_status(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.origin, "Genesis");
+        assert_eq!(
+            resp.state, "Forming",
+            "any forming group must aggregate the cluster state to Forming"
+        );
+        assert_eq!(
+            resp.cluster_uuid,
+            Uuid::from_u128(0x1234).hyphenated().to_string()
+        );
+        assert_eq!(resp.topology_revision, 7);
+        assert_eq!(resp.store_revision, 1);
+        assert_eq!(resp.groups.len(), 2);
+        assert_eq!(resp.groups[0].group_id, 1);
+        assert_eq!(resp.groups[0].bootstrap_epoch, 11);
+        assert_eq!(resp.groups[0].state, "Active");
+        assert_eq!(resp.groups[1].group_id, 2);
+        assert_eq!(resp.groups[1].bootstrap_epoch, 12);
+        assert_eq!(resp.groups[1].state, "Forming");
+    }
+
+    #[tokio::test]
+    async fn test_get_formation_status_all_active_reports_active_and_legacy_origin() {
+        let store = Arc::new(MemLifecycleStore::new());
+        store
+            .create_if_absent(formation_record(
+                ClusterOrigin::LegacyAdopted,
+                &[(1, FormationState::Active), (2, FormationState::Active)],
+            ))
+            .await
+            .unwrap();
+        let svc = make_admin_service().with_lifecycle_store(store);
+
+        let resp = svc
+            .get_formation_status(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.origin, "LegacyAdopted");
+        assert_eq!(resp.state, "Active");
+        assert!(
+            resp.groups.iter().all(|group| group.state == "Active"),
+            "every group must map to Active: {:?}",
+            resp.groups
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_formation_status_store_error_is_sanitized() {
+        let svc = make_admin_service().with_lifecycle_store(Arc::new(FailingLifecycleStore));
+
+        let status = svc
+            .get_formation_status(Request::new(Empty {}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            status.message(),
+            "formation status unavailable; retry after store recovery"
+        );
+        assert!(
+            !status.message().contains("10.0.0.5"),
+            "internal store detail must not leak to the client: {}",
+            status.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_operation_counters_record_ok_and_error() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+        // Error paths on a node hosting no groups.
+        let svc = make_admin_service();
+        let _ = svc
+            .trigger_snapshot(Request::new(GroupId { group_id: 99 }))
+            .await;
+        let _ = svc
+            .transfer_leader(Request::new(TransferLeaderRequest {
+                group_id: 99,
+                target_node_id: 1,
+            }))
+            .await;
+        let _ = svc
+            .add_learner(Request::new(AddLearnerRequest {
+                group_id: 99,
+                node_id: 2,
+                addr: "127.0.0.1:5001".to_string(),
+            }))
+            .await;
+        let _ = svc
+            .change_membership(Request::new(ChangeMembershipRequest {
+                group_id: 99,
+                voter_node_ids: vec![1, 2, 3],
+                force: false,
+            }))
+            .await;
+        let _ = svc
+            .remove_group_member(Request::new(RemoveGroupMemberRequest {
+                group_id: 99,
+                node_id: 2,
+                force: false,
+            }))
+            .await;
+
+        // Success paths on a single-node group (self is leader).
+        let svc = make_admin_service_with_group().await;
+        svc.trigger_snapshot(Request::new(GroupId { group_id: 1 }))
+            .await
+            .unwrap();
+        svc.change_membership(Request::new(ChangeMembershipRequest {
+            group_id: 1,
+            voter_node_ids: vec![1],
+            force: true,
+        }))
+        .await
+        .unwrap();
+        // Targeting the local node is the supported path: it triggers a
+        // fresh election, which a live RaftCore always accepts.
+        svc.transfer_leader(Request::new(TransferLeaderRequest {
+            group_id: 1,
+            target_node_id: 1,
+        }))
+        .await
+        .unwrap();
+        // Re-adding the local node (already a voter) is an openraft no-op
+        // (`AddNodes` on an existing voter), and the manager skips the
+        // line-rate wait for self — a deterministic Ok without a live peer.
+        svc.add_learner(Request::new(AddLearnerRequest {
+            group_id: 1,
+            node_id: 1,
+            addr: "127.0.0.1:9090".to_string(),
+        }))
+        .await
+        .unwrap();
+        // Seed a dead learner directly (the blocking admin add path would
+        // wait forever for it to become line-rate), then remove it: removing
+        // a learner bypasses the voter guards and commits a membership write.
+        svc.group_manager
+            .add_learner_nonblocking(1, 2, "node-2:9001".to_string())
+            .await
+            .unwrap();
+        svc.remove_group_member(Request::new(RemoveGroupMemberRequest {
+            group_id: 1,
+            node_id: 2,
+            force: false,
+        }))
+        .await
+        .unwrap();
+
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("rr_admin_snapshot_trigger_total{result=\"error\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("rr_admin_snapshot_trigger_total{result=\"ok\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("rr_admin_transfer_leader_total{result=\"error\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("rr_admin_transfer_leader_total{result=\"ok\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "rr_admin_membership_changes_total{op=\"change_membership\",result=\"error\"} 1"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "rr_admin_membership_changes_total{op=\"change_membership\",result=\"ok\"} 1"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "rr_admin_membership_changes_total{op=\"add_learner\",result=\"error\"} 1"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("rr_admin_membership_changes_total{op=\"add_learner\",result=\"ok\"} 1"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "rr_admin_membership_changes_total{op=\"remove_group_member\",result=\"error\"} 1"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "rr_admin_membership_changes_total{op=\"remove_group_member\",result=\"ok\"} 1"
+            ),
+            "{rendered}"
+        );
     }
 }

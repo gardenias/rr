@@ -799,11 +799,11 @@ mod tests {
 
     #[tokio::test]
     async fn apply_emits_prometheus_metrics() {
-        // Global recorder can be installed only once per process; rr-raft has
-        // no other test installing one, so this is safe here.
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _ = metrics::set_global_recorder(recorder);
+        // The global recorder can be installed only once per process; all
+        // metric-assertion tests in this crate share the OnceLock-installed
+        // recorder (see crate::test_metrics) and keep series distinguishable
+        // via unique label values.
+        let handle = crate::test_metrics::shared_prometheus_recorder();
 
         let svc = MockService::new(b"ok".to_vec());
         let mut adapter = ServiceStateMachineAdapter::new(7, svc);

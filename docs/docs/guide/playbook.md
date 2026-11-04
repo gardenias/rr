@@ -240,8 +240,8 @@ just java-publish-local
 Integration tests follow the SDK's `RR_TEST_DOCKER=1` convention and need a working Docker daemon. Local publish
 goes to Maven Local only; it does not publish to GitHub Packages.
 
-See the [Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md) for API-level examples, including leader redirect,
-linearizable reads, idempotency, TLS and metrics.
+See the [Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md) for API-level examples,
+including leader redirect, linearizable reads, idempotency, TLS and metrics.
 
 ## 11. Troubleshooting
 
@@ -259,6 +259,20 @@ the original SeedSpec.
 
 The group is still Forming or lifecycle state is unavailable. Wait for Active state, then retry the membership
 operation.
+
+### Formation
+
+Run `rr-admin --addr <admin-addr> formation status` first; it prints the lifecycle origin, aggregate state,
+store revision, and per-group formation state.
+
+- `origin` is `Untracked`: the cluster predates formation tracking and carries no lifecycle record. Adopt it
+  instead of re-bootstrapping — follow [Legacy adoption](#5-legacy-adoption) and the exact phases in
+  [Upgrading](../deployment/upgrading.md). Adoption never initializes groups or expands membership by itself.
+- A group stays `Forming`: verify every node can reach the configured `etcd_endpoints` and that all nodes share
+  the identical seed/roster. Look for CAS conflict retries — a rising `rr_formation_cas_total{result="conflict"}`
+  counter and WARN logs from the formation job.
+- A membership change is rejected with `lifecycle is not Active`: the group is still forming. Wait for Active
+  (re-check `formation status`), then retry the membership operation.
 
 ### Background processes remain after an interrupted command
 

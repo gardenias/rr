@@ -347,7 +347,8 @@ fn route_error_to_status(partition_id: u64, err: RrError) -> tonic::Status {
 /// `rr_server_requests_total{group_id, op, outcome}` (counter) and
 /// `rr_server_request_duration_seconds{group_id, op}` (histogram).
 /// `op` is one of `write|read|lin_read`; `outcome` is
-/// `success|redirect|error|idempotency_expired`. `group_label` is an interned
+/// `success|redirect|error|idempotency_expired|idempotency_namespace_limit`.
+/// `group_label` is an interned
 /// `&'static str` (see [`ClientDispatchImpl::group_label`]) so recording
 /// allocates nothing per request.
 fn record_request_metrics(
