@@ -1529,10 +1529,11 @@ async fn kv_call(
                 Err(e) => {
                     last_response = None;
                     // The connect() error already names the address and
-                    // carries the remediation checklist — pass its message
-                    // through verbatim instead of adding a second
+                    // carries the remediation checklist — pass it through
+                    // with the alternate anyhow format so the transport
+                    // cause is rendered too, instead of adding a second
                     // "connect ... failed" prefix around it.
-                    last_error = Some(Status::unavailable(e.to_string()));
+                    last_error = Some(Status::unavailable(format!("{e:#}")));
                 }
             }
         }

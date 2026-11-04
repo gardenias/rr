@@ -61,7 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`NodeConfig::validate` enforces `grpc_max_frame_size ≤ MAX_ENTRY_BODY`**
   (and rejects 0) for library embedders too — previously only the binary
   config path checked the ADR A-0018 coupling, leaving embedders fail-open
-  to log-poisoning their own groups.
+  to log-poisoning their own groups. The same `validate` also rejects
+  `grpc_max_concurrent_streams = Some(0)` (`must be >= 1`) — a behavior
+  change for library embedders who previously passed `Some(0)`.
 - **Admin error sanitization consistency**: online-backup snapshot fetch /
   trigger and get-routing-table no longer echo raw internal errors to the
   RPC client; details go to tracing, matching `error_convert`'s documented
@@ -160,7 +162,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Status; detail goes to tracing (error_convert contract).
 
 ### Added — 2026-11-01 homogeneous cluster formation
-
 
 - Added versioned `SeedSpec` and linearizable lifecycle state with Mem and etcd stores, local cluster identity,
   and managed `genesis` / `adopt` modes for stock `rr-server` and the kv-store example. Fresh Genesis

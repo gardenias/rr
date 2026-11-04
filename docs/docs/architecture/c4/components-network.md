@@ -28,7 +28,7 @@ Container_Ext(admin_hdl, "Admin Handlers (local)", "rr-server", "AdminService tr
 Container_Boundary(rr_network, "rr-network") {
   Component(proto_raft, "raft.proto → RaftService", "tonic-generated", "AppendEntries, Vote, InstallSnapshot (streaming). Bytes field carries bincode-encoded openraft types")
   Component(proto_client, "client.proto → ClientService", "tonic-generated", "Request, ReadLocal, ReadLinearizable, GetClusterInfo")
-  Component(proto_admin, "admin.proto → AdminService", "tonic-generated", "14 RPCs: GetNodeStatus, GetGroupStatus, ListGroups, GetSnapshotStatus, TriggerSnapshot, TransferLeader, DrainNode, AddLearner, ChangeMembership, ResetIngestorOffset, GetGroupMembership, OnlineBackup (streaming), GetRoutingTable, GetMetricsSummary")
+  Component(proto_admin, "admin.proto → AdminService", "tonic-generated", "16 RPCs: GetNodeStatus, GetGroupStatus, ListGroups, GetSnapshotStatus, TriggerSnapshot, TransferLeader, DrainNode, AddLearner, ChangeMembership, RemoveGroupMember, ResetIngestorOffset, GetGroupMembership, OnlineBackup (streaming), GetRoutingTable, GetMetricsSummary, GetFormationStatus")
 
   Component(raft_svc_impl, "RaftServiceImpl", "rr-network::raft_service", "gRPC handler. Delegates to injected RaftGroupLookup trait")
   Component(client_svc_impl, "ClientServiceImpl", "rr-network::client_service", "gRPC handler. Delegates to injected ClientDispatch trait")
@@ -113,11 +113,13 @@ service AdminService {
   rpc DrainNode(DrainRequest) returns (DrainResult);
   rpc AddLearner(AddLearnerRequest) returns (Empty);
   rpc ChangeMembership(ChangeMembershipRequest) returns (Empty);
+  rpc RemoveGroupMember(RemoveGroupMemberRequest) returns (Empty);
   rpc ResetIngestorOffset(ResetIngestorOffsetRequest) returns (Empty);
   rpc GetGroupMembership(GroupId) returns (GroupMembership);
   rpc OnlineBackup(OnlineBackupRequest) returns (stream OnlineBackupChunk);  // streaming!
   rpc GetRoutingTable(Empty) returns (RoutingTableSnapshot);
   rpc GetMetricsSummary(Empty) returns (MetricsSummary);
+  rpc GetFormationStatus(Empty) returns (FormationStatus);
 }
 ```
 
