@@ -343,3 +343,106 @@ java-clean:
     [[ -x "{{JAVA_DIR}}/gradlew" ]] || { echo "{{JAVA_DIR}}/gradlew is missing or not executable" >&2; exit 1; }
     cd "{{JAVA_DIR}}"
     ./gradlew clean
+
+# ---------------------------------------------------------------------------
+# Quality gates — local replacement for the disabled nightly CI workflows.
+# Results are archived by scripts/quality-gate.sh under target/quality-runs/.
+# ---------------------------------------------------------------------------
+
+FUZZ_SECONDS := env_var_or_default("RR_FUZZ_SECONDS", "300")
+SOAK_SMOKE_DURATION := env_var_or_default("RR_SOAK_SMOKE_DURATION", "180")
+TLA_VERSION := "1.7.4"
+TLA_JAR := ROOT / "target/tools/tla2tools.jar"
+
+[group("gates")]
+gate-invariants:
+    ./scripts/check-invariants.sh
+
+[group("gates")]
+gate-test:
+    cargo test --workspace
+
+[group("gates")]
+gate-crash:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p crash-tests --features rocks
+    RR_CRASH_NODE_BIN="{{ROOT}}/target/debug/rr-crash-node" \
+      cargo test -p crash-tests --features rocks -- --test-threads=1 --nocapture
+
+[group("gates")]
+gate-fuzz:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo fuzz --version >/dev/null 2>&1 || {
+      echo "cargo-fuzz is required: cargo install cargo-fuzz --locked --version 0.13.2" >&2
+      exit 1
+    }
+    rustup toolchain list | grep -q '^nightly' || {
+      echo "nightly toolchain is required: rustup toolchain install nightly" >&2
+      exit 1
+    }
+    targets=(
+      fuzz_framed_entry_decode fuzz_framed_snapshot_decode
+      fuzz_apply_outcome_decode fuzz_client_request_proto
+      fuzz_framed_entry_roundtrip fuzz_apply_outcome_roundtrip
+      fuzz_batch_frame_decode fuzz_batch_frame_roundtrip
+    )
+    for t in "${targets[@]}"; do
+      echo "== fuzz $t ({{FUZZ_SECONDS}}s) =="
+      cargo +nightly fuzz run "$t" --fuzz-dir fuzz -- -max_total_time={{FUZZ_SECONDS}} -error_exitcode=42
+    done
+
+[group("gates")]
+gate-formal:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v java >/dev/null || { echo "java is required for the TLC model checker" >&2; exit 1; }
+    if [[ ! -f "{{TLA_JAR}}" ]]; then
+      mkdir -p "$(dirname "{{TLA_JAR}}")"
+      echo "downloading pinned tla2tools {{TLA_VERSION}} (one-off)"
+      curl -sSL -o "{{TLA_JAR}}" \
+        "https://github.com/tlaplus/tlaplus/releases/download/v{{TLA_VERSION}}/tla2tools.jar"
+    fi
+    cd "{{ROOT}}/formal/tla"
+    for spec in MembershipGuard OffsetExactlyOnce OutputWatermark; do
+      java -XX:+UseParallelGC -jar "{{TLA_JAR}}" -deadlock "$spec.tla"
+    done
+    for cfg in RoutingTableSwitch RoutingTableSwitchIncremental; do
+      java -XX:+UseParallelGC -jar "{{TLA_JAR}}" -deadlock -config "$cfg.cfg" RoutingTableSwitch.tla
+    done
+
+[group("gates")]
+bench-save-baseline:
+    cargo bench --workspace --features rr-benches/rocks -- --save-baseline main
+
+[group("gates")]
+bench-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [[ -d "{{ROOT}}/target/criterion" ]] || {
+      echo "no criterion baseline found; run 'just bench-save-baseline' first" >&2
+      exit 1
+    }
+    mkdir -p "{{ROOT}}/target/quality-runs"
+    out="{{ROOT}}/target/quality-runs/bench-$(date +%Y%m%d-%H%M%S).txt"
+    cargo bench --workspace --features rr-benches/rocks -- --baseline main | tee "$out"
+    ./scripts/bench-compare.sh "$out"
+
+[group("gates")]
+soak-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{RR_DOCKER_HOST}}" ]]; then export DOCKER_HOST="{{RR_DOCKER_HOST}}"; fi
+    command -v docker >/dev/null || { echo "docker CLI is required" >&2; exit 1; }
+    docker info >/dev/null 2>&1 || { echo "docker daemon is not reachable; set RR_DOCKER_HOST" >&2; exit 1; }
+    docker image inspect rr-lab:dev >/dev/null 2>&1 || {
+      echo "rr-lab:dev image missing; build it first:" >&2
+      echo "  docker compose -f deploy/lab/docker-compose.yml build" >&2
+      exit 1
+    }
+    SOAK_DURATION={{SOAK_SMOKE_DURATION}} SOAK_FAULT_MEAN_SECS=45 ./scripts/soak.sh
+
+[group("gates")]
+nightly:
+    ./scripts/quality-gate.sh nightly

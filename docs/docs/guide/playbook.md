@@ -209,6 +209,22 @@ including revision-specific Job names.
 These suites use real processes/containers and may leave detailed failures in `target/just/logs/` or the Cargo
 test output. Do not treat skipped tests as passes.
 
+### Local quality gates
+
+The hosted nightly workflows are disabled; the local replacement is:
+
+```bash
+just nightly          # invariants + workspace tests + crash + fuzz + formal TLC
+just bench-gate       # criterion vs the saved "main" baseline (just bench-save-baseline to create it)
+just soak-smoke       # 3-minute seeded soak; needs the local rr-lab:dev image
+```
+
+`just nightly` delegates to `scripts/quality-gate.sh`, which runs every gate to completion and archives
+per-step logs plus a SUMMARY.md under `target/quality-runs/<timestamp>-nightly/`; the run exits non-zero if any
+gate failed. Each gate is also runnable on its own (`just gate-invariants`, `just gate-test`, `just gate-crash`,
+`just gate-fuzz`, `just gate-formal`). For an unattended daily run, `scripts/install-local-gates.sh install`
+registers a launchd agent (default 03:47 local; `status` and `uninstall` subcommands manage it).
+
 ## 10. Java SDK workflow
 
 The Java SDK remains under `sdks/java` and uses its existing Gradle wrapper. Common commands:

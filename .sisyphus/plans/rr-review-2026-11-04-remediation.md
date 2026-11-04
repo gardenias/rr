@@ -8,12 +8,23 @@
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| A | 执法恢复（本地调度替代已停用的 CI 职能） | ⏳ 待开始 |
+| A | 执法恢复（本地调度替代已停用的 CI 职能） | ✅ 完成（2026-11-04；含验收中发现并修复的 crash oracle 探针记账缺陷） |
 | B | 正确性/鲁棒性缺口（G1） | ⏳ 待开始 |
 | C | 可观测性欠账（G3-观测） | ⏳ 待开始 |
 | D | 性能治理（G2） | ⏳ 待开始 |
 | E | 易用性/文档债（G3-易用） | ⏳ 待开始 |
 | F | 工程治理（低优先） | ⏳ 待开始 |
+
+### 实施记录
+
+- **2026-11-04 Phase A 完成**：justfile `gates` 组（gate-invariants/gate-test/gate-crash/gate-fuzz/gate-formal/
+  bench-gate/bench-save-baseline/soak-smoke/nightly）+ `scripts/quality-gate.sh`（归档 target/quality-runs/）+
+  `scripts/install-local-gates.sh`（launchd）。验收：invariants PASS（9 INV/130 链接）、TLC 五组配置零反例、
+  fuzz 单目标 220 万次执行无崩溃、soak/bench 的 fail-fast 路径、launchd install→status→uninstall 往返。
+  A-2 openraft 补丁台账落入 openraft-relationship.md（含升级核对清单）。
+- **A-1 验收时发现并修复**：crash harness count-bounds oracle 未计入启动探针写（wait_writable 的一次真实
+  apply），sent == acked 的场景确定性误报 `applied > sent ceiling`；三场景算术验证（343=171+171+1 等），
+  修复后场景 A/B/C 全部通过。引擎本身无缺陷，INV-1 未被违反。
 
 ---
 

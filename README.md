@@ -305,6 +305,7 @@ just genesis-up      # 一键三节点同构 Genesis 集群（需本地 etcd）/
 just test-etcd       # 真实 etcd 验收测试 / real-etcd acceptance tests
 just helm-test       # Helm chart 渲染测试 / Helm render tests
 just java-test       # Java SDK 单元测试 / Java SDK unit tests
+just nightly         # 本地质量门禁（invariants+全量测试+crash+fuzz+TLA）/ local quality gates
 ```
 
 后台进程的 PID 与日志统一放在 `target/just/`，用 `just kv-cluster-down` / `just genesis-down` / `just etcd-down` 清理。

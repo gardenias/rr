@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-11-04 local quality gates
+
+- **`just` quality-gate recipes + launchd scheduling** — local replacement for
+  the disabled nightly CI workflows (`.github/workflows/` have been
+  `disabled_manually` since 2026-10-20; nothing else ran the invariants lint,
+  crash/fuzz/soak nightlies, formal TLC, or the bench regression gate). New
+  `gates` recipe group: `gate-invariants`, `gate-test`, `gate-crash`,
+  `gate-fuzz` (`RR_FUZZ_SECONDS`, default 300s/target), `gate-formal` (pinned
+  tla2tools v1.7.4 fetched once into `target/tools/`), `bench-gate` /
+  `bench-save-baseline` (criterion vs the saved `main` baseline through
+  `scripts/bench-compare.sh`), and `soak-smoke` (short seeded soak, requires
+  the local `rr-lab:dev` image). `just nightly` runs the full set through
+  `scripts/quality-gate.sh`, which never stops at the first failure and
+  archives per-step logs + `SUMMARY.md` under `target/quality-runs/<ts>-<suite>/`.
+  `scripts/install-local-gates.sh install|status|uninstall` registers a
+  launchd agent for an unattended daily run (default 03:47 local).
+- **Vendored openraft patch ledger** —
+  `docs/docs/architecture/openraft-relationship.md` now carries a per-patch
+  table (commit, root cause, upheld invariant, upstream status) and an
+  upgrade reconciliation checklist. Patches #3/#4/#5 directly uphold INV-1;
+  upgrading openraft without reconciling the ledger can silently reintroduce
+  committed-entry erasure.
+
+### Fixed — 2026-11-04 crash harness oracle accounting
+
+- **Crash-harness count-bounds oracle now accounts for the bootstrap
+  writability probe** (`tests/crash`): `wait_writable` applies exactly one
+  keyed probe write per cluster start outside the driver's sent/acked
+  counters, so the true bound is `applied ∈ [acked+1, sent+1]`. Scenarios
+  whose lanes drained cleanly (sent == acked — deterministic for
+  scenario-a's seed) failed with a false-positive "applied > sent ceiling";
+  scenarios with in-flight slack absorbed the probe and passed (scenario-b
+  had 51 batch failures of slack). Arithmetic across all three scenarios
+  confirmed the +1 probe (343=171+171+1; 1333=661+671+1; 2921=1461+1459+1).
+  Not an engine defect: the keyed ack-log replay verified zero loss in every
+  run. `wait_writable` now returns the applied probe count, stored on
+  `CrashCluster::warmup_applies` and added to both oracle bounds.
+
 ### Added — 2026-11-01 homogeneous cluster formation
+
 
 - Added versioned `SeedSpec` and linearizable lifecycle state with Mem and etcd stores, local cluster identity,
   and managed `genesis` / `adopt` modes for stock `rr-server` and the kv-store example. Fresh Genesis
