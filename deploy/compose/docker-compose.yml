@@ -1,0 +1,131 @@
+# rr local dev cluster — 3 × rr-server (stock echo state machine) + single-node
+# etcd backing managed genesis formation. This is the compose template referenced
+# by config/node*.toml, CHANGELOG.md, and docs/docs/intro.md.
+#
+# 仅本地开发 / LOCAL DEV ONLY: no TLS, no auth tokens — every rr node opts out of
+# the production security gates via RR_ALLOW_INSECURE=true (see the [node] comment
+# in config/node1.toml; the G7 TCP-raft loopback gate is never bypassed, and this
+# file uses gRPC anyway). Never reuse outside local dev: real deployments must
+# configure [tls] + [auth] admin_token instead — docs/docs/deployment/upgrading.md
+# has the secure-rollout procedure.
+#
+# Usage (repo root):
+#   docker compose -f deploy/compose/docker-compose.yml up -d --build
+#   docker compose -f deploy/compose/docker-compose.yml down -v
+#
+# Verify (see README.md): curl http://127.0.0.1:9101/ready, or
+#   docker exec rr-1 rr-admin --addr 127.0.0.1:52001 group status --group 1
+
+name: rrcompose
+
+x-rr-node: &rr-node
+  build:
+    # Repo root: the root Dockerfile compiles rr-server (rocks backend) +
+    # rr-admin and runs `serve --config /etc/rr/config.toml` (mounted below).
+    context: ../..
+  image: rr-compose:dev
+  networks: [rrnet]
+  environment:
+    RUST_LOG: "info"
+    # 仅本地开发 / local dev only — see the header. The TOML configs stay
+    # production-shaped on purpose; the insecure opt-out lives HERE.
+    RR_ALLOW_INSECURE: "true"
+  restart: unless-stopped
+  # Genesis reconcile runs during node startup and needs etcd reachable —
+  # gate all nodes on the etcd healthcheck, not just container start.
+  depends_on:
+    etcd:
+      condition: service_healthy
+  healthcheck:
+    # /ready is 200 only after the group is formed AND a leader is observed
+    # (crates/rr-server/src/health.rs). curl ships in the runtime image.
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9100/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 24
+    start_period: 15s
+  deploy:
+    resources:
+      limits:
+        cpus: "1.0"
+        memory: 512M
+
+services:
+  rr-1:
+    <<: *rr-node
+    container_name: rr-1
+    hostname: rr-1
+    volumes:
+      - ./config/node1.toml:/etc/rr/config.toml:ro
+      - rr-data-1:/var/lib/rr/data
+    ports:
+      # Loopback-only publishes: with RR_ALLOW_INSECURE the admin API has no
+      # auth — keep it off LAN interfaces (contract per config/node1.toml:
+      # host 5200N→admin 52001, host 910N→metrics/HTTP 9100). The raft/client
+      # gRPC port 51001 stays in-network (rr-N:51001); the host reaches the
+      # cluster through the admin and metrics ports below.
+      - "127.0.0.1:52001:52001"
+      - "127.0.0.1:9101:9100"
+
+  rr-2:
+    <<: *rr-node
+    container_name: rr-2
+    hostname: rr-2
+    volumes:
+      - ./config/node2.toml:/etc/rr/config.toml:ro
+      - rr-data-2:/var/lib/rr/data
+    ports:
+      - "127.0.0.1:52002:52001"
+      - "127.0.0.1:9102:9100"
+
+  rr-3:
+    <<: *rr-node
+    container_name: rr-3
+    hostname: rr-3
+    volumes:
+      - ./config/node3.toml:/etc/rr/config.toml:ro
+      - rr-data-3:/var/lib/rr/data
+    ports:
+      - "127.0.0.1:52003:52001"
+      - "127.0.0.1:9103:9100"
+
+  # Single-node dev etcd: holds the cluster lifecycle record that genesis
+  # formation CASes through (rr-config-etcd). Dev-permissive: listens on all
+  # interfaces inside the compose network, never published to the host.
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.13
+    container_name: rr-etcd
+    hostname: etcd
+    networks: [rrnet]
+    command:
+      - etcd
+      - --name=rr-etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=rr-etcd=http://etcd:2380
+      - --initial-cluster-token=rr-compose
+    volumes:
+      # Persisted so plain `down`/`up` stays consistent with the rr node data
+      # volumes (losing etcd while rr keeps its volumes strands initialized
+      # groups without a lifecycle record). `down -v` still resets everything.
+      - etcd-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+networks:
+  rrnet:
+    driver: bridge
+
+volumes:
+  rr-data-1:
+  rr-data-2:
+  rr-data-3:
+  etcd-data:

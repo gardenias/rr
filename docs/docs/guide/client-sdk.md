@@ -7,10 +7,12 @@ sidebar_position: 6
 ## 概述 / Overview
 
 `RrClient` 为连接到 rr 集群提供了客户端 SDK。它位于 `rr-client` crate 中，负责处理领导者发现、领导者变更时的自动重试以及连接管理。
+此外，仓库还在 `sdks/java` 提供了 Java SDK（`io.github.gardenias:rr-client`），见下文 [Java SDK](#java-sdk) 一节。
 
 ---
 
 `RrClient` provides the client-side SDK for connecting to rr clusters. Located in the `rr-client` crate, it handles leader discovery, automatic retry on leader changes, and connection management.
+A Java SDK (`io.github.gardenias:rr-client`) also ships under `sdks/java` — see the [Java SDK](#java-sdk) section below.
 
 ## 连接到集群 / Connecting to a Cluster
 
@@ -204,6 +206,164 @@ Clients may encounter the following common `RrError` variants during interaction
 - `RrError::Network(NetworkError::RpcFailed)` — gRPC call failed.
 - `RrError::Raft(RaftError::NotLeader)` — Target is not the leader (usually handled internally by `RrClient`).
 - `RrError::Router(RouterError::PartitionNotFound)` — Partition ID not found in the routing table.
+
+## Java SDK
+
+仓库在 `sdks/java` 提供了一个 Java SDK（Gradle 构建，需 JDK 17+）。它与 Rust 客户端使用同一套 gRPC wire 协议
+（proto 直接取自 `crates/rr-network/proto`），API 覆盖核心能力：领导者发现与自动重定向、指数退避重试、
+TLS/mTLS、bearer 认证、幂等键写入、线性一致读与 Micrometer 指标。
+
+---
+
+The repository ships a Java SDK under `sdks/java` (Gradle build, requires JDK 17+). It speaks the same gRPC
+wire protocol as the Rust client (protos are sourced directly from `crates/rr-network/proto`) and covers the
+core capabilities: leader discovery with automatic redirect, exponential-backoff retry, TLS/mTLS, bearer auth,
+idempotency-keyed writes, linearizable reads, and Micrometer metrics.
+
+### 安装 / Install
+
+构件坐标为 `io.github.gardenias:rr-client`（当前版本 `0.2.0`，以 `sdks/java/gradle.properties` 的
+`sdkVersion` 为准）。它**发布在 GitHub Packages，未发布到 Maven Central**；读取 GitHub Packages 上的构件
+需要 GitHub 凭证：
+
+---
+
+The artifact coordinates are `io.github.gardenias:rr-client` (current version `0.2.0`; see `sdkVersion` in
+`sdks/java/gradle.properties`). It is **published to GitHub Packages, not Maven Central**; reading artifacts
+from GitHub Packages requires GitHub credentials:
+
+```kotlin
+// Gradle (Kotlin DSL)
+repositories {
+    maven {
+        url = uri("https://maven.pkg.github.com/gardenias/rr")
+        credentials {
+            username = System.getenv("GITHUB_ACTOR")
+            password = System.getenv("GITHUB_TOKEN")
+        }
+    }
+}
+
+dependencies {
+    implementation("io.github.gardenias:rr-client:0.2.0")
+}
+```
+
+```xml
+<!-- Maven -->
+<dependency>
+  <groupId>io.github.gardenias</groupId>
+  <artifactId>rr-client</artifactId>
+  <version>0.2.0</version>
+</dependency>
+```
+
+也可以从源码构建并发布到本机 Maven Local（`~/.m2`），然后在消费方使用 `mavenLocal()`：
+
+---
+
+Alternatively, build from source and publish to the local Maven repository (`~/.m2`), then consume it via
+`mavenLocal()`:
+
+```bash
+just java-publish-local   # 等价于 / equivalent to: cd sdks/java && ./gradlew publishToMavenLocal
+```
+
+### 快速上手 / Quick start
+
+SDK 传输的是不透明字节负载（编解码由服务的 wire 格式决定）。最小示例——连接、写入、线性一致读：
+
+---
+
+The SDK transports opaque byte payloads (encoding is defined by the service's wire format). A minimal
+example — connect, write, linearizable read:
+
+```java
+import io.github.gardenias.rr.client.RrClient;
+
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+
+public class QuickStart {
+    public static void main(String[] args) {
+        RrClient client = RrClient.connect(List.of("127.0.0.1:51001")).join();
+
+        byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
+        byte[] response = client.sendRequest(1L, payload).join();        // 写入 / write
+        byte[] value = client.readLinearizable(1L, payload).join();      // 线性一致读 / linearizable read
+        System.out.println("got " + value.length + " bytes");
+
+        client.close();
+    }
+}
+```
+
+所有响应式方法返回 `CompletableFuture`（I/O 由 Netty 事件循环驱动，不占用线程）；每个方法都有对应的
+阻塞变体（`sendRequestSync`、`readSync`、`readLinearizableSync`、`getClusterInfoSync`）。TLS、bearer 认证、
+请求超时与重试策略通过 `RrClientBuilder` 配置；幂等写入使用 `sendRequestIdempotent(groupId, payload,
+IdempotencyKey)`。完整 API 示例见 [Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md)
+与[响应式使用手册](https://github.com/gardenias/rr/blob/main/sdks/java/docs/reactive-guide.md)。
+
+---
+
+All reactive methods return `CompletableFuture` (I/O is driven by Netty's event loop — no thread is blocked);
+each has a blocking counterpart (`sendRequestSync`, `readSync`, `readLinearizableSync`, `getClusterInfoSync`).
+TLS, bearer auth, request timeout, and retry policy are configured via `RrClientBuilder`; idempotent writes
+use `sendRequestIdempotent(groupId, payload, IdempotencyKey)`. For the full API see the
+[Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md) and the
+[reactive usage guide](https://github.com/gardenias/rr/blob/main/sdks/java/docs/reactive-guide.md).
+
+### 能力对照 / Capability Comparison
+
+以下每一行均已对照两侧源码核实（Rust：`crates/rr-client`；Java：`sdks/java`）：
+
+---
+
+Every row below is verified against the sources on both sides (Rust: `crates/rr-client`; Java: `sdks/java`):
+
+| 能力 / Capability | Rust `rr-client` | Java SDK |
+| :--- | :--- | :--- |
+| 领导者发现与重定向 / Leader discovery & redirect | ✅ leader 缓存 + 自动重试 | ✅ LeaderCache + 自动重试 |
+| 指数退避重试（含抖动）/ Exponential-backoff retry (jittered) | ✅ 默认 3 次 / 100ms | ✅ 默认 3 次 / 100ms |
+| 单次尝试超时 / Per-attempt request timeout | ✅ `with_request_timeout` | ✅ `withRequestTimeout` |
+| TLS / mTLS | ✅ `with_tls` | ✅ `withTls` + `TlsConfig` |
+| Bearer token 认证 / Bearer-token auth | ✅ `with_bearer_token` | ✅ `withBearerToken` |
+| 严格安全检查 / Strict-security check | ✅ `with_strict_security` | ✅ `withStrictSecurity` |
+| 幂等键写入 / Idempotency-keyed writes | ✅ `send_request_idempotent` | ✅ `sendRequestIdempotent` |
+| 本地（过期）读 / Stale (local) read | ✅ `read` | ✅ `read` |
+| 线性一致读 / Linearizable read (ReadIndex) | ✅ `read_linearizable` | ✅ `readLinearizable` |
+| 集群拓扑查询 / Cluster info | ✅ `get_cluster_info` | ✅ `getClusterInfo` |
+| 客户端写批处理 / Client-side write batching | ✅ `with_batching`（未发布，随 v0.3.0 落地，默认关闭） | ❌ 无 |
+| 连接扇出 / Channel fanout | ✅ `with_channel_fanout` | ❌ 每个地址仅一条 channel |
+| 指标 / Metrics | ✅ `metrics` crate 计数器/直方图 | ✅ Micrometer（`rr.client.*`） |
+| 异步/阻塞双 API / Async + blocking APIs | ✅ async / `*_blocking` / `*_reactive` | ✅ `CompletableFuture` / `*Sync` |
+
+### 与 Rust 客户端的差距 / Gaps vs the Rust Client
+
+Java SDK 目前缺少以下 Rust 客户端能力（差距已被跟踪，但尚未排期，不承诺时间）：
+
+---
+
+The Java SDK currently lacks the following Rust client capabilities (parity is tracked but not scheduled —
+no dates are promised):
+
+- **客户端写批处理 / Client-side write batching** — Rust 的 `RrClientBuilder::with_batching(BatchConfig)`
+  （`crates/rr-client/src/batch.rs`）可把多条无幂等键的写合并为一条 Raft entry；Java 的每个 `sendRequest`
+  都是一次独立 RPC。注意：Java 响应式手册中的"并发批量请求"指的是 `CompletableFuture` 并发组合，
+  并非写合并。Rust 侧该特性本身也尚未发布（随 v0.3.0 落地且默认关闭，见上文"写批处理"一节）。
+- **连接扇出 / Channel fanout** — Rust 的 `with_channel_fanout(n)` 对同一地址维持多条 H2 连接并轮询，
+  以并行化服务端连接任务的串行瓶颈；Java 每个地址只建立一条 `ManagedChannel`。
+
+---
+
+- **Client-side write batching** — Rust's `RrClientBuilder::with_batching(BatchConfig)`
+  (`crates/rr-client/src/batch.rs`) merges multiple unkeyed writes into one Raft entry; in Java every
+  `sendRequest` is its own RPC. Note: the Java reactive guide's "concurrent batch requests" section is
+  `CompletableFuture` fan-in composition, not write coalescing. On the Rust side this feature is itself
+  unreleased (lands in v0.3.0, off by default — see the "Client Write Batching" section above).
+- **Channel fanout** — Rust's `with_channel_fanout(n)` keeps `n` H2 connections per address and
+  round-robins across them, parallelizing the server-side connection-task bottleneck; Java opens one
+  `ManagedChannel` per address.
 
 ---
 

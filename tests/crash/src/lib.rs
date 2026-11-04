@@ -24,12 +24,17 @@
 //!    and fails `ApplyOutcome::decode` in the dispatch layer
 //!    (`Status::internal("internal decode error")`): the idempotency layer
 //!    is never engaged through the production binary.
-//! 2. `RrNode::start` starts groups via `RaftGroupManager::start_group`,
-//!    which hardcodes in-memory `RrLogStorage`; the `--storage rocks`
-//!    `RocksStorage` built in `main.rs` is never wired into the Raft log
-//!    path, and `RaftGroupManager` has no constructor combining a network
-//!    factory with `rocks_base_path`. So a stock `rr-server` restart today
-//!    loses the Raft log regardless of `--storage`.
+//! 2. (Fixed by ADR A-0016 — kept for the record.) `RrNode::start` used to
+//!    start groups via `RaftGroupManager::start_group`, which hardcoded the
+//!    in-memory `RrLogStorage`, so a stock `rr-server` restart lost the Raft
+//!    log regardless of `--storage`. Since A-0016 the log storage and network
+//!    factory are orthogonal: `start_group` selects `RocksLogStorage` at
+//!    `{base}/{group_id}` whenever the manager is built with
+//!    `with_rocks_base_path`, and stock `rr-server --storage rocks` wires
+//!    `{data_dir}/raft-log` through it (`main.rs::with_raft_log_dir`). Gap 1
+//!    above is what still forces a custom binary; the harness additionally
+//!    keeps its explicit `new_with_rocks_factory` + `GrpcNetworkFactory`
+//!    assembly to pin the exact durable-log path INV-1 makes claims about.
 //!
 //! `rr-crash-node` wires `RaftNode::new_with_rocks_factory` (RocksDB log,
 //! strict durability) + `GrpcNetworkFactory` directly — the exact storage

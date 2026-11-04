@@ -5,12 +5,28 @@
 
 ## 状态
 
+> 状态回写（2026-11-04，rr-review-2026-11-04 remediation T8）：P0–P3 全部完成——实际于
+> 2026-05-08 批次落地（commits `7d183d8` / `35943e7` / `069f24c`，见 `.sisyphus/CONTEXT.md`
+> Session 2026-05-08 的 "Quality Hardening P0-P3（已修）" 记录）。下表已按当前代码逐项核实
+> 更新；正文各 Phase 保留原始计划内容作历史记录，不再改动。
+
 | 阶段 | 内容 | 状态 |
 |---|---|---|
-| P0 | Lock poisoning + RetryConfig 溢出 | 🚧 进行中 |
-| P1 | Ingestor batch write + Service lifecycle hooks | ⏳ 待开始 |
-| P2 | GroupManager RwLock 合并 + Proto 错误码 | ⏳ 待开始 |
-| P3 | Rate limiter GC + Backup checksum | ⏳ 待开始 |
+| P0 | Lock poisoning + RetryConfig 溢出 | ✅ 完成 |
+| P1 | Ingestor batch write + Service lifecycle hooks | ✅ 完成 |
+| P2 | GroupManager RwLock 合并 + Proto 错误码 | ✅ 完成 |
+| P3 | Rate limiter GC + Backup checksum | ✅ 完成 |
+
+逐项代码核实（2026-11-04）：
+
+- P0-1: `service_adapter.rs` / `rate_limit.rs` 的锁已全部为 `unwrap_or_else(|p| p.into_inner())`
+- P0-2: `crates/rr-client/src/lib.rs:94` 统一 `backoff_delay_ms`，saturating 乘法/幂（含 ±20% jitter）
+- P1-1: `crates/rr-raft/src/group_manager.rs:1118` `pub async fn write_batch`（`client_write_many` 路径）
+- P1-2: `crates/rr-core/src/service.rs` 已有 `on_leader_elected` / `on_step_down` 生命周期钩子
+- P2-1: `group_manager.rs` 合并为单一 `DashMap<GroupId, Arc<Mutex<GroupState>>>`
+- P2-2: admin RPC 全面改用 gRPC `Status`（`crates/rr-server/src/admin.rs` 21 处 `Status::`）
+- P3-1: `crates/rr-network/src/rate_limit.rs:457` 后台 GC task（间隔 ttl/2、下限 30s）
+- P3-2: `crates/rr-admin/src/backup.rs` metadata `data_sha256` + restore 校验（`backup.rs:371`）
 
 ---
 

@@ -44,6 +44,8 @@ slug: /
 - 多层验证网：TLA+ 形式化规约 + crash 恢复测试 + fuzz + 不变量守护（INV-x）
 - 持久化契约：fsync 先于 ACK（关停契约 C1–C7）；快照要么完整要么不存在；失败一律 fail-closed
 - 故障自愈：leader 秒级重选且不丢已提交数据；快照传输追赶落后节点；成员变更 quorum 守卫
+- 集群 Formation（同构，P1）：genesis / adopt-legacy 双模式——所有节点携带同一份 SeedSpec 花名册，
+  经 LifecycleStore 的线性化 CAS 逐组推进 Forming → Active；花名册分歧或生命周期存储中断一律 fail-closed
 
 ### G2. 高吞吐 & 低延迟
 
@@ -55,7 +57,7 @@ slug: /
 
 - 接入成本：实现两个 trait + 零配置 demo，分钟级拉起三节点真实共识集群
 - 客户端：SDK 自动 leader 发现 / 重定向 / 重试 / 超时映射，含跨语言 SDK
-- 运维工具链：rr-admin CLI/REPL、TLS/mTLS 与 G1–G7 启动安全自检、per-caller 限流与审计
+- 运维工具链：rr-admin CLI/REPL（含 `formation status` 自省）、TLS/mTLS 与 G1–G7 启动安全自检、per-caller 限流与审计
 - 可观测：Prometheus `/metrics`、tracing 结构化日志、compose / k8s / helm 部署模板
 
 ### 非目标 / Non-Goals
@@ -108,6 +110,9 @@ Three pillars, in priority order **G1 > G2 > G3** — conflicts are resolved in 
 - Layered verification: TLA+ specs + crash-recovery tests + fuzz + invariant guards (INV-x)
 - Durability contracts: fsync before ACK (shutdown contract C1–C7); snapshots are complete or nonexistent; fail-closed
 - Self-healing: leader re-election in seconds without losing committed data; snapshot-transfer catch-up; membership quorum guard
+- Managed cluster formation (P1): homogeneous genesis / adopt-legacy modes — every node carries the same SeedSpec
+  roster, and a linearizable LifecycleStore CAS drives each group Forming → Active; roster divergence or
+  lifecycle-store outage fails closed
 
 ### G2. High throughput & low latency
 
@@ -119,7 +124,8 @@ Three pillars, in priority order **G1 > G2 > G3** — conflicts are resolved in 
 
 - Onboarding: two traits + a zero-config demo; a real three-node consensus cluster in minutes
 - Client: SDK with automatic leader discovery / redirect / retry / timeout mapping, plus cross-language SDKs
-- Ops toolchain: rr-admin CLI/REPL, TLS/mTLS with G1–G7 startup security self-checks, per-caller rate limiting and audit
+- Ops toolchain: rr-admin CLI/REPL (with `formation status` introspection), TLS/mTLS with G1–G7
+  startup security self-checks, per-caller rate limiting and audit
 - Observability: Prometheus `/metrics`, tracing structured logs, compose / k8s / helm deployment templates
 
 ### Non-Goals
