@@ -381,6 +381,35 @@ impl NodeConfig {
             }
         }
 
+        if let Some(n) = self.grpc_max_concurrent_streams {
+            if n == 0 {
+                return Err(ConfigError::InvalidConfig(
+                    "grpc_max_concurrent_streams must be >= 1".to_string(),
+                ));
+            }
+        }
+        if let Some(n) = self.grpc_max_frame_size {
+            if n == 0 {
+                return Err(ConfigError::InvalidConfig(
+                    "grpc_max_frame_size must be >= 1 (bytes)".to_string(),
+                ));
+            }
+            // Same coupling the binary entrypoint enforces in config_file.rs:
+            // the gRPC ingress frame must never exceed the apply-side bounded
+            // decode cap, or a large keyed write would encode and replicate
+            // fine but fail FramedEntry::decode at apply time — and apply
+            // errors are group-fatal (ADR A-0018). Library embedders get the
+            // same protection here, not only via the binary config path.
+            let cap = rr_core::bounded_decode::MAX_ENTRY_BODY as u64;
+            if u64::from(n) > cap {
+                return Err(ConfigError::InvalidConfig(format!(
+                    "grpc_max_frame_size ({n} bytes) exceeds the apply-side decode cap \
+                     MAX_ENTRY_BODY ({cap} bytes); lower grpc_max_frame_size to at most {cap} \
+                     bytes (ADR A-0018)"
+                )));
+            }
+        }
+
         // Rate-limit field/combination rules (rps ceiling, per-caller
         // requires the global fallback bucket) live next to the policy
         // itself in rr-network.

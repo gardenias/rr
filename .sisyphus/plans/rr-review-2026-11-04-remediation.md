@@ -9,7 +9,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | A | 执法恢复（本地调度替代已停用的 CI 职能） | ✅ 完成（2026-11-04；含验收中发现并修复的 crash oracle 探针记账缺陷） |
-| B | 正确性/鲁棒性缺口（G1） | ⏳ 待开始 |
+| B | 正确性/鲁棒性缺口（G1） | 🟡 B-1/B-2/B-3 完成（2026-11-04）；B-4 待设计评审 |
 | C | 可观测性欠账（G3-观测） | ⏳ 待开始 |
 | D | 性能治理（G2） | ⏳ 待开始 |
 | E | 易用性/文档债（G3-易用） | ⏳ 待开始 |
@@ -25,6 +25,14 @@
 - **A-1 验收时发现并修复**：crash harness count-bounds oracle 未计入启动探针写（wait_writable 的一次真实
   apply），sent == acked 的场景确定性误报 `applied > sent ceiling`；三场景算术验证（343=171+171+1 等），
   修复后场景 A/B/C 全部通过。引擎本身无缺陷，INV-1 未被违反。
+- **2026-11-04 B-1..B-3 完成**：节点间 RPC 8 个解码点 + 快照内嵌幂等状态 + membership sidecar 全部接入
+  bounded_decode（新增 AppendEntriesRequest 超限断言与各类型 roundtrip 测试）；`NodeConfig::validate`
+  补上 grpc_max_frame_size ≤ MAX_ENTRY_BODY（库嵌入路径不再 fail-open）；admin 三处原始错误回显改为
+  脱敏 + tracing；error_convert 文档登记 InvalidConfig 例外。B-4（INV-6）仍需设计评审，未动。
+- **A-1 验收附带发现（fmt 漂移）**：CI 停用后 fmt 无人执法，main 在固定工具链 rustfmt 1.9.0 下已有 29 个
+  文件漂移（CI 历史上用滚动 stable 跑 fmt，与本机 pin 的 1.98 不一致）。已在分支上 `cargo fmt --all`
+  一次性规范化（24 个文件，纯格式、零语义改动，vendor/openraft 与 0229d25 先例一致地一并格式化），
+  后续由 `just check` / nightly 守住房线。
 
 ---
 

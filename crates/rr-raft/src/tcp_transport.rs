@@ -489,8 +489,7 @@ impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
             })?;
 
         let (resp, _): (AppendEntriesResponse<RrTypeConfig>, _) =
-            bincode::serde::decode_from_slice(&resp_payload, bincode::config::standard())
-                .map_err(to_unreachable)?;
+            rr_core::bounded_decode::decode_entry_body(&resp_payload).map_err(to_unreachable)?;
         Ok(resp)
     }
 
@@ -516,8 +515,7 @@ impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
             })?;
 
         let (resp, _): (VoteResponse<RrTypeConfig>, _) =
-            bincode::serde::decode_from_slice(&resp_payload, bincode::config::standard())
-                .map_err(to_unreachable)?;
+            rr_core::bounded_decode::decode_entry_body(&resp_payload).map_err(to_unreachable)?;
         Ok(resp)
     }
 
@@ -767,5 +765,23 @@ mod tests {
             rx1.await.is_err(),
             "the displaced waiter must observe a failure (sender dropped)"
         );
+    }
+
+    /// Peer responses on the TCP transport are fixed-size structs (no
+    /// attacker-sized containers): the meaningful guarantee is
+    /// wire-compatibility of the bounded decode used by the TCP response path.
+    #[test]
+    fn tcp_response_decode_roundtrips_valid_payload() {
+        let resp = VoteResponse::<RrTypeConfig> {
+            vote: openraft::Vote::new(4, 2),
+            vote_granted: true,
+            last_log_id: None,
+        };
+        let bytes = bincode::serde::encode_to_vec(&resp, bincode::config::standard()).unwrap();
+        let (decoded, _): (VoteResponse<RrTypeConfig>, _) =
+            rr_core::bounded_decode::decode_entry_body(&bytes).unwrap();
+        let reencoded =
+            bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap();
+        assert_eq!(bytes, reencoded);
     }
 }

@@ -221,13 +221,11 @@ impl IdempotencyLayer {
             return Ok(());
         }
         let (decoded, _): (IdempotencyStateInternal, _) =
-            bincode::serde::decode_from_slice(&state.data, bincode::config::standard()).map_err(
-                |e| {
-                    RrError::Codec(CodecError::DeserializeFailed(format!(
-                        "idempotency state decode failed: {e}"
-                    )))
-                },
-            )?;
+            rr_core::bounded_decode::decode_snapshot_body(&state.data).map_err(|e| {
+                RrError::Codec(CodecError::DeserializeFailed(format!(
+                    "idempotency state decode failed: {e}"
+                )))
+            })?;
         self.watermarks = decoded.watermarks;
         let cap = self.cache.cap();
         self.cache = LruCache::new(cap);
@@ -549,5 +547,17 @@ mod tests {
         // record within an existing namespace works.
         layer.record(&key("ns-1", 5), vec![]).unwrap();
         assert_eq!(layer.watermark_for("ns-1"), Some(5));
+    }
+
+    // Snapshot-embedded state is bytes from disk — a corrupt/torn write must
+    // fail the bounded decode, not allocate gigabytes from a claimed length.
+    #[test]
+    fn restore_rejects_absurd_length_claim() {
+        let mut layer = IdempotencyLayer::new(10);
+        let absurd = IdempotencyState {
+            data: vec![0x28, 0x00, 0x01, 0xfc, 0x00, 0x00, 0x32, 0xa3, 0x61],
+        };
+        let result = layer.restore(absurd);
+        assert!(matches!(result, Err(RrError::Codec(_))));
     }
 }

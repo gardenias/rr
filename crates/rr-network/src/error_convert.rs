@@ -30,6 +30,11 @@
 //!   already exposed via `GetGroupMembership`).
 //! * `RrError::Application(msg)` — the user's own service produced it;
 //!   it is the user's responsibility not to leak in their own message.
+//! * `ConfigError::InvalidConfig(msg)` — messages are framework-authored
+//!   validation strings that may echo user-supplied config values (the
+//!   operator needs them verbatim, e.g. the G1–G7 startup gates). The
+//!   authoring rule: never embed absolute file paths or secrets in these
+//!   messages.
 
 use rr_core::error::{
     CodecError, ConfigError, NetworkError, RaftError, RouterError, RrError, StorageError,

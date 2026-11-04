@@ -44,7 +44,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
         let req: openraft::raft::AppendEntriesRequest<RrTypeConfig> =
-            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+            rr_core::bounded_decode::decode_entry_body(&payload)
                 .map(|(v, _)| v)
                 .map_err(|e| {
                     tracing::warn!(
@@ -83,7 +83,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
             .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
 
         let req: openraft::raft::VoteRequest<RrTypeConfig> =
-            bincode::serde::decode_from_slice(&payload, bincode::config::standard())
+            rr_core::bounded_decode::decode_entry_body(&payload)
                 .map(|(v, _)| v)
                 .map_err(|e| {
                     tracing::warn!(
@@ -129,7 +129,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
         let (vote, meta): (
             openraft::type_config::alias::VoteOf<RrTypeConfig>,
             openraft::type_config::alias::SnapshotMetaOf<RrTypeConfig>,
-        ) = bincode::serde::decode_from_slice(&metadata, bincode::config::standard())
+        ) = rr_core::bounded_decode::decode_entry_body(&metadata)
             .map(|(v, _)| v)
             .map_err(|e| {
                 tracing::warn!(
@@ -240,5 +240,52 @@ mod tests {
         let status = result.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);
         assert!(status.message().contains("7"));
+    }
+
+    /// Inter-node RPC payloads come from other nodes — untrusted once a peer
+    /// is compromised or a TCP dev-mode port is reachable. The handler decode
+    /// must be the bounded one: an absurd container-length claim (the
+    /// fuzz-nightly OOM pattern) fails instead of allocating.
+    /// AppendEntriesRequest carries `entries: Vec<_>` and is the one request
+    /// type with an attacker-influenced length prefix; Vote/snapshot-metadata
+    /// types are fixed-size and cannot be length-abused (covered by the
+    /// roundtrip test below instead).
+    #[test]
+    fn append_entries_decode_rejects_absurd_length_claim() {
+        // 9-byte input claiming a ~2.5 GiB container (fuzz-nightly OOM input).
+        let absurd: [u8; 9] = [0x28, 0x00, 0x01, 0xfc, 0x00, 0x00, 0x32, 0xa3, 0x61];
+        let ae: Result<(openraft::raft::AppendEntriesRequest<RrTypeConfig>, _), _> =
+            rr_core::bounded_decode::decode_entry_body(&absurd);
+        assert!(ae.is_err());
+    }
+
+    /// The bounded decode must stay wire-compatible with the plain one for
+    /// legitimate traffic (golden-path roundtrip).
+    #[test]
+    fn rpc_request_decode_roundtrips_valid_payload() {
+        let req = openraft::raft::AppendEntriesRequest::<RrTypeConfig> {
+            vote: openraft::Vote::new(1, 1),
+            prev_log_id: None,
+            entries: vec![],
+            leader_commit: None,
+        };
+        let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard()).unwrap();
+        let (decoded, _): (openraft::raft::AppendEntriesRequest<RrTypeConfig>, _) =
+            rr_core::bounded_decode::decode_entry_body(&bytes).unwrap();
+        let reencoded =
+            bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap();
+        assert_eq!(bytes, reencoded);
+
+        let vote_req = openraft::raft::VoteRequest::<RrTypeConfig> {
+            vote: openraft::Vote::new(2, 3),
+            last_log_id: None,
+            leadership_transfer: false,
+        };
+        let bytes = bincode::serde::encode_to_vec(&vote_req, bincode::config::standard()).unwrap();
+        let (decoded, _): (openraft::raft::VoteRequest<RrTypeConfig>, _) =
+            rr_core::bounded_decode::decode_entry_body(&bytes).unwrap();
+        let reencoded =
+            bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap();
+        assert_eq!(bytes, reencoded);
     }
 }

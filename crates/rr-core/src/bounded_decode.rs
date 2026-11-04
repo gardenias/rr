@@ -51,7 +51,12 @@ pub(crate) const MAX_SNAPSHOT_BODY: usize = 1024 * 1024 * 1024;
 /// push total claimed bytes past `MAX_ENTRY_BODY` — before the memory is
 /// allocated. Wire-compatible with the unbounded
 /// `bincode::serde::decode_from_slice` on `bincode::config::standard()`.
-pub(crate) fn decode_entry_body<T: DeserializeOwned>(
+///
+/// Public so the inter-node RPC layers (rr-server's RaftService handlers,
+/// rr-raft's gRPC/TCP network factories) apply the same guard: their
+/// payloads come from other nodes, which are untrusted input once a peer
+/// is compromised or a TCP dev-mode port is reachable.
+pub fn decode_entry_body<T: DeserializeOwned>(
     body: &[u8],
 ) -> Result<(T, usize), bincode::error::DecodeError> {
     bincode::serde::decode_from_slice(
@@ -61,7 +66,11 @@ pub(crate) fn decode_entry_body<T: DeserializeOwned>(
 }
 
 /// Same guard as [`decode_entry_body`], with the snapshot ceiling.
-pub(crate) fn decode_snapshot_body<T: DeserializeOwned>(
+///
+/// Also covers state blobs embedded inside a snapshot (e.g. the idempotency
+/// layer's serialized state): they ride the snapshot's bytes, so the
+/// snapshot ceiling is the right bound.
+pub fn decode_snapshot_body<T: DeserializeOwned>(
     body: &[u8],
 ) -> Result<(T, usize), bincode::error::DecodeError> {
     bincode::serde::decode_from_slice(

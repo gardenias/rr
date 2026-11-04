@@ -1193,6 +1193,23 @@ mod tests {
     }
 
     #[test]
+    fn test_node_new_rejects_grpc_frame_size_above_entry_decode_cap() {
+        let cap = rr_core::bounded_decode::MAX_ENTRY_BODY as u64;
+        let config = make_config(1, "127.0.0.1:50051").with_grpc_max_frame_size((cap + 1) as u32);
+        let msg = config.validate().err().unwrap().to_string();
+        assert!(
+            msg.contains("grpc_max_frame_size"),
+            "expected the frame-size coupling error, got: {msg}"
+        );
+
+        // The exact cap is allowed; zero and one-past are not.
+        let ok = make_config(1, "127.0.0.1:50051").with_grpc_max_frame_size(cap as u32);
+        assert!(ok.validate().is_ok(), "cap-sized frame must be accepted");
+        let zero = make_config(1, "127.0.0.1:50051").with_grpc_max_frame_size(0);
+        assert!(zero.validate().is_err());
+    }
+
+    #[test]
     fn test_node_config_metrics_port() {
         let config = make_config(1, "127.0.0.1:50051");
         assert_eq!(config.metrics_port, None);

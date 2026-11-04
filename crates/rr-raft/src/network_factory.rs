@@ -236,13 +236,12 @@ impl ChannelPool {
                         reason: format!("tls attach: {e}"),
                     })?;
         }
-        let channel = tuned_endpoint(endpoint)
-            .connect()
-            .await
-            .map_err(|e| NetworkError::ConnectionFailed {
+        let channel = tuned_endpoint(endpoint).connect().await.map_err(|e| {
+            NetworkError::ConnectionFailed {
                 addr: addr.to_string(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
         self.channels
             .insert(node_id, (addr.to_string(), channel.clone()));
         Ok(channel)
@@ -538,7 +537,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         .record(rpc_started.elapsed().as_secs_f64());
 
         let (resp, _): (AppendEntriesResponse<RrTypeConfig>, _) =
-            bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
+            rr_core::bounded_decode::decode_entry_body(&response.payload)
                 .map_err(to_unreachable)?;
         Ok(resp)
     }
@@ -587,7 +586,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         };
 
         let (resp, _): (VoteResponse<RrTypeConfig>, _) =
-            bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
+            rr_core::bounded_decode::decode_entry_body(&response.payload)
                 .map_err(to_unreachable)?;
         Ok(resp)
     }
@@ -688,7 +687,7 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
             vote
         } else {
             let (resp, _): (SnapshotResponse<RrTypeConfig>, _) =
-                bincode::serde::decode_from_slice(&response.payload, bincode::config::standard())
+                rr_core::bounded_decode::decode_entry_body(&response.payload)
                     .map_err(to_unreachable_streaming)?;
             resp.vote
         };
@@ -926,7 +925,8 @@ mod tests {
             // Use a fake address; get_or_connect will attempt to connect.
             // We insert a channel manually via the DashMap to avoid needing a server.
             let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
-            pool.channels.insert(1, ("http://[::1]:50051".to_string(), channel));
+            pool.channels
+                .insert(1, ("http://[::1]:50051".to_string(), channel));
         });
 
         assert_eq!(pool.len(), 1);
@@ -941,7 +941,8 @@ mod tests {
 
         // Insert a lazily-connected channel.
         let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
-        pool.channels.insert(42, ("http://127.0.0.1:1".to_string(), channel));
+        pool.channels
+            .insert(42, ("http://127.0.0.1:1".to_string(), channel));
         assert_eq!(pool.len(), 1);
 
         // remove_and_reconnect will remove the old channel, then try to connect.
@@ -968,9 +969,8 @@ mod tests {
         // had the pool dialed the stale address it would fail fast.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let new_addr = listener.local_addr().unwrap().to_string();
-        let acceptor = tokio::spawn(async move {
-            while let Ok((_sock, _)) = listener.accept().await {}
-        });
+        let acceptor =
+            tokio::spawn(async move { while let Ok((_sock, _)) = listener.accept().await {} });
 
         pool.get_or_connect(7, &new_addr)
             .await
@@ -993,9 +993,8 @@ mod tests {
         let pool = ChannelPool::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let acceptor = tokio::spawn(async move {
-            while let Ok((_sock, _)) = listener.accept().await {}
-        });
+        let acceptor =
+            tokio::spawn(async move { while let Ok((_sock, _)) = listener.accept().await {} });
 
         pool.get_or_connect(7, &addr).await.unwrap();
         assert_eq!(pool.len(), 1);
@@ -1017,7 +1016,9 @@ mod tests {
         // Insert a lazily-connected channel for node 99.
         let concrete_pool = ChannelPool::new();
         let channel = Channel::from_static("http://[::1]:50051").connect_lazy();
-        concrete_pool.channels.insert(99, ("http://127.0.0.1:1".to_string(), channel));
+        concrete_pool
+            .channels
+            .insert(99, ("http://127.0.0.1:1".to_string(), channel));
         let pool: Arc<dyn ChannelPoolLike> = Arc::new(concrete_pool);
         assert_eq!(pool.len(), 1);
 
@@ -1046,5 +1047,23 @@ mod tests {
         // (if the error was Unavailable). The lazy channel to a non-existent server
         // may produce various error codes, so we just verify the mechanism compiles
         // and runs without panicking. In production, a real Unavailable status triggers eviction.
+    }
+
+    /// Peer responses are fixed-size structs (no attacker-sized containers),
+    /// so the meaningful guarantee is wire-compatibility of the bounded
+    /// decode used by the gRPC response path.
+    #[test]
+    fn grpc_response_decode_roundtrips_valid_payload() {
+        for resp in [
+            AppendEntriesResponse::<RrTypeConfig>::Success,
+            AppendEntriesResponse::<RrTypeConfig>::PartialSuccess(None),
+        ] {
+            let bytes = bincode::serde::encode_to_vec(&resp, bincode::config::standard()).unwrap();
+            let (decoded, _): (AppendEntriesResponse<RrTypeConfig>, _) =
+                rr_core::bounded_decode::decode_entry_body(&bytes).unwrap();
+            let reencoded =
+                bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap();
+            assert_eq!(bytes, reencoded);
+        }
     }
 }

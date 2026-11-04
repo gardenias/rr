@@ -45,6 +45,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run. `wait_writable` now returns the applied probe count, stored on
   `CrashCluster::warmup_applies` and added to both oracle bounds.
 
+### Security — 2026-11-04 review remediation (B-1..B-3)
+
+- **Inter-node RPC payload decode is now bounded**: all eight bincode decode
+  sites on the raft RPC path go through `bounded_decode` — the three
+  `RaftService` handlers (`crates/rr-server/src/lookup.rs`: AppendEntries /
+  Vote / InstallSnapshot metadata), the gRPC network factory's three
+  response decodes and the TCP transport's two (`crates/rr-raft`), plus the
+  snapshot-embedded idempotency state and the membership sidecar via
+  `decode_snapshot_body`. This closes the same allocation-abort class the
+  fuzz-nightly found for `FramedEntry` (9-byte input claiming GiBs) on the
+  peer-facing surface. New tests pin the reject path for the
+  container-carrying request type and wire-compat roundtrips for the
+  fixed-size response types.
+- **`NodeConfig::validate` enforces `grpc_max_frame_size ≤ MAX_ENTRY_BODY`**
+  (and rejects 0) for library embedders too — previously only the binary
+  config path checked the ADR A-0018 coupling, leaving embedders fail-open
+  to log-poisoning their own groups.
+- **Admin error sanitization consistency**: online-backup snapshot fetch /
+  trigger and get-routing-table no longer echo raw internal errors to the
+  RPC client; details go to tracing, matching `error_convert`'s documented
+  contract (whose exception list now records the `ConfigError::InvalidConfig`
+  authoring rule: framework-authored, no absolute paths or secrets).
+
 ### Added — 2026-11-01 homogeneous cluster formation
 
 

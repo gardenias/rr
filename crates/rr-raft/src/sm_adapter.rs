@@ -196,7 +196,7 @@ impl RrStateMachine {
                         return self;
                     }
                 };
-                match bincode::serde::decode_from_slice(body, bincode::config::standard()) {
+                match rr_core::bounded_decode::decode_snapshot_body(body) {
                     Ok((membership, _)) => {
                         self.last_membership = membership;
                     }

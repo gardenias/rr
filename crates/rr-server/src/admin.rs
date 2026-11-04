@@ -58,11 +58,14 @@ async fn wait_for_snapshot(
 ) -> Result<Vec<u8>, Status> {
     let deadline = std::time::Instant::now() + ONLINE_BACKUP_SNAPSHOT_WAIT;
     loop {
-        if let Some(bytes) = mgr
-            .fetch_snapshot_bytes(group_id)
-            .await
-            .map_err(|e| Status::internal(format!("fetch_snapshot_bytes: {e}")))?
-        {
+        if let Some(bytes) = mgr.fetch_snapshot_bytes(group_id).await.map_err(|e| {
+            tracing::warn!(
+                group_id,
+                error = %e,
+                "fetch_snapshot_bytes failed (detail sanitized for client)"
+            );
+            Status::internal("snapshot fetch failed")
+        })? {
             return Ok(bytes);
         }
         if std::time::Instant::now() > deadline {
@@ -988,10 +991,14 @@ impl AdminService for AdminServiceImpl {
             .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
 
         if req.force_fresh_snapshot {
-            raft.trigger()
-                .snapshot()
-                .await
-                .map_err(|e| Status::internal(format!("trigger snapshot failed: {e}")))?;
+            raft.trigger().snapshot().await.map_err(|e| {
+                tracing::warn!(
+                    group_id,
+                    error = %e,
+                    "trigger snapshot failed (detail sanitized for client)"
+                );
+                Status::internal("trigger snapshot failed")
+            })?;
         }
 
         let snapshot_bytes = wait_for_snapshot(&raft, &self.group_manager, group_id).await?;
@@ -1095,7 +1102,13 @@ impl AdminService for AdminServiceImpl {
             .config_provider
             .get_routing_table()
             .await
-            .map_err(|e| Status::internal(format!("get_routing_table failed: {e}")))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "get_routing_table failed (detail sanitized for client)"
+                );
+                Status::internal("routing table unavailable")
+            })?;
         let groups_meta = table.groups;
         let mut partitions: Vec<PartitionRoute> = table
             .partitions
