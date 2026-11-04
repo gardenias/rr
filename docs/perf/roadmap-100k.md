@@ -109,10 +109,13 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
       fan1 从 175.2k → 76.6k 是**正确性代价**(稳态下批 RPC 不再重叠);
       fan4 恢复到 121k。若需兼得,候选是给 BatchConfig 加 `ordered: bool`(默认 true)
       让吞吐优先用户显式放弃跨批顺序——留作 v0.3.0 kickoff 决策点。
+      → 已裁定 defer 至 v0.3.0 kickoff(2026-11-04,见
+      `.sisyphus/adr/A-0019-g2-decisions.md` ①;候选登记 `.sisyphus/plans/rr-v030-scope.md`)。
 - [ ] tokio worker 数与 CPU 亲和性扫描(当前默认)——未做,留 M3 续;
 - [ ] per-group 串行段(apply 管线、metrics tick)的跨组并行度验证——多组平顶根因
       已由扇出实验解释大半(单连接),组内 Mutex(`group_manager.rs` get_raft_for_write)
-      是否次要点待扇出后复测。
+      是否次要点待扇出后复测。复测已排入 D-1(2026-11-04);结果回填后由维护者勾选
+      (裁定见 `.sisyphus/adr/A-0019-g2-decisions.md` ②)。
 
 ### 退出判据 / Exit criteria
 

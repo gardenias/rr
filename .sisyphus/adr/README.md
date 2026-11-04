@@ -37,6 +37,7 @@
 | [A-0016](./A-0016-durable-raft-log-wiring.md) | 生产二进制接线 durable raft log(log storage × network factory 正交化) | implemented | 2026-09-10 |
 | [A-0017](./A-0017-service-bytes-migration.md) | Service trait Bytes 化 — 消除 apply 路径强制拷贝 | drafted | 2026-09-23 |
 | [A-0018](./A-0018-apply-error-contract.md) | Apply 期错误契约:group-fatal vs error-as-applied-response | drafted | 2026-09-23 |
+| [A-0019](./A-0019-g2-decisions.md) | G2 决策点裁定 — ordered 旋钮 / 多组复测 / 100k 立场 | accepted | 2026-11-04 |
 
 ## Relationship
 
