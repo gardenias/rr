@@ -229,22 +229,25 @@ mod rocks_scenarios {
                 // Count-bounds oracle for the batched lane (wired here — it
                 // was dead code in oracle.rs): the applied count must cover
                 // every ACKed write (keyed + batched) and never exceed what
-                // the harness actually sent.
+                // the harness actually sent. Both bounds include the bootstrap
+                // writability probe: it is a real apply that bypasses the
+                // driver's sent/acked accounting (see wait_writable).
+                let probes = self.cluster.warmup_applies;
                 let keyed_acked = stats.acked.load(std::sync::atomic::Ordering::Relaxed);
                 let batch_acked = lane_stats.acked.load(std::sync::atomic::Ordering::Relaxed);
                 let keyed_sent = stats.sent.load(std::sync::atomic::Ordering::Relaxed);
                 let batch_sent = lane_stats.sent.load(std::sync::atomic::Ordering::Relaxed);
                 let count = crate::oracle::verify_applied_count_bounds(
                     &self.client,
-                    keyed_acked + batch_acked,
-                    move || (keyed_sent, batch_sent),
+                    keyed_acked + batch_acked + probes,
+                    move || keyed_sent + batch_sent + probes,
                 )
                 .await
                 .expect("batch-lane count-bounds oracle failed");
                 println!(
-                    "[crash-harness] scenario={scenario} count-bounds: applied={count} acked_floor={} sent_ceiling={}",
-                    keyed_acked + batch_acked,
-                    keyed_sent + batch_sent,
+                    "[crash-harness] scenario={scenario} count-bounds: applied={count} acked_floor={} sent_ceiling={} (incl. {probes} warmup probe(s))",
+                    keyed_acked + batch_acked + probes,
+                    keyed_sent + batch_sent + probes,
                 );
             }
             // Zero-panic gate (same shape as scripts/soak.sh): a panicked

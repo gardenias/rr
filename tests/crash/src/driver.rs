@@ -49,7 +49,15 @@ pub async fn connect(addrs: &[String]) -> Result<RrClient> {
 
 /// Block until the cluster accepts a keyed write (leader elected, dispatch
 /// path live). Uses a fast-failing probe client so the loop stays responsive.
-pub async fn wait_writable(client: &RrClient, timeout: Duration) -> Result<()> {
+///
+/// Returns the number of probes that were successfully applied. A probe is a
+/// real apply that bypasses the driver's sent/acked accounting, so callers
+/// feeding the count-bounds oracle must add it to BOTH the floor and the
+/// ceiling. Returning on the first success means every successful call
+/// applies exactly one probe; call at most once per cluster lifetime —
+/// probe ids restart at 1 per call, so a second call would replay the
+/// earlier keys (no new apply) while still reporting success.
+pub async fn wait_writable(client: &RrClient, timeout: Duration) -> Result<u64> {
     let deadline = Instant::now() + timeout;
     let mut probe_id = 0u64;
     while Instant::now() < deadline {
@@ -59,7 +67,7 @@ pub async fn wait_writable(client: &RrClient, timeout: Duration) -> Result<()> {
             .send_request_idempotent(GROUP_ID, b"warmup".to_vec(), key)
             .await
         {
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(1),
             Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
         }
     }

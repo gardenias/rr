@@ -173,6 +173,10 @@ pub struct CrashCluster {
     run_dir: PathBuf,
     log_level: String,
     snapshot_logs_since_last: Option<u64>,
+    /// Writes applied by the bootstrap writability probe. The count-bounds
+    /// oracle must add this to both its floor and its ceiling: probes are
+    /// real applies that bypass the driver's sent/acked accounting.
+    pub warmup_applies: u64,
     /// Owns the per-node data dirs; dropped last (after children are dead).
     _data_root: TempDir,
 }
@@ -266,6 +270,7 @@ impl CrashCluster {
             run_dir: cfg.run_dir.clone(),
             log_level: cfg.log_level.clone(),
             snapshot_logs_since_last: cfg.snapshot_logs_since_last,
+            warmup_applies: 0,
             _data_root: data_root,
         };
 
@@ -277,9 +282,11 @@ impl CrashCluster {
         }
 
         // Wait until the cluster elects a leader and serves writes. The probe
-        // write uses a separate request_type so it never lands in the ack log.
+        // write uses a separate request_type so it never lands in the ack log;
+        // it is still a real apply, so it is tracked in warmup_applies for the
+        // count-bounds oracle.
         let client = crate::driver::connect(&cluster.all_grpc_addrs()).await?;
-        crate::driver::wait_writable(&client, Duration::from_secs(30))
+        cluster.warmup_applies = crate::driver::wait_writable(&client, Duration::from_secs(30))
             .await
             .context("cluster did not become writable after bootstrap")?;
 

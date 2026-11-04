@@ -66,16 +66,18 @@ pub struct OracleReport {
 /// that batched entries survived the crash:
 ///
 /// - `count < acked_floor` — an **acknowledged** write was lost (INV-1
-///   violated). `acked_floor` = keyed acks + batched lane acks.
+///   violated). `acked_floor` = keyed acks + batched lane acks + writes the
+///   harness applied on the side (e.g. the bootstrap writability probe).
 /// - `count > sent_ceiling` — the cluster applied writes the harness never
 ///   sent (double-apply/phantom). `sent_ceiling` = keyed sent + batched sent
-///   (sampled *after* the count read so in-flight writes can't trip it).
+///   + side-applied writes (sampled *after* the count read so in-flight
+///   writes can't trip it).
 ///
 /// Returns the observed count.
 pub async fn verify_applied_count_bounds(
     client: &RrClient,
     acked_floor: u64,
-    sent_ceiling_after: impl Fn() -> (u64, u64),
+    sent_ceiling_after: impl Fn() -> u64,
 ) -> Result<u64> {
     let bytes = client
         .read(GROUP_ID, crate::driver::COUNT_READ_QUERY.to_vec())
@@ -86,8 +88,7 @@ pub async fn verify_applied_count_bounds(
         .trim()
         .parse()
         .with_context(|| format!("applied-count read not a number: {text:?}"))?;
-    let (keyed_sent, batch_sent) = sent_ceiling_after();
-    let ceiling = keyed_sent + batch_sent;
+    let ceiling = sent_ceiling_after();
     if count < acked_floor {
         bail!(
             "INV-1 VIOLATION: applied count {count} < acked floor {acked_floor} — \
