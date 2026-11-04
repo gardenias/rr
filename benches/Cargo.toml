@@ -8,8 +8,14 @@ publish = false
 rr-raft = { path = "../crates/rr-raft", features = [] }
 rr-storage = { path = "../crates/rr-storage" }
 rr-core = { path = "../crates/rr-core" }
+rr-router = { path = "../crates/rr-router" }
+rr-config = { path = "../crates/rr-config" }
+rr-server = { path = "../crates/rr-server" }
+rr-network = { path = "../crates/rr-network" }
 criterion = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
+tokio-stream = { workspace = true }
 bincode = { workspace = true }
 serde = { workspace = true }
 openraft = { workspace = true, features = ["serde"] }
@@ -52,3 +58,23 @@ required-features = ["rocks"]
 name = "log_tps"
 harness = false
 required-features = ["rocks"]
+
+[[bench]]
+name = "dispatch_pipeline"
+harness = false
+
+[[bench]]
+name = "shard_router_route"
+harness = false
+
+[[bench]]
+name = "batch_frame"
+harness = false
+
+[[bench]]
+name = "read_index"
+harness = false
+
+[[bench]]
+name = "snapshot_build"
+harness = false

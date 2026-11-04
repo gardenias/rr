@@ -3478,15 +3478,21 @@ dependencies = [
 name = "rr-benches"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "bincode 2.0.1",
  "criterion 0.5.1",
  "openraft",
+ "rr-config",
  "rr-core",
+ "rr-network",
  "rr-raft",
+ "rr-router",
+ "rr-server",
  "rr-storage",
  "serde",
  "tempfile",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
