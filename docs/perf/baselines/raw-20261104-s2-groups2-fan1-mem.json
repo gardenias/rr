@@ -1,0 +1,35 @@
+{
+  "meta": {
+    "tool": "rr-perf-bench",
+    "version": "0.2.0",
+    "git_sha": "04589df5bee7154375373eb9e0c5f42d1e2dfdb4",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "os": "macos",
+    "arch": "aarch64",
+    "storage": "mem",
+    "durability": "strict",
+    "payload_bytes": 128,
+    "warmup_secs": 2,
+    "duration_secs": 10,
+    "concurrency_levels": [
+      200
+    ],
+    "captured_unix_secs": 1793783649
+  },
+  "s1": null,
+  "s2": [
+    {
+      "concurrency": 200,
+      "ok": 412175,
+      "err": 0,
+      "elapsed_secs": 12.002104625,
+      "tps": 34341.89347917307,
+      "p50_us": 4632,
+      "p95_us": 7290,
+      "p99_us": 10813,
+      "p999_us": 22282
+    }
+  ],
+  "s3": [],
+  "soak": null
+}

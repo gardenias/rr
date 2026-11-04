@@ -111,8 +111,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   durable SnapshotStore persist, FramedSnapshot encode/decode throughput).
   `scripts/bench-compare.sh` picks them up automatically — no explicit list.
 
-### Added — 2026-11-04 decision records & release hygiene (review D-3/F-1/F-2)
+### Changed — 2026-11-04 performance re-baseline (review D-1)
 
+- **benchmarks.md re-sampled to 2026-11-04** (21 cluster runs, 0 errors, raw
+  JSONs under `docs/perf/baselines/`): default-config S2 k=200 3-node
+  30.7k TPS; best opt-in batch64+fanout4 **174.2k TPS** (batch64+fan1
+  168.3k — the cross-batch serialization cost recorded on 2026-09-23 no
+  longer shows on this HEAD). The multi-group note now carries the
+  groups{1,2,4} × fanout{1,4} retest: same-host multi-group aggregate does
+  not scale post-fanout and the per-group Mutex is not the binding
+  constraint — fixed-node host CPU/scheduling is the ceiling; multi-host
+  scaling with disjoint replica sets is unaffected (ADR A-0019 ②).
+- **Two material regressions surfaced by the re-baseline** (pre-date this
+  branch; recorded as follow-up work in the remediation plan):
+  rocks-strict serial writes 5.9k → 421 TPS (-93%, fsync-independent,
+  CPU far from saturated — likely pathological in the post-A-0016 durable
+  raft-log path; bisect window d8ba158 / 6eb02d6 / bcdbdbc) and a
+  replication-path-specific mem serial/low-concurrency dip of ~17-22%
+  (single-node p50 unchanged). `v0.2.0-baseline.md` carries a
+  non-comparability note: pre/post-A-0016 rocks numbers must not be
+  compared.
+
+### Added — 2026-11-04 decision records & release hygiene (review D-3/F-1/F-2)
 - **ADR A-0019 (G2 rulings)**: the `BatchConfig::ordered` knob is deferred to
   the v0.3.0 kickoff (opt-out of cross-batch ordering needs an interaction
   analysis with deferred services first; batch64+fanout4 already measured

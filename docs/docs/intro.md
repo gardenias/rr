@@ -49,7 +49,8 @@ slug: /
 
 ### G2. 高吞吐 & 低延迟
 
-- 单共识组 100k ops/s 量级；聚合吞吐靠 multi-raft 分片水平扩展（而非加副本）——当前实测边界：同机多组聚合吞吐尚未随组数增长（受单 h2 连接串行点限制，见 `docs/perf/roadmap-100k.md`），跨机扩展不受此限
+- 单共识组 100k ops/s 为愿景目标：opt-in 批处理+扇出实测 174k TPS（2026-11-04）；默认配置 ~31k（ADR A-0019）
+- 聚合吞吐靠 multi-raft 分片水平扩展（而非加副本）：同机多组受宿主机 CPU 平顶，跨机（副本集合不相交）不受此限
 - IoBatcher 批量落盘 + 字节级背压；gRPC 连接池；读写 RPC 分离，本地读走最低延迟路径
 - benches + perf-lab + soak + 基线对比：性能回归必须能被自动化发现
 
@@ -116,7 +117,8 @@ Three pillars, in priority order **G1 > G2 > G3** — conflicts are resolved in 
 
 ### G2. High throughput & low latency
 
-- ~100k ops/s per consensus group; aggregate throughput scales horizontally via multi-raft sharding (not replicas) — current measured boundary: same-host multi-group aggregate does NOT yet scale with group count (single-h2-connection serialization point, see `docs/perf/roadmap-100k.md`); multi-host scaling is unaffected
+- 100k ops/s per group is aspirational: opt-in batch64+fanout4 hit 174k TPS (2026-11-04); default ~31k (ADR A-0019)
+- Scale-out via multi-raft sharding (not replicas): same-host groups plateau (host-CPU bound); multi-host unaffected
 - IoBatcher batched fsync with byte-level backpressure; gRPC connection pooling; read/write RPC separation with a lowest-latency local read path
 - benches + perf-lab + soak + baseline comparison: performance regressions must be caught automatically
 

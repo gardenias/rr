@@ -111,11 +111,18 @@ openraft 核心与编解码几乎不占 leaf 时间;gRPC/HTTP-2 传输栈和每�
       让吞吐优先用户显式放弃跨批顺序——留作 v0.3.0 kickoff 决策点。
       → 已裁定 defer 至 v0.3.0 kickoff(2026-11-04,见
       `.sisyphus/adr/A-0019-g2-decisions.md` ①;候选登记 `.sisyphus/plans/rr-v030-scope.md`)。
+      **2026-11-04 D-1 复测补记**:HEAD 上 batch64+fan1 已恢复至 168.3k、fan4 174.2k
+      (raw-20261104-s2-batch64-fan{1,4}-mem.json)——上述 fan1 串行化代价在当前
+      代码上不再显现,批处理下 fanout 边际收益仅 +3.5%。
 - [ ] tokio worker 数与 CPU 亲和性扫描(当前默认)——未做,留 M3 续;
-- [ ] per-group 串行段(apply 管线、metrics tick)的跨组并行度验证——多组平顶根因
+- [x] per-group 串行段(apply 管线、metrics tick)的跨组并行度验证——多组平顶根因
       已由扇出实验解释大半(单连接),组内 Mutex(`group_manager.rs` get_raft_for_write)
-      是否次要点待扇出后复测。复测已排入 D-1(2026-11-04);结果回填后由维护者勾选
-      (裁定见 `.sisyphus/adr/A-0019-g2-decisions.md` ②)。
+      是否次要点待扇出后复测。**复测完成(2026-11-04,D-1,裁定 A-0019 ② 回填)**:
+      扇出后多组仍不扩展,但组内 Mutex 不是约束——单组 fanout=4 已达 72.0k
+      (远高于 Mutex 假设的 ~34k 上限),fanout=4 下 1→4 组聚合 72.0k→61.2k 且
+      p50 持平(≈2.0ms,锁竞争会表现为延迟膨胀);瓶颈是固定 3 节点拓扑的宿主机
+      CPU/调度。数据:raw-20261104-s2-groups{1,2,4}-fan{1,4}-mem.json 与
+      benchmarks.md 多组注记。跨机(副本集合不相交)扩展路径不受此限。
 
 ### 退出判据 / Exit criteria
 

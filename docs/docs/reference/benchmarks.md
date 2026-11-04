@@ -23,10 +23,10 @@ The numbers below are **framework-overhead benchmarks** (mirroring openraft's mi
 |---|---|
 | 硬件 / Hardware | Apple M3 Pro, 36 GB RAM |
 | 操作系统 / OS | macOS 26.6.1 |
-| 工具链 / Toolchain | rustc 1.98.0, `--release` |
+| 工具链 / Toolchain | rustc 1.98.1, `--release` |
 | 拓扑 / Topology | 单机 loopback；1/3/5 个 `rr-server` 进程 |
 | 存储 / Storage | `MemStorage`（本基线使用内存 raft 日志；stock 二进制自 v0.3.0 起亦支持 `--storage rocks` 持久化日志——见 ADR A-0016） |
-| 负载 / Load | 128B（默认）或 1KiB payload；4s 预热 + 10s 计量窗口 |
+| 负载 / Load | 128B（默认）或 1KiB payload；5s 预热 + 20s 计量窗口（短窗口复测单独标注） |
 
 ## 场景定义 / Scenarios
 
@@ -36,33 +36,50 @@ The numbers below are **framework-overhead benchmarks** (mirroring openraft's mi
 
 ## 结果 / Results
 
+> **采样 / Sampled**：2026-11-04，commit `04589df`，rustc 1.98.1，全部运行 0 错误。原始数据见
+> `docs/perf/baselines/`：`raw-20261104-*.json`（本轮新采）；`raw-s1-rocks-strict.json`、
+> `raw-s2-{mem,rocks-strict,rocks-replicated-only,rocks-test-only}.json` 与
+> `cpu-samples-s2-rocks-strict.txt`（`scripts/perf-baseline.sh` 的 canonical 输出，本轮已原地刷新）。
+> 除单独标注日期的行外，本页 loopback 表格均为当日数据。
+>
+> Re-sampled 2026-11-04 at commit `04589df`, rustc 1.98.1, zero errors in every run. Raw data in
+> `docs/perf/baselines/`: `raw-20261104-*.json` (this round); the canonical `raw-s1-rocks-strict.json` /
+> `raw-s2-*.json` and `cpu-samples-s2-rocks-strict.txt` (refreshed in place by `scripts/perf-baseline.sh`).
+> Unless a row carries its own date, every loopback table on this page is from this capture.
+
 ### S1：串行写延迟（128B）/ Serial write latency
 
 集群规模与传输对**单笔写延迟**的影响：
 
 | 配置 / Config | TPS | p50 | p99 | p999 | 错误 / Errors |
 |---|---|---|---|---|---|
-| 1 节点， gRPC | 14.6k | 67µs | 94µs | 197µs | 0 |
-| 3 节点， gRPC | 6.1k | 156µs | 260µs | 572µs | 0 |
-| 5 节点， gRPC | 4.5k | 216µs | 371µs | 697µs | 0 |
+| 1 节点， gRPC | 13.4k | 67µs | 223µs | 545µs | 0 |
+| 3 节点， gRPC | 4.8k | 189µs | 501µs | 1.2ms | 0 |
+| 5 节点， gRPC | 3.5k | 264µs | 700µs | 1.8ms | 0 |
 | 3 节点， TCP raft 传输（实验性） | 7.8k | 123µs | 219µs | 393µs | 0 |
 | 3 节点， gRPC，1KiB payload | 5.6k | 171µs | 335µs | 546µs | 0 |
 | 3 节点， gRPC，`--client-rps 2000` | 2.0k | 168µs | 500µs | 102ms | 0 |
 
-要点：串行延迟由 quorum 规模决定（1 → 3 → 5 节点：67µs → 156µs → 216µs，每加一个复制跳点约 +60-90µs）；实验性 TCP raft 传输比 gRPC 快约 21%（156µs → 123µs）。
+注：第 4–6 行（TCP 传输 / 1KiB payload / 限流）为 2026-09 采集的独立场景，本轮未重测。
+Rows 4–6 (TCP transport, 1KiB payload, rate limit) are distinct scenarios captured in 2026-09, not re-run this round.
+
+要点：串行延迟由 quorum 规模决定（1 → 3 → 5 节点：67µs → 189µs → 264µs，每加一个复制跳点约
++75-120µs）；实验性 TCP raft 传输在 2026-09 的采集中比 gRPC 快约 21%（156µs → 123µs）。
 
 ### S2：并发写吞吐扫描（128B）/ Concurrent write throughput
 
 | 并发 / Concurrency | 1 节点 TPS | 3 节点 TPS | 5 节点 TPS | 3 节点 p50/p99 | 错误 / Errors |
 |---|---|---|---|---|---|
-| 1 | 10.1k | 4.4k | 3.2k | 151µs / 232µs | 0 |
-| 10 | 19.9k | 18.4k | 15.9k | 367µs / 650µs | 0 |
-| 50 | 26.6k | 28.3k | 25.9k | 1.2ms / 2.2ms | 0 |
-| 100 | 30.3k | 30.1k | 29.2k | 2.3ms / 4.1ms | 0 |
-| 200 | 31.1k | 31.5k | 30.1k | 4.5ms / 7.4ms | 0 |
-| 500 | 31.0k | 32.1k | 31.3k | 11.1ms / 16.9ms | 0 |
+| 1 | 10.3k | 3.6k | 2.8k | 187µs / 531µs | 0 |
+| 10 | 19.7k | 16.9k | 15.5k | 429µs / 1.0ms | 0 |
+| 50 | 30.3k | 28.6k | 27.7k | 1.3ms / 3.5ms | 0 |
+| 100 | 32.9k | 30.6k | 30.2k | 2.5ms / 5.5ms | 0 |
+| 200 | 33.9k | 30.7k | 31.5k | 5.0ms / 10.6ms | 0 |
+| 500 | 33.2k | 31.0k | 31.5k | 12.6ms / 25.9ms | 0 |
 
-要点：并发起来后吞吐由**组提交批处理**（IoBatcher）主导，与集群规模基本无关（≈31-32k TPS）；延迟随并发线性增长（排队的正常表现）。1KiB payload 时峰值约 26.2k TPS（−18%）。
+要点：并发起来后吞吐由**组提交批处理**（IoBatcher）主导，k≥50 时与集群规模基本无关（≈28-34k TPS，
+单节点略高）；延迟随并发线性增长（排队的正常表现）。1KiB payload 时 k=200 约 28.2k TPS
+（同窗口 128B 的 82%，raw-20261104-s2-payload1024-mem.json）。
 
 ---
 
@@ -70,14 +87,16 @@ The numbers below are **framework-overhead benchmarks** (mirroring openraft's mi
 
 | 并发 / Concurrency | ReadLocal TPS | Linearizable TPS | Lin. p50/p99 | 错误 / Errors |
 |---|---|---|---|---|
-| 1 | 12.3k | 5.9k | 117µs / 150µs | 0 |
-| 10 | 27.2k | 15.1k | 452µs / 799µs | 0 |
-| 50 | 30.4k | 18.9k | 1.8ms / 3.4ms | 0 |
-| 100 | 32.3k | 19.3k | 3.6ms / 6.2ms | 0 |
-| 200 | 33.5k | 19.0k | 7.5ms / 12.4ms | 0 |
-| 500 | 33.2k | 19.2k | 18.7ms / 29.4ms | 0 |
+| 1 | 13.2k | 5.7k | 119µs / 377µs | 0 |
+| 10 | 27.9k | 16.1k | 449µs / 1.1ms | 0 |
+| 50 | 32.9k | 21.1k | 1.8ms / 4.3ms | 0 |
+| 100 | 34.3k | 20.5k | 3.7ms / 8.4ms | 0 |
+| 200 | 35.0k | 19.3k | 7.8ms / 18.1ms | 0 |
+| 500 | 33.8k | 19.9k | 19.3ms / 39.4ms | 0 |
 
-要点：ReadLocal（可能读到略旧数据）与写吞吐持平（≈33k）；线性一致读受 ReadIndex quorum 往返限制，3 节点平台期 ≈19k TPS、5 节点 ≈14k TPS。两者的取舍见 [读一致性指南](../guide/read-consistency.md)。
+要点：ReadLocal（可能读到略旧数据）与写吞吐持平（≈34-35k）；线性一致读受 ReadIndex quorum 往返
+限制，3 节点平台期 ≈19-21k TPS；5 节点 ≈14k TPS 为 2026-09 采集，本轮未重测。两者的取舍见
+[读一致性指南](../guide/read-consistency.md)。
 
 ### 限流自我保护 / Rate-limit self-protection
 
@@ -87,9 +106,16 @@ Under `--client-rps 2000` per node, excess requests get `RESOURCE_EXHAUSTED` and
 
 ### 实验性 TCP raft 传输 / Experimental TCP raft transport
 
-写入与 ReadLocal 在 TCP 传输下正常（S1 p50=123µs，S2 峰值 31.9k TPS）。**已知问题**：TCP 传输下线性一致读的 follower→leader 重定向在并发 ≥10 时不稳定（约 1-2% 的请求重定向后不收敛，报 `follower redirected to leader`；gRPC 传输无此问题）。TCP 传输为明文实验特性（强制 loopback），不建议生产使用。
+写入与 ReadLocal 在 TCP 传输下正常（2026-09 采集：S1 p50=123µs，S2 峰值 31.9k TPS；本轮未重测）。
+**已知问题**：TCP 传输下线性一致读的 follower→leader 重定向在并发 ≥10 时不稳定（约 1-2% 的请求
+重定向后不收敛，报 `follower redirected to leader`；gRPC 传输无此问题）。TCP 传输为明文实验特性
+（强制 loopback），不建议生产使用。
 
-Writes and ReadLocal are healthy over the TCP transport (S1 p50=123µs, S2 peak 31.9k TPS). **Known issue**: with the TCP transport, follower→leader redirects for linearizable reads are unstable at concurrency ≥10 (~1-2% of requests fail to converge after redirect; the gRPC transport is unaffected). The TCP transport is a plaintext experimental feature (loopback-only) and not production-recommended.
+Writes and ReadLocal are healthy over the TCP transport (2026-09 capture: S1 p50=123µs, S2 peak 31.9k
+TPS; not re-run this round). **Known issue**: with the TCP transport, follower→leader redirects for
+linearizable reads are unstable at concurrency ≥10 (~1-2% of requests fail to converge after redirect;
+the gRPC transport is unaffected). The TCP transport is a plaintext experimental feature (loopback-only)
+and not production-recommended.
 
 ## 压测驱动的修复 / Benchmark-driven fixes
 
@@ -142,17 +168,36 @@ cargo bench -p rr-benches                                  # 内存存储/编解
 cargo bench -p rr-benches --features rocks                 # 含 RocksDB 存储层 / incl. RocksDB layer
 ```
 
-> **多组扩展实测(2026-09-22, M3 Pro 3 节点 loopback, mem/strict, 128B)**:`--groups 1/2/4`
-> 在 k=100/200 下聚合吞吐均为 ~26k TPS——**持平而非增长**。原因:stock 拓扑里每个组都复制到全部
-> 3 个节点,单机 CPU 已饱和(见 v0.2.0 基线 Finding 4),加组不产生新 CPU。multi-raft 的扩展性
-> 前提是**组的副本集合不相交 + 加机器**(如 3 组 × 3 副本部署在 9 台主机);在固定 3 节点上堆组
-> 只是换来更多上下文切换。容量规划请按"每组吞吐 ≈ 单组基线,组数随节点池扩展"建模。
+> **多组 × 连接扇出复测（2026-11-04，M3 Pro 3 节点 loopback，mem/strict，128B，k=200，2s 预热 + 10s 窗口）**
+> ——回答「扇出移除单 h2 连接串行点后，多组聚合吞吐是否开始扩展」（D-3②；
+> raw-20261104-s2-groups{1,2,4}-fan{1,4}-mem.json）：
 >
-> Measured 2026-09-22 (M3 Pro, 3-node loopback, mem/strict, 128B): aggregate TPS stays flat
-> (~26k) for `--groups 1/2/4` at k=100/200. With the stock topology every group replicates to
-> all 3 nodes and the host CPU is already saturated (baseline Finding 4) — more groups add no
-> CPU. Multi-raft scaling assumes **disjoint replica sets over a growing node pool**; piling
-> groups onto fixed nodes only buys context-switching.
+> | 组数 \ `--channel-fanout` | 1 | 4 |
+> |---|---|---|
+> | 1 | 34.3k | 72.0k |
+> | 2 | 34.3k | 63.8k |
+> | 4 | 33.0k | 61.2k |
+>
+> 结论：**多组聚合吞吐仍不随组数增长。** 扇出确实移除了单连接串行点（单组 34.3k → 72.0k = 2.1×，
+> 与 2026-09-23 的 1.91× 一致）；但 fanout=4 下 1→4 组聚合反而 −15%（72.0k → 61.2k），p50 持平
+> ≈2.0ms——绑定约束不是 per-group Mutex（`group_manager.rs` 的 `get_raft_for_write`：单组即可达
+> 72k，锁若绑死会把多组压到单组之下并推高延迟），而是固定 3 节点上的宿主 CPU/调度，加组只增加
+> raft 核/心跳/apply 的固定开销。multi-raft 扩展性前提不变——**组副本集合不相交 + 加机器**；容量
+> 规划按「每组吞吐 ≈ 单组基线，组数随节点池扩展」建模。同窗口 opt-in 批处理复测：batch64+fan1
+> = 168.3k、batch64+fan4 = 174.2k（p50 ≈0.8ms；raw-20261104-s2-batch64-fan{1,4}-mem.json）——
+> 批处理自身已摊薄连接串行点，扇出边际收益仅 +3.5%。
+>
+> Retest 2026-11-04 (M3 Pro, 3-node loopback, mem/strict, 128B, k=200, 2s warmup + 10s window), answering
+> "does multi-group aggregate throughput scale once the single-h2-connection serializer is removed?" (D-3②).
+> **It does not.** Fanout does remove the connection serializer (one group: 34.3k → 72.0k = 2.1×, matching
+> the 1.91× of 2026-09-23), but at fanout=4 the aggregate *falls* 72.0k → 61.2k from 1 → 4 groups while p50
+> stays ≈2.0ms — the binding constraint is not the per-group Mutex (`get_raft_for_write` in
+> `group_manager.rs`: a single group already reaches 72k; a binding lock would push multi-group *below*
+> single-group and inflate latency) but host CPU/scheduling on the fixed 3 nodes, where each extra group adds
+> fixed raft-core/heartbeat/apply cost. The multi-raft scaling premise is unchanged: **disjoint replica sets
+> over a growing node pool** — model capacity as "per-group TPS ≈ single-group baseline, group count scales
+> with the node pool". Same-window opt-in batching: batch64+fan1 = 168.3k, batch64+fan4 = 174.2k — batching
+> alone amortizes the connection serializer, so fanout adds only +3.5%.
 
 更多参数见 `./target/release/rr-perf-bench --help`。压测期间的客户端重试/重定向诊断可用 `RUST_LOG=rr_client=debug` 打开。
 
@@ -187,14 +232,23 @@ rr-perf-bench --cluster-addrs ... --scenario mix \
 
 - **单机 loopback**：跨机器网络 RTT 会主导真实部署的写延迟（Raft 写通常 2-3 个 RTT）。
 - **空状态机**：无业务逻辑、无反序列化成本、无快照流量。
-- **上述 loopback 表格为内存 Raft 日志**：基线采集早于 ADR A-0016——此后 `--storage rocks` 会同时持久化 Raft 日志（`{data_dir}/raft-log/{group_id}`，见 [持久化与恢复](../architecture/durability.md)）；生产形态数字（durable log + TLS/mTLS + 负载机隔离）请用 `deploy/perf/` perf-lab 与上文 open-loop 场景；存储层开销请用 `benches/` 的 criterion 微基准测量。
+- **上述 loopback 表格为内存 Raft 日志**（`--storage mem`）：自 ADR A-0016 起 `--storage rocks` 会同时
+  持久化 Raft 日志（`{data_dir}/raft-log/{group_id}`，见 [持久化与恢复](../architecture/durability.md)），
+  因此 2026-11-04 归档的 rocks 矩阵（`raw-s2-rocks-*.json`）与 A-0016 前的同名 raw **不可直接比较**
+  （durable raft log 是新的在途开销）。生产形态数字（durable log + TLS/mTLS + 负载机隔离）请用
+  `deploy/perf/` perf-lab 与上文 open-loop 场景；存储层开销请用 `benches/` 的 criterion 微基准测量。
 - **无 Jepsen 式正确性压测**：本页只覆盖性能；一致性验证见 `tests/integration/`（含 chaos 用例）。
 
 ---
 
 - **Single-machine loopback**: cross-machine network RTT dominates real deployments (a Raft write typically costs 2-3 RTTs).
 - **Empty state machine**: no business logic, no deserialization cost, no snapshot traffic.
-- **In-memory Raft log in these tables**: the loopback baselines above predate ADR A-0016 — since then `--storage rocks` also persists the Raft log (`{data_dir}/raft-log/{group_id}`, see [Durability & Recovery](../architecture/durability.md)). For production-shape numbers (durable log + TLS/mTLS + isolated load generator) use the perf-lab in `deploy/perf/` with the open-loop scenarios above; use the criterion micro-benches in `benches/` for storage-layer numbers.
+- **In-memory Raft log in these tables** (`--storage mem`): since ADR A-0016, `--storage rocks` also persists
+  the Raft log (`{data_dir}/raft-log/{group_id}`, see [Durability & Recovery](../architecture/durability.md)),
+  so the rocks matrix archived on 2026-11-04 (`raw-s2-rocks-*.json`) is **not directly comparable** to the
+  pre-A-0016 raws of the same name (a durable raft log is new on-path cost). For production-shape numbers
+  (durable log + TLS/mTLS + isolated load generator) use the perf-lab in `deploy/perf/` with the open-loop
+  scenarios above; use the criterion micro-benches in `benches/` for storage-layer numbers.
 - **No Jepsen-style correctness testing**: this page covers performance only; correctness under faults lives in `tests/integration/` (including chaos cases).
 
 ## 贡献基准测试 / Contributing Benchmarks
