@@ -392,7 +392,8 @@ impl LazyBucket {
         if new_permits > 0 {
             let current = self.semaphore.available_permits();
             if current < self.burst {
-                self.semaphore.add_permits(new_permits.min(self.burst - current));
+                self.semaphore
+                    .add_permits(new_permits.min(self.burst - current));
             }
         }
         match self.semaphore.try_acquire() {
@@ -498,7 +499,10 @@ impl PerCallerLimiterMap {
         if write_guard.len() >= MAX_PER_CALLER_ENTRIES {
             // Edge-triggered warn: the flood that fills the map must not
             // also fill the logs.
-            if !self.full_warned.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if !self
+                .full_warned
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
                 tracing::warn!(
                     target: AUDIT_TARGET,
                     op = "rate_limit",

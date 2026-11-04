@@ -210,7 +210,12 @@ async fn evaluate_and_promote(
     let promotable = plan_promotions(
         group_id,
         &learner_ids,
-        |nid| replication.get(nid).and_then(|opt| opt.as_ref()).map(|l| l.index),
+        |nid| {
+            replication
+                .get(nid)
+                .and_then(|opt| opt.as_ref())
+                .map(|l| l.index)
+        },
         leader_index,
         config,
         stable_ticks,
@@ -254,7 +259,10 @@ async fn evaluate_and_promote(
         "group_id" => group_id.to_string()
     )
     .increment(promotable.len() as u64);
-    match mgr.promote_learners(group_id, promotable.iter().copied().collect()).await {
+    match mgr
+        .promote_learners(group_id, promotable.iter().copied().collect())
+        .await
+    {
         Ok(()) => {
             info!(
                 target: AUDIT_TARGET,

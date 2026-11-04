@@ -165,9 +165,8 @@ mod tests {
         let pool = ChannelPool::new();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let acceptor = tokio::spawn(async move {
-            while let Ok((_sock, _)) = listener.accept().await {}
-        });
+        let acceptor =
+            tokio::spawn(async move { while let Ok((_sock, _)) = listener.accept().await {} });
 
         pool.get_or_connect(7, &addr).await.unwrap();
         assert_eq!(pool.len(), 1);
@@ -197,9 +196,8 @@ mod tests {
         // had the pool dialed the stale address it would fail fast.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let new_addr = listener.local_addr().unwrap().to_string();
-        let acceptor = tokio::spawn(async move {
-            while let Ok((_sock, _)) = listener.accept().await {}
-        });
+        let acceptor =
+            tokio::spawn(async move { while let Ok((_sock, _)) = listener.accept().await {} });
 
         pool.get_or_connect(7, &new_addr)
             .await

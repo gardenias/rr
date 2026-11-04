@@ -17,10 +17,8 @@ use crate::error::CodecError;
 /// wire paths decode through the bounded helpers in
 /// [`crate::bounded_decode`] instead; downstream users handling untrusted
 /// input should do the same.
-#[deprecated(
-    note = "unbounded bincode decode on untrusted bytes is an OOM risk; \
-            use rr_core::bounded_decode or the frame codecs (FramedEntry/FramedSnapshot) instead"
-)]
+#[deprecated(note = "unbounded bincode decode on untrusted bytes is an OOM risk; \
+            use rr_core::bounded_decode or the frame codecs (FramedEntry/FramedSnapshot) instead")]
 pub trait Codec: Send + Sync {
     /// Encode a value to bytes.
     fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CodecError>;
@@ -29,10 +27,8 @@ pub trait Codec: Send + Sync {
 }
 
 /// Default codec using bincode v2 for binary serialization.
-#[deprecated(
-    note = "unbounded bincode decode on untrusted bytes is an OOM risk; \
-            use rr_core::bounded_decode or the frame codecs (FramedEntry/FramedSnapshot) instead"
-)]
+#[deprecated(note = "unbounded bincode decode on untrusted bytes is an OOM risk; \
+            use rr_core::bounded_decode or the frame codecs (FramedEntry/FramedSnapshot) instead")]
 pub struct BincodeCodec;
 
 // Zero workspace consumers of these items remain (verified by workspace-wide

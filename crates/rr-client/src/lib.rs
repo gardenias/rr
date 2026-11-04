@@ -591,7 +591,8 @@ impl RrClient {
                             self.evict_channel(addr).await;
                         }
                         if attempt + 1 < max_attempts {
-                            let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
+                            let delay_ms =
+                                backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
                     }
@@ -692,7 +693,8 @@ impl RrClient {
                             self.evict_channel(addr).await;
                         }
                         if attempt + 1 < max_attempts {
-                            let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
+                            let delay_ms =
+                                backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
                             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         }
                     }
@@ -855,7 +857,8 @@ impl RrClient {
                             self.remove_cached_leader(group_id).await;
                             last_error = Some(RrError::Network(NetworkError::Timeout));
                             if attempt + 1 < max_attempts {
-                                let delay_ms = backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
+                                let delay_ms =
+                                    backoff_delay_ms(self.retry_config.retry_delay_ms, attempt);
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
                                     .await;
                             }

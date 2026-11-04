@@ -164,7 +164,10 @@ mod tests {
     #[test]
     fn into_response_pending_maps_to_empty_bytes() {
         let bytes = DeferredApply::Pending { correlation_id: 1 }.into_response();
-        assert!(bytes.is_empty(), "Pending must defensively map to empty bytes");
+        assert!(
+            bytes.is_empty(),
+            "Pending must defensively map to empty bytes"
+        );
     }
 
     // CompletedResponse crosses the adapter boundary as plain data; pin the
@@ -277,7 +280,11 @@ mod tests {
             _: metrics::SharedString,
         ) {
         }
-        fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
             self.seen_counter_keys
                 .lock()
                 .unwrap()

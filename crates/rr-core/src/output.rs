@@ -152,7 +152,10 @@ mod tests {
             },
             b"payload".to_vec(),
         );
-        assert_eq!(out.seq, 0, "framework assigns seq; user-built outputs start at 0");
+        assert_eq!(
+            out.seq, 0,
+            "framework assigns seq; user-built outputs start at 0"
+        );
         assert_eq!(out.idempotency_key, "req-1:0");
         assert_eq!(out.payload, b"payload".to_vec());
         match &out.target {
@@ -244,8 +247,7 @@ mod tests {
                 target,
                 payload: b"payload".to_vec(),
             };
-            let encoded =
-                bincode::serde::encode_to_vec(&out, bincode::config::standard()).unwrap();
+            let encoded = bincode::serde::encode_to_vec(&out, bincode::config::standard()).unwrap();
             let (decoded, n): (Output, _) =
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
             assert_eq!(n, encoded.len());
@@ -257,10 +259,7 @@ mod tests {
             assert_eq!(decoded.seq, out.seq);
             assert_eq!(decoded.idempotency_key, out.idempotency_key);
             assert_eq!(decoded.payload, out.payload);
-            assert_eq!(
-                format!("{:?}", decoded.target),
-                format!("{:?}", out.target)
-            );
+            assert_eq!(format!("{:?}", decoded.target), format!("{:?}", out.target));
         }
     }
 

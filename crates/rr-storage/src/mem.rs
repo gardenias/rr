@@ -116,7 +116,10 @@ impl StorageEngine for MemStorage {
         for op in ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    guard.get_mut(&cf).expect("cf validated above").insert(key, value);
+                    guard
+                        .get_mut(&cf)
+                        .expect("cf validated above")
+                        .insert(key, value);
                 }
                 BatchOp::Delete { cf, key } => {
                     guard.get_mut(&cf).expect("cf validated above").remove(&key);

@@ -309,8 +309,8 @@ async fn wait_for_configuration_settled(mgr: &RaftGroupManager) -> Result<()> {
             .membership()
             .get_joint_config()
             .len();
-        let membership_committed = metrics.membership_config.as_ref()
-            == metrics.committed_membership_config.as_ref();
+        let membership_committed =
+            metrics.membership_config.as_ref() == metrics.committed_membership_config.as_ref();
         let logs_committed = metrics
             .last_log_index
             .is_none_or(|last| metrics.local_committed.index() == Some(last));
@@ -794,9 +794,7 @@ async fn test_force_audit_waits_for_authoritative_locked_decision() {
     wait_for_membership(mgr.as_ref(), remaining, BTreeSet::from([4]))
         .await
         .unwrap();
-    wait_for_configuration_settled(mgr.as_ref())
-        .await
-        .unwrap();
+    wait_for_configuration_settled(mgr.as_ref()).await.unwrap();
 
     let buf = MembershipAuditBuf::default();
     let subscriber = tracing_subscriber::fmt()

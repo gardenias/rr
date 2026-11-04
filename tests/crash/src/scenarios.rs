@@ -521,7 +521,9 @@ mod rocks_scenarios {
             Some(target),
             None,
             None,
-            Some(format!("warmup_ms={warmup_ms} dead_window_ms={dead_window_ms}")),
+            Some(format!(
+                "warmup_ms={warmup_ms} dead_window_ms={dead_window_ms}"
+            )),
         )?;
         tokio::time::sleep(Duration::from_millis(warmup_ms)).await;
 

@@ -775,10 +775,7 @@ impl EtcdConfigProvider {
 
         // The scan's store revision: events up to this revision are covered
         // by the returned table, so a watch resumed from here loses nothing.
-        let scan_revision = response
-            .header()
-            .map(|h| h.revision())
-            .unwrap_or(0);
+        let scan_revision = response.header().map(|h| h.revision()).unwrap_or(0);
 
         let mut max_mod_revision: i64 = 0;
         let mut bad_keys: u64 = 0;
@@ -1694,7 +1691,8 @@ mod tests {
         // Scan + stage are done and the lock released: the rescan path must
         // stay acquirable while dispatch is stalled on the slow consumer.
         // (Pre-fix this timed out — dispatch sent while holding rescan_lock.)
-        let acquired = tokio::time::timeout(Duration::from_millis(200), rescan_lock_probe.lock()).await;
+        let acquired =
+            tokio::time::timeout(Duration::from_millis(200), rescan_lock_probe.lock()).await;
         assert!(
             acquired.is_ok(),
             "rescan lock must stay free while resync dispatch is stalled"

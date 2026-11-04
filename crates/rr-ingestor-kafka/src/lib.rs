@@ -100,8 +100,9 @@ pub enum KafkaOffsetError {
 ///
 /// [`IdempotencyKey::request_id`]: rr_core::idempotency::IdempotencyKey::request_id
 pub fn kafka_offset_to_request_id(bytes: &[u8]) -> Result<u64, KafkaOffsetError> {
-    let (i, consumed): (i64, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-        .map_err(|e| KafkaOffsetError::DecodeFailed(e.to_string()))?;
+    let (i, consumed): (i64, _) =
+        bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+            .map_err(|e| KafkaOffsetError::DecodeFailed(e.to_string()))?;
     if consumed != bytes.len() {
         return Err(KafkaOffsetError::DecodeFailed(format!(
             "trailing bytes after offset: {} bytes consumed of {}",
