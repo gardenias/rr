@@ -158,7 +158,7 @@ TOML / CLI 收到旧字符串（`"balanced"` / `"fast"`）现在会**硬报错**
 `ReplicatedOnly` 的故障覆盖边界：进程崩溃与单机宕机/掉电可由 quorum 复制恢复
 （committed 日志不丢）；但多数派同时掉电（机房断电、集体重启）时，未 fsync 的
 已 ACK 写可能在多数派上同时丢失——即静默丢失已提交数据（INV-1）。生产建议保持
-`Strict`：并发下它与 `ReplicatedOnly` 的吞吐差仅 ~5%（2026-11-04 S2 实测
+`Strict`：并发下它与 `ReplicatedOnly` 的吞吐差仅 ~5%（2026-11-04 S2 k=500 实测
 24.9k vs 26.1k TPS），window=0 默认下串行写也已与 mem 路径同级。
 
 ---
@@ -179,9 +179,8 @@ Failure semantics of `ReplicatedOnly`: process crashes and single-node outages
 committed entries survive. Correlated power loss on a MAJORITY of nodes,
 however, can lose recently ACKed writes on every replica at once: silent
 committed-data loss (INV-1). Keep `Strict` in production — its concurrent
-throughput is within ~5% of `ReplicatedOnly` (24.9k vs 26.1k TPS, S2
-2026-11-04), and serial writes match the in-memory path under the zero-window
-default.
+throughput is within ~5% of `ReplicatedOnly` (S2 k=500, 2026-11-04: 24.9k vs
+26.1k TPS), and serial writes match the in-memory path under the zero-window default.
 
 `RocksStorage::open()` 在 policy 不是 `Strict` 时也会在启动日志里发一条
 `tracing::warn!`，提醒 ops 这个节点违反了 Raft 的持久性契约。

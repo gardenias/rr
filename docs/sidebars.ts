@@ -88,6 +88,7 @@ const sidebars: SidebarsConfig = {
       label: 'Deployment',
       items: [
         'deployment/deployment',
+        'deployment/capacity-planning',
         'deployment/tls',
         'deployment/audit-log',
         'deployment/kubernetes',

@@ -258,3 +258,9 @@ rr-perf-bench --cluster-addrs ... --scenario mix \
 ---
 
 If you run benchmarks, please open a PR. Include hardware specs, OS, Rust version, and the full command line (every table on this page is reproducible with the commands above).
+
+---
+
+**按目标 TPS 选部署拓扑与客户端开关，见 [容量规划与性能部署](../deployment/capacity-planning.md)。**
+For deployment topologies and client knobs by target TPS, see
+[Capacity Planning & Performance Deployment](../deployment/capacity-planning.md).
