@@ -30,8 +30,13 @@
 //!
 //! - After receiving the first item, the worker does a **non-blocking drain**
 //!   of any already-queued items (zero extra latency for high throughput).
-//! - If the non-blocking drain collected only that one item, it waits up to
-//!   `window` for more before flushing (bounded latency for low throughput).
+//! - If the non-blocking drain collected only that one item and `window` is
+//!   nonzero, it waits up to `window` for more before flushing (bounded
+//!   latency for low throughput); a second submission arriving during that
+//!   wait triggers an immediate flush instead of waiting out the deadline.
+//!   The default is `Duration::ZERO` — no timed wait, since the timed wait
+//!   costs ~0.5-1 ms of timer granularity while phase 2 already coalesces
+//!   queued submissions under load.
 //! - Either `max_entries` being reached OR the deadline expiring triggers an
 //!   early flush.
 //!
@@ -92,8 +97,20 @@ use crate::type_config::RrTypeConfig;
 pub struct IoBatcherConfig {
     /// How long to wait for additional entries after the first one arrives.
     ///
-    /// Set to `Duration::ZERO` to flush every single item individually (i.e.,
-    /// disables group commit while keeping the async-append path intact).
+    /// Defaults to `Duration::ZERO` (no timed wait): the non-blocking drain
+    /// already coalesces everything queued under concurrent load, and a timed
+    /// wait costs ~0.5-1 ms of timer granularity on the tokio scheduler —
+    /// punishing serial writers without buying meaningful batching (Kafka's
+    /// `linger.ms=0` rationale; measured 2026-11-14: 443 TPS at 500 µs →
+    /// 4831 TPS at zero, S2 rocks-strict +12-87% across k=1..500).
+    ///
+    /// A nonzero value is an explicit latency/throughput tuning knob for slow
+    /// storage: a single-submission batch then waits out the window, and the
+    /// wait ends early as soon as a second submission arrives.
+    ///
+    /// This is only the batching-window knob — it never disables the async
+    /// append path, and phase-2's non-blocking drain always coalesces queued
+    /// submissions regardless of this value.
     pub window: Duration,
 
     /// Flush the batch early once this many entries have accumulated.
@@ -127,7 +144,7 @@ pub struct IoBatcherConfig {
 impl Default for IoBatcherConfig {
     fn default() -> Self {
         Self {
-            window: Duration::from_micros(500),
+            window: Duration::ZERO,
             max_entries: 256,
             close_timeout: Duration::from_secs(30),
             max_inflight_bytes: 64 * 1024 * 1024,
@@ -609,7 +626,16 @@ async fn batcher_worker(
                     break;
                 }
                 match tokio::time::timeout(remaining, rx.recv()).await {
-                    Ok(Some(item)) => accumulate(item, &mut acc),
+                    Ok(Some(item)) => {
+                        accumulate(item, &mut acc);
+                        // A second submission means concurrent proposals are
+                        // in flight: flush now instead of waiting out the
+                        // remaining window (they coalesce into this batch
+                        // either way, so waiting longer buys nothing).
+                        if acc.submissions > 1 {
+                            break;
+                        }
+                    }
                     Ok(None) => break, // channel closed
                     Err(_) => break,   // timeout
                 }
@@ -711,6 +737,29 @@ mod tests {
         );
         first.await.unwrap().unwrap();
         second.await.unwrap().unwrap();
+        batcher.close().await.unwrap();
+    }
+
+    /// A second submission arriving during the timed drain must flush the
+    /// batch immediately instead of waiting out the remaining window.
+    #[tokio::test]
+    async fn second_submission_flushes_before_window_expires() {
+        let (storage, _tmp) = open_storage();
+        let config = IoBatcherConfig::new(Duration::from_millis(500), 256);
+        let batcher = IoBatcher::new(storage, config);
+
+        let b1 = batcher.clone();
+        let first = tokio::spawn(async move { b1.submit(put_op(1)).await });
+        // Let the worker enter the timed drain with the single submission.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let start = std::time::Instant::now();
+        batcher.submit(put_op(2)).await.unwrap();
+        first.await.unwrap().unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "second submission must flush early, not wait out the 500ms window (took {elapsed:?})"
+        );
         batcher.close().await.unwrap();
     }
 

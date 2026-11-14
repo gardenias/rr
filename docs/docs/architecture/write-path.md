@@ -140,7 +140,7 @@ channel bound alone is payload-blind). `crates/rr-raft/src/io_batcher.rs`.
 
 
 Phase 2: try_recv() 零等待 drain
-Phase 3: 500µs 窗口（低吞吐时）
+Phase 3: 可选 window（默认 0，不等；第二提交提前冲刷）
 Phase 4: 单次 write_batch()
 Phase 5: 所有 callback 统一触发
 → N 个提案共享 1 次 fdatasync

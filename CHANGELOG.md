@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — 2026-11-14 IoBatcher serial-write window elimination
+
+- **The group-commit batcher no longer waits a timed window by default**
+  (`crates/rr-raft/src/io_batcher.rs`): `IoBatcherConfig::default().window`
+  is now `Duration::ZERO`. The 500µs default charged every single-submission
+  batch the full window (and tokio's ~0.5-1ms timer granularity made even a
+  10µs window expensive), which dominated serial-write latency on the
+  post-A-0016 durable raft-log path. Measured on this branch: S1
+  rocks-strict serial writes **443 → 4831 TPS** (p50 2.2ms → 198µs,
+  matching the in-memory path); S2 rocks-strict improves at every level
+  (k=100 15.7k → 29.4k, k=200 21.0k → 30.9k ≈ mem, k=500 24.9k → 27.8k).
+  The non-blocking drain still coalesces queued submissions under load
+  (Kafka `linger.ms=0` rationale). A nonzero `window` remains an explicit
+  tuning knob, and the timed wait now also ends early when a second
+  submission arrives instead of waiting out the deadline. Root-cause and
+  A/B evidence: 2026-11-14 investigation; storage-engines.md documents the
+  replicated_only failure-semantics boundary (majority power loss can drop
+  recently ACKed writes; production should keep Strict — the concurrency
+  cost is only ~5%).
+
 ### Added — 2026-11-04 local quality gates
 
 - **`just` quality-gate recipes + launchd scheduling** — local replacement for

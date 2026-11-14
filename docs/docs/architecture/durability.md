@@ -37,7 +37,7 @@ RocksDB 模式下，日志写入经过**组提交**（group commit）管线（`c
 ```text
 RaftLogStorage::append(entries, IOFlushed)
     → 立即返回（pipeline），操作进入 IoBatcher channel
-    → worker 聚批：首个条目后非阻塞排空；不足则等待 window（默认 500µs）
+    → worker 聚批：首个条目后非阻塞排空；不足且 window 非零时等待 window（默认 0，不等；第二个提交到达会提前冲刷）
     → 达到 max_entries（默认 256）或窗口到期 → 单次 write_batch()
     → Strict 策略下 write_batch 带 set_sync(true) —— 一次 fsync 覆盖整批
     → 逐个点火每个 append 的 IOFlushed 回调（恰好一次）
@@ -52,7 +52,8 @@ In rocks mode, log appends flow through a **group-commit** pipeline (`crates/rr-
 RaftLogStorage::append(entries, IOFlushed)
     → returns immediately (pipelined); op enters the IoBatcher channel
     → worker accumulates: non-blocking drain after the first item, else waits
-      up to `window` (default 500µs)
+      up to `window` when nonzero (default 0 — no wait; a second submission
+      arriving during the wait flushes early)
     → flush on `max_entries` (default 256) or window expiry → one write_batch()
     → under Strict the write_batch carries set_sync(true) — one fsync per batch
     → each append's IOFlushed callback fires exactly once
