@@ -4,9 +4,9 @@ sidebar_position: 10
 
 # C4 架构图 / C4 Architecture Diagrams
 
-本目录用 [C4 模型](https://c4model.com/)分层次描述 rr：系统上下文、容器、组件，以及部署和动态视图。
+本目录用 [C4 模型](https://c4model.com/)分层次描述 Rr：系统上下文、容器、组件，以及部署和动态视图。
 
-This directory uses the [C4 Model](https://c4model.com/) to describe rr through context, container, component,
+This directory uses the [C4 Model](https://c4model.com/) to describe Rr through context, container, component,
 deployment, and dynamic views.
 
 ## 阅读顺序 / Reading Order
@@ -21,7 +21,7 @@ deployment, and dynamic views.
 
 ### 第 1 级：上下文 / Level 1: Context
 
-- [**context.md**](./context.md) — 系统上下文：rr 的边界、用户和外部系统。<br />System context: rr's boundary, users, and external systems.
+- [**context.md**](./context.md) — 系统上下文：Rr 的边界、用户和外部系统。<br />System context: Rr's boundary, users, and external systems.
 
 ### 第 2 级：容器 / Level 2: Containers
 

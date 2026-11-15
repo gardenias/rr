@@ -40,11 +40,10 @@ export default function LanguageModeSwitcher(): ReactNode {
       onClick={cycleMode}
       aria-label={label}
       title={label}>
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" />
-        <path d="M3 12h18M12 3c2.2 2.45 3.3 5.45 3.3 9S14.2 18.55 12 21c-2.2-2.45-3.3-5.45-3.3-9S9.8 5.45 12 3Z" />
-      </svg>
-      <span className="language-mode-switcher__label">{labels[mode]}</span>
+      <span className="language-mode-switcher__languages" data-mode={mode} aria-hidden="true">
+        <span className="language-mode-switcher__chinese">文</span>
+        <span className="language-mode-switcher__english">En</span>
+      </span>
       <svg className="language-mode-switcher__cycle" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
         <path d="M15.5 7A6 6 0 0 0 5 5.5L3 7.5M3 3.5v4h4M4.5 13A6 6 0 0 0 15 14.5l2-2M17 16.5v-4h-4" />
       </svg>

@@ -1,6 +1,6 @@
 ---
 title: Kafka 输入 / Kafka Input (CommandIngestor)
-description: Drive an rr Raft group from a Kafka topic with leader-exclusive consumption and exactly-once apply
+description: Drive an Rr Raft group from a Kafka topic with leader-exclusive consumption and exactly-once apply
 ---
 
 # Kafka 输入 / Kafka Input

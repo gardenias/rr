@@ -156,9 +156,9 @@ When attached through `RaftGroupManager::attach_ingestor_with_auto_idempotency` 
 
 ### 输出 Outbox / Output Outbox
 
-`Service::handle_with_outputs`（`crates/rr-core/src/service.rs:152`）让 apply 同时返回响应和 `Output` 列表；目标可为另一 rr 组的 `RaftWrite` 或 Kafka 的 `KafkaPublish`。框架为每个 output 分配单调 `seq` 和幂等键。leader-only output runner（`crates/rr-raft/src/output_runner.rs`）负责投递，失败按指数退避无限重试，不静默丢弃；`sent_watermark` 仅在确认发送后推进。outbox 随快照复制，新 leader 从 watermark 续发。
+`Service::handle_with_outputs`（`crates/rr-core/src/service.rs:152`）让 apply 同时返回响应和 `Output` 列表；目标可为另一 Rr 组的 `RaftWrite` 或 Kafka 的 `KafkaPublish`。框架为每个 output 分配单调 `seq` 和幂等键。leader-only output runner（`crates/rr-raft/src/output_runner.rs`）负责投递，失败按指数退避无限重试，不静默丢弃；`sent_watermark` 仅在确认发送后推进。outbox 随快照复制，新 leader 从 watermark 续发。
 
-`Service::handle_with_outputs` (`crates/rr-core/src/service.rs:152`) lets apply return both a response and `Output`s targeting another rr group (`RaftWrite`) or Kafka (`KafkaPublish`). The framework assigns each output a monotonic `seq` and idempotency key. A leader-only output runner (`crates/rr-raft/src/output_runner.rs`) retries failures forever with exponential backoff and never silently drops them; `sent_watermark` advances only after confirmed delivery. The outbox replicates in snapshots, so a new leader resumes from the watermark.
+`Service::handle_with_outputs` (`crates/rr-core/src/service.rs:152`) lets apply return both a response and `Output`s targeting another Rr group (`RaftWrite`) or Kafka (`KafkaPublish`). The framework assigns each output a monotonic `seq` and idempotency key. A leader-only output runner (`crates/rr-raft/src/output_runner.rs`) retries failures forever with exponential backoff and never silently drops them; `sent_watermark` advances only after confirmed delivery. The outbox replicates in snapshots, so a new leader resumes from the watermark.
 
 ```plantuml
 @startuml

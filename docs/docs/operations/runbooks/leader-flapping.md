@@ -112,10 +112,10 @@ information back to it.
 
 ### 时钟与调度 / Clock and Scheduling
 
-rr 选举使用 monotonic `Instant`，wall-clock 跳变不会直接改变超时。但时钟修正可能触发外部调度器或监控行为，仍需检查
+Rr 选举使用 monotonic `Instant`，wall-clock 跳变不会直接改变超时。但时钟修正可能触发外部调度器或监控行为，仍需检查
 NTP/chrony 和进程重启记录。
 
-rr elections use monotonic `Instant`, so wall-clock jumps do not directly change timeouts. Clock corrections can still
+Rr elections use monotonic `Instant`, so wall-clock jumps do not directly change timeouts. Clock corrections can still
 affect external schedulers or monitoring, so inspect NTP/chrony and process-restart records.
 
 ## 恢复 / Recovery

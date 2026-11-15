@@ -2,11 +2,11 @@
 
 ## 简介 / Introduction
 
-基于 `rr` 分布式多 Raft 共识框架的分布式计数器示例。展示如何使用 `Service` trait 实现一个支持原子递增、读取和重置操作的命名计数器服务。所有状态变更通过 Raft 共识协议复制，保证强一致性。
+基于 Rr 分布式多 Raft 共识框架的分布式计数器示例。展示如何使用 `Service` trait 实现一个支持原子递增、读取和重置操作的命名计数器服务。所有状态变更通过 Raft 共识协议复制，保证强一致性。
 
 ---
 
-A distributed counter example built on the `rr` multi-Raft consensus framework. Demonstrates how to implement named counters with atomic `Increment`, `Get`, and `Reset` operations using the `Service` trait. All state mutations are replicated through Raft consensus for strong consistency.
+A distributed counter example built on the Rr multi-Raft consensus framework. Demonstrates how to implement named counters with atomic `Increment`, `Get`, and `Reset` operations using the `Service` trait. All state mutations are replicated through Raft consensus for strong consistency.
 
 ## 功能 / Features
 

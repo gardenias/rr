@@ -1,6 +1,6 @@
 # rr-client-java
 
-Async Java SDK for the [rr distributed Multi-Raft consensus framework](https://github.com/gardenias/rr).
+Async Java SDK for the [Rr distributed Multi-Raft consensus framework](https://github.com/gardenias/rr).
 
 Features:
 

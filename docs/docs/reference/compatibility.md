@@ -4,13 +4,13 @@ sidebar_position: 10
 
 # 兼容性与 API 稳定性 / Compatibility & API Stability
 
-本文声明 rr 的版本兼容承诺，用于选择版本和规划升级。
-This document states rr's compatibility commitments for choosing versions and planning upgrades.
+本文声明 Rr 的版本兼容承诺，用于选择版本和规划升级。
+This document states Rr's compatibility commitments for choosing versions and planning upgrades.
 
 ## 版本号方案 / Versioning Scheme
 
-rr 遵循 [Semantic Versioning 2.0.0](https://semver.org/)：`MAJOR.MINOR.PATCH`。
-rr follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`.
+Rr 遵循 [Semantic Versioning 2.0.0](https://semver.org/)：`MAJOR.MINOR.PATCH`。
+Rr follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
 | 版本位 / Component | 何时递增 / When it bumps |
 | :--- | :--- |
@@ -22,7 +22,7 @@ rr follows [Semantic Versioning 2.0.0](https://semver.org/): `MAJOR.MINOR.PATCH`
 
 `1.0.0` 前采用 Cargo 惯例：`0.x.y` 中 `x` 递增可包含破坏性变更。因此 `0.2.0 → 0.3.0` 可破坏
 API，`0.2.0 → 0.2.1` 不可。
-Before `1.0.0`, rr follows Cargo convention: incrementing `x` in `0.x.y` may break APIs. Thus
+Before `1.0.0`, Rr follows Cargo convention: incrementing `x` in `0.x.y` may break APIs. Thus
 `0.2.0 → 0.3.0` may break APIs, while `0.2.0 → 0.2.1` may not.
 
 ## 兼容性层次 / Compatibility Tiers

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the rr distributed multi-Raft consensus framework will be documented in this file.
+All notable changes to the Rr distributed multi-Raft consensus framework will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -215,7 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Genesis pods concurrently. The Helm formation job is an ordinary resource rendered only for `adopt`, so
   `--wait` can complete convergence; revision-specific names avoid immutable-template upgrade conflicts, and
   fresh Genesis does not run it. Helm requires an explicit formation-capable
-  image tag and raw manifests carry a mandatory override placeholder because rr 0.2.0 rejects the new fields.
+  image tag and raw manifests carry a mandatory override placeholder because Rr 0.2.0 rejects the new fields.
   P1 documents no dynamic expansion, replica replacement, or resharding, and SeedSpec is not current membership.
 
 ### Added — 2026-10-22 INV-4 outbox failover e2e
@@ -1148,7 +1148,7 @@ and REPL/admin-port notes.
   reports `Notification::LocalIO` at submit time — which `handle_local_io`
   treats as *flushed* (`log_progress.try_flush` + leader
   `update_local_progress`). Harmless with synchronous storage
-  (accepted == durable), but under rr's async append + pending overlay
+  (accepted == durable), but under Rr's async append + pending overlay
   (A-0015: submitted ⇒ visible) a node elected with an unflushed backlog
   had its `flushed()` cursor inflated over entries no fsync had covered:
   the new leader self-matched its unflushed tail, so a quorum could commit
@@ -1572,7 +1572,7 @@ narrative, breaking-change list, and upgrade guide. Compare view:
     oracle(无丢失 / 无 panic / lag 60s 收敛)+ 报告入 `docs/perf/soak/`。
   - `.github/workflows/soak-nightly.yml`:每日 04:17 UTC 2h smoke,信息性;
     24h release 级经 `workflow_dispatch`,0.3.0 起进入 release checklist。
-- **`formal/tla/` TLA+ 形式化(R-2)**:rr 自有扩展协议的 4 份 spec + TLC 小模型实测:
+- **`formal/tla/` TLA+ 形式化(R-2)**:Rr 自有扩展协议的 4 份 spec + TLC 小模型实测:
   - `MembershipGuard.tla`(INV-7/A-0012,11,545 态零反例):并发 change-membership
     任意交错下 n→0 无条件拒绝、低于 MinVoters 必经 force+先审计、审计完备。
   - `OffsetExactlyOnce.tla`(INV-3,558 态零反例):exactly-once apply、缓存响应归属

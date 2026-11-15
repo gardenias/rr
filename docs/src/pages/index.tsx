@@ -286,8 +286,8 @@ export default function Home(): ReactNode {
   const mode = useLanguageMode();
   const title = text('面向 Rust 的生产级 Multi-Raft 框架', 'Production-grade Multi-Raft for Rust');
   const description = text(
-    'rr 是一个用于构建强一致、水平分片、生产可用分布式系统的 Rust 框架。',
-    'rr is a Rust framework for building strongly consistent, horizontally sharded, production-ready distributed systems.',
+    'Rr 是一个用于构建强一致、水平分片、生产可用分布式系统的 Rust 框架。',
+    'Rr is a Rust framework for building strongly consistent, horizontally sharded, production-ready distributed systems.',
   );
 
   return (
@@ -367,8 +367,8 @@ export default function Home(): ReactNode {
               <h2><Bilingual zh="专注业务逻辑。" en="Your business logic." /><br /><Bilingual zh="分布式底座交给我们。" en="Our distributed backbone." /></h2>
               <p>
                 <Bilingual
-                  zh="无需再手工拼装共识、网络、路由与运维能力。rr 为每个关注点提供清晰边界和经过验证的集成路径。"
-                  en="Stop stitching consensus, networking, routing, and operations together by hand. rr gives each concern a clear boundary and a tested integration path."
+                  zh="无需再手工拼装共识、网络、路由与运维能力。Rr 为每个关注点提供清晰边界和经过验证的集成路径。"
+                  en="Stop stitching consensus, networking, routing, and operations together by hand. Rr gives each concern a clear boundary and a tested integration path."
                 />
               </p>
               <Link to="/docs/architecture/c4" className={styles.textLink}>

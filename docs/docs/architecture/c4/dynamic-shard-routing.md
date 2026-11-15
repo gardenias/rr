@@ -115,10 +115,10 @@ poll it for leaders.
 
 ## 由应用计算 Partition ID / Application-computed Partition IDs
 
-分区策略属于应用语义，rr 不猜测按用户、地域还是时间分片。应用必须保持计算稳定，否则相同 key 可能映射
+分区策略属于应用语义，Rr 不猜测按用户、地域还是时间分片。应用必须保持计算稳定，否则相同 key 可能映射
 到不同 partition。
 
-Partitioning is application semantics: rr does not choose between user, geography, time, or another key. The
+Partitioning is application semantics: Rr does not choose between user, geography, time, or another key. The
 application must keep the computation stable, or the same key can map to different partitions.
 
 ```rust

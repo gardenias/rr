@@ -1,6 +1,6 @@
 # rr-client
 
-Async Rust client SDK for the [rr distributed Multi-Raft consensus framework](https://github.com/gardenias/rr).
+Async Rust client SDK for the [Rr distributed Multi-Raft consensus framework](https://github.com/gardenias/rr).
 
 Features:
 

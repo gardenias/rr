@@ -1,7 +1,7 @@
-# formal/tla — rr 自有协议的 TLA+ 形式化(R-2)
+# formal/tla — Rr 自有协议的 TLA+ 形式化(R-2)
 
 > 工作项:`.sisyphus/plans/rr-reliability-program.md` R-2。
-> 范围:**只验证 rr 在 openraft 之上自建的扩展协议**;openraft 核心(leader 选举、
+> 范围:**只验证 Rr 在 openraft 之上自建的扩展协议**;openraft 核心(leader 选举、
 > 日志复制、joint consensus)属上游已验证范围,不重复。
 
 ## 目录

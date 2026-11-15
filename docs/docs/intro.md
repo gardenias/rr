@@ -17,9 +17,9 @@ Rr is a distributed multi-Raft consensus framework for Rust. Embed it in your ow
 shard routing, clients, and operational tooling. It is not a turnkey database, and the stock `rr-server` includes
 only an `EchoStateMachine` for smoke tests.
 
-工作区包含 11 个 rr crate，按职责可分为：
+工作区包含 11 个 Rr crate，按职责可分为：
 
-The workspace contains 11 rr crates, grouped here by responsibility:
+The workspace contains 11 Rr crates, grouped here by responsibility:
 
 - `rr-core`、`rr-raft`、`rr-storage`：核心类型、Raft 协议和存储抽象；默认使用内存存储，`rocks` feature
   启用 RocksDB。<br />

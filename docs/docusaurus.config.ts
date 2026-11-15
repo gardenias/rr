@@ -108,7 +108,7 @@ const config: Config = {
           href: 'https://github.com/rr-framework/rr',
           position: 'right',
           className: 'header-github-link',
-          'aria-label': 'rr on GitHub',
+          'aria-label': 'Rr on GitHub',
         },
       ],
     },

@@ -5,11 +5,11 @@ sidebar_position: 8
 # 设计决策记录（ADR 索引） / Design Decisions (ADR Index)
 
 :::info 文档性质 / About This Page
-rr 的架构决策以 **ADR A-0001 … A-0019** 编号，代码注释通过 `ADR A-` 引用，可用
+Rr 的架构决策以 **ADR A-0001 … A-0019** 编号，代码注释通过 `ADR A-` 引用，可用
 `grep -rn "ADR A-" crates/` 查找。完整 ADR 位于 `.sisyphus/adr/`，不由 Docusaurus 发布。
 本页提炼代码引用与 ADR；如与代码注释不一致，以代码注释为准。表中列出决策的代码或设计锚点。
 
-rr numbers architecture decisions **ADR A-0001 … A-0019** and references them from code comments as
+Rr numbers architecture decisions **ADR A-0001 … A-0019** and references them from code comments as
 `ADR A-`; locate them with `grep -rn "ADR A-" crates/`. Full ADRs live in `.sisyphus/adr/` and are not
 published by Docusaurus. This page distils the code references and ADRs; code comments win if they disagree.
 The table lists each decision's code or design anchor.

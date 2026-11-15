@@ -10,9 +10,9 @@ sidebar_position: 6
 - [**生产部署端口** / **Production port layout**](./c4/deployment.md)
 :::
 
-rr 使用 gRPC 承载节点间 Raft 通信和客户端请求，并通过连接池复用通道。
+Rr 使用 gRPC 承载节点间 Raft 通信和客户端请求，并通过连接池复用通道。
 
-rr uses gRPC for inter-node Raft traffic and client requests, with pooled channels reused across calls.
+Rr uses gRPC for inter-node Raft traffic and client requests, with pooled channels reused across calls.
 
 ## gRPC 传输层 / gRPC Transport
 
@@ -31,7 +31,7 @@ The network layer is built on `tonic` and `prost`.
 @startuml
 !include <C4/C4_Component.puml>
 
-title Component Diagram - rr Networking Layer
+title Component Diagram - Rr Networking Layer
 
 Container_Boundary(client_side, "Client Side") {
   Component(rr_client, "RrClient", "rr-client", "Client SDK")

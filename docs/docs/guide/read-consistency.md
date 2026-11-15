@@ -4,8 +4,8 @@ sidebar_position: 7
 
 # 读一致性模型 / Read Consistency Model
 
-rr 将写、本地读和线性一致读定义为三个独立 gRPC 方法，而不是同一 RPC 的开关。
-rr defines writes, local reads, and linearizable reads as three separate gRPC methods rather than a flag on one RPC.
+Rr 将写、本地读和线性一致读定义为三个独立 gRPC 方法，而不是同一 RPC 的开关。
+Rr defines writes, local reads, and linearizable reads as three separate gRPC methods rather than a flag on one RPC.
 
 ## 请求路径对比 / Request Paths
 

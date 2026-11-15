@@ -89,10 +89,10 @@ N2 --> Client : ClientResponse{success=true, payload}
 ## 安全性保证 / Safety Guarantees
 
 openraft 实现 Raft 不变量：同一 term 最多一个 leader；新 leader 必须包含此前已提交日志；相同 index 和
-term 的日志条目具有相同前缀。rr 只增加多组管理和网络层。
+term 的日志条目具有相同前缀。Rr 只增加多组管理和网络层。
 
 Openraft implements Raft's invariants: at most one leader per term, a new leader contains all previously committed
-entries, and matching index/term entries imply matching prefixes. rr adds multi-group management and networking
+entries, and matching index/term entries imply matching prefixes. Rr adds multi-group management and networking
 without changing those rules.
 
 ## 时间参数 / Timing Parameters

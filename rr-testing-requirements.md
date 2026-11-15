@@ -1,5 +1,5 @@
 ---
-title: "rr 框架测试补强需求"
+title: "Rr 框架测试补强需求"
 aliases: [rr-testing, rr-test-requirements]
 tags: [adr, testing, rr, raft, distributed-systems]
 up: "[[00-moc/architecture]]"
@@ -9,16 +9,16 @@ created: 2026-05-07
 updated: 2026-05-07
 ---
 
-# rr 框架测试补强需求
+# Rr 框架测试补强需求
 
-> 本文档由 my-biz（CEX 业务项目）整理，供 **rr 项目**参考实施。
-> 记录 CEX 业务侧对 rr 框架的可靠性假设，以及建议 rr 补强的测试方向。
+> 本文档由 my-biz（CEX 业务项目）整理，供 **Rr 项目**参考实施。
+> 记录 CEX 业务侧对 Rr 框架的可靠性假设，以及建议 Rr 补强的测试方向。
 
 ---
 
 ## 背景
 
-rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 rr 为黑盒，依赖 rr 保证：
+Rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 Rr 为黑盒，依赖 Rr 保证：
 
 - Raft 共识正确性（线性一致）
 - exactly-once 语义（不重复 apply）
@@ -29,9 +29,9 @@ rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 rr
 
 ---
 
-## 一、CEX 对 rr 的业务假设（契约）
+## 一、CEX 对 Rr 的业务假设（契约）
 
-以下 6 条假设是 CEX 代码正确性的前提。**rr 必须保证**，CEX 侧会写契约测试（L2）验证。
+以下 6 条假设是 CEX 代码正确性的前提。**Rr 必须保证**，CEX 侧会写契约测试（L2）验证。
 
 ### C-001：`Service::apply` 幂等性
 
@@ -110,7 +110,7 @@ rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 rr
 
 ---
 
-## 二、建议 rr 补强的测试方向
+## 二、建议 Rr 补强的测试方向
 
 ### T-001：确定性模拟（Deterministic Simulation Testing）
 
@@ -119,7 +119,7 @@ rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 rr
 **起点**：openraft 已在 2026-04 合并 turmoil 支持（PR #1714，`tests-turmoil` crate）。
 
 **建议扩展**：
-- 在 openraft tests-turmoil 基础上，增加 rr 业务层（Service trait、HandleResult、Outbox）的模拟
+- 在 openraft tests-turmoil 基础上，增加 Rr 业务层（Service trait、HandleResult、Outbox）的模拟
 - 实现 VOPR 风格双模式：
   - Safety 模式：均匀随机故障注入，验证 invariant 不违反
   - Liveness 模式：选定 quorum core 并 heal，冻结其余故障，验证系统最终收敛
@@ -137,7 +137,7 @@ rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 rr
 **参考**：TigerBeetle `StorageChecker`——两个节点经不同故障路径达到相同 commit index 后，state digest 必须 bit-by-bit 相同。
 
 **建议**：
-- 为 rr 的 snapshot 格式（bincode）实现 `state_digest()` 或 `checksum()`
+- 为 Rr 的 snapshot 格式（bincode）实现 `state_digest()` 或 `checksum()`
 - 在模拟测试中，任意两个 caught-up 节点的 digest 相同为 invariant
 - 覆盖场景：normal snapshot、crash-during-install、snapshot + incremental log
 
@@ -190,7 +190,7 @@ rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 rr
 
 | 编号 | 内容 | 优先级 |
 |---|---|:---:|
-| C-001 ~ C-006 | CEX 契约假设（rr 需保证，CEX 侧会验证） | P0 |
+| C-001 ~ C-006 | CEX 契约假设（Rr 需保证，CEX 侧会验证） | P0 |
 | T-001 | 确定性模拟（turmoil + madsim） | P0 |
 | T-002 | Snapshot/restore 一致性 | P0 |
 | T-003 | Outbox 投递完整性 | P0 |
@@ -201,4 +201,4 @@ rr 是 CEX 业务的核心框架（openraft multi-Raft 封装）。CEX 侧视 rr
 
 ## Changelog
 
-- **2026-05-07**: 初始版本。由 my-biz P-007 讨论产出，记录 CEX 对 rr 的 6 条业务假设 + 5 个 rr 测试补强方向。
+- **2026-05-07**: 初始版本。由 my-biz P-007 讨论产出，记录 CEX 对 Rr 的 6 条业务假设 + 5 个 Rr 测试补强方向。

@@ -1,4 +1,4 @@
-# rr perf-lab (`deploy/perf/`)
+# Rr perf-lab (`deploy/perf/`)
 
 生产形态性能基准集群 / production-shape performance benchmark cluster —
 the secure twin of `deploy/lab/`. Plan: `.sisyphus/plans/rr-prod-perf.md`

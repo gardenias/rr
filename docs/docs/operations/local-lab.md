@@ -36,10 +36,10 @@ docker exec kv-1 rr-admin --addr 127.0.0.1:52001 group status --group 1
 # rr> get foo
 ```
 
-Grafana 为 `http://localhost:3000`（admin/admin），看板是 `rr Cluster Overview`；Prometheus 为 `http://localhost:9090`。
+Grafana 为 `http://localhost:3000`（admin/admin），看板是 `Rr Cluster Overview`；Prometheus 为 `http://localhost:9090`。
 宿主机的 REPL 写必须发往 leader 对应的已发布端口，因为 redirect 返回的是容器网络主机名。
 
-Grafana is at `http://localhost:3000` (admin/admin) with the `rr Cluster Overview` dashboard; Prometheus is at
+Grafana is at `http://localhost:3000` (admin/admin) with the `Rr Cluster Overview` dashboard; Prometheus is at
 `http://localhost:9090`. Host-side REPL writes must target the published port for the current leader because redirects
 contain container-network hostnames.
 

@@ -4,9 +4,9 @@ sidebar_position: 1
 
 # 第 1 级：系统上下文 / Level 1: System Context
 
-本图界定 rr 的系统边界、使用者和外部依赖。
+本图界定 Rr 的系统边界、使用者和外部依赖。
 
-This diagram defines rr's system boundary, users, and external dependencies.
+This diagram defines Rr's system boundary, users, and external dependencies.
 
 ## 图示 / Diagram
 
@@ -14,13 +14,13 @@ This diagram defines rr's system boundary, users, and external dependencies.
 @startuml
 !include <C4/C4_Context.puml>
 
-title System Context - rr-based Distributed Service
+title System Context - Rr-based Distributed Service
 
 Person(developer, "Application Developer", "Implements Service / StateMachine trait, configures & deploys the cluster")
 Person(operator, "Cluster Operator / SRE", "Monitors health, triggers snapshots, transfers leadership, scales cluster")
-Person_Ext(end_user, "End User", "Consumes the application (KV store, counter, etc.) — unaware of rr")
+Person_Ext(end_user, "End User", "Consumes the application (KV store, counter, etc.) — unaware of Rr")
 
-System(rr_service, "rr-based Service", "Distributed service (e.g. KV store) running on a multi-Raft rr cluster. Provides strong consistency + high availability.")
+System(rr_service, "Rr-based Service", "Distributed service (e.g. KV store) running on a multi-Raft Rr cluster. Provides strong consistency + high availability.")
 
 System_Ext(prometheus, "Prometheus", "Time-series metrics DB. Scrapes per-node /metrics")
 System_Ext(config_store, "External ConfigProvider (optional)", "etcd / file / custom source for routing table in production")
@@ -56,9 +56,9 @@ monitor the cluster.
 
 ### 最终用户 / End User
 
-最终用户只接触应用 API，不需要感知 rr。
+最终用户只接触应用 API，不需要感知 Rr。
 
-End users interact with the application API and need not be aware of rr.
+End users interact with the application API and need not be aware of Rr.
 
 ## 外部系统 / External Systems
 
@@ -71,10 +71,10 @@ Nodes expose HTTP `/metrics` through `metrics-exporter-prometheus`; Prometheus s
 ### 外部 ConfigProvider（可选）/ External ConfigProvider (Optional)
 
 默认 `MemConfigProvider` 只保存进程内路由表。生产环境可使用只读的 `rr-config-etcd`
-（`EtcdConfigProvider`），或自行实现 `ConfigProvider`；rr 不写回 etcd。
+（`EtcdConfigProvider`），或自行实现 `ConfigProvider`；Rr 不写回 etcd。
 
 The default `MemConfigProvider` keeps the routing table in process memory. Production deployments can use the
-read-only `rr-config-etcd` (`EtcdConfigProvider`) or a custom `ConfigProvider`; rr never writes back to etcd.
+read-only `rr-config-etcd` (`EtcdConfigProvider`) or a custom `ConfigProvider`; Rr never writes back to etcd.
 
 ### 本地磁盘 / Local Disk
 

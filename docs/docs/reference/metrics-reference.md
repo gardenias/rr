@@ -4,9 +4,9 @@ sidebar_position: 7
 
 # 指标参考 / Metrics Reference
 
-rr 使用 `metrics` crate（v0.24）记录指标，由 `rr-server` 的 Prometheus exporter 暴露。通过
+Rr 使用 `metrics` crate（v0.24）记录指标，由 `rr-server` 的 Prometheus exporter 暴露。通过
 `NodeConfig::with_metrics_port(port)` 启用后，端点为 `http://<host>:<metrics_port>/metrics`。
-rr records metrics with the `metrics` crate (v0.24) and exposes them through `rr-server`'s Prometheus
+Rr records metrics with the `metrics` crate (v0.24) and exposes them through `rr-server`'s Prometheus
 exporter. After `NodeConfig::with_metrics_port(port)`, scrape `http://<host>:<metrics_port>/metrics`.
 
 ## 启用与验证 / Enable and Verify
@@ -22,7 +22,7 @@ curl http://127.0.0.1:62001/metrics
 
 ## 命名惯例 / Naming Conventions
 
-rr 当前混用两种命名风格，未来版本会统一 / rr currently mixes two naming styles; future versions will
+Rr 当前混用两种命名风格，未来版本会统一 / Rr currently mixes two naming styles; future versions will
 unify them:
 
 - `rr_` 前缀 + 下划线（Prometheus 推荐）/ `rr_` prefix with underscores (recommended by Prometheus):<br />

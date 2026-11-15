@@ -4,11 +4,11 @@ sidebar_position: 2
 
 # Protobuf 参考 / Protobuf Reference
 
-rr 使用 Protocol Buffers 定义 gRPC 通信：`raft.proto` 承载节点间 Raft RPC，`client.proto` 承载客户端
+Rr 使用 Protocol Buffers 定义 gRPC 通信：`raft.proto` 承载节点间 Raft RPC，`client.proto` 承载客户端
 请求与读取，`admin.proto` 承载运维管理。protobuf 的 `bytes` 字段传输不透明负载；Raft 内部负载使用
 bincode，业务负载可选择应用自己的编码，框架另可能添加带版本的信封。
 
-rr uses Protocol Buffers for gRPC: `raft.proto` carries inter-node Raft RPCs, `client.proto` carries
+Rr uses Protocol Buffers for gRPC: `raft.proto` carries inter-node Raft RPCs, `client.proto` carries
 client requests and reads, and `admin.proto` carries administration. Protobuf `bytes` fields carry opaque
 payloads. Raft internals use bincode; applications can choose their own payload encoding, while the
 framework may add versioned envelopes.

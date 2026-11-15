@@ -89,13 +89,13 @@ The routing table defines partition ownership; updating it changes partition-to-
 
 ## 与 openraft 的集成 / openraft Integration
 
-rr 使用 [openraft](https://docs.rs/openraft) 并为多组场景增加适配层。
+Rr 使用 [openraft](https://docs.rs/openraft) 并为多组场景增加适配层。
 
-rr uses [openraft](https://docs.rs/openraft) with adapters for multi-group operation.
+Rr uses [openraft](https://docs.rs/openraft) with adapters for multi-group operation.
 
 - **`RrTypeConfig`**：通过 `declare_raft_types!` 绑定 `NodeId`（`u64`）、日志和状态机类型。<br />`RrTypeConfig` binds `NodeId` (`u64`), log, and state-machine types through `declare_raft_types!`.
 - **`RaftNode`**：封装 `openraft::Raft<RrTypeConfig>`，组合 `RrLogStorage` 与 `RrStateMachine`。<br />`RaftNode` wraps `openraft::Raft<RrTypeConfig>` with `RrLogStorage` and `RrStateMachine`.
-- **`RrStateMachine`**：把 rr 的业务状态机接入 openraft 的 apply、快照和恢复接口。<br />`RrStateMachine` connects rr's business state machine to openraft's apply, snapshot, and restore interfaces.
+- **`RrStateMachine`**：把 Rr 的业务状态机接入 openraft 的 apply、快照和恢复接口。<br />`RrStateMachine` connects Rr's business state machine to openraft's apply, snapshot, and restore interfaces.
 
 Raft 算法本身见 [Raft 论文](https://raft.github.io/raft.pdf)。<br />For the Raft algorithm itself, see the [Raft paper](https://raft.github.io/raft.pdf).
 

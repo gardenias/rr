@@ -23,7 +23,7 @@ Dependencies are layered, with no cycles in this graph.
 
 ```plantuml
 @startuml
-title Crate Dependency Graph - rr Framework
+title Crate Dependency Graph - Rr Framework
 
 skinparam componentStyle rectangle
 skinparam component {

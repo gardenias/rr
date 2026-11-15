@@ -2,7 +2,7 @@
 
 ## 简介 / Introduction
 
-rr 框架的主参考示例：一个真实语义的分布式 KV 服务（`Put` / `Get` / `Delete` / `Increment`），演示业务服务
+Rr 框架的主参考示例：一个真实语义的分布式 KV 服务（`Put` / `Get` / `Delete` / `Increment`），演示业务服务
 接入框架的完整路径——实现 `Service` trait，由 `ServiceStateMachineAdapter` 提供 FramedEntry 编解码、
 keyed 幂等与框架元数据快照，再经 `ShardRouter` 分片路由对外提供 Client / Admin / Raft 三个 gRPC 服务面。
 不同于 stock `rr-server` 内置的 EchoStateMachine 冒烟服务（`get` 回显 key 本身），本示例是真实 KV 语义，

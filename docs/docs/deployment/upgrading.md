@@ -1,9 +1,9 @@
 ---
-title: 升级 rr / Upgrading rr
+title: 升级 Rr / Upgrading Rr
 sidebar_label: 升级 / Upgrading
 ---
 
-# 升级 rr / Upgrading rr
+# 升级 Rr / Upgrading Rr
 
 先确认目标版本的迁移说明、磁盘格式和回退边界，再逐节点操作。跨 minor 升级不要只替换二进制；本页重点覆盖生产安全门和旧集
 群收养。
@@ -131,11 +131,11 @@ Startup now runs full validation and fails fast on missing configuration. Verify
 ## 收养旧集群到托管生命周期 / Adopt a Legacy Cluster into Managed Formation
 
 Genesis 只用于全新的空节点，不能收养已有 Raft 状态。旧集群必须使用 `adopt`，并区分“记录现有状态”和“后续成员收敛”。Helm
-和 raw Kubernetes 都必须显式选择 formation-capable 镜像；rr 0.2.0 会拒绝新配置字段。
+和 raw Kubernetes 都必须显式选择 formation-capable 镜像；Rr 0.2.0 会拒绝新配置字段。
 
 Genesis is only for fresh pristine nodes and cannot adopt existing Raft state. Use `adopt` for an existing group,
 separating lifecycle adoption from subsequent membership convergence. Both Helm and raw Kubernetes require an explicit
-formation-capable image; rr 0.2.0 rejects the new configuration fields.
+formation-capable image; Rr 0.2.0 rejects the new configuration fields.
 
 1. **准备相同花名册。** 所有节点使用相同的 `cluster.name`、完整
    `cluster.nodes = ["id@advertised_addr", ...]`、`mode = "adopt"` 和 etcd endpoints；移除 `bootstrap` 与旧 `peers`。花

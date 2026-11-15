@@ -1,4 +1,4 @@
-# rr — Fuzz Targets
+# Rr — Fuzz Targets
 
 cargo-fuzz harness for the wire-format decoders. The decode targets
 follow the "no panic on arbitrary input" contract: feed bytes,

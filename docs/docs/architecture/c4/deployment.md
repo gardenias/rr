@@ -17,7 +17,7 @@ state across restart.
 @startuml
 !include <C4/C4_Deployment.puml>
 
-title Deployment Diagram - 3-node rr Cluster
+title Deployment Diagram - 3-node Rr Cluster
 
 Deployment_Node(client_zone, "Application Tier", "VPC / Subnet") {
   Deployment_Node(app_host, "App Server", "Linux, multiple instances") {
@@ -29,7 +29,7 @@ Deployment_Node(ops_zone, "Operator Workstation", "Developer/SRE laptop or basti
   Container(admin_cli, "rr-admin CLI", "Rust binary", "Run ad-hoc; no daemon")
 }
 
-Deployment_Node(cluster_zone, "rr Cluster", "VPC / 3 availability zones") {
+Deployment_Node(cluster_zone, "Rr Cluster", "VPC / 3 availability zones") {
   Deployment_Node(host1, "Node Host 1", "Linux, AZ-a") {
     Container(rr1, "rr-server #1", "Rust binary", "node_id=1, listen=:51001, admin=:52001, metrics=:9100")
     ContainerDb(disk1, "Data Volume 1", "Local SSD / EBS", "/var/lib/rr/data — per-group RocksDB + sm-snapshot.bin with --storage rocks")

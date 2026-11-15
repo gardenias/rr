@@ -31,7 +31,7 @@ Container_Boundary(rr_raft, "rr-raft") {
   Component(log_storage, "RrLogStorage", "rr-raft::log_storage", "In-memory implementation of openraft::RaftLogStorage (BTreeMap)")
   Component(rocks_log, "RocksLogStorage", "rr-raft::rocks_log_storage", "Persistent openraft::RaftLogStorage — per-group independent RocksDB instance at {base_path}/{group_id} (rocks feature)")
   Component(sm_adapter, "RrStateMachine", "rr-raft::sm_adapter", "Implements openraft::RaftStateMachine. Delegates apply(); builds/installs snapshots with fail-closed persistence when a store is attached")
-  Component(svc_adapter, "ServiceStateMachineAdapter", "rr-raft::service_adapter", "Bridges Service trait (async handle / snapshot / restore) to rr's internal StateMachine trait")
+  Component(svc_adapter, "ServiceStateMachineAdapter", "rr-raft::service_adapter", "Bridges Service trait (async handle / snapshot / restore) to Rr's internal StateMachine trait")
 
   Component(net_factory, "GrpcNetworkFactory", "rr-raft::network_factory", "Implements openraft::RaftNetworkFactory. For each peer node, creates a GrpcRaftNetwork")
   Component(net_client, "GrpcRaftNetwork", "rr-raft::network_factory", "Implements openraft::RaftNetwork. Converts openraft RPC calls → bincode-serialized bytes → gRPC messages via ChannelPool")
@@ -65,10 +65,10 @@ LAYOUT_WITH_LEGEND()
 openraft::RaftStateMachine           ← openraft consensus-engine contract
         │ implemented by
         ▼
-RrStateMachine                       ← internal rr wrapper
+RrStateMachine                       ← internal Rr wrapper
         │ delegates to
         ▼
-rr_core::state_machine::StateMachine ← rr abstraction
+rr_core::state_machine::StateMachine ← Rr abstraction
         │ implemented by
         ▼
 ServiceStateMachineAdapter           ← adapter
@@ -79,8 +79,8 @@ rr_core::service::Service            ← application business logic
 
 - `Service` 面向应用，只处理字节请求、快照和恢复，不暴露 Raft 日志。
   `Service` is application-facing: byte requests, snapshots, and restore, without exposing Raft logs.
-- `StateMachine` 是 rr 内部契约；`ServiceStateMachineAdapter` 将 `Service` 接到该契约。
-  `StateMachine` is rr's internal contract; `ServiceStateMachineAdapter` bridges `Service` to it.
+- `StateMachine` 是 Rr 内部契约；`ServiceStateMachineAdapter` 将 `Service` 接到该契约。
+  `StateMachine` is Rr's internal contract; `ServiceStateMachineAdapter` bridges `Service` to it.
 - `RrStateMachine` 实现 openraft 接口，维护 applied/snapshot 元数据；`rocks` 只替换日志存储并附加快照持久化。
   `RrStateMachine` implements openraft, tracking applied/snapshot metadata; `rocks` replaces log storage and adds
   snapshot persistence.

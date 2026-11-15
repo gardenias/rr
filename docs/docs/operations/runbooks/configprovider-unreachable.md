@@ -33,10 +33,10 @@ rate(rr_config_etcd_watch_reconnects_total[5m]) > 0
 etcd_server_has_leader == 0
 ```
 
-前两项只适用于 `rr-config-etcd`；其他实现需要各自指标。逐节点检查 provider 连通和 rr readiness：
+前两项只适用于 `rr-config-etcd`；其他实现需要各自指标。逐节点检查 provider 连通和 Rr readiness：
 
 The first two queries apply only to `rr-config-etcd`; other implementations need their own metrics. Check provider
-connectivity and rr readiness from every node:
+connectivity and Rr readiness from every node:
 
 ```bash
 etcdctl --endpoints=http://etcd:2379 endpoint status
@@ -52,9 +52,9 @@ apply to a legacy cluster without managed formation.
 
 ## 立即处置 / Immediate Mitigation
 
-先恢复配置服务，不要改 rr 拓扑。确认现有读写是否仍可工作：
+先恢复配置服务，不要改 Rr 拓扑。确认现有读写是否仍可工作：
 
-Restore the configuration service first; do not change rr topology. Check whether existing reads/writes still work:
+Restore the configuration service first; do not change Rr topology. Check whether existing reads/writes still work:
 
 ```bash
 rr-admin --addr rr-0:52001 node status
@@ -85,22 +85,22 @@ Restore the service according to its implementation:
 - 自定义实现：检查健康端点、日志、认证和 watch 重连行为。<br />
   For custom providers, inspect health, logs, authentication, and watch-reconnect behavior.
 
-不要例行重启 rr。只有确认自定义 provider 的 watch 不会在断流后恢复时，才按其实现要求进行受控重启。
+不要例行重启 Rr。只有确认自定义 provider 的 watch 不会在断流后恢复时，才按其实现要求进行受控重启。
 
-Do not restart rr routinely. Use a controlled restart only when the custom provider is known not to recover its watch
+Do not restart Rr routinely. Use a controlled restart only when the custom provider is known not to recover its watch
 after a disconnect.
 
 ## 根因分析 / Root-Cause Investigation
 
 1. **服务不可用。** 按 etcd、Consul 或自定义服务的 playbook 处理。<br />
    **Service down.** Follow the provider's own service playbook.
-2. **网络中断。** 从每个 rr 节点测试，而不是只从运维机测试。见 [网络分区](./network-partition.md)。<br />
-   **Network path broken.** Test from every rr node, not only an operator workstation. See
+2. **网络中断。** 从每个 Rr 节点测试，而不是只从运维机测试。见 [网络分区](./network-partition.md)。<br />
+   **Network path broken.** Test from every Rr node, not only an operator workstation. See
    [Network Partition](./network-partition.md).
 3. **认证或授权。** 检查证书有效期、token 轮换和 ACL 变更。<br />
    **Authentication or authorization.** Check certificate expiry, token rotation, and ACL changes.
-4. **数据损坏。** 从 provider 备份恢复路由数据，或根据已核验拓扑重建；不要用 rr 节点数据目录代替 ConfigProvider 备份。<br />
-   **Corrupt provider data.** Restore routing data from the provider backup or rebuild it from verified topology; an rr
+4. **数据损坏。** 从 provider 备份恢复路由数据，或根据已核验拓扑重建；不要用 Rr 节点数据目录代替 ConfigProvider 备份。<br />
+   **Corrupt provider data.** Restore routing data from the provider backup or rebuild it from verified topology; an Rr
    node data directory is not a ConfigProvider backup.
 5. **自定义实现缺陷。** 检查 watch 提前结束、重连、typed error 和 panic；故障应返回 `ProviderUnavailable` 等错误，以便使用
    缓存，而不是静默返回空路由。<br />
@@ -111,8 +111,8 @@ after a disconnect.
 
 1. 等 provider 健康、watch 恢复、日志不再出现 stale/provider error。<br />
    Wait for provider health, watch recovery, and the disappearance of stale/provider errors.
-2. 对比 rr 路由缓存和 source of truth。<br />
-   Compare rr's routing view with the source of truth.
+2. 对比 Rr 路由缓存和 source of truth。<br />
+   Compare Rr's routing view with the source of truth.
 3. Managed 集群确认 `formation status` 为 Active，所有节点 `/ready` 恢复。<br />
    For managed clusters, confirm Active formation and restored `/ready` on every node.
 4. 仅重试明确失败或尚未执行的配置操作；不要盲目重放可能已成功的写。<br />
@@ -130,8 +130,8 @@ rr-admin --addr rr-0:52001 formation status
   Run ConfigProvider and lifecycle store in high-availability form, such as 3+ etcd nodes across AZs.
 - 设置有界的连接和读取超时，并监测 stale serve、watch reconnect 和 readiness。<br />
   Use bounded connection/read timeouts and monitor stale serves, watch reconnects, and readiness.
-- 监控系统独立于 rr 的 ConfigProvider，避免级联故障。<br />
-  Keep monitoring independent of rr's ConfigProvider to avoid cascading failure.
+- 监控系统独立于 Rr 的 ConfigProvider，避免级联故障。<br />
+  Keep monitoring independent of Rr's ConfigProvider to avoid cascading failure.
 - 定期备份 provider 数据，并演练 outage、恢复和缓存对账。<br />
   Back up provider data regularly and rehearse outage, recovery, and cache reconciliation.
 

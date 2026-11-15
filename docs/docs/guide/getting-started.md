@@ -135,8 +135,8 @@ cargo run -p rr-server -- serve \
 
 ## 在应用中实现 Service / Implement Service in an Application
 
-`rr` 尚未发布到 crates.io。下游项目可使用固定 tag 的 git 依赖；本地联调可使用 path 依赖，详见 [外部项目引入指南](consumer-guide.md)。
-`rr` is not published to crates.io. Downstream projects can use tag-pinned git dependencies or local path dependencies; see [Consuming rr from External Projects](consumer-guide.md).
+Rr 尚未发布到 crates.io。下游项目可使用固定 tag 的 git 依赖；本地联调可使用 path 依赖，详见 [外部项目引入指南](consumer-guide.md)。
+Rr is not published to crates.io. Downstream projects can use tag-pinned git dependencies or local path dependencies; see [Consuming Rr from External Projects](consumer-guide.md).
 
 请求和响应由应用定义并编码为字节。`Service` 负责请求处理、快照和恢复；框架通过 `ServiceStateMachineAdapter` 将它接入 Raft。
 The application defines and encodes requests and responses as bytes. `Service` handles requests, snapshots, and restoration; `ServiceStateMachineAdapter` connects it to Raft.

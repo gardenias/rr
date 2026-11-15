@@ -1,10 +1,10 @@
-# Contributing to rr
+# Contributing to Rr
 
-Thanks for considering a contribution! rr is a distributed multi-Raft consensus
+Thanks for considering a contribution! Rr is a distributed multi-Raft consensus
 framework in Rust. This guide will get you from zero to a green `cargo test`
 in under 20 minutes, and explains how to propose changes.
 
-> New to rr? Start with the [architecture overview](./docs/docs/architecture/overview.md)
+> New to Rr? Start with the [architecture overview](./docs/docs/architecture/overview.md)
 > and the [C4 diagrams](./docs/docs/architecture/c4/README.md) for a mental map.
 
 ## 1. Prerequisites
@@ -166,7 +166,7 @@ yarn build   # static output in docs/build/
 
 ### Invariant enforcement review
 
-rr's advertised system-level properties are registered as decidable invariants
+Rr's advertised system-level properties are registered as decidable invariants
 in [`docs/docs/reference/invariants.md`](./docs/docs/reference/invariants.md)
 (INV-1…INV-n). `scripts/check-invariants.sh` (CI job `invariants-lint`) keeps
 the registry and the test code bidirectionally linked. When reviewing a PR,

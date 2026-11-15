@@ -12,31 +12,31 @@ This page gives the high-level view. For Context / Container / Component / Deplo
 - [部署单元 / Deployable units](./c4/containers.md)
 :::
 
-## rr 是什么 / What rr Is
+## Rr 是什么 / What Rr Is
 
-rr 是用 Rust 编写的分布式 Multi-Raft 共识框架。业务逻辑通过 `Service` 或 `StateMachine` 接口接入，框架负责共识、网络传输和成员变更。
+Rr 是用 Rust 编写的分布式 Multi-Raft 共识框架。业务逻辑通过 `Service` 或 `StateMachine` 接口接入，框架负责共识、网络传输和成员变更。
 
-rr is a distributed Multi-Raft consensus framework written in Rust. Business logic plugs in through the `Service` or `StateMachine` traits; the framework handles consensus, networking, and membership changes.
+Rr is a distributed Multi-Raft consensus framework written in Rust. Business logic plugs in through the `Service` or `StateMachine` traits; the framework handles consensus, networking, and membership changes.
 
 一个节点可运行多个相互独立的 Raft 组。写吞吐通过跨组分片扩展，而不是通过增加单组副本扩展。
 
 Each node can run multiple independent Raft groups. Write throughput scales by sharding across groups, not by adding replicas to one group.
 
-## rr 解决什么问题 / What Problem rr Solves
+## Rr 解决什么问题 / What Problem Rr Solves
 
-[openraft](https://github.com/datafuselabs/openraft) 提供单个 Raft 组的引擎，日志存储、状态机和网络传输 trait 由使用方实现。分片系统还需要多组生命周期管理、`Partition → Group → Node` 路由、gRPC 与连接池、leader 发现与重定向、框架级幂等，以及成员编排、备份、限流和 TLS。rr 集成这些组件并提供联测过的技术栈。
+[openraft](https://github.com/datafuselabs/openraft) 提供单个 Raft 组的引擎，日志存储、状态机和网络传输 trait 由使用方实现。分片系统还需要多组生命周期管理、`Partition → Group → Node` 路由、gRPC 与连接池、leader 发现与重定向、框架级幂等，以及成员编排、备份、限流和 TLS。Rr 集成这些组件并提供联测过的技术栈。
 
-[openraft](https://github.com/datafuselabs/openraft) provides the engine for one Raft group; you implement its log-storage, state-machine, and network traits. A sharded system also needs multi-group lifecycle management, `Partition → Group → Node` routing, gRPC and connection pooling, leader discovery and redirects, framework-level idempotency, plus membership orchestration, backup, rate limiting, and TLS. rr integrates these pieces into a jointly tested stack.
+[openraft](https://github.com/datafuselabs/openraft) provides the engine for one Raft group; you implement its log-storage, state-machine, and network traits. A sharded system also needs multi-group lifecycle management, `Partition → Group → Node` routing, gRPC and connection pooling, leader discovery and redirects, framework-level idempotency, plus membership orchestration, backup, rate limiting, and TLS. Rr integrates these pieces into a jointly tested stack.
 
-**非目标**：rr 不是数据库，不提供 SQL、事务或二级索引；Raft 提供 CP 而非 AP 语义；单组写入不随副本数扩展；quorum 往返使跨地域写入存在延迟下限。如果单个 etcd、rqlite 或 consul 已满足需求，无需引入 rr。详见 [与 openraft 的关系](./openraft-relationship.md) 和 [常见问题](../faq.md)。
+**非目标**：Rr 不是数据库，不提供 SQL、事务或二级索引；Raft 提供 CP 而非 AP 语义；单组写入不随副本数扩展；quorum 往返使跨地域写入存在延迟下限。如果单个 etcd、rqlite 或 consul 已满足需求，无需引入 Rr。详见 [与 openraft 的关系](./openraft-relationship.md) 和 [常见问题](../faq.md)。
 
-**Non-goals**: rr is not a database and provides no SQL, transactions, or secondary indexes. Raft is CP, not AP; one group's writes do not scale with replicas; quorum round-trips impose a latency floor on cross-region writes. If one etcd, rqlite, or consul deployment already meets your needs, rr adds no value. See [Relationship with openraft](./openraft-relationship.md) and the [FAQ](../faq.md).
+**Non-goals**: Rr is not a database and provides no SQL, transactions, or secondary indexes. Raft is CP, not AP; one group's writes do not scale with replicas; quorum round-trips impose a latency floor on cross-region writes. If one etcd, rqlite, or consul deployment already meets your needs, Rr adds no value. See [Relationship with openraft](./openraft-relationship.md) and the [FAQ](../faq.md).
 
 ## 核心概念 / Key Concepts
 
 | 概念 / Concept | 描述 / Description |
 | :--- | :--- |
-| **Node / 节点** | 运行 rr 实例的物理机或虚拟机，由 `NodeId` 标识。<br />A physical or virtual machine running rr, identified by `NodeId`. |
+| **Node / 节点** | 运行 Rr 实例的物理机或虚拟机，由 `NodeId` 标识。<br />A physical or virtual machine running Rr, identified by `NodeId`. |
 | **Group / 共识组** | 一个 Raft 共识实例，由 `GroupId` 标识。<br />One Raft consensus instance, identified by `GroupId`. |
 | **Partition / 分片** | 数据路由的最小单位，映射到共识组，由 `PartitionId` 标识。<br />The smallest routing unit, mapped to a group and identified by `PartitionId`. |
 | **Leader / Follower** | Raft 角色；只有 Leader 接受写请求。<br />Raft roles; only the Leader accepts writes. |
@@ -49,7 +49,7 @@ Each node can run multiple independent Raft groups. Write throughput scales by s
 @startuml
 !include <C4/C4_Component.puml>
 
-title Component Diagram - rr System Architecture
+title Component Diagram - Rr System Architecture
 
 Component(client, "Client App", "Rust + rr-client", "Application using the cluster")
 
@@ -85,6 +85,6 @@ Rel(router, config, "Loads routing table")
 
 ## 与 openraft 的关系 / Relationship with openraft
 
-rr 使用 [openraft](https://github.com/datafuselabs/openraft) `v0.10.0-alpha.34` 的 Raft 实现，在其上增加多组管理、gRPC 网络、路由发现和统一生命周期管理。
+Rr 使用 [openraft](https://github.com/datafuselabs/openraft) `v0.10.0-alpha.34` 的 Raft 实现，在其上增加多组管理、gRPC 网络、路由发现和统一生命周期管理。
 
-rr uses the Raft implementation from [openraft](https://github.com/datafuselabs/openraft) `v0.10.0-alpha.34`, adding multi-group management, gRPC networking, routing discovery, and unified lifecycle management.
+Rr uses the Raft implementation from [openraft](https://github.com/datafuselabs/openraft) `v0.10.0-alpha.34`, adding multi-group management, gRPC networking, routing discovery, and unified lifecycle management.

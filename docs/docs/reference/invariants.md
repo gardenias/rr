@@ -4,9 +4,9 @@ sidebar_position: 8
 
 # 系统级不变量目录 / System Invariants
 
-本文是 rr 对外系统属性的登记表：每条属性必须有可判定的不变量、强制链、代码强制点
+本文是 Rr 对外系统属性的登记表：每条属性必须有可判定的不变量、强制链、代码强制点
 （`file:line`）、测试和已知缺口。
-This document registers rr's advertised system-level properties. Each property has a decidable invariant,
+This document registers Rr's advertised system-level properties. Each property has a decidable invariant,
 an enforcement chain, code enforcement points (`file:line`), tests, and known gaps.
 
 ## 目的与维护 / Purpose and Maintenance

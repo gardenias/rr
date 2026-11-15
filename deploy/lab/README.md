@@ -1,4 +1,4 @@
-# rr Local Lab (OrbStack / Docker)
+# Rr Local Lab (OrbStack / Docker)
 
 > **仅本地实验环境 / LOCAL LAB ONLY** — 本目录所有编排均无 TLS、无认证，
 > kv-store 以 allow_insecure 运行。禁止用于任何真实部署。
@@ -33,7 +33,7 @@ docker exec kv-2 rr-admin --addr 127.0.0.1:52001 group status --group 1
 ./target/debug/rr-admin repl --addr 127.0.0.1:51101 --group 1
 # rr> put foo bar / get foo
 
-# Grafana: http://localhost:3000 （admin/admin）→ "rr Cluster Overview"
+# Grafana: http://localhost:3000 （admin/admin）→ "Rr Cluster Overview"
 # Prometheus: http://localhost:9090
 
 # 压力测试（在 lab 网络内运行，leader-redirect 地址可解析）

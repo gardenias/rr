@@ -4,9 +4,9 @@ sidebar_position: 2
 
 # TLS：加密 gRPC 流量 / TLS: Encrypting gRPC Traffic
 
-rr 通过 rustls 在 Client、Raft、Admin gRPC 端点支持 TLS 和可选 mTLS。默认不启用 TLS；生产 Raft 必须启用 TLS + mTLS。
+Rr 通过 rustls 在 Client、Raft、Admin gRPC 端点支持 TLS 和可选 mTLS。默认不启用 TLS；生产 Raft 必须启用 TLS + mTLS。
 
-rr supports TLS and optional mTLS on Client, Raft, and Admin gRPC endpoints through rustls. TLS is off by default;
+Rr supports TLS and optional mTLS on Client, Raft, and Admin gRPC endpoints through rustls. TLS is off by default;
 production Raft requires TLS + mTLS.
 
 ## 本地开发证书 / Local Development Certificates

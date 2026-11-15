@@ -4,9 +4,9 @@ sidebar_position: 8
 
 # 与 openraft 的关系 / Relationship with openraft
 
-rr 不重新实现 Raft 算法，而是在 [openraft](https://github.com/datafuselabs/openraft) 之上提供多共识组框架。
+Rr 不重新实现 Raft 算法，而是在 [openraft](https://github.com/datafuselabs/openraft) 之上提供多共识组框架。
 
-rr does not reimplement Raft; it provides a multi-group consensus framework on top of [openraft](https://github.com/datafuselabs/openraft).
+Rr does not reimplement Raft; it provides a multi-group consensus framework on top of [openraft](https://github.com/datafuselabs/openraft).
 
 ## openraft 提供什么 / What openraft Provides
 
@@ -24,7 +24,7 @@ openraft 提供一个组的引擎；存储、网络和部署形态由使用方�
 
 openraft supplies one group's engine; storage, networking, and deployment remain the consumer's responsibility.
 
-## rr 增加的能力 / What rr Adds
+## Rr 增加的能力 / What Rr Adds
 
 | 能力 / Capability | 行为 / Behavior | 位置 / Location |
 | :--- | :--- | :--- |
@@ -35,14 +35,14 @@ openraft supplies one group's engine; storage, networking, and deployment remain
 | **客户端 SDK / Client SDK** | 基于 `ClientResponse.leader_info` 的 leader 重定向、指数退避重试和无 TTL 的 leader 缓存。<br />Leader redirects via `ClientResponse.leader_info`, exponential-backoff retries, and a leader cache without TTL. | `rr-client` |
 | **框架幂等 / Framework idempotency** | `FramedEntry{version, offset, idem_key, payload}`、`IdempotencyLayer`（LRU + 水位线）、`send_request_idempotent` 和 `RrError::IdempotencyExpired`。<br />`FramedEntry{version, offset, idem_key, payload}`, `IdempotencyLayer` (LRU + watermark), `send_request_idempotent`, and `RrError::IdempotencyExpired`. | `rr-core` / `rr-client` |
 | **接入与输出 / Ingest and egress** | Kafka at-least-once 摄入结合框架去重实现 exactly-once apply；outbox 提供 at-least-once 输出。<br />Kafka at-least-once ingest plus framework dedup gives exactly-once apply; the outbox provides at-least-once delivery. | `rr-ingestor-kafka` / `rr-core` |
-| **配置提供者 / Config providers** | `MemConfigProvider` 可写；`EtcdConfigProvider` 只读，rr 不回写路由表到 etcd。<br />`MemConfigProvider` is writable; `EtcdConfigProvider` is read-only, and rr never writes routing tables back to etcd. | `rr-config` / `rr-config-etcd` |
+| **配置提供者 / Config providers** | `MemConfigProvider` 可写；`EtcdConfigProvider` 只读，Rr 不回写路由表到 etcd。<br />`MemConfigProvider` is writable; `EtcdConfigProvider` is read-only, and Rr never writes routing tables back to etcd. | `rr-config` / `rr-config-etcd` |
 | **安全 / Security** | TLS/mTLS（RaftService 强制 mTLS）、分离的 admin/client bearer token、按服务与调用方限流、G1–G7 启动安全门。<br />TLS/mTLS (mandatory mTLS for RaftService), separate admin/client bearer tokens, per-service/per-caller rate limits, and G1–G7 startup gates. | `rr-server` |
 | **存储 / Storage** | 默认 `mem` 全内存；`--storage rocks` 持久化 Raft 日志和 `sm-snapshot.bin`，快照写入 fail-closed。<br />Default `mem` is memory-only; `--storage rocks` persists Raft logs and `sm-snapshot.bin`, with fail-closed snapshot writes. | `rr-storage` |
 | **运维工具 / Operations** | `rr-admin` CLI + REPL、DrainNode/退役、OnlineBackup 快照流、离线 tar.gz + SHA-256 备份、node-reset、metrics 和 tracing。<br />`rr-admin` CLI + REPL, DrainNode/decommission, OnlineBackup snapshot streaming, offline tar.gz + SHA-256 backups, node-reset, metrics, and tracing. | `rr-admin` |
 
-## 封装方式 / How rr Wraps openraft
+## 封装方式 / How Rr Wraps openraft
 
-- **类型配置 / Type configuration**：`RrTypeConfig` 通过 `openraft::declare_raft_types!` 绑定 rr 的请求与响应类型。<br />`RrTypeConfig` uses `openraft::declare_raft_types!` to bind rr's request and response types.
+- **类型配置 / Type configuration**：`RrTypeConfig` 通过 `openraft::declare_raft_types!` 绑定 Rr 的请求与响应类型。<br />`RrTypeConfig` uses `openraft::declare_raft_types!` to bind Rr's request and response types.
 - **节点封装 / Node wrapper**：每组一个 `RaftNode`，持有 `openraft::Raft<RrTypeConfig, RrStateMachine>`。<br />Each group has a `RaftNode` holding `openraft::Raft<RrTypeConfig, RrStateMachine>`.
 - **存储适配 / Storage adapters**：`RrLogStorage` 实现 `RaftLogStorage<RrTypeConfig>`；`RocksLogStorage` 是 `rocks` feature 下的 RocksDB 实现。<br />`RrLogStorage` implements `RaftLogStorage<RrTypeConfig>`; `RocksLogStorage` is the RocksDB implementation behind `rocks`.
 - **状态机适配 / State-machine adapter**：`RrStateMachine` 把用户的 `Service` / `StateMachine` 接入 openraft 的 apply、snapshot 和 restore。<br />`RrStateMachine` bridges user `Service` / `StateMachine` implementations to openraft's apply, snapshot, and restore interfaces.
@@ -51,9 +51,9 @@ openraft supplies one group's engine; storage, networking, and deployment remain
 
 ## 版本锁定 / Version Pinning
 
-根 `Cargo.toml` 将 openraft 精确锁定为 `= 0.10.0-alpha.34`。pre-1.0 alpha 的相邻版本可能改变 API，精确锁定避免 `cargo update` 隐式升级；升级必须经过兼容性检查和测试。rr 升级时以 [reference/compatibility](../reference/compatibility.md) 为准。
+根 `Cargo.toml` 将 openraft 精确锁定为 `= 0.10.0-alpha.34`。pre-1.0 alpha 的相邻版本可能改变 API，精确锁定避免 `cargo update` 隐式升级；升级必须经过兼容性检查和测试。Rr 升级时以 [reference/compatibility](../reference/compatibility.md) 为准。
 
-The root `Cargo.toml` pins openraft to `= 0.10.0-alpha.34`. APIs can change between pre-1.0 alpha releases, so the exact pin prevents implicit upgrades through `cargo update`; upgrades require compatibility checks and tests. When upgrading rr, consult [reference/compatibility](../reference/compatibility.md).
+The root `Cargo.toml` pins openraft to `= 0.10.0-alpha.34`. APIs can change between pre-1.0 alpha releases, so the exact pin prevents implicit upgrades through `cargo update`; upgrades require compatibility checks and tests. When upgrading Rr, consult [reference/compatibility](../reference/compatibility.md).
 
 ## Vendored 补丁台账 / Vendored Patch Ledger
 
@@ -81,10 +81,10 @@ The root `Cargo.toml` pins openraft to `= 0.10.0-alpha.34`. APIs can change betw
 Use openraft directly when:
 
 - 单个共识组已足够，不需要分片。<br />One consensus group is sufficient and no sharding is needed.
-- 需要最小依赖树，不接受 rr 引入的 tonic、DashMap、metrics 等依赖。<br />You need a minimal dependency tree without rr's tonic, DashMap, metrics, and related dependencies.
+- 需要最小依赖树，不接受 Rr 引入的 tonic、DashMap、metrics 等依赖。<br />You need a minimal dependency tree without Rr's tonic, DashMap, metrics, and related dependencies.
 - 已有自研存储或传输层，需要完全控制这些边界。<br />You already have custom storage or transport and need full control of those boundaries.
 - 需要持续跟踪 openraft 最新 API，而不是固定 alpha 版本。<br />You need to track the latest openraft APIs rather than a fixed alpha release.
 
-构建需要运维工具链的多分片强一致服务时，rr 用部分底层灵活性换取集成后的多组框架。更多选型说明见 [FAQ](../faq.md)。
+构建需要运维工具链的多分片强一致服务时，Rr 用部分底层灵活性换取集成后的多组框架。更多选型说明见 [FAQ](../faq.md)。
 
-For a sharded, strongly consistent service that needs an operational toolchain, rr trades some low-level flexibility for an integrated multi-group framework. See the [FAQ](../faq.md) for selection guidance.
+For a sharded, strongly consistent service that needs an operational toolchain, Rr trades some low-level flexibility for an integrated multi-group framework. See the [FAQ](../faq.md) for selection guidance.

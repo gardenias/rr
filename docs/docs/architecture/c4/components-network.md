@@ -35,7 +35,7 @@ Container_Boundary(rr_network, "rr-network") {
 
   Component(channel_pool, "ChannelPool", "rr-network::channel_pool", "DashMap<NodeId, (String, Channel)>. Lazy same-address reuse; callers evict on Code::Unavailable")
 
-  Component(err_convert, "error_convert", "rr-network::error_convert", "IntoStatus trait: one-way rr error types → tonic::Status, with info-leak hardening (used by rr-server's admin handlers)")
+  Component(err_convert, "error_convert", "rr-network::error_convert", "IntoStatus trait: one-way Rr error types → tonic::Status, with info-leak hardening (used by rr-server's admin handlers)")
 }
 
 Rel(rr_client, client_svc_impl, "Client RPCs", "gRPC")
@@ -178,10 +178,10 @@ cycle.
 
 ## 错误转换 / Error Conversion
 
-`error_convert.rs` 的 `IntoStatus` 将 rr 错误单向转换为 `tonic::Status`。Config、Network 等分支会把
+`error_convert.rs` 的 `IntoStatus` 将 Rr 错误单向转换为 `tonic::Status`。Config、Network 等分支会把
 peer 地址、文件路径和库内部细节留在服务端日志；具体响应内容以各错误分支为准。
 
-`error_convert.rs` provides one-way conversion from rr errors to `tonic::Status` through `IntoStatus`. Config,
+`error_convert.rs` provides one-way conversion from Rr errors to `tonic::Status` through `IntoStatus`. Config,
 Network, and other hardened branches keep peer addresses, file paths, and library internals in server logs; exact
 response content depends on the error branch.
 

@@ -4,9 +4,9 @@ sidebar_position: 5
 
 # 第 3 级：路由与配置组件 / Level 3: Routing and Configuration Components
 
-rr 使用路由表把 `partition_id` 映射到 `group_id`；leader 是 Raft 运行时状态，不在表内。
+Rr 使用路由表把 `partition_id` 映射到 `group_id`；leader 是 Raft 运行时状态，不在表内。
 
-rr uses a routing table to map `partition_id` to `group_id`; the leader is Raft runtime state and is not stored
+Rr uses a routing table to map `partition_id` to `group_id`; the leader is Raft runtime state and is not stored
 in the table.
 
 ## 图示 / Diagram

@@ -4,9 +4,9 @@ sidebar_position: 2
 
 # 第 2 级：容器图 / Level 2: Container Diagram
 
-本图展示 rr 的可部署单元、外部依赖和通信协议。这里的“容器”是 C4 概念，不限于 Docker。
+本图展示 Rr 的可部署单元、外部依赖和通信协议。这里的“容器”是 C4 概念，不限于 Docker。
 
-This diagram shows rr's deployable units, external dependencies, and communication protocols. Here “container”
+This diagram shows Rr's deployable units, external dependencies, and communication protocols. Here “container”
 is a C4 concept, not necessarily Docker.
 
 ## 图示 / Diagram
@@ -15,7 +15,7 @@ is a C4 concept, not necessarily Docker.
 @startuml
 !include <C4/C4_Container.puml>
 
-title Container Diagram - rr Cluster
+title Container Diagram - Rr Cluster
 
 Person(developer, "Application Developer")
 Person(operator, "Cluster Operator")
@@ -26,7 +26,7 @@ System_Boundary(client_side, "Client Side") {
   Container(admin_cli, "rr-admin CLI", "Rust binary, clap + tonic", "Interactive REPL & one-shot commands for cluster administration")
 }
 
-System_Boundary(cluster, "rr Cluster (N nodes)") {
+System_Boundary(cluster, "Rr Cluster (N nodes)") {
   Container(rr_node, "rr-server Node", "Rust binary built from examples/* or custom server", "Hosts multiple Raft groups; serves Client + Raft gRPC on listen_addr (51001 by convention), Admin gRPC on a separate admin_port, /metrics on metrics_port")
   ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-group independent RocksDB at {data_dir}/raft-log/{group_id} plus durable sm-snapshot.bin (stock rr-server --storage rocks, ADR A-0016/T1)")
 }

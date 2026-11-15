@@ -6,11 +6,11 @@ sidebar_position: 1
 
 ## 生产构建 / Production Build
 
-在仓库根目录构建服务端、管理工具和带 RocksDB 的 KV 示例。`rr-server` 内置的是 Echo 冒烟服务；真实业务应嵌入 rr crates，
+在仓库根目录构建服务端、管理工具和带 RocksDB 的 KV 示例。`rr-server` 内置的是 Echo 冒烟服务；真实业务应嵌入 Rr crates，
 或参考 `examples/kv-store` 构建自己的二进制。
 
 Build the server, admin CLI, and RocksDB-enabled KV example from the repository root. The stock `rr-server` contains an
-Echo smoke service; embed the rr crates for real application logic, using `examples/kv-store` as the reference.
+Echo smoke service; embed the Rr crates for real application logic, using `examples/kv-store` as the reference.
 
 ```bash
 cargo build --release -p rr-server -p rr-admin --features rr-server/rocks

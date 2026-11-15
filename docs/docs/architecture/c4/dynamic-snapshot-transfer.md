@@ -126,9 +126,9 @@ These are idealized 1 Gbps estimates and exclude serialization, disk, and protoc
   64 KiB。
   Chunks default to 64 KiB; openraft's `snapshot_chunk_size` takes precedence when provided. `OnlineBackup` also
   uses 64 KiB.
-- `SnapshotPolicy::LogsSinceLast(N)` 控制快照阈值；rr 默认 `N = 50_000`，可用
+- `SnapshotPolicy::LogsSinceLast(N)` 控制快照阈值；Rr 默认 `N = 50_000`，可用
   `--snapshot-logs-since-last` 调整。
-  `SnapshotPolicy::LogsSinceLast(N)` controls snapshot frequency; rr defaults to `N = 50_000`, tunable with
+  `SnapshotPolicy::LogsSinceLast(N)` controls snapshot frequency; Rr defaults to `N = 50_000`, tunable with
   `--snapshot-logs-since-last`.
 - `GrpcRaftNetwork` 当前没有快照传输限流；大快照会与正常流量竞争资源。
   `GrpcRaftNetwork` currently has no snapshot-transfer throttling; large snapshots compete with normal traffic.

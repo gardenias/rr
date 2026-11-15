@@ -1,14 +1,14 @@
-# rr — Distributed Multi-Raft Consensus Framework
+# Rr — Distributed Multi-Raft Consensus Framework
 
 [![Coverage](https://codecov.io/gh/gardenias/rr/branch/main/graph/badge.svg)](https://codecov.io/gh/gardenias/rr)
 
 ## 简介 / Introduction
 
-rr 是一个用 Rust 编写的分布式多 Raft 共识框架，专为构建高可用、强一致性的分布式系统而设计。它在单个节点上支持多个独立的 Raft 组，通过表格式的分片路由实现灵活的数据分布。核心特性包括可插拔的存储后端、基于 gRPC 的高效网络通信、动态的分布式配置管理和成熟的客户端 SDK，大大降低了开发分布式应用的复杂度。
+Rr 是一个用 Rust 编写的分布式多 Raft 共识框架，专为构建高可用、强一致性的分布式系统而设计。它在单个节点上支持多个独立的 Raft 组，通过表格式的分片路由实现灵活的数据分布。核心特性包括可插拔的存储后端、基于 gRPC 的高效网络通信、动态的分布式配置管理和成熟的客户端 SDK，大大降低了开发分布式应用的复杂度。
 
 ---
 
-rr is a distributed multi-Raft consensus framework written in Rust, designed for building highly available and strongly consistent distributed systems. It supports multiple independent Raft groups on a single node with flexible data distribution through table-based shard routing. Key features include pluggable storage backends, efficient gRPC-based networking, dynamic distributed configuration management, and a mature client SDK that significantly reduces the complexity of building distributed applications.
+Rr is a distributed multi-Raft consensus framework written in Rust, designed for building highly available and strongly consistent distributed systems. It supports multiple independent Raft groups on a single node with flexible data distribution through table-based shard routing. Key features include pluggable storage backends, efficient gRPC-based networking, dynamic distributed configuration management, and a mature client SDK that significantly reduces the complexity of building distributed applications.
 
 ## 特性 / Features
 
@@ -27,11 +27,11 @@ rr is a distributed multi-Raft consensus framework written in Rust, designed for
 
 ## Architecture
 
-A C4 Container view of a deployed rr cluster — what processes run, what they talk, and over which protocols.
+A C4 Container view of a deployed Rr cluster — what processes run, what they talk, and over which protocols.
 
 ```mermaid
 C4Container
-  title Container Diagram - rr Cluster (condensed)
+  title Container Diagram - Rr Cluster (condensed)
 
   Person(developer, "App Developer")
   Person(operator, "Operator")
@@ -41,7 +41,7 @@ C4Container
     Container(admin_cli, "rr-admin CLI", "Rust binary", "Cluster administration")
   }
 
-  System_Boundary(cluster, "rr Cluster (N nodes)") {
+  System_Boundary(cluster, "Rr Cluster (N nodes)") {
     Container(rr_node, "rr-server Node", "Rust binary", "Hosts multiple Raft groups; serves Client + Raft + Admin gRPC")
     ContainerDb(rocks, "RocksDB Data Dir", "Local SSD", "Raft log + state (optional rocks feature)")
   }

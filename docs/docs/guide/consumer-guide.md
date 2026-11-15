@@ -2,15 +2,15 @@
 sidebar_position: 7
 ---
 
-# 在外部项目中引入 rr / Consuming rr from External Projects
+# 在外部项目中引入 Rr / Consuming Rr from External Projects
 
-rr 尚未发布到 crates.io。业务项目应使用固定 tag 的 git 依赖；path 依赖只用于本机联调。
-rr is not published to crates.io. Downstream projects should use tag-pinned git dependencies; path dependencies are for local development.
+Rr 尚未发布到 crates.io。业务项目应使用固定 tag 的 git 依赖；path 依赖只用于本机联调。
+Rr is not published to crates.io. Downstream projects should use tag-pinned git dependencies; path dependencies are for local development.
 
 | 方式 / Mode | 版本固定 / Reproducible Version | 用途 / Use |
 | :--- | :--- | :--- |
 | git + tag | 是，并提交 `Cargo.lock` / Yes, with `Cargo.lock` committed | CI 和业务项目 / CI and downstream projects |
-| path | 取决于本机 checkout / Depends on the local checkout | 同机修改 rr 与业务项目 / Local rr and application development |
+| path | 取决于本机 checkout / Depends on the local checkout | 同机修改 Rr 与业务项目 / Local Rr and application development |
 | crates.io | 当前不可用 / Not currently available | 需先完成发布准备 / Requires release preparation |
 
 ## 使用 Git 和 Tag / Use Git with a Tag
@@ -24,8 +24,8 @@ Consumers of the private repository need read access to `github.com/gardenias/rr
 git-fetch-with-cli = true
 ```
 
-使用 Rust 1.98 或更高版本。将所有 rr crate 固定到同一 tag：
-Use Rust 1.98 or newer and pin every rr crate to the same tag:
+使用 Rust 1.98 或更高版本。将所有 Rr crate 固定到同一 tag：
+Use Rust 1.98 or newer and pin every Rr crate to the same tag:
 
 ```toml
 [workspace]
@@ -67,8 +67,8 @@ Do not replace the tag with `branch = "main"`; otherwise `cargo update` can intr
 
 ## 使用 Path 依赖 / Use Path Dependencies
 
-当 rr 与业务项目位于同一父目录时：
-When rr and the business project share a parent directory:
+当 Rr 与业务项目位于同一父目录时：
+When Rr and the business project share a parent directory:
 
 ```text
 Projects/
@@ -97,8 +97,8 @@ This guide does not imply that the crates are currently publishable; check crate
 
 **公共依赖版本 / Public dependency versions**
 
-rr 的公共 API 暴露 openraft、tokio、bincode 等类型。业务项目必须与 rr workspace 对齐这些版本，否则同名类型会来自不同 crate 版本并报 `mismatched types`。
-rr exposes openraft, tokio, bincode, and other types in public APIs. Align them with the rr workspace or Cargo will report mismatched types from different crate versions.
+Rr 的公共 API 暴露 openraft、tokio、bincode 等类型。业务项目必须与 Rr workspace 对齐这些版本，否则同名类型会来自不同 crate 版本并报 `mismatched types`。
+Rr exposes openraft, tokio, bincode, and other types in public APIs. Align them with the Rr workspace or Cargo will report mismatched types from different crate versions.
 
 **Rocks 特性 / Rocks feature**
 
@@ -122,8 +122,8 @@ Application workspaces should commit `Cargo.lock` to pin git revisions and trans
 
 ## 升级版本 / Upgrading
 
-查看远端 tag，编辑所有 rr 依赖的 tag，再更新 lockfile 并验证：
-List remote tags, edit every rr dependency to the selected tag, then update and verify:
+查看远端 tag，编辑所有 Rr 依赖的 tag，再更新 lockfile 并验证：
+List remote tags, edit every Rr dependency to the selected tag, then update and verify:
 
 ```bash
 git ls-remote --tags https://github.com/gardenias/rr.git
@@ -133,8 +133,8 @@ cargo check --workspace --all-targets
 cargo test
 ```
 
-不要只升级部分 rr crate；混合 tag 容易产生类型或协议不兼容。
-Do not upgrade only a subset of rr crates; mixed tags can cause type or protocol incompatibilities.
+不要只升级部分 Rr crate；混合 tag 容易产生类型或协议不兼容。
+Do not upgrade only a subset of Rr crates; mixed tags can cause type or protocol incompatibilities.
 
 ## 项目结构参考 / Reference Layout
 

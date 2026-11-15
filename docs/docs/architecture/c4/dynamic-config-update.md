@@ -26,7 +26,7 @@ Container_Boundary(target_node, "Target Node (receives admin RPC)") {
   Component(raft_mgr_t, "RaftGroupManager", "rr-raft", "add_learner / change_membership")
 }
 
-Container_Ext(external_cfg, "External store (optional)", "etcd / custom", "Production source of truth; rr only reads + watches it")
+Container_Ext(external_cfg, "External store (optional)", "etcd / custom", "Production source of truth; Rr only reads + watches it")
 
 Container_Boundary(any_node, "Every Node (incl. target & new node)") {
   Component(cfg_local, "ConfigProvider (local)", "rr-config / rr-config-etcd", "Read + watch only")
@@ -39,7 +39,7 @@ Rel(admin_svc, admin_hdl, "2. dispatch")
 Rel(admin_hdl, raft_mgr_t, "3. add_learner(7, 4, addr) — raft level only")
 
 Rel(app, cfg_local, "4a. Out-of-band routing change (e.g. MemConfigProvider.add_node / update_group_membership)")
-Rel(app, external_cfg, "4b. …or write to the external store directly (rr never writes back)")
+Rel(app, external_cfg, "4b. …or write to the external store directly (Rr never writes back)")
 Rel(external_cfg, cfg_local, "4c. EtcdConfigProvider watch emits events")
 Rel(cfg_local, watch_loop, "5. RoutingTableChange via watch_changes()")
 Rel(watch_loop, raft_mgr_x, "6. start_group / stop_group per membership")
@@ -84,7 +84,7 @@ alt MemConfigProvider (dev/tests)
   note over App, Cfg : Each node's MemConfigProvider is isolated —\nthe app must update every node itself.
 else External store (production)
   App -> Ext : write routing entries (e.g. etcd put)
-  Ext -> Cfg : watch event (EtcdConfigProvider observes; rr never writes back)
+  Ext -> Cfg : watch event (EtcdConfigProvider observes; Rr never writes back)
 end
 
 Cfg -> Cfg : emit RoutingTableChange::NodeAdded{4, ...}\n+ GroupMembershipChanged{7, [1,2,3,4]}

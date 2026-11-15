@@ -49,20 +49,20 @@ RUST_LOG="warn,rr::audit=info" rr-server serve --config /etc/rr/config.toml
 
 ### 独立文件 / Dedicated File
 
-嵌入 rr 或 fork `rr-server` 时，可增加自定义 `tracing-subscriber` layer，把 `target="rr::audit"` 写到独立文件，再由平台
+嵌入 Rr 或 fork `rr-server` 时，可增加自定义 `tracing-subscriber` layer，把 `target="rr::audit"` 写到独立文件，再由平台
 设置 append-only/immutable 属性。默认二进制的 stdout 配置本身不会创建独立审计文件。
 
-When embedding rr or forking `rr-server`, add a custom `tracing-subscriber` layer for `target="rr::audit"` and protect
+When embedding Rr or forking `rr-server`, add a custom `tracing-subscriber` layer for `target="rr::audit"` and protect
 the resulting file with platform append-only/immutable attributes. The stock binary's stdout configuration does not
 create a separate audit file.
 
 ### 日志平台 / Loki, CloudWatch, or Datadog
 
-把 tracing 输出转发到日志平台，再按 `target:"rr::audit"` 持久化和查询。传输、索引和不可篡改保留策略由该平台负责，rr 不直
+把 tracing 输出转发到日志平台，再按 `target:"rr::audit"` 持久化和查询。传输、索引和不可篡改保留策略由该平台负责，Rr 不直
 接提供这些 sink。
 
 Forward tracing output to the platform and filter on `target:"rr::audit"` for persistence and queries. Transport,
-indexing, and immutable retention belong to that platform; rr does not provide these sinks directly.
+indexing, and immutable retention belong to that platform; Rr does not provide these sinks directly.
 
 ## 保留策略 / Retention Policy
 
@@ -117,8 +117,8 @@ not currently available.
 - 默认审计事件与应用日志共享 subscriber 和输出；独立文件需要自定义 layer 或下游采集。<br />
   By default, audit and application events share the subscriber and output; separate files require a custom layer or
   downstream collection.
-- stdout 被丢弃、进程崩溃或 sink 不可达时，rr 不提供独立持久化补发队列。<br />
-  rr has no separate durable replay queue if stdout is lost, the process crashes, or the sink is unreachable.
+- stdout 被丢弃、进程崩溃或 sink 不可达时，Rr 不提供独立持久化补发队列。<br />
+  Rr has no separate durable replay queue if stdout is lost, the process crashes, or the sink is unreachable.
 
 ## 相关 / Related
 

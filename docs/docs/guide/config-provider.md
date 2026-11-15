@@ -101,8 +101,8 @@ let provider = EtcdConfigProvider::new(
 ).await?;
 ```
 
-该实现只读，rr 不把路由写回 etcd；外部工具负责写入以下 key：
-The provider is read-only; rr never writes routing state back to etcd. External tooling provisions these keys:
+该实现只读，Rr 不把路由写回 etcd；外部工具负责写入以下 key：
+The provider is read-only; Rr never writes routing state back to etcd. External tooling provisions these keys:
 
 ```text
 /rr/{cluster_id}/nodes/{node_id}

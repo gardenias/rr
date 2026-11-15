@@ -106,9 +106,9 @@ Snapshot bytes and the metadata needed to rebuild them are enveloped by `Snapsho
 
 ## Raft 日志存储 / Raft Log Storage
 
-rr 提供两种 openraft `RaftLogStorage` 实现：
+Rr 提供两种 openraft `RaftLogStorage` 实现：
 
-rr provides two openraft `RaftLogStorage` implementations:
+Rr provides two openraft `RaftLogStorage` implementations:
 
 1. **`RrLogStorage`**：内存 `BTreeMap`，适用于开发；重启后日志丢失。<br />`RrLogStorage` uses an in-memory `BTreeMap` for development; its log is lost on restart.
 2. **`RocksLogStorage`**：通过 `StorageEngine` 调用 `RocksStorage`，提供跨重启持久化。<br />`RocksLogStorage` uses `RocksStorage` through `StorageEngine` and persists logs across restarts.

@@ -135,10 +135,10 @@ leader_cache: Arc<RwLock<HashMap<GroupId, (NodeId, String)>>>
 
 ### 不由 Follower 代理 / No Follower Proxying
 
-rr 不在 follower 上代理写入，避免额外一跳、follower 持有等待状态以及被代理流量掩盖真实 leader 变化。
+Rr 不在 follower 上代理写入，避免额外一跳、follower 持有等待状态以及被代理流量掩盖真实 leader 变化。
 代价由 `rr-client` 的重定向逻辑承担；无幂等键时，应用仍需处理重试造成的重复写风险。
 
-rr does not proxy writes through followers, avoiding an extra hop, pending response state on followers, and hidden
+Rr does not proxy writes through followers, avoiding an extra hop, pending response state on followers, and hidden
 leader changes. `rr-client` owns the redirect logic instead; without idempotency keys, applications must still
 handle duplicate-write risk from retries.
 

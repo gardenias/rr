@@ -14,7 +14,7 @@ Both use managed formation, not the legacy bootstrap/peers flow.
 
 - Kubernetes 1.27+，以及支持 `ReadWriteOnce` 的 StorageClass。
 - 每个 Pod 可访问的 etcd v3。Raw manifests 默认使用 `http://etcd:2379`；Helm 默认使用 `http://rr-etcd:2379`。
-- 显式指定支持 managed formation 的镜像。rr 0.2.0 的严格解析器拒绝 `[cluster.formation]` 和新 cluster 字段，不能使用，也
+- 显式指定支持 managed formation 的镜像。Rr 0.2.0 的严格解析器拒绝 `[cluster.formation]` 和新 cluster 字段，不能使用，也
   不能保留 `REPLACE_WITH_FORMATION_CAPABLE_TAG`。
 - 默认安全配置需要 `rr-tls` 和 `rr-admin-token` 两个 Secret。证书 SAN 必须覆盖实际拨入的 Pod/Service DNS 名。
 
@@ -23,7 +23,7 @@ Requirements:
 - Kubernetes 1.27+ and a StorageClass supporting `ReadWriteOnce`.
 - An etcd v3 endpoint reachable from every Pod. Raw manifests default to `http://etcd:2379`; Helm defaults to
   `http://rr-etcd:2379`.
-- An explicit formation-capable image. rr 0.2.0 rejects `[cluster.formation]` and the new cluster fields; neither that
+- An explicit formation-capable image. Rr 0.2.0 rejects `[cluster.formation]` and the new cluster fields; neither that
   release nor `REPLACE_WITH_FORMATION_CAPABLE_TAG` is valid.
 - The default secure configuration requires `rr-tls` and `rr-admin-token` Secrets. Certificate SANs must cover the
   Pod/Service DNS names clients actually dial.

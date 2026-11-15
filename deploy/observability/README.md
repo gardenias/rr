@@ -1,6 +1,6 @@
-# rr — Prometheus & Grafana
+# Rr — Prometheus & Grafana
 
-Drop-in observability artifacts for an rr cluster.
+Drop-in observability artifacts for an Rr cluster.
 
 ## Files
 
