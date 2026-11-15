@@ -56,7 +56,7 @@
   text-transform: uppercase;
 }
 
-.eyebrow > span {
+.eyebrow > span:first-child {
   width: 22px;
   height: 1px;
   background: currentColor;
@@ -138,13 +138,13 @@
   font-size: 0.72rem;
 }
 
-.heroMeta span {
+.heroMeta > span {
   display: flex;
   align-items: center;
   gap: 0.45rem;
 }
 
-.heroMeta span::before {
+.heroMeta > span::before {
   width: 4px;
   height: 4px;
   border-radius: 50%;
@@ -201,7 +201,7 @@
   font-size: 0.68rem;
 }
 
-.health > span {
+.health > i {
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -466,46 +466,211 @@
 }
 
 .stackCard {
-  padding: 0.5rem 1.25rem;
-  border: 1px solid #29323d;
-  border-radius: 12px;
-  background: #121820;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid #2b3540;
+  border-radius: 14px;
+  background: #11171e;
+  box-shadow: 0 28px 70px rgb(0 0 0 / 24%);
+}
+
+.stackCard::before {
+  position: absolute;
+  height: 1px;
+  top: 0;
+  right: 12%;
+  left: 12%;
+  background: linear-gradient(90deg, transparent, var(--rr-orange), transparent);
+  content: '';
+  opacity: 0.7;
+}
+
+.stackHeader,
+.stackFooter {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: #151c24;
+}
+
+.stackHeader {
+  border-bottom: 1px solid #27313b;
+}
+
+.stackHeaderLabel {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #aab5c0;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.61rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.stackHeaderLabel > i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--rr-orange);
+  box-shadow: 0 0 0 4px rgb(244 123 69 / 9%);
+}
+
+.stackHeaderMeta {
+  color: #657383;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+}
+
+.stackRows {
+  padding: 0.35rem 1rem;
 }
 
 .stackRow {
+  position: relative;
   display: grid;
-  grid-template-columns: 28px 1fr auto;
-  gap: 1rem;
+  grid-template-columns: 26px 42px minmax(0, 1fr) auto;
+  gap: 0.85rem;
   align-items: center;
-  padding: 1.25rem 0;
+  min-height: 94px;
+  padding: 0.85rem 0.35rem;
+  border-bottom: 1px solid #242e38;
+  border-radius: 7px;
+  transition: background-color 180ms ease;
 }
 
-.stackRow > span {
-  color: #8491a0;
+.stackRow:last-child {
+  border-bottom-color: transparent;
+}
+
+.stackRow:hover {
+  background: rgb(255 255 255 / 2.5%);
+}
+
+.stackRail {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  justify-content: center;
+  color: #778596;
   font-family: var(--ifm-font-family-monospace);
-  font-size: 0.65rem;
+  font-size: 0.61rem;
 }
 
-.stackRow strong {
-  color: #dce2e8;
-  font-size: 0.87rem;
-  font-weight: 550;
+.stackRail::after {
+  position: absolute;
+  width: 1px;
+  top: calc(50% + 13px);
+  bottom: calc(-50% - 3px);
+  left: 50%;
+  background: #35414d;
+  content: '';
+}
+
+.stackRail::before {
+  position: absolute;
+  z-index: 1;
+  width: 3px;
+  height: 7px;
+  top: calc(50% + 12px);
+  left: calc(50% - 1px);
+  background: var(--rr-orange);
+  content: '';
+  animation: stackPulse 2.8s ease-in-out var(--stack-delay, 0ms) 1;
+}
+
+.stackRow:last-child .stackRail::before,
+.stackRow:last-child .stackRail::after {
+  display: none;
+}
+
+.stackIcon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  border: 1px solid #34404b;
+  border-radius: 9px;
+  color: #d58a64;
+  background: #192129;
+  place-items: center;
+  transition: border-color 180ms ease, color 180ms ease, transform 180ms ease;
+}
+
+.stackIcon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.stackRow:hover .stackIcon {
+  border-color: rgb(244 123 69 / 48%);
+  color: var(--rr-orange);
+  transform: translateY(-1px);
+}
+
+.stackContent {
+  min-width: 0;
+}
+
+.stackContent h3 {
+  margin: 0 0 0.35rem;
+  color: #e2e7ec;
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.stackContent p {
+  margin: 0;
+  color: #8795a4;
+  font-size: 0.69rem;
+  line-height: 1.5;
 }
 
 .stackRow code {
-  padding: 0.3rem 0.45rem;
-  border: 1px solid #29333e;
-  border-radius: 4px;
-  color: #929fac;
-  background: #0e141b;
-  font-size: 0.66rem;
+  padding: 0.38rem 0.5rem;
+  border: 1px solid #2c3742;
+  border-radius: 5px;
+  color: #a3afbb;
+  background: #0d1319;
+  font-size: 0.64rem;
+  white-space: nowrap;
 }
 
-.stackConnector {
-  width: 1px;
-  height: 12px;
-  margin-left: 13px;
-  background: #35404b;
+.stackFooter {
+  justify-content: center;
+  gap: 0.75rem;
+  padding-top: 0.8rem;
+  padding-bottom: 0.8rem;
+  border-top: 1px solid #27313b;
+  color: #788696;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.58rem;
+}
+
+.stackFooter > i {
+  position: relative;
+  width: 52px;
+  height: 1px;
+  background: #3b4651;
+}
+
+.stackFooter > i::after {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  top: -2px;
+  right: 0;
+  border-top: 1px solid var(--rr-orange);
+  border-right: 1px solid var(--rr-orange);
+  content: '';
+  transform: rotate(45deg);
 }
 
 .finalCta {
@@ -598,14 +763,14 @@
   transform: translateY(0);
 }
 
-.primaryButton > span,
-.textLink > span {
+.primaryButton > span[aria-hidden='true'],
+.textLink > span[aria-hidden='true'] {
   display: inline-block;
   transition: transform 160ms ease;
 }
 
-.primaryButton:hover > span,
-.textLink:hover > span {
+.primaryButton:hover > span[aria-hidden='true'],
+.textLink:hover > span[aria-hidden='true'] {
   transform: translate(2px, -1px);
 }
 
@@ -616,22 +781,6 @@
 .featureCard:hover .featureIcon {
   border-color: var(--ifm-color-primary);
   background: rgb(200 83 36 / 7%);
-}
-
-.stackConnector {
-  position: relative;
-  overflow: hidden;
-}
-
-.stackConnector::after {
-  position: absolute;
-  width: 1px;
-  height: 7px;
-  top: 0;
-  left: 0;
-  background: var(--rr-orange);
-  content: '';
-  animation: stackPulse 2.8s ease-in-out 1;
 }
 
 @media (max-width: 1100px) {
@@ -761,17 +910,33 @@
     margin-bottom: 2.25rem;
   }
 
-  .stackCard {
-    padding: 0.5rem 0.85rem;
+  .stackHeader,
+  .stackFooter {
+    padding-right: 0.9rem;
+    padding-left: 0.9rem;
+  }
+
+  .stackHeaderMeta {
+    display: none;
+  }
+
+  .stackRows {
+    padding: 0.3rem 0.65rem;
   }
 
   .stackRow {
-    grid-template-columns: 24px 1fr;
-    gap: 0.5rem;
+    grid-template-columns: 22px 36px minmax(0, 1fr);
+    gap: 0.65rem;
+    padding: 0.85rem 0.15rem;
+  }
+
+  .stackIcon {
+    width: 36px;
+    height: 36px;
   }
 
   .stackRow code {
-    grid-column: 2;
+    grid-column: 3;
     justify-self: start;
   }
 
@@ -785,7 +950,7 @@
   .heroCopy,
   .clusterCard,
   .activeLine,
-  .stackConnector::after {
+  .stackRail::before {
     animation: none;
   }
 
@@ -801,8 +966,8 @@
   .primaryButton,
   .secondaryButton,
   .featureCard,
-  .primaryButton > span,
-  .textLink > span {
+  .primaryButton > span[aria-hidden='true'],
+  .textLink > span[aria-hidden='true'] {
     transition: none;
   }
 }

@@ -375,15 +375,46 @@ body {
 
 
 .language-mode-switcher {
+  display: inline-flex;
   min-width: 7.5rem;
   min-height: 36px;
-  padding: 0.35rem 1.8rem 0.35rem 0.65rem;
-  border: 1px solid var(--ifm-color-emphasis-300);
-  border-radius: 6px;
-  background: var(--ifm-background-surface-color);
-  color: var(--ifm-font-color-base);
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--ifm-color-emphasis-700);
+  background: transparent;
   font: 600 0.75rem var(--ifm-font-family-base);
+  white-space: nowrap;
   cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease;
+}
+
+.language-mode-switcher > svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+}
+
+.language-mode-switcher .language-mode-switcher__cycle {
+  width: 13px;
+  height: 13px;
+  margin-left: 0.1rem;
+  opacity: 0.5;
+  transition: opacity 160ms ease, transform 200ms ease;
+}
+
+.language-mode-switcher:hover {
+  border-color: var(--ifm-color-emphasis-200);
+  color: var(--ifm-color-primary);
+  background: var(--ifm-color-emphasis-100);
+}
+
+.language-mode-switcher:hover .language-mode-switcher__cycle {
+  opacity: 1;
+  transform: rotate(35deg);
 }
 
 .language-mode-switcher:focus-visible {
