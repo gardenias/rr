@@ -2,13 +2,11 @@
 sidebar_position: 1
 ---
 
-# Level 1 — 系统上下文 / System Context
+# 第 1 级：系统上下文 / Level 1: System Context
 
-系统上下文图回答一个简单问题：**rr 到底是什么，谁用它，它与哪些外部系统交互？** 本图面向所有读者——开发者、运维、产品经理——建立对 rr 所处位置的共识。
+本图界定 rr 的系统边界、使用者和外部依赖。
 
----
-
-The System Context diagram answers one simple question: **what is rr, who uses it, and what external systems does it talk to?** This diagram is for all audiences — developers, operators, product managers — to establish a shared mental model of where rr sits.
+This diagram defines rr's system boundary, users, and external dependencies.
 
 ## 图示 / Diagram
 
@@ -41,58 +39,60 @@ LAYOUT_WITH_LEGEND()
 
 ## 外部行为者 / External Actors
 
-### Application Developer
-构建基于 rr 的服务的工程师。他们通过实现 `rr-core` 的 `Service` 或 `StateMachine` trait 嵌入业务逻辑，并通过 `NodeConfig` 配置部署。关注点：编程模型、失败模式、一致性语义。
+### 应用开发者 / Application Developer
 
----
+开发者实现 `rr-core` 的 `Service` 或 `StateMachine` trait 以嵌入业务逻辑，并用 `NodeConfig` 配置节点。
+他们需要了解编程模型、失败模式和一致性语义。
 
-Engineers building services on top of rr. They embed business logic by implementing the `Service` or `StateMachine` traits from `rr-core`, and configure deployment via `NodeConfig`. Concerns: programming model, failure modes, consistency semantics.
+Developers implement `rr-core`'s `Service` or `StateMachine` trait to embed business logic and configure nodes
+with `NodeConfig`. Their concerns are the programming model, failure modes, and consistency semantics.
 
-### Cluster Operator / SRE
-运行 rr 集群的人。他们使用 `rr-admin` CLI 检查状态、触发快照、转移领导权，并通过 Prometheus 监控集群健康度。关注点：可观测性、故障恢复、滚动升级。
+### 集群运维 / Cluster Operator / SRE
 
----
+运维使用 `rr-admin` 查看状态、触发快照和转移领导权，并通过 Prometheus 监控集群。
 
-People running rr clusters in production. They use the `rr-admin` CLI to inspect status, trigger snapshots, transfer leadership, and monitor cluster health via Prometheus. Concerns: observability, failure recovery, rolling upgrades.
+Operators use `rr-admin` to inspect status, trigger snapshots, and transfer leadership, and use Prometheus to
+monitor the cluster.
 
-### End User
-应用的最终用户，例如通过用户应用调用 KV 操作的业务服务。他们完全不感知 rr 的存在——只看到应用提供的 API。
+### 最终用户 / End User
 
----
+最终用户只接触应用 API，不需要感知 rr。
 
-The final users of the application, e.g. business services calling KV operations via the user's app. They are completely unaware of rr — they only see the API the application exposes.
+End users interact with the application API and need not be aware of rr.
 
 ## 外部系统 / External Systems
 
-### Prometheus (optional)
-rr 节点通过内置的 `metrics-exporter-prometheus` 在 HTTP `/metrics` 端点暴露指标（请求延迟、Raft 任期、日志追加速率等）。Prometheus 定期抓取。
+### Prometheus（可选）/ Prometheus (Optional)
 
----
+节点通过 `metrics-exporter-prometheus` 暴露 HTTP `/metrics`，Prometheus 定期抓取。
 
-rr nodes expose metrics at HTTP `/metrics` via the built-in `metrics-exporter-prometheus` (request latencies, Raft terms, log append rates, etc.). Prometheus scrapes them periodically.
+Nodes expose HTTP `/metrics` through `metrics-exporter-prometheus`; Prometheus scrapes the endpoint periodically.
 
-### External ConfigProvider (optional)
-默认 `MemConfigProvider` 将路由表存储在进程内存中，仅适合开发。生产环境可用 workspace 自带的 `rr-config-etcd`（`EtcdConfigProvider`，**只读**——rr 从不写回 etcd），或自行实现 `ConfigProvider` 从其他外部源加载并监听变化。
+### 外部 ConfigProvider（可选）/ External ConfigProvider (Optional)
 
----
+默认 `MemConfigProvider` 只保存进程内路由表。生产环境可使用只读的 `rr-config-etcd`
+（`EtcdConfigProvider`），或自行实现 `ConfigProvider`；rr 不写回 etcd。
 
-The default `MemConfigProvider` keeps the routing table in process memory — suitable only for development. In production you can use the workspace-provided `rr-config-etcd` (`EtcdConfigProvider`, **read-only** — rr never writes back to etcd), or implement `ConfigProvider` yourself to load from and watch another external source.
+The default `MemConfigProvider` keeps the routing table in process memory. Production deployments can use the
+read-only `rr-config-etcd` (`EtcdConfigProvider`) or a custom `ConfigProvider`; rr never writes back to etcd.
 
-### Local Disk
-启用 `rocks` feature 并以 `--storage rocks` 运行 stock `rr-server` 后，每个 group 的 Raft 日志持久化到本地文件系统（通常是 SSD）——**每个 group 一个独立的 RocksDB 实例**，路径为 `{data_dir}/raft-log/{group_id}`（ADR A-0016）。状态机快照同样持久化：原子写入同目录的 `sm-snapshot.bin`（fail-closed，T1），重启时先恢复快照再重放未 purge 的日志尾部。默认 `--storage mem` 仍为全内存。
+### 本地磁盘 / Local Disk
 
----
+stock `rr-server` 在启用 `rocks` feature 且使用 `--storage rocks` 时，为每个 group 在
+`{data_dir}/raft-log/{group_id}` 打开独立 RocksDB。Raft 日志和 `sm-snapshot.bin` 均持久化；快照原子写入，
+损坏或未知版本会 fail-closed。重启时先恢复快照，再重放未 purge 的日志尾部。默认 `--storage mem`
+仍为全内存。
 
-With the `rocks` feature and `--storage rocks`, the stock `rr-server` persists each group's Raft log to the local filesystem (typically an SSD) — **one independent RocksDB instance per group** at `{data_dir}/raft-log/{group_id}` (ADR A-0016). State-machine snapshots are persisted too: atomically written to `sm-snapshot.bin` in the same directory (fail-closed, T1), and a restart restores the snapshot before replaying the un-purged log tail. The default `--storage mem` remains fully in-memory.
+With the `rocks` feature and `--storage rocks`, stock `rr-server` opens an independent RocksDB per group at
+`{data_dir}/raft-log/{group_id}`. It persists both the Raft log and `sm-snapshot.bin`; snapshot writes are atomic,
+and corrupt or unknown-version files fail closed. Restart restores the snapshot before replaying the un-purged
+log tail. The default `--storage mem` remains in-memory.
 
-## 未显式建模的内容 / What's Intentionally Out of Scope
+## 不在本图范围内 / Out of Scope
 
-- **单个 rr 节点内部结构** → 见 [containers.md](./containers.md) 与 components-*.md
-- **节点间 Raft 消息的具体协议** → 见 [components-network.md](./components-network.md)
-- **物理部署布局（可用区、网络分区）** → 见 [deployment.md](./deployment.md)
-
----
-
-- **Inside a single rr node** → see [containers.md](./containers.md) and components-*.md
-- **Concrete Raft RPC protocol between nodes** → see [components-network.md](./components-network.md)
-- **Physical deployment layout (availability zones, network partitions)** → see [deployment.md](./deployment.md)
+- 节点内部结构见 [containers.md](./containers.md) 和组件图。 /
+  See [containers.md](./containers.md) and the component diagrams for node internals.
+- Raft RPC 协议见 [components-network.md](./components-network.md)。 /
+  See [components-network.md](./components-network.md) for Raft RPCs.
+- 物理部署见 [deployment.md](./deployment.md)。 /
+  See [deployment.md](./deployment.md) for physical deployment.

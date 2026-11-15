@@ -2,133 +2,152 @@
 sidebar_position: 4
 ---
 
-# Runbook — 网络分区 / Network Partition
+# 网络分区手册 / Runbook: Network Partition
 
-## Symptom / 症状
+## 症状 / Symptoms
 
-部分 rr 节点相互无法通信，导致集群分裂成两个或多个子集。症状：
+部分节点无法互通，一侧可提交写入，另一侧报 `NotLeader` 或超时；`rr_channel_reconnects_total` 增长，监控视角中的部分节点
+不可达。
 
-- 一侧客户端成功写入；另一侧报 `RaftError::NotLeader` 或超时
-- `rr_channel_reconnects_total` 在多个节点上爆增
-- 节点日志：
-  ```
-  WARN rr_raft::network_factory: failed to append_entries to node 3: transport error: ... Connection refused
-  ```
-- Prometheus `up{job="rr"}` 部分节点显示 `0`（监控器视角）
+Some nodes cannot communicate. One side may commit writes while the other returns `NotLeader` or times out;
+`rr_channel_reconnects_total` rises and some nodes become unreachable from monitoring.
 
-**重要事实 / Important**: Raft 的设计能**安全地处理分区** —— 多数方继续工作，少数方只读/不写。**真正的问题是 split-brain 风险（不会发生于 rr，因为 Raft 保证最多一个 leader per term），以及长期 availability 降级。**
+```text
+WARN rr_raft::network_factory: failed to append_entries to node 3: transport error: ... Connection refused
+```
 
-## Detection / 检测
+多数派可继续提交，少数派不能提交新写。少数派的本地读可能返回旧数据，不应把它描述为正常只读服务。Raft 防止同一 term 出现
+两个合法 leader，但分区仍会造成可用性下降和客户端路由问题。
+
+A majority can continue committing; a minority cannot commit new writes. Local reads on the minority can return stale
+data and must not be presented as normal read-only service. Raft prevents two legitimate leaders in one term, but a
+partition still degrades availability and client routing.
+
+## 检测 / Detection
 
 ```promql
-# PromQL — 某节点 5 分钟内 reconnect > 30 次（持续断连）
 increase(rr_channel_reconnects_total[5m]) > 30
-
-# PromQL — 某节点 node_id 视角看不到其他节点
-# （需要 blackbox_exporter 或 dedicated probe）
 probe_success{job="rr-peer-probe"} == 0
-
-# 应用层 / Application-level
-# A 端客户端写入率为 0 而 B 端仍在写 → 分区高度可疑
 ```
 
-手动确认 / Manual confirm:
+从每个节点向其他节点探测实际配置的 Raft 地址。TCP 成功只证明端口可连，不证明 TLS、认证或 Raft RPC 正常。
+
+Probe the configured Raft addresses from every node. TCP success proves only port reachability, not TLS, authentication,
+or healthy Raft RPCs.
 
 ```bash
-# 从节点 A 测试能否连到其他节点的 Raft port / From node A, can reach peers?
 for peer in rr-0 rr-1 rr-2; do
-  echo "--- $peer ---"
-  nc -zv $peer 51001 2>&1 | head -1
+  nc -zv "$peer" 51001
 done
+rr-admin --addr rr-0:52001 group status --group "$GROUP"
 ```
 
-## Immediate Mitigation / 立即处置
+安全模式下，为 `rr-admin` 添加 `--token-env RR_ADMIN_TOKEN` 和三个 TLS 参数。
 
-### Step 1 — 映射分区拓扑 / Map the partition topology
+In secure mode, add `--token-env RR_ADMIN_TOKEN` and all three TLS flags to `rr-admin`.
 
-**从每个节点 ssh 过去运行 probe**，画出可达矩阵：
+## 立即处置 / Immediate Mitigation
 
-```
+### 绘制可达矩阵 / Map the Reachability Matrix
+
+从每个节点执行探测，记录方向性；A→B 成功不代表 B→A 成功。根据实际 voter 集合判断哪一侧有多数派，而不是根据进程是否存活。
+
+Probe from every node and record directionality; A→B success does not imply B→A. Determine which side has a majority
+from the actual voter set, not from process liveness.
+
+```text
      rr-0  rr-1  rr-2  rr-3  rr-4
-rr-0  -    ✓     ✓     ✗     ✗
-rr-1  ✓    -     ✓     ✗     ✗
-rr-2  ✓    ✓     -     ✗     ✗
-rr-3  ✗    ✗     ✗     -     ✓
-rr-4  ✗    ✗     ✗     ✓     -
+rr-0  -     yes   yes   no    no
+rr-1  yes   -     yes   no    no
+rr-2  yes   yes   -     no    no
+rr-3  no    no    no    -     yes
+rr-4  no    no    no    yes   -
 ```
 
-这个矩阵告诉你哪一侧有 quorum（此例 3/5 → {0,1,2} 侧仍可写，{3,4} 只读）。
+### 引导客户端 / Steer Clients
 
-### Step 2 — 警告客户端写入将倾斜 / Warn consumers that writes will skew
+让客户端连接多数派侧的健康地址，并清理失效的本地连接。不要通过向少数派重复写入来“测试恢复”，这只会增加超时和重试压力。
 
-如果你的应用（网关等）能识别 leader 地址，让它们只连接 quorum 侧。否则客户端会经历超时（因为它们缓存的 leader 可能在 minority 侧）。
+Point clients at healthy majority-side addresses and clear dead local connections. Do not repeatedly write to the
+minority as a recovery probe; it only adds timeouts and retry pressure.
 
-### Step 3 — **不要手动 `rr-admin change-membership`** 除非确定
+### 冻结成员变更 / Freeze Membership Changes
 
-人为改变 membership 在分区期间是**最危险的操作**。若你在 minority 侧改成员去排除 majority，你会造成 split-brain（两侧都觉得自己有 quorum）。**仅当确信另一侧永久下线时才改 membership**（例如 DC 失火全毁）。
+分区期间不要用 `change-membership` 排除暂时不可达节点。少数派上的变更无法提交，不会因此自动产生双主；多数派上排除节点则
+会真实改变 quorum，必须只用于已确认永久损失且剩余 voter 仍满足多数派的灾难场景。
 
-## Root-Cause Investigation / 根因分析
+Do not use `change-membership` to evict temporarily unreachable nodes during a partition. A change on the minority
+cannot commit and does not automatically create split-brain; a change on the majority really changes quorum and belongs
+only to confirmed permanent-loss disaster recovery where remaining voters still form a majority.
 
-### 1. 物理网络故障 / Physical network failure
+不要对少数派使用 `--force`，也不要把 force 当成绕过网络分区的工具。
 
-**证据**: 云厂商状态页报 AZ / region 事件；`ip route` 异常；switch/router 监控告警。
+Never use `--force` on the minority or treat it as a way to bypass a network partition.
 
-**Fix**: 等网络恢复；修 NIC / cable / peering。
+## 根因分析 / Root-Cause Investigation
 
-### 2. 防火墙规则变更 / Firewall rule change
+1. **物理或云网络故障。** 检查云事件、路由、NIC、交换机和 peering。<br />
+   **Physical or cloud-network failure.** Inspect cloud incidents, routes, NICs, switches, and peering.
+2. **防火墙变更。** 检查最近部署、security group、`iptables`/`nft`，只开放实际配置的 Client/Raft 端口；Admin 只向运维网段
+   开放。<br />
+   **Firewall change.** Inspect recent deployments, security groups, and packet filters. Open only configured Client/Raft
+   ports; restrict Admin to operations networks.
+3. **Kubernetes 策略。** 检查 NetworkPolicy、Istio AuthorizationPolicy 和 egress 是否允许 StatefulSet Pod 互通。<br />
+   **Kubernetes policy.** Check NetworkPolicy, Istio AuthorizationPolicy, and egress for StatefulSet peer traffic.
+4. **MTU 不匹配。** 小包可用而大 AppendEntries 失败时，检查隧道/VLAN MTU 和 path MTU discovery，不要盲目改成固定值。<br />
+   **MTU mismatch.** If small packets work but large AppendEntries fail, inspect tunnel/VLAN MTU and path MTU discovery
+   instead of blindly forcing a value.
+5. **TLS 证书。** 检查 `certificate expired`、`UnknownIssuer` 和 SAN；见
+   [TLS 轮换](../../deployment/tls.md#证书轮换--certificate-rotation)。<br />
+   **TLS certificates.** Inspect expiry, issuer, and SAN errors and follow
+   [TLS rotation](../../deployment/tls.md#证书轮换--certificate-rotation).
+6. **DNS 故障。** 从 Pod/节点内部检查解析和 CoreDNS；临时 IP 直连也必须与证书 SAN 或显式 TLS domain 匹配。<br />
+   **DNS failures.** Test resolution from inside the Pod/node and inspect CoreDNS. Temporary IP dialing must still match
+   certificate SANs or an explicit TLS domain.
 
-**证据**: 最近有部署/配置变更；`iptables -L -n -v` 或 `nft list ruleset` 显示新规则；security group/NetworkPolicy 改过。
+## 恢复 / Recovery
 
-**Fix**: 回滚；或在所有节点打开 51001（Client+Raft）、52001（Admin，仅从 ops 网段）。
+网络恢复后通常无需重启。确认连接重建、leader 唯一且稳定、复制 lag 下降；落后过多时等待 InstallSnapshot 完成。写入期间各
+节点 `last_log_index` 不要求每一时刻完全相等，应在暂停写入后收敛或持续增长时保持有限 lag。
 
-### 3. K8s NetworkPolicy / Istio 策略 / K8s NetworkPolicy or Istio policies
+After the network heals, a restart is usually unnecessary. Confirm rebuilt connections, one stable leader, and
+decreasing replication lag; wait for InstallSnapshot if a node is too far behind. During active writes, `last_log_index`
+need not be identical at every instant; it should converge when writes pause or remain within bounded lag during growth.
 
-**证据**: `kubectl describe networkpolicy`、Istio AuthorizationPolicy 最近被改。
+```bash
+rr-admin --addr rr-0:52001 group membership --group "$GROUP"
+rr-admin --addr rr-0:52001 group status --group "$GROUP"
+```
 
-**Fix**: 回滚 policy；确保 rr StatefulSet 的 pods 能互相 egress 51001。
+```promql
+rr_raft_replication_lag
+```
 
-### 4. MTU 不匹配 / MTU mismatch
+若少数派节点数据损坏，先在多数派侧确认集群健康，再按 [快照损坏手册](./snapshot-corruption.md) 做单节点恢复。若怀疑实现缺
+陷导致两侧都提交冲突写，立即停止两侧写入、保存证据并升级事故；不要自行选择一侧覆盖另一侧。
 
-**证据**: 小包能过，大包（AppendEntries with batch）丢；`ping -s 8000 peer` 失败而 `ping peer` 成功；新 VLAN / VPN 隧道最近上线。
+If a minority node's data is corrupt, first verify majority-side health, then follow
+[Snapshot Corruption](./snapshot-corruption.md) for single-node recovery. If an implementation defect is suspected of
+allowing conflicting commits on both sides, stop writes on both sides, preserve evidence, and escalate; do not choose
+one side to overwrite the other ad hoc.
 
-**Fix**: 在 NIC 上降 MTU 到 1500 或 enable path MTU discovery。
+## 预防 / Prevention
 
-### 5. TLS 证书过期 / Expired TLS certs
-
-**证据**: 日志 `certificate expired`、`UnknownIssuer`；`openssl x509 -in cert.pem -noout -enddate` 显示 past-due。
-
-**Fix**: 立刻 rotate 证书（见 [tls.md](../../deployment/tls.md#证书轮换--certificate-rotation)）。
-
-### 6. DNS 解析失败 / DNS failures
-
-**证据**: `nslookup peer.domain` 从节点内部失败；`CoreDNS` 日志错误。
-
-**Fix**: 修 CoreDNS；临时用 IP 直连。
-
-## Recovery / 恢复
-
-### 分区自动愈合后 / After partition heals on its own
-
-1. **不要重启节点** — Raft 会自动恢复。旧 minority 侧的节点会作为 follower 重新加入。
-2. **等 catch-up 完成** — `rr_raft_last_log_index` 在所有节点收敛到同一值。慢节点可能要几分钟或触发 `InstallSnapshot`。
-3. **验证 quorum 健康** — `rr-admin group status --group $GID` 显示所有 voters 均可见。
-4. **如果 minority 侧有节点写入被应用** — 在 Raft 里这**不可能发生**（minority 无 leader），但如果曾 temporary 被误认为 leader（例如 GC pause 延迟了 step-down），该 writes 会被新的 log entries 覆盖。这是 Raft 的正确行为。
-
-### 需要手动干预的情况 / When manual intervention is needed
-
-- **Minority 侧节点**的 cert 全过期、配置全坏了 → `rr-admin backup` 导出后 wipe → rebuild 从 majority 侧 replicate。
-- **分区后两侧都认为自己 quorum**（rr 不应该导致；开源 etcd 有过类似 bug 场景）→ 证据收集 → 停止写入两侧 → 选择一侧为 source of truth → 另一侧做 restore。
-
-## Prevention / 预防
-
-- **跨 AZ 部署** — 每个 rr 节点在独立 availability zone。3 AZ × 3 节点最小化单 AZ 故障影响。
-- **Quorum size** — 5 节点容忍 2 宕 > 3 节点容忍 1 宕。生产优先 5+。
-- **NetworkPolicy 测试** — 每个 NetworkPolicy 变更都在 staging 的活 rr 集群跑一遍。
-- **TLS 证书监控** — Prometheus `blackbox_exporter` 的 `probe_ssl_earliest_cert_expiry` 告警 7 天前。
-- **Chaos testing** — 定期注入分区（rr 的集成测试套件 `test_leader_isolation_and_recovery` 就是这种场景；生产可用 [Chaos Mesh](https://chaos-mesh.org/) 复现）。
+- 跨 AZ 分布 voter，使任一 AZ 故障不夺走多数派。<br />
+  Spread voters across AZs so one AZ loss cannot remove the majority.
+- 按容错目标选择 3 或 5 个 voter；5 个可容忍 2 个故障，但成本和延迟更高。<br />
+  Choose three or five voters from fault-tolerance goals; five tolerate two failures at higher cost and latency.
+- 在 staging 验证 NetworkPolicy、防火墙和 TLS 变更。<br />
+  Validate NetworkPolicy, firewall, and TLS changes in staging.
+- 用 `probe_ssl_earliest_cert_expiry` 等证书指标提前告警。<br />
+  Alert early with certificate metrics such as `probe_ssl_earliest_cert_expiry`.
+- 定期做分区演练；集成测试 `test_leader_isolation_and_recovery` 覆盖同类场景，生产可使用
+  [Chaos Mesh](https://chaos-mesh.org/)。<br />
+  Rehearse partitions regularly; `test_leader_isolation_and_recovery` covers a similar scenario, and
+  [Chaos Mesh](https://chaos-mesh.org/) can be used in production-like environments.
 
 ## 相关 / Related
 
-- [leader-flapping.md](./leader-flapping.md) — 间歇性网络问题的症状
-- [tls.md](../../deployment/tls.md) — 证书 rotation
-- [../../architecture/c4/deployment.md](../../architecture/c4/deployment.md) — 多 AZ 部署推荐
+- [Leader 不稳定 / Leader instability](./leader-flapping.md)
+- [证书轮换 / Certificate rotation](../../deployment/tls.md)
+- [多 AZ 部署 / Multi-AZ deployment](../../architecture/c4/deployment.md)

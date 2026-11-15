@@ -5,33 +5,29 @@ sidebar_position: 4
 # 多 Raft 架构 / Multi-Raft Architecture
 
 :::info C4 对应视图 / C4 Counterparts
-- rr-raft 内部组件（RaftGroupManager、适配器层、LogStorage）/ rr-raft internals (RaftGroupManager, adapters, LogStorage) → [**c4/components-raft.md**](./c4/components-raft.md)
-- 选举流程视觉化 / Election flow → [**c4/dynamic-leader-election.md**](./c4/dynamic-leader-election.md)
+- [**rr-raft 内部组件** / **rr-raft internals**](./c4/components-raft.md)
+- [**选举流程** / **Election flow**](./c4/dynamic-leader-election.md)
 :::
 
-## 什么是多 Raft / What is Multi-Raft
+## 什么是多 Raft / What Multi-Raft Means
 
-在 rr 框架中，Multi-Raft 是指在单个物理节点上同时运行多个独立的 Raft 共识组（RaftGroup）。每个 Raft 组负责管理集群中特定分片的数据。这种架构相比单 Raft 组具有更高的扩展性和并发处理能力。
+Multi-Raft 在单个节点上运行多个独立的 Raft 组，每个组负责特定分片。写吞吐通过跨组分片扩展；增加同一组的副本不会提高其写吞吐。
 
-每个 Raft 组都是完全独立的：
-- **独立选举**：一个组的领导者选举不会影响其他组。
-- **故障隔离**：如果某个 Raft 组因多数派不可用而停止工作，其他组仍能正常运行。
-- **并行同步**：不同组的日志复制和状态机应用过程是并行的，能够充分利用多核 CPU。
+Multi-Raft runs multiple independent Raft groups on one node, with each group owning specific partitions. Write throughput scales by sharding across groups; adding replicas to one group does not increase its write throughput.
 
----
+各组相互独立：
 
-In the rr framework, Multi-Raft refers to running multiple independent Raft consensus groups (RaftGroup) on a single physical node. Each group manages a specific partition of the cluster's data. Compared to a single Raft group, this architecture provides better scalability and higher concurrency.
+Groups are independent:
 
-Each Raft group is completely independent:
-- **Independent Election**: Leader election in one group does not affect others.
-- **Failure Isolation**: If one group stops working due to quorum loss, other groups continue to function normally.
-- **Parallel Sync**: Log replication and state machine application for different groups are processed in parallel, making full use of multi-core CPUs.
+- **独立选举 / Independent elections**：一个组的选举不改变其他组的角色。<br />An election in one group does not change roles in another.
+- **故障隔离 / Failure isolation**：一个组失去多数派时，其他组仍可服务。<br />Other groups can continue serving when one group loses quorum.
+- **并行处理 / Parallel processing**：不同组并行复制日志和应用状态机，但仍共享节点 CPU、磁盘和网络资源。<br />Different groups replicate logs and apply state machines in parallel, while still sharing the node's CPU, disk, and network resources.
 
 ## 多组架构 / Multi-Group Architecture
 
-下面的图示展示了三个节点如何承载三个不同的 Raft 组。每个组在不同的节点上可能处于不同的角色（Leader 或 Follower）。
+三个节点可承载三个 Raft 组，同一组在不同节点上承担不同角色。
 
-The diagram below shows how three nodes host three different Raft groups. Each group may have different roles (Leader or Follower) on different nodes.
+Three nodes can host three Raft groups, with each group assigning different roles to different nodes.
 
 ```plantuml
 @startuml
@@ -70,74 +66,44 @@ LAYOUT_WITH_LEGEND()
 
 ## 共识组管理器 / RaftGroupManager
 
-`RaftGroupManager` 是 rr 中管理本地所有 Raft 组生命周期的核心组件。它维护了 `GroupId` 到 `RaftNode` 的映射，并提供了一系列 API 来动态控制这些组。
+`RaftGroupManager` 管理本节点的 Raft 组，维护 `GroupId` 到 `RaftNode` 的映射。
 
-主要方法包括：
-- `start_group(group_id)`：为指定的组 ID 创建并启动一个新的 Raft 节点。
-- `init_cluster(group_id, members)`：初始化一个多节点集群。
-- `stop_group(group_id)`：优雅地关闭并移除指定的 Raft 组。
-- `group_ids()`：获取当前节点上所有活跃组的 ID 列表。
-- `get_raft(group_id)`：获取底层 `openraft::Raft` 实例的句柄，用于直接操作（如提交建议）。
+`RaftGroupManager` manages local Raft groups and maps each `GroupId` to a `RaftNode`.
 
----
-
-`RaftGroupManager` is the core component in rr that manages the lifecycle of all local Raft groups. It maintains a mapping from `GroupId` to `RaftNode` and provides a set of APIs to control these groups dynamically.
-
-Key methods include:
-- `start_group(group_id)`: Creates and starts a new Raft node for the specified group ID.
-- `init_cluster(group_id, members)`: Initializes a multi-node cluster.
-- `stop_group(group_id)`: Gracefully shuts down and removes the specified Raft group.
-- `group_ids()`: Returns a list of all active group IDs on the current node.
-- `get_raft(group_id)`: Retrieves a handle to the underlying `openraft::Raft` instance for direct operations (like proposing entries).
+- `start_group(group_id)`：创建并启动组。<br />`start_group(group_id)` creates and starts a group.
+- `init_cluster(group_id, members)`：初始化多节点集群。<br />`init_cluster(group_id, members)` initializes a multi-node cluster.
+- `stop_group(group_id)`：优雅关闭并移除组。<br />`stop_group(group_id)` gracefully stops and removes a group.
+- `group_ids()`：列出本节点活跃组。<br />`group_ids()` lists active local groups.
+- `get_raft(group_id)`：获取底层 `openraft::Raft` 句柄。<br />`get_raft(group_id)` gets the underlying `openraft::Raft` handle.
 
 ## 分片到组的映射 / Partition-to-Group Mapping
 
-rr 通过路由表实现数据分片（Partition）到共识组（Group）的灵活映射。这种设计允许用户根据数据量和负载情况，动态地调整分片的归属。
+路由表定义分片归属；调整路由表可改变分片到组的映射。
 
-- **PartitionConfig**：定义分片的范围或 ID 规则。
-- **GroupMeta**：包含共识组的配置面元数据（副本成员列表）；leader 是 raft 运行时状态，由客户端经 redirect 发现。
-- **RoutingTable**：维护 `PartitionId` 到 `GroupId` 的映射，以及 `NodeId` 到网络地址的映射。
-- **ConfigProvider**：配置提供者接口；内置实现为内存版（`MemConfigProvider`）和基于 etcd 的只读实现（`EtcdConfigProvider`）。
+The routing table defines partition ownership; updating it changes partition-to-group mappings.
 
----
-
-rr implements flexible mapping from data partitions (Partition) to consensus groups (Group) via a routing table. This design allows users to dynamically adjust partition ownership based on data volume and load.
-
-- **PartitionConfig**: Defines partition ranges or ID rules.
-- **GroupMeta**: Contains configuration-plane metadata for a consensus group (the replica member list); the leader is raft runtime state, discovered by clients via redirects.
-- **RoutingTable**: Maintains mappings from `PartitionId` to `GroupId`, and from `NodeId` to network addresses.
-- **ConfigProvider**: An interface for configuration providers; built-in implementations are the in-memory `MemConfigProvider` and the read-only, etcd-backed `EtcdConfigProvider`.
+- **`PartitionConfig`**：定义分片范围或 ID 规则。<br />`PartitionConfig` defines partition ranges or ID rules.
+- **`GroupMeta`**：保存副本成员等配置面元数据；leader 是运行时状态，由客户端通过重定向发现。<br />`GroupMeta` stores configuration-plane metadata such as replicas; the leader is runtime state discovered through client redirects.
+- **`RoutingTable`**：维护 `PartitionId → GroupId` 和 `NodeId → 网络地址` 映射。<br />`RoutingTable` maintains `PartitionId → GroupId` and `NodeId → network address` mappings.
+- **`ConfigProvider`**：配置接口；内置 `MemConfigProvider` 和只读 `EtcdConfigProvider`。<br />`ConfigProvider` is the configuration interface, with `MemConfigProvider` and read-only `EtcdConfigProvider` implementations.
 
 ## 与 openraft 的集成 / openraft Integration
 
-rr 内部集成了 [openraft](https://docs.rs/openraft)，并针对多组场景进行了适配。
+rr 使用 [openraft](https://docs.rs/openraft) 并为多组场景增加适配层。
 
-- **RrTypeConfig**：通过 `declare_raft_types!` 宏定义，统一了 rr 内部使用的 NodeId (u64)、日志类型和状态机类型。
-- **RaftNode**：包装了 `openraft::Raft<RrTypeConfig>`，并结合了 `RrLogStorage` 和 `RrStateMachine`。
-- **适配器模式**：通过 `RrStateMachine` 适配器，将 rr 定义的业务状态机与 openraft 的存储接口连接起来。
+rr uses [openraft](https://docs.rs/openraft) with adapters for multi-group operation.
 
-更多关于 Raft 协议本身的细节，请参考 [Raft 论文](https://raft.github.io/raft.pdf)。
+- **`RrTypeConfig`**：通过 `declare_raft_types!` 绑定 `NodeId`（`u64`）、日志和状态机类型。<br />`RrTypeConfig` binds `NodeId` (`u64`), log, and state-machine types through `declare_raft_types!`.
+- **`RaftNode`**：封装 `openraft::Raft<RrTypeConfig>`，组合 `RrLogStorage` 与 `RrStateMachine`。<br />`RaftNode` wraps `openraft::Raft<RrTypeConfig>` with `RrLogStorage` and `RrStateMachine`.
+- **`RrStateMachine`**：把 rr 的业务状态机接入 openraft 的 apply、快照和恢复接口。<br />`RrStateMachine` connects rr's business state machine to openraft's apply, snapshot, and restore interfaces.
 
----
-
-rr integrates [openraft](https://docs.rs/openraft) internally and adapts it for multi-group scenarios.
-
-- **RrTypeConfig**: Defined via the `declare_raft_types!` macro, it unifies the NodeId (u64), log types, and state machine types used within rr.
-- **RaftNode**: Wraps `openraft::Raft<RrTypeConfig>` and combines it with `RrLogStorage` and `RrStateMachine`.
-- **Adapter Pattern**: Connects rr's business state machine with openraft's storage interface via the `RrStateMachine` adapter.
-
-For more details about the Raft consensus algorithm itself, please refer to the [Raft paper](https://raft.github.io/raft.pdf).
+Raft 算法本身见 [Raft 论文](https://raft.github.io/raft.pdf)。<br />For the Raft algorithm itself, see the [Raft paper](https://raft.github.io/raft.pdf).
 
 ## 动态成员变更 / Dynamic Membership
 
-Multi-Raft 架构支持在不停止服务的情况下动态增删节点。
+组成员可在线变更：
 
-1. **添加 Learner**：使用 `add_learner(group_id, node_id, addr)` 将新节点加入组。Learner 节点会开始同步日志，但不参与投票，对读写吞吐量没有影响。
-2. **变更成员**：使用 `change_membership(group_id, members)` 触发联合共识过程，将 Learner 提升为投票成员（Voter）或移除现有成员。
+Membership can change without stopping the group:
 
----
-
-The Multi-Raft architecture supports dynamically adding or removing nodes without downtime.
-
-1. **Add Learner**: Use `add_learner(group_id, node_id, addr)` to add a new node to the group. Learner nodes start replicating logs but do not participate in voting, thus having no impact on write throughput.
-2. **Change Membership**: Use `change_membership(group_id, members)` to trigger a joint consensus process, promoting Learners to Voters or removing existing members.
+1. **添加 Learner / Add a learner**：`add_learner(group_id, node_id, addr)` 让新节点同步日志。Learner 不投票、不计入提交多数派，但复制仍消耗资源。<br />`add_learner(group_id, node_id, addr)` starts log replication. Learners neither vote nor count toward the commit quorum, but replication still consumes resources.
+2. **变更成员 / Change membership**：`change_membership(group_id, members)` 通过联合共识提升 learner 或移除成员。缩容受 `MIN_VOTERS_AFTER_REMOVAL = 2` 守卫约束。<br />`change_membership(group_id, members)` uses joint consensus to promote learners or remove members. Shrinking is guarded by `MIN_VOTERS_AFTER_REMOVAL = 2`.

@@ -1,100 +1,79 @@
 ---
-title: Kafka Input (CommandIngestor)
+title: Kafka 输入 / Kafka Input (CommandIngestor)
 description: Drive an rr Raft group from a Kafka topic with leader-exclusive consumption and exactly-once apply
 ---
 
-# Kafka Input — `rr-ingestor-kafka`
+# Kafka 输入 / Kafka Input
 
-> **Available since**: v0.2.0 (see the [v0.1 → v0.2 Migration Guide](../deployment/v0.1-to-v0.2-migration.md)).
-> **Reference ADR**: [A-0001](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0001-command-ingestor-abstraction.md).
+自 v0.2.0 起，`rr-ingestor-kafka` 可将 Kafka topic 作为 Raft 组的写输入。只有当前 leader 消费；follower 通过 Raft 日志接收命令。结合 [框架幂等](idempotency.md)，Kafka 至少一次投递在用户 `Service::handle()` 处变为恰好一次 apply。迁移见 [v0.1 → v0.2 指南](../deployment/v0.1-to-v0.2-migration.md)，设计见 [ADR A-0001](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0001-command-ingestor-abstraction.md)。
+Since v0.2.0, `rr-ingestor-kafka` can use a Kafka topic as a Raft group's write input. Only the current leader consumes; followers receive commands through Raft replication. With [framework idempotency](idempotency.md), Kafka's at-least-once delivery becomes exactly-once apply at `Service::handle()`. See the [migration guide](../deployment/v0.1-to-v0.2-migration.md) and [ADR A-0001](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0001-command-ingestor-abstraction.md).
 
-The `rr-ingestor-kafka` crate makes a Kafka topic a first-class write source for an rr Raft group: only the current leader of group `G` reads from `input_{G}` (single partition); followers receive every command via Raft log replication. Combined with the [framework idempotency layer](idempotency.md), Kafka's at-least-once delivery becomes **exactly-once apply** at the user `Service::handle()`.
+## Topic 规划 / Topic Layout
 
----
+默认每组使用 `input_{group_id}`，topic 名可配置。每组一个 topic，且必须恰好一个 partition：
+By default, each group uses `input_{group_id}`; the pattern is configurable. Use one topic per group with exactly one partition:
 
-## Plan: one topic per Raft group
-
-The default topic-name pattern is `input_{group_id}` (configurable). Every group gets a dedicated topic with **exactly one partition**:
-
-```
+```text
 Raft Group 0 ↔ topic input_0 (partition 0)
 Raft Group 1 ↔ topic input_1 (partition 0)
-…
 Raft Group N ↔ topic input_N (partition 0)
 ```
 
-Single-partition is mandatory. Multiple partitions per topic would let multiple consumers read concurrently, which contradicts leader-exclusive semantics.
+框架用 `assign()` 而非 `subscribe()` 固定 partition，避免 consumer-group rebalance 在持有领导权时移动消费。多 partition 会破坏 leader 独占消费模型。
+The framework uses `assign()`, not `subscribe()`, to pin the partition so consumer-group rebalances cannot move consumption during leadership. Multiple partitions violate leader-exclusive consumption.
 
-The framework uses Kafka's `assign()` (not `subscribe()`) to bind to the partition. Consumer-group rebalances cannot move us off the partition while we hold leadership — the supervisor is the sole arbiter of when consumption starts and stops.
-
----
-
-## Lifecycle
+## 生命周期 / Lifecycle
 
 ```text
-Node boots
+Group G becomes leader
     │
-    ▼
-Group G becomes Leader
+    ├─ Read last_applied_offset from the framed snapshot
+    ├─ seek(last_applied_offset + 1)
+    └─ Poll loop:
+       poll() → frame offset/payload/idempotency key
+              → Raft client_write() → commit + apply
+
+Step down
     │
-    ├─ Framework reads last_applied_offset from the framed snapshot
-    ├─ Framework calls ingestor.seek(last_applied_offset + 1)
-    └─ Framework spawns the poll loop:
-       loop {
-         let batch = ingestor.poll().await?;
-         for cmd in batch {
-           let envelope = FramedEntry { offset, payload, idem_key }.encode();
-           raft.client_write(envelope).await?;     // commit + apply (blocking)
-         }
-       }
-    │
-    ▼
-Step-down event
-    │
-    ├─ Framework cancels the poll loop
-    └─ Framework drops the ingestor instance
+    ├─ Cancel the poll loop
+    └─ Drop the ingestor
 ```
 
-The poll loop is naturally rate-limited by Raft commit throughput — `client_write` blocks until commit + apply, so the ingestor cannot run ahead of consensus.
+`client_write` 等待 commit 和 apply，因此消费速度受 Raft 提交吞吐限制。
+`client_write` waits for commit and apply, so Raft throughput naturally limits consumption.
 
-If `seek_offset` fails (corrupt persisted offset, broker unreachable), the supervisor exits cleanly **without** falling through to a free-running poll. Without this guard, Kafka's `auto.offset.reset = "earliest"` would silently replay from offset 0; the supervisor refuses that footgun. Operators see `rr_ingestor_seed_failures_total{group_id}` incremented and a structured error in the supervisor log.
+`seek` 失败时 supervisor 退出，不会退回到自由 poll；否则 `auto.offset.reset = "earliest"` 可能从 0 静默重放。此时增加 `rr_ingestor_seed_failures_total{group_id}` 并记录结构化错误。
+If `seek` fails, the supervisor exits instead of falling through to polling; otherwise `auto.offset.reset = "earliest"` could silently replay from zero. It increments `rr_ingestor_seed_failures_total{group_id}` and logs a structured error.
 
----
+## 构建前提 / Build Prerequisites
 
-## Build prerequisites
-
-The `rr-ingestor-kafka` crate's default features compile on every CI host with no native dependencies — only the in-memory `MockKafkaIngestor` (used in tests and examples) and the public config types.
-
-The real backend is gated behind the `rdkafka` feature:
+默认 feature 只包含内存 `MockKafkaIngestor` 和公共配置，无本地 Kafka 依赖。真实后端需要 `rdkafka` feature 和 `cmake`。
+Default features include only the in-memory `MockKafkaIngestor` and public configuration, with no native Kafka dependency. The real backend requires the `rdkafka` feature and `cmake`.
 
 ```toml
-# Cargo.toml
 [dependencies]
-rr-ingestor-kafka = { version = "0.3", features = ["rdkafka"] }
+rr-ingestor-kafka = { path = "../rr/crates/rr-ingestor-kafka", features = ["rdkafka"] }
 ```
 
-Enabling `rdkafka` pulls `rdkafka` with `cmake-build`, which compiles the bundled librdkafka. **`cmake` must be on the build host**:
-
 ```bash
-# Linux CI
-sudo apt-get install -y cmake
+# Ubuntu
+sudo apt-get install cmake
 
 # macOS
 brew install cmake
 ```
 
----
+启用后，rdkafka 使用 `cmake-build` 编译捆绑的 librdkafka。
+With this feature, rdkafka uses `cmake-build` to compile the bundled librdkafka.
 
-## Wiring an ingestor to a Raft group
+## 接入 Raft 组 / Attach to a Raft Group
+
+推荐使用 `attach_ingestor_with_auto_idempotency`，以关闭 leader 切换造成的重复 apply 窗口：
+Use `attach_ingestor_with_auto_idempotency` to close the duplicate-apply window during leadership changes:
 
 ```rust
-use std::sync::Arc;
-
-use rr_ingestor_kafka::{KafkaIngestor, KafkaIngestorConfig, kafka_offset_to_request_id};
+use rr_ingestor_kafka::{kafka_offset_to_request_id, KafkaIngestor, KafkaIngestorConfig};
 use rr_raft::ingestor_runner::{AutoIdempotency, OffsetMapError};
-use rr_raft::RaftGroupManager;
-
-let mgr: Arc<RaftGroupManager> = /* … from RrNode setup */;
 
 let cfg = KafkaIngestorConfig {
     bootstrap_servers: vec!["broker1:9092".into()],
@@ -103,7 +82,6 @@ let cfg = KafkaIngestorConfig {
     poll_timeout: std::time::Duration::from_millis(200),
     ..Default::default()
 };
-
 let ingestor = KafkaIngestor::new(group_id, cfg.clone()).await?;
 
 mgr.attach_ingestor_with_auto_idempotency(
@@ -111,20 +89,20 @@ mgr.attach_ingestor_with_auto_idempotency(
     Box::new(ingestor),
     AutoIdempotency {
         request_type: cfg.topic_for(group_id),
-        offset_to_request_id: Box::new(|b| {
-            kafka_offset_to_request_id(b).map_err(OffsetMapError::new)
+        offset_to_request_id: Box::new(|bytes| {
+            kafka_offset_to_request_id(bytes).map_err(OffsetMapError::new)
         }),
     },
 ).await?;
 ```
 
-`attach_ingestor_with_auto_idempotency` is the **recommended** path — auto-idempotency closes the duplicate-apply gap on leader transitions (see [Idempotency](idempotency.md)). Use the bare `attach_ingestor` only when your `Service::handle()` is itself trivially idempotent.
+只有 `Service::handle()` 自身已按业务键幂等时，才考虑裸 `attach_ingestor`。
+Consider bare `attach_ingestor` only when `Service::handle()` is already idempotent by business key.
 
----
+## TLS 与 SASL / TLS and SASL
 
-## Security: TLS + SASL
-
-`KafkaSecurityConfig` maps onto rdkafka's `security.protocol` / `ssl.*` / `sasl.*` properties. Sensitive values are pulled from environment variables (the `*_env` fields name the variable to read at attach time) — secrets never live in config files:
+`KafkaSecurityConfig` 映射到 rdkafka 的 `security.protocol`、`ssl.*` 和 `sasl.*`。密码通过 `*_env` 指定的环境变量读取，不写入配置文件。
+`KafkaSecurityConfig` maps to rdkafka's `security.protocol`, `ssl.*`, and `sasl.*` properties. Passwords are read from environment variables named by `*_env`, not stored in configuration files.
 
 ```rust
 use rr_ingestor_kafka::{KafkaIngestorConfig, KafkaSecurityConfig, SecurityProtocol};
@@ -145,76 +123,70 @@ let cfg = KafkaIngestorConfig {
 };
 ```
 
-This matches the [F2 security pattern](../deployment/audit-log.md): plaintext-OK metadata in config, secrets in env vars referenced by `*_env`. A missing or empty env var fails fast at `KafkaIngestor::new` with `KafkaIngestorError::MissingSecret`.
+环境变量缺失或为空时，`KafkaIngestor::new` 以 `KafkaIngestorError::MissingSecret` 立即失败。
+A missing or empty environment variable fails `KafkaIngestor::new` with `KafkaIngestorError::MissingSecret`.
 
----
+## 自定义 Ingestor / Custom Ingestors
 
-## Implementing your own ingestor
-
-Any source that satisfies `CommandIngestor` is a valid command stream. To plug a Pulsar/NATS/HTTP-cursor source:
+其他数据源实现 `CommandIngestor` 即可接入：
+Other sources integrate by implementing `CommandIngestor`:
 
 ```rust
 use async_trait::async_trait;
-use rr_core::ingestor::{CommandIngestor, IngressCommand};
 use rr_core::error::RrError;
-
-struct MyIngestor { /* … */ }
+use rr_core::ingestor::{CommandIngestor, IngressCommand};
 
 #[async_trait]
 impl CommandIngestor for MyIngestor {
-    type Offset = i64;  // any Serialize + DeserializeOwned + Ord + Copy + Debug + Send + Sync
+    type Offset = i64;
 
-    async fn seek(&mut self, offset: Option<i64>) -> Result<(), RrError> { /* … */ }
-    async fn poll(&mut self, max_batch_size: usize)
-        -> Result<Vec<IngressCommand<i64>>, RrError> { /* … */ }
-    async fn commit_applied(&mut self, offset: i64) -> Result<(), RrError> { /* … */ }
+    async fn seek(&mut self, offset: Option<i64>) -> Result<(), RrError> { /* ... */ }
+    async fn poll(
+        &mut self,
+        max_batch_size: usize,
+    ) -> Result<Vec<IngressCommand<i64>>, RrError> { /* ... */ }
+    async fn commit_applied(&mut self, offset: i64) -> Result<(), RrError> { /* ... */ }
 }
 ```
 
-Safety invariants the implementer MUST uphold (per ADR A-0001):
+实现必须满足：
+Implementations must satisfy:
 
-1. **Single-consumer**: only one instance of your ingestor exists per `(group_id, source)` pair at any time. The framework guarantees this — your ingestor is constructed when the node becomes leader and dropped when it steps down.
-2. **Ordered offsets**: `poll()` MUST return commands in strictly monotonically increasing `offset` order. Gaps OK (Kafka topic compaction); regression forbidden.
-3. **`seek()` idempotency**: same `seek(O)` called twice MUST have identical effect.
-4. **No-commit-before-apply**: `poll()` and `seek()` MUST NOT call any source-side "commit" API. Only `commit_applied()` may.
+1. 每个 `(group_id, source)` 同时只有一个 ingestor；框架在成为 leader 时创建，step-down 时销毁。/ One ingestor per `(group_id, source)`; the framework creates it on promotion and drops it on step-down.
+2. `poll()` 的 offset 严格递增，允许空洞但不允许回退。/ Poll offsets strictly increase; gaps are allowed, regressions are not.
+3. 相同 `seek(O)` 可重复调用且效果一致。/ Repeating the same `seek(O)` has the same effect.
+4. `poll()` 和 `seek()` 不得提交源端 offset，只有 `commit_applied()` 可以。/ Neither `poll()` nor `seek()` commits source offsets; only `commit_applied()` may.
 
----
+## 指标 / Metrics
 
-## Metrics
+| 指标 / Metric | 类型 / Type | 触发 / Trigger |
+| :--- | :--- | :--- |
+| `rr_ingestor_seek_total` | counter | leader 提升时调用 `seek()` / `seek()` on leader promotion |
+| `rr_ingestor_poll_duration_seconds` | histogram | 每次 `poll()` / Each poll |
+| `rr_ingestor_seed_failures_total` | counter | seek 失败，supervisor 退出 / Seek failure and supervisor exit |
+| `rr_ingestor_step_down_drops_total` | counter | step-down 丢弃批次尾部；下任 leader 重拉并由幂等去重 / Batch tail dropped on step-down, then refetched and deduplicated |
 
-| Metric | Type | When |
-|---|---|---|
-| `rr_ingestor_seek_total` | counter | `seek()` invoked on leader promotion |
-| `rr_ingestor_poll_duration_seconds` | histogram | Each `poll()` invocation |
-| `rr_ingestor_seed_failures_total` | counter | `seek()` failed (supervisor exited) |
-| `rr_ingestor_step_down_drops_total` | counter | Batch-tail commands dropped on step-down (re-fetched on next leader; deduped by auto-idempotency) |
+将 step-down drop 与 `rr_idempotency_replays_total` 一起观察，可区分重拉和实际去重。
+Observe step-down drops with `rr_idempotency_replays_total` to correlate refetches with deduplication.
 
-Pair `rr_ingestor_step_down_drops_total` with `rr_idempotency_replays_total` to see how often Kafka re-delivery is being absorbed by the dedup layer.
+## 故障与处理 / Failures and Responses
 
----
+| 症状 / Symptom | 原因 / Cause | 处理 / Action |
+| :--- | :--- | :--- |
+| `rr_ingestor_seed_failures_total > 0` | 持久 offset 损坏或提升时 broker 不可达 / Corrupt offset or unreachable broker | 检查 broker；必要时用 `rr-admin group reset-ingestor-offset --group <G> --offset <N>` 覆盖，`-1` 清除 / Check the broker; override with the Admin command if needed, using `-1` to clear |
+| 持续出现 `ingestor poll failed; backing off` / Repeated poll warnings | broker 中断 / Broker outage | 恢复 broker；退避上限 30 秒，共识本身不受影响 / Restore the broker; backoff caps at 30 seconds and consensus continues |
+| 自动幂等下 collision 增加 / Collisions with auto-idempotency | 多条流复用 `request_type` / Streams share a request type | 确保 `topic_for(group_id)` 对流唯一 / Make `topic_for(group_id)` unique per stream |
+| out-of-range seek 警告 / Out-of-range seek warning | retention 已裁过持久 offset / Retention trimmed past the persisted offset | 检查保留策略与消费 lag；watermark 查询失败会跳过范围校验并记录日志 / Inspect retention and lag; watermark failure skips range validation with a log |
 
-## Failure modes & operator response
+新 leader seek 前会刷新过旧快照；残余重拉仍由自动幂等去重。
+A new leader refreshes a stale snapshot before seeking; any residual refetch is still deduplicated by auto-idempotency.
 
-| Symptom | Likely cause | Action |
-|---|---|---|
-| `rr_ingestor_seed_failures_total > 0` | Corrupt persisted offset OR broker unreachable at promotion | Check broker health; if persistent, use `rr-admin group reset-ingestor-offset --group <G> --offset <N>` to override the persisted offset (`--offset -1` clears it) |
-| Endless `ingestor poll failed; backing off` warnings | Broker outage | Backoff capped at 30s; consensus is unaffected. Restore broker. |
-| `rr_idempotency_collisions_total > 0` with auto-idempotency | Two ingestors attached to the same group with the same `request_type` | Ensure `topic_for(group_id)` is unique per stream |
-| Out-of-range seek warning in logs | Kafka retention trimmed past `last_applied_offset` | The backend validates seeks against `fetch_watermarks` before consuming; if the watermark fetch itself fails it logs `fetch_watermarks failed; skipping seek-range validation` and proceeds — monitor lag externally |
+## 边界与参考 / Limits and References
 
----
+当前不内置 Pulsar、NATS 或 RocketMQ 后端，也不支持单组多 partition fan-out。需要分片时使用多个 Raft 组，每组独立 topic。
+No Pulsar, NATS, or RocketMQ backend is bundled, and per-group multi-partition fan-out is unsupported. Shard with multiple Raft groups and one topic per group.
 
-## Limitations (v0.2.0)
-
-- **No bundled Pulsar / NATS / RocketMQ backends** — only Kafka. Other backends are out-of-tree (community contributions welcome).
-- **Single partition per group** is mandatory; the framework explicitly does not support partition-fanout. To shard load, use multiple groups (each its own topic).
-- **`P0-1` resolved** — `seed_offset` first calls `refresh_snapshot_if_stale()`, which triggers a fresh snapshot and waits (up to a bounded deadline) when the latest snapshot lags `last_applied`, so a newly-promoted leader no longer re-fetches large lagging ranges from Kafka. Any residual re-fetch is still deduped by auto-idempotency at apply time.
-
----
-
-## See also
-
-- [`CommandIngestor` trait docs](https://docs.rs/rr-core/latest/rr_core/ingestor/trait.CommandIngestor.html)
-- [Idempotency Guide](idempotency.md)
-- [`Service` Trait Guide](service-trait.md)
-- ADR [A-0001](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0001-command-ingestor-abstraction.md) — design rationale
+- [`CommandIngestor` 源码与 rustdoc 注释 / source and rustdoc comments](https://github.com/gardenias/rr/blob/main/crates/rr-core/src/ingestor.rs)
+- [框架幂等 / Framework Idempotency](idempotency.md)
+- [Service Trait 指南 / Service Trait Guide](service-trait.md)
+- [ADR A-0001](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0001-command-ingestor-abstraction.md)

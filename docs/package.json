@@ -4,7 +4,11 @@
   "private": true,
   "scripts": {
     "docusaurus": "docusaurus",
+    "diagrams": "node scripts/generate-plantuml.mjs",
+    "fix-bilingual-page": "node scripts/fix-bilingual-page.mjs",
+    "prestart": "npm run diagrams",
     "start": "docusaurus start",
+    "prebuild": "npm run diagrams",
     "build": "docusaurus build",
     "swizzle": "docusaurus swizzle",
     "deploy": "docusaurus deploy",
@@ -16,9 +20,13 @@
   },
   "dependencies": {
     "@docusaurus/core": "3.9.2",
+    "@docusaurus/plugin-client-redirects": "^3.9.2",
     "@docusaurus/preset-classic": "3.9.2",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/noto-sans-sc": "^5.3.1",
     "@mdx-js/react": "^3.0.0",
     "clsx": "^2.0.0",
+    "plantuml-encoder": "^1.4.0",
     "prism-react-renderer": "^2.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

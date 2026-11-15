@@ -4,76 +4,38 @@ sidebar_position: 4
 
 # 配置提供者 / ConfigProvider
 
-## 什么是 ConfigProvider / What is ConfigProvider
+`ConfigProvider` 提供分片到 Raft 组的路由、节点地址和组副本元数据。仓库实现包括 `MemConfigProvider` 和只读 etcd 后端 `EtcdConfigProvider`。
+`ConfigProvider` supplies partition-to-group routing, node addresses, and group replica metadata. Implementations include `MemConfigProvider` and the read-only etcd-backed `EtcdConfigProvider`.
 
-`ConfigProvider` 是 `rr` 框架中用于抽象集群拓扑和路由信息的接口。它负责维护和分发整个集群的状态，包括：
+## Trait 与路由表 / Trait and Routing Table
 
-- **分片路由 (Shard Routing)**：分片 ID（Partition ID）到 Raft 组（Group ID）的映射。
-- **节点拓扑 (Node Topology)**：节点 ID（Node ID）到网络地址（NodeAddr）的映射。
-- **副本管理 (Replica Management)**：Raft 组内的副本列表及其元数据。
-
----
-
-`ConfigProvider` is the abstraction in the `rr` framework for cluster topology and routing information. It's responsible for maintaining and distributing the state of the entire cluster, including:
-
-- **Shard Routing**: Mapping between Partition IDs and Raft Group IDs.
-- **Node Topology**: Mapping between Node IDs and network addresses (NodeAddr).
-- **Replica Management**: List of replicas within Raft groups and their metadata.
-
-`ConfigProvider` 可以由不同的后端实现，例如用于本地开发的内存存储、用于生产环境的 etcd 或 ZooKeeper。
-
----
-
-`ConfigProvider` can be backed by different implementations, such as in-memory storage for local development, or etcd/ZooKeeper for production environments.
-
-## ConfigProvider Trait
-
-核心接口定义在 `rr-core` crate 中。任何配置源都必须实现以下 trait 方法：
-
----
-
-The core interface is defined in the `rr-core` crate. Any configuration source must implement the following trait methods:
+接口定义在 `rr-core`：
+The interface is defined in `rr-core`:
 
 ```rust
 #[async_trait]
 pub trait ConfigProvider: Send + Sync {
-    /// 获取当前的完整路由表 / Get the current full routing table.
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
 
-    /// 当前表的共享快照；内存后端覆写为廉价 Arc clone，默认包装
-    /// get_routing_table()。每次调用取最新快照，不引入调用方缓存（INV-6）。
-    /// Shared snapshot of the current table; in-memory backends override with
-    /// a cheap Arc clone. Default wraps get_routing_table(). Every call sees
-    /// the latest table — no caller-side cache (INV-6).
     async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError> {
         Ok(Arc::new(self.get_routing_table().await?))
     }
 
-    /// 订阅路由表变更事件流 / Subscribe to routing table change events as a stream.
     async fn watch_changes(
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError>;
 
-    /// 获取特定节点的 gRPC 地址 / Get the gRPC address for a specific node.
     async fn get_node_addr(&self, node_id: NodeId) -> Result<NodeAddr, ConfigError>;
 }
 ```
 
-## 路由表结构 / RoutingTable Structure
-
-路由表是集群状态的快照。
-
----
-
-The routing table is a snapshot of the cluster state.
+每次读取都获取提供方当前的 point-in-time 快照，不在调用方引入另一份权威缓存。内存后端可用廉价 `Arc` clone 覆盖默认实现。
+Each read obtains the provider's current point-in-time snapshot without introducing another caller-side authority. In-memory backends can override the default with a cheap `Arc` clone.
 
 ```rust
 pub struct RoutingTable {
-    /// 分片 ID -> (配置, 组 ID) / partition_id -> (config, group_id)
     pub partitions: HashMap<PartitionId, (PartitionConfig, GroupId)>,
-    /// 节点 ID -> 地址 / node_id -> addr
     pub nodes: HashMap<NodeId, NodeAddr>,
-    /// 组 ID -> 组元数据 / group_id -> group metadata
     pub groups: HashMap<GroupId, GroupMeta>,
 }
 
@@ -88,131 +50,91 @@ pub struct GroupMeta {
 }
 ```
 
-## 路由表变更事件 / RoutingTableChange Events
+## 变更流语义 / Change Stream Semantics
 
-当集群拓扑发生变化时，`ConfigProvider` 通过 `watch_changes` 发送事件：
+`watch_changes` 的事件包括 `PartitionAdded`、`PartitionRemoved`、`PartitionUpdated`、`NodeAdded`、`NodeRemoved` 和 `GroupMembershipChanged`。
+`watch_changes` emits `PartitionAdded`, `PartitionRemoved`, `PartitionUpdated`, `NodeAdded`, `NodeRemoved`, and `GroupMembershipChanged` events.
 
----
+- 流不包含初始快照；先调用 `get_routing_table()`，再应用订阅后的事件。/ There is no initial snapshot; fetch the table first, then apply post-subscription events.
+- etcd 的 nodes、partitions、groups 是独立 watcher，不保证跨域全局顺序。/ etcd uses independent watchers with no global cross-domain ordering.
+- 内存后端在消费者落后时丢弃事件并记录 WARN/指标；etcd 有界通道施加背压。/ The in-memory backend drops lagged events with a warning and metric; etcd's bounded channel applies backpressure.
+- 不能丢事件的消费者应定期重新读取完整表；流终止时重新读取并订阅。/ Consumers that cannot miss events should periodically refetch the table; on termination, refetch and resubscribe.
 
-When the cluster topology changes, `ConfigProvider` sends events via `watch_changes`:
+组删除当前表示为空副本集，没有独立 `GroupRemoved` 事件。内存 `remove_node` 会从副本列表删除节点但不另发 `GroupMembershipChanged`；etcd 不做这项删除。
+Group deletion currently appears as an empty replica set; there is no separate `GroupRemoved`. In-memory `remove_node` strips the node from replica lists without another membership event; etcd does not strip it.
 
-- `PartitionAdded { partition_id, config, group_id }`: 添加了新的分片。
-- `PartitionRemoved { partition_id }`: 删除了现有分片。
-- `PartitionUpdated { partition_id, config, group_id }`: 分片配置已更新。
-- `NodeAdded { node_id, addr }`: 新节点加入集群。
-- `NodeRemoved { node_id }`: 节点已离开集群。
-- `GroupMembershipChanged { group_id, replicas }`: Raft 组的副本集发生了变化。
+## 内存提供者 / MemConfigProvider
 
-## 内存配置提供者 / MemConfigProvider
-
-`rr-config` 提供了 `MemConfigProvider`，这是一个线程安全的内存实现，非常适合单元测试和单机演示。
-
----
-
-`rr-config` provides `MemConfigProvider`, a thread-safe in-memory implementation ideal for unit testing and local demos.
+`MemConfigProvider` 适合测试和本地演示：
+`MemConfigProvider` is intended for tests and local demos:
 
 ```rust
 use rr_config::mem::MemConfigProvider;
 use rr_core::types::{NodeAddr, PartitionConfig};
 
 let config = MemConfigProvider::new();
-
-// 添加节点 / Add nodes
-config.add_node(1, NodeAddr { addr: "127.0.0.1:51001".to_string() }).await;
-
-// 添加分片和 Raft 组 / Add partition and Raft group
+config.add_node(1, NodeAddr {
+    addr: "127.0.0.1:51001".to_string(),
+}).await;
 config.add_partition(
-    0,                      // Partition ID
-    PartitionConfig::SingleId(0), 
-    1,                      // Group ID
-    vec![1, 2, 3]           // Replicas (Node IDs)
+    0,
+    PartitionConfig::SingleId(0),
+    1,
+    vec![1, 2, 3],
 ).await;
 ```
 
-## etcd 配置提供者 / EtcdConfigProvider
+这些写入只修改本地内存表，不会自动配置其他进程。
+These writes modify only the local in-memory table; they do not configure other processes.
 
-`rr-config-etcd` crate 提供了基于 etcd v3 的生产级后端 `EtcdConfigProvider`：
+## etcd 提供者 / EtcdConfigProvider
 
----
-
-The `rr-config-etcd` crate provides a production-grade etcd v3 backend, `EtcdConfigProvider`:
+`rr-config-etcd` 的构造函数会立即验证连通性。`cluster_id` 用于 key 前缀隔离。
+The `rr-config-etcd` constructor validates connectivity immediately. `cluster_id` isolates key prefixes.
 
 ```rust
 use rr_config_etcd::EtcdConfigProvider;
 
-// 构造函数会立即验证与 etcd 的连通性
-// The constructor validates connectivity to etcd immediately
 let provider = EtcdConfigProvider::new(
-    vec!["http://localhost:2379".to_string()], // etcd endpoints
-    "default".to_string(), // cluster_id，用于 key 前缀隔离 / cluster_id, used as key-prefix isolation
+    vec!["http://localhost:2379".to_string()],
+    "default".to_string(),
 ).await?;
 ```
 
-- **只读实现 / Read-only**：`EtcdConfigProvider` 只实现 `get_routing_table` / `routing_table_snapshot` / `watch_changes` / `get_node_addr`。rr 永远不会把路由信息写回 etcd——路由表由外部工具或运维流程写入 etcd，rr 只负责消费。 / It implements only `get_routing_table` / `routing_table_snapshot` / `watch_changes` / `get_node_addr`. rr never writes routing state back to etcd — the routing table is provisioned into etcd by external tooling or operator workflows, and rr only consumes it.
-- **读路径缓存 / Read-path caching**：`routing_table_snapshot()` 每次调用只做一次 keys-only 的 revision 探针（默认 serializable，成员本地应答、无 quorum 往返）；revision 未变即服务缓存的 `Arc` 快照，变了才全量重扫。路由判定每次都咨询 etcd（INV-6 不变），但成本从"逐请求全前缀扫描 + 重连"降为一次轻量探针。serializable 探针可能落后 quorum 写一个 apply 延迟（健康集群亚毫秒）；需要 quorum 级新鲜度时用 `with_linearizable_probes(true)`（每调用一次 quorum RTT）。 / `routing_table_snapshot()` performs a tiny keys-only revision probe per call (serializable by default — member-local, no quorum RTT) and only re-scans the full prefix when the revision moved. Serializable probes may lag quorum writes by the member's apply lag; use `with_linearizable_probes(true)` for quorum-fresh probes.
-- **Key 布局 / Key layout**：`/rr/{cluster_id}/nodes/{node_id}`、`/rr/{cluster_id}/partitions/{partition_id}`、`/rr/{cluster_id}/groups/{group_id}/replicas`。
-- **示例 / Example**：`examples/etcd-config-quickstart` 演示了完整的读取 + watch 流程，运行前需要在 `localhost:2379` 启动一个 etcd v3 实例。 / `examples/etcd-config-quickstart` demonstrates the full read + watch flow; it requires an etcd v3 instance running at `localhost:2379`.
+该实现只读，rr 不把路由写回 etcd；外部工具负责写入以下 key：
+The provider is read-only; rr never writes routing state back to etcd. External tooling provisions these keys:
 
-## 实现自定义提供者 / Implementing a Custom Provider
+```text
+/rr/{cluster_id}/nodes/{node_id}
+/rr/{cluster_id}/partitions/{partition_id}
+/rr/{cluster_id}/groups/{group_id}/replicas
+```
 
-要实现自定义的 `ConfigProvider`（例如基于 ZooKeeper 或 Consul）：
+`routing_table_snapshot()` 默认以 serializable keys-only revision 探针检查缓存，revision 变化才全量重扫。需要 quorum 新鲜度时调用 `with_linearizable_probes(true)`，代价是每次调用一次 quorum 往返。
+`routing_table_snapshot()` uses a serializable keys-only revision probe by default and rescans only when the revision changes. Use `with_linearizable_probes(true)` for quorum-fresh probes at the cost of one quorum round trip per call.
 
----
+完整读取和 watch 示例见 `examples/etcd-config-quickstart`，运行前在 `localhost:2379` 启动 etcd v3。
+See `examples/etcd-config-quickstart` for reading and watching; start etcd v3 at `localhost:2379` first.
 
-To implement a custom `ConfigProvider` (e.g., based on ZooKeeper or Consul):
+## 自定义提供者 / Custom Providers
 
-1. 为你的存储后端实现 `ConfigProvider` trait。
-2. 在 `watch_changes` 中，利用后端的监听机制（如 etcd watch）返回一个事件流。
-3. `RrNode` 在启动时会调用 `watch_changes` 并在后台循环中自动响应拓扑变化。
-
----
-
-1. Implement the `ConfigProvider` trait for your storage backend.
-2. In `watch_changes`, use the backend's notification mechanism (e.g., etcd watch) to return a stream of events.
-3. `RrNode` calls `watch_changes` on startup and automatically reacts to topology changes in a background loop.
+自定义后端需实现 trait，将后端通知转换为变更流，并明确初始快照、断线、顺序和 lag 行为。`RrNode` 启动时读取表并运行 watch loop。
+A custom backend implements the trait, converts backend notifications into the change stream, and defines snapshot, disconnect, ordering, and lag behavior. `RrNode` reads the table at startup and runs a watch loop.
 
 ## 托管 SeedSpec 与生命周期 / Managed SeedSpec and Lifecycle
 
-托管 formation 从相同 SeedSpec 构造静态路由表，并使用独立的 `LifecycleStore`（生产为 etcd）授权
-Genesis、恢复和旧集群收养。`[cluster.formation].etcd_endpoints` 指向这个生命周期存储；它并不把
-`EtcdConfigProvider` 变成可写成员表。
+配置 `[cluster.formation]` 后，节点从相同 SeedSpec 构造静态路由，并使用独立 `LifecycleStore` 授权 Genesis、恢复和旧集群收养。`[cluster.formation].etcd_endpoints` 属于生命周期存储，不会让 `EtcdConfigProvider` 变成可写成员表。
+With `[cluster.formation]`, nodes build static routing from an identical SeedSpec and use a separate `LifecycleStore` to authorize Genesis, recovery, and legacy adoption. Formation endpoints belong to the lifecycle store; they do not make `EtcdConfigProvider` a writable membership authority.
 
-Managed formation builds a static routing table from an identical SeedSpec and uses a separate linearizable
-`LifecycleStore` (etcd in production) to authorize Genesis, recovery, and legacy adoption. Formation endpoints
-do not turn `EtcdConfigProvider` into a writable membership authority.
+- SeedSpec 的 groups/replicas 只描述初始路由和 Genesis 授权；当前 voter/learner 以 Raft membership 为准。/ Seed groups and replicas describe initial routing and Genesis authorization; current Raft membership is authoritative.
+- managed 节点禁用旧 watch loop 的成员副作用；Active 记录下的空节点等待复制。/ Managed nodes suppress legacy watch-loop membership side effects; pristine nodes with an Active record wait for replication.
+- 修改 SeedSpec 会改变 seed identity，并被现有生命周期记录拒绝；该路径不支持动态扩缩容或 resharding。/ Changing SeedSpec changes seed identity and is rejected by the existing record; this path does not support dynamic scaling or resharding.
+- 存储中断不会清空路由：已初始化节点可继续 Raft 流量但 readiness degraded，空节点不初始化且不就绪。/ A store outage does not clear routing: initialized nodes may continue Raft traffic with degraded readiness, while pristine nodes neither initialize nor become ready.
 
-- SeedSpec 的 `groups` / `replicas` 是初始路由和 Genesis 初始化授权，**不是当前 Raft membership**。
-  当前 voter/learner 只以 Raft membership 为准。
-- managed 节点禁用旧 watch-loop 的 learner/membership 副作用和自动 learner promotion。Active 记录下的
-  pristine 节点等待复制；legacy adoption 之后的成员收敛仍由 Job/Admin 手工执行。
-- P1 不支持通过 ConfigProvider、修改 `replicaCount` 或修改 SeedSpec 来做动态扩缩容、副本替换或
-  resharding。改变 SeedSpec 会改变 seed identity，并被现有生命周期记录拒绝。
-- store outage 不清空路由：已初始化节点继续 Raft 流量但 readiness degraded；pristine 节点不就绪且
-  不初始化。
+## 旧模式动态行为 / Legacy Dynamic Behavior
 
-## 旧模式动态重新配置 / Legacy Dynamic Reconfiguration
+以下副作用仅适用于未配置 `[cluster.formation]` 的旧模式节点：新分片可在本节点副本列表包含本节点时启动组；成员事件可调整或停止本地组；节点事件更新路由地址。
+The following side effects apply only to legacy nodes without `[cluster.formation]`: new partitions can start groups when the local node is a replica; membership events can adjust or stop local groups; node events update routing addresses.
 
-以下行为仅适用于未配置 `[cluster.formation]` 的旧模式 `RrNode`；managed 节点不会执行其中的成员副作用。
-
-The behavior below applies only to legacy nodes without `[cluster.formation]`; managed nodes suppress its
-membership side effects.
-
-`RrNode` 运行一个后台任务来监听配置变更：
-
----
-
-`RrNode` runs a background task to listen for configuration changes:
-
-- **新增分片**：如果当前节点在副本列表中，`RrNode` 会自动启动对应的 Raft 组。
-- **成员变更**：`RrNode` 会自动调整本地 Raft 组的成员，或根据需要停止不再属于本节点的 Raft 组。
-- **节点更新**：更新内部路由表，确保请求能正确转发到新的节点地址。
-
-整个过程不需要手动重启节点，实现了真正的动态缩扩容。
-
----
-
-- **New Partitions**: If the current node is in the replica list, `RrNode` automatically starts the corresponding Raft group.
-- **Membership Changes**: `RrNode` automatically adjusts local Raft group membership, or stops groups that no longer belong to this node.
-- **Node Updates**: Updates the internal routing table to ensure requests are correctly forwarded to new node addresses.
-
-The entire process requires no manual node restarts, enabling true dynamic scaling.
+不要把这些 watch 副作用当作当前 Raft membership 的权威来源，也不要据此假定所有扩缩容操作都已自动完成。
+Do not treat these watch side effects as the authority for current Raft membership or assume that every scaling operation completes automatically.

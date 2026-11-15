@@ -2,143 +2,81 @@
 sidebar_position: 2
 ---
 
-# Service Trait
+# Service 特性 / Service Trait
 
-## 什么是 Service Trait / What is the Service Trait
+`Service` 是业务请求处理的高层接口。框架用 `ServiceStateMachineAdapter` 将它接入 Raft，多数应用不需要直接实现底层状态机。
+`Service` is the high-level interface for business request handling. `ServiceStateMachineAdapter` connects it to Raft, so most applications do not implement the low-level state machine directly.
 
-`Service` 是 rr 框架提供的高层、用户友好的 API，用于实现业务逻辑。它抽象了 Raft 日志条目的复杂性，让开发者专注于处理业务请求。
+## 与 StateMachine 的分工 / Service versus StateMachine
 
-在内部，框架会将你的 `Service` 包装在 `ServiceStateMachineAdapter` 中，从而与底层的 Raft 状态机（openraft）对接。
-
----
-
-`Service` is a high-level, user-friendly API provided by the rr framework for implementing business logic. It abstracts away the complexity of Raft log entries, allowing developers to focus on processing business requests.
-
-Internally, the framework wraps your `Service` in a `ServiceStateMachineAdapter` to bridge it with the underlying Raft state machine (openraft).
-
-## Service 与 StateMachine 的对比 / Service vs StateMachine
-
-| 特性 / Feature | Service | StateMachine |
+| 项目 / Aspect | `Service` | `StateMachine` |
 | :--- | :--- | :--- |
-| **抽象级别 / Abstraction level** | 高（业务逻辑）/ High (business logic) | 低（Raft 内部）/ Low (Raft internals) |
-| **条目格式 / Entry format** | 原始字节（自定义编码）/ Raw bytes (your encoding) | 带有元数据的日志条目 / LogEntry with metadata |
-| **快照 / Snapshot** | 简单的序列化与反序列化 / Simple serialize/deserialize | 复杂的日志管理 / Complex log management |
-| **使用场景 / Use when** | 大多数应用程序 / Most applications | 需要完全控制 Raft 日志 / Need full Raft log control |
+| 请求 / Request | 已提交请求的业务字节 / Business bytes for a committed request | 原始日志字节，可选 `ApplyContext` / Raw entry bytes with optional `ApplyContext` |
+| 进度 / Progress | 适配器跟踪 `last_applied` / Adapter tracks `last_applied` | 实现自行跟踪 / Implementation tracks it |
+| 适用 / Use | 常规请求、快照和恢复 / Ordinary requests, snapshots, and restoration | 自定义帧格式或底层控制 / Custom framing or low-level control |
 
-## 安全不变量 / Safety Invariants (MUST uphold)
+## 必须满足的安全条件 / Required Safety Invariants
 
-实现 `Service` 时必须遵守 **3 条安全不变量**——违反任何一条都会导致**静默
-数据损坏**（snapshot 不一致、follower 与 leader 偏离），且没有运行时检查
-能在数据写到生产之前 catch 住。完整契约（含 OpenRaft 源码引用）见 trait 的
-[rustdoc](https://docs.rs/rr-core/latest/rr_core/service/trait.Service.html)
-和 [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)。
+违反以下任一条件都可能导致快照不一致或副本状态分叉。完整契约见当前仓库的 [`Service` 源码与 rustdoc 注释](https://github.com/gardenias/rr/blob/main/crates/rr-core/src/service.rs) 和 [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)。
+Violating any invariant below can cause inconsistent snapshots or diverging replicas. See the [`Service` source and rustdoc comments](https://github.com/gardenias/rr/blob/main/crates/rr-core/src/service.rs) in this repository and [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md) for the full contract.
 
----
+| 条件 / Invariant | 错误后果 / Failure |
+| :--- | :--- |
+| `snapshot()` 用单个锁或不可变结构捕获完整原子视图 / Capture one atomic view with one lock or an immutable structure | 快照混合不同时刻的状态 / Snapshot mixes different points in time |
+| `handle()` 返回前完成所有状态修改 / Finish every mutation before `handle()` returns | 随后的快照漏掉已应用修改 / A later snapshot misses applied mutations |
+| `restore()` 完整替换旧状态 / Replace all old state in `restore()` | 恢复后残留旧数据 / Pre-restore data survives |
 
-Implementing `Service` requires upholding **3 safety invariants** — violating
-any of them causes **silent data corruption** (inconsistent snapshots,
-followers diverging from the leader), with no runtime check that catches
-it before the data ships. See the trait
-[rustdoc](https://docs.rs/rr-core/latest/rr_core/service/trait.Service.html)
-and [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)
-for the full contract with OpenRaft source citations.
-
-| # | Invariant | Failure mode |
-| :- | :--- | :--- |
-| 1 | `snapshot()` captures an atomically-consistent view (single lock or immutable clone) | Snapshot bytes mix old + new state; followers receive corrupt snapshot |
-| 2 | `handle()` completes all state mutations synchronously before returning | Subsequent `snapshot()` reads stale state; followers diverge |
-| 3 | `restore()` completely replaces state (no merging into existing data) | Restored node retains pre-restore data, drifts from leader's authoritative state |
-
-### 反例与正例 / Anti-pattern and Correct Pattern (Invariant 1)
-
-下面是最常见的违反 Invariant 1 的写法 vs 正确写法。两个 lock 之间出现的 gap
-window 让 `apply()` 可以提交一个更新到 `map_b` 但 `map_a` 还没——`snapshot()`
-拿到的两半就不对应同一个时刻。
-
----
-
-The most common violation of Invariant 1 vs. the correct fix. The gap
-window between two `read()` calls lets `apply()` commit an update to
-`map_b` while `map_a` is unchanged — `snapshot()` returns two halves that
-don't correspond to the same moment.
+错误写法是在两个读锁之间释放第一个锁，再读取另一部分状态；这样得到的两个字段不属于同一时刻。
+A broken implementation releases one read lock before acquiring another for a different field, producing fields from different points in time.
 
 ```rust
-// ❌ 错误 / Incorrect — gap window between lock acquisitions
-async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
-    let a = self.map_a.read().await;
-    let snap_a = a.clone();
-    drop(a);                                // gap window opens here
-    let b = self.map_b.read().await;        // b may already reflect a write
-    let snap_b = b.clone();
-    bincode::serde::encode_to_vec(&(snap_a, snap_b), bincode::config::standard())
-        .map_err(|e| RrError::Codec(/* ... */))
-}
+// 错误 / Incorrect: two independent lock windows.
+let a = self.map_a.read().await.clone();
+let b = self.map_b.read().await.clone();
 
-// ✅ 正确 / Correct — single lock covers all fields
-async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
-    let state = self.state.read().await;    // covers ALL fields
-    bincode::serde::encode_to_vec(&*state, bincode::config::standard())
-        .map_err(|e| RrError::Codec(/* ... */))
-}
+// 正确 / Correct: one lock covers every snapshotted field.
+let state = self.state.read().await;
+let bytes = bincode::serde::encode_to_vec(&*state, bincode::config::standard())?;
 ```
 
-## Service Trait 定义 / Service Trait Definition
+## 接口与默认方法 / Interface and Default Methods
 
-以下是 `Service` trait 的核心方法（定义在 `crates/rr-core/src/service.rs`）：
+必需方法如下：
+The required methods are:
 
 ```rust
 #[async_trait]
 pub trait Service: Send + Sync {
-    /// 处理进入的客户端请求 / Handle an incoming client request.
-    ///
-    /// 框架在调用此方法前，会先通过 Raft 共识对请求字节进行提案。
     async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError>;
-
-    /// 返回服务的名称（用于标识和日志记录）/ Return the name of this service.
     fn name(&self) -> &str;
-
-    /// 为 Raft 快照创建服务状态的快照 / Create a snapshot of the service state.
     async fn snapshot(&self) -> Result<Vec<u8>, RrError>;
-
-    /// 从快照恢复服务状态 / Restore service state from a snapshot.
     async fn restore(&mut self, data: &[u8]) -> Result<(), RrError>;
 }
 ```
 
-## 默认方法 / Default Methods
+默认方法按需覆盖：
+Override default methods only when needed:
 
-除上述四个核心方法外，`Service` 还提供以下带默认实现的方法，可按需覆盖：
+- `handle_with_outputs`：apply 后以至少一次语义产生输出。/ Emit outputs with at-least-once delivery after apply.
+- `handle_with_ctx` / `handle_with_outputs_ctx`：接收真实 `ApplyContext { log_index, log_term }`；后者同时支持输出。/ Receive the real apply context; the outputs variant also emits outputs.
+- `handle_deferred`：两阶段 apply 可延迟客户端响应；不与框架幂等键层组合。/ Two-phase apply may defer a client response; it does not compose with framework idempotency keys.
+- `on_leader_elected` / `on_step_down`：管理仅 leader 使用的资源。/ Manage leader-only resources.
+- `shutdown`：组停止前释放资源。/ Release resources before the group stops.
 
-- `handle_with_outputs(request)`：与 `handle` 类似，但允许在请求提交后以至少一次（at-least-once）语义附带投递输出（见 ADR A-0007）。默认委托给 `handle()` 并返回空输出。
-- `handle_with_ctx(request, ctx)`（R-1 / A-0033）：在 apply 时携带该条目的真实 Raft 日志上下文 `ApplyContext { log_index, log_term }`。用于以真实 log index 作为意图记录键 / fencing 基准。默认忽略 `ctx` 并委托给 `handle()`（向后兼容）。适配器在 apply 路径实际调用的是其输出形态 `handle_with_outputs_ctx(request, ctx)`（默认委托给 `handle_with_ctx`）——因此普通服务只需覆盖 `handle_with_ctx` 即可拿到上下文；使用 Output 框架且需要上下文的服务覆盖 `handle_with_outputs_ctx`。
-- `on_leader_elected(group_id)`：当本节点成为该组的 Leader 时调用，适合启动仅 Leader 使用的资源（如挂接 Kafka ingestor、预热缓存）。默认为 no-op。
-- `on_step_down(group_id)`：当本节点卸任 Leader 时调用，适合停止仅 Leader 使用的资源。默认为 no-op。
-- `shutdown()`：在 Raft 组停止前调用，适合 flush 状态、关闭连接或释放外部资源。默认为 no-op。
+## KV 实现示例 / KV Implementation
 
----
-
-Beyond the four core methods above, `Service` provides the following defaulted methods you can override as needed:
-
-- `handle_with_outputs(request)`: like `handle`, but may also emit outputs delivered at-least-once after the apply commits (see ADR A-0007). Defaults to delegating to `handle()` with empty outputs.
-- `handle_with_ctx(request, ctx)` (R-1 / A-0033): carries the entry's real Raft log context `ApplyContext { log_index, log_term }` on apply. Use it to key intent records on the true log index or as a fencing basis. Defaults to ignoring `ctx` and delegating to `handle()` (backward compatible). The adapter actually invokes its outputs form `handle_with_outputs_ctx(request, ctx)` on the apply path (default delegates to `handle_with_ctx`) — so a plain service only needs to override `handle_with_ctx` to receive the context; Output-framework services that need the context override `handle_with_outputs_ctx`.
-- `on_leader_elected(group_id)`: called when this node becomes the group's leader — the right place to start leader-only resources (e.g. attach a Kafka ingestor, pre-warm caches). Default is a no-op.
-- `on_step_down(group_id)`: called when this node steps down from leadership — the right place to stop leader-only resources. Default is a no-op.
-- `shutdown()`: called before the Raft group is stopped — flush state, close connections, or release external resources. Default is a no-op.
-
-## 完整的 KvService 示例 / Complete KvService Example
-
-以下是一个典型的 `KvService` 实现（参考自 `examples/kv-store/src/service.rs`）：
+下面模式与 `examples/kv-store/src/service.rs` 一致：单个 `RwLock` 同时保护业务状态和快照视图。
+This follows `examples/kv-store/src/service.rs`: one `RwLock` protects both business state and the snapshot view.
 
 ```rust
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use bincode::config::standard;
-use tokio::sync::RwLock;
 use rr_core::error::{CodecError, RrError};
 use rr_core::service::Service;
+use tokio::sync::RwLock;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct KvService {
     store: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
@@ -146,31 +84,26 @@ pub struct KvService {
 #[async_trait]
 impl Service for KvService {
     async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError> {
-        // 解码请求 / Decode request
-        let (req, _): (KvRequest, _) = bincode::serde::decode_from_slice(&request, standard())
-            .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
+        let (request, _): (KvRequest, _) =
+            bincode::serde::decode_from_slice(&request, standard())
+                .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
 
-        let response = match req {
+        let response = match request {
             KvRequest::Put { key, value } => {
                 self.store.write().await.insert(key, value);
-                KvResponse::none()
+                KvResponse { value: None }
             }
-            KvRequest::Get { key } => {
-                let guard = self.store.read().await;
-                KvResponse {
-                    value: guard.get(&key).cloned(),
-                }
-            }
+            KvRequest::Get { key } => KvResponse {
+                value: self.store.read().await.get(&key).cloned(),
+            },
             KvRequest::Delete { key } => {
                 self.store.write().await.remove(&key);
-                KvResponse::none()
+                KvResponse { value: None }
             }
         };
 
-        // 编码响应 / Encode response
-        let encoded = bincode::serde::encode_to_vec(&response, standard())
-            .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))?;
-        Ok(encoded)
+        bincode::serde::encode_to_vec(&response, standard())
+            .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))
     }
 
     fn name(&self) -> &str {
@@ -178,8 +111,8 @@ impl Service for KvService {
     }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
-        let guard = self.store.read().await;
-        bincode::serde::encode_to_vec(&*guard, standard())
+        let state = self.store.read().await;
+        bincode::serde::encode_to_vec(&*state, standard())
             .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))
     }
 
@@ -193,52 +126,13 @@ impl Service for KvService {
 }
 ```
 
-## 服务状态机适配器 / ServiceStateMachineAdapter
+不要在 `handle()` 中用 `tokio::spawn` 延迟实际写入；如果解码或业务校验失败，应返回错误，不要推进状态。
+Do not defer the actual mutation with `tokio::spawn` in `handle()`. Return an error on decode or validation failure without advancing state.
 
-`ServiceStateMachineAdapter<S: Service>` 负责将你的 `Service` 包装起来。
+## 编码与读取 / Encoding and Reads
 
-- 它实现了 openraft 的状态机接口。
-- 将 `apply()` 委托给 `Service::handle()`。
-- 将 `snapshot()` 委托给 `Service::snapshot()`。
-- 将 `restore()` 委托给 `Service::restore()`。
-- 内部自动处理 `last_applied` 索引的追踪。
+请求、响应和快照都是字节，编码由应用选择。`kv-store` 使用 bincode v2；跨语言协议需要双方共享且版本化的 schema，不能依赖 Rust 私有类型布局。
+Requests, responses, and snapshots are bytes chosen by the application. `kv-store` uses bincode v2; cross-language protocols need a shared, versioned schema rather than Rust-specific type layouts.
 
----
-
-`ServiceStateMachineAdapter<S: Service>` wraps your `Service`.
-
-- It implements openraft's state machine interface.
-- Delegates `apply()` to `Service::handle()`.
-- Delegates `snapshot()` to `Service::snapshot()`.
-- Delegates `restore()` to `Service::restore()`.
-- Internally handles `last_applied` index tracking automatically.
-
-## 选择指南 / When to Use Service vs StateMachine
-
-选择哪种方式取决于你的需求：
-
-- **使用 `Service` 当：** 你只需要简单的请求/响应语义，不需要访问 Raft 日志的元数据（如 Index 或 Term）。
-- **直接使用 `StateMachine` 当：** 你在 `apply()` 时需要访问日志的 Index/Term，或者你需要自定义快照格式，亦或是在构建高级的复制逻辑。
-
----
-
-The choice depends on your requirements:
-
-- **Use `Service` when:** you want simple request/response semantics and don't need access to log metadata (like Index or Term).
-- **Use `StateMachine` directly when:** you need access to the log Index/Term in `apply()`, need custom snapshot formats, or are building advanced replication logic.
-
-## 请求/响应编码 / Request/Response Encoding
-
-关于序列化的建议：
-
-- 请求和响应都是 `Vec<u8>`，你可以使用任何编码方式。
-- 推荐：Rust 之间的通信使用 `bincode` v2，跨语言通信使用 `serde_json`。
-- `kv-store` 示例中展示了使用 `bincode` 进行编解码的标准模式。
-
----
-
-Notes about serialization:
-
-- Both requests and responses are `Vec<u8>`, any encoding works.
-- Recommended: `bincode` v2 for Rust-to-Rust communication, and `serde_json` for cross-language scenarios.
-- The `kv-store` example demonstrates the standard pattern of using `bincode` for encoding and decoding.
+读 API 不会替应用决定一致性。本地读与 ReadIndex 的区别见 [读一致性模型](read-consistency.md)；重试写需要业务键或 [框架幂等](idempotency.md)。
+Read APIs do not choose consistency for the application. See [Read Consistency](read-consistency.md) for local reads versus ReadIndex and [Framework Idempotency](idempotency.md) for retried writes.

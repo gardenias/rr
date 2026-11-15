@@ -2,15 +2,14 @@
 sidebar_position: 9
 ---
 
-# Dynamic — Raft Leader Election
+# 动态：Raft 领导者选举 / Dynamic: Raft Leader Election
 
-领导者选举发生在**每个 Raft 组内部独立**进行。当一个 group 的 leader 失联（进程崩溃、网络分区、GC 暂停），其他成员的选举定时器会超时并发起选举。本图展示标准的 Raft 选举流程在 rr 中的具体实现。
+每个 Raft group 独立选举。leader 失联后，其他成员的随机选举定时器超时并发起投票。
 
----
+Each Raft group elects independently. When its leader becomes unreachable, followers' randomized election timers
+expire and start an election.
 
-Leader election happens **independently inside each Raft group**. When a group's leader becomes unreachable (process crash, network partition, GC pause), other members' election timers fire and trigger a vote. This diagram shows how the standard Raft election flow is realized in rr.
-
-## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
+## 高层流程 / High-level Flow
 
 ```plantuml
 @startuml
@@ -44,7 +43,7 @@ Rel(client, n2_raft, "7. Clients learn the new leader via leader_info redirects 
 @enduml
 ```
 
-## 详细时序图 / Detailed Sequence
+## 详细时序 / Detailed Sequence
 
 ```plantuml
 @startuml
@@ -60,14 +59,14 @@ N1 -> N3 : AppendEntries (empty, heartbeat)
 N2 --> N1 : ack
 N3 --> N1 : ack
 
-note over N1 : 💥 N1 crashes / network partitions
+note over N1 : N1 crashes / network partitions
 
 note over N2 : Election timeout (randomized 150-300ms)\nfires first on N2
 N2 -> N2 : state = Candidate\ncurrent_term += 1\nvoted_for = self
 N2 -> N3 : VoteRequest(term, last_log_idx, last_log_term)
 N2 -> N1 : VoteRequest (connection fails — N1 down)
 
-note over N3 : term > my current_term ✓\nlog at least as up-to-date ✓\nhaven't voted this term ✓
+note over N3 : term > my current_term: OK\nlog at least as up-to-date: OK\nhaven't voted this term: OK
 N3 -> N3 : current_term = N2.term\nvoted_for = N2
 N3 --> N2 : VoteResponse(granted=true)
 
@@ -87,57 +86,39 @@ N2 --> Client : ClientResponse{success=true, payload}
 @enduml
 ```
 
-## 选举安全性保证 / Election Safety Guarantees
+## 安全性保证 / Safety Guarantees
 
-Raft 协议（由 openraft 实现）保证以下不变量：
+openraft 实现 Raft 不变量：同一 term 最多一个 leader；新 leader 必须包含此前已提交日志；相同 index 和
+term 的日志条目具有相同前缀。rr 只增加多组管理和网络层。
 
-The Raft protocol (implemented by openraft) guarantees the following invariants:
-
-1. **At most one leader per term** — 一个 term 内最多一个 leader；通过 "majority vote required" 保证。
-2. **Leader Completeness** — 新 leader 拥有所有之前 term 已 commit 的日志条目；通过 "log comparison in VoteRequest" 保证。
-3. **Log Matching** — 如果两个日志在某个 index 上条目相同，那么之前的条目也相同。
-
-rr **不会** 削弱这些保证——它原封不动地使用 openraft，仅在此之上加多组管理与网络层。
-
----
-
-rr **does not** weaken these guarantees — it uses openraft as-is, adding multi-group management and networking on top.
+Openraft implements Raft's invariants: at most one leader per term, a new leader contains all previously committed
+entries, and matching index/term entries imply matching prefixes. rr adds multi-group management and networking
+without changing those rules.
 
 ## 时间参数 / Timing Parameters
 
-| Parameter | Typical Value | Tradeoff |
+| 参数 / Parameter | 默认值 / Default | 说明 / Meaning |
 | :--- | :--- | :--- |
-| `heartbeat_interval` | 50 ms (rr default) | Lower = faster failure detection, higher = less network chatter |
-| `election_timeout_min` | 150 ms (rr default) | Must be > 2× heartbeat_interval |
-| `election_timeout_max` | 300 ms (rr default) | Randomized per-node to prevent split votes |
-| `snapshot_policy` | `SnapshotPolicy::LogsSinceLast(50_000)` (rr default, `rr_raft::DEFAULT_SNAPSHOT_LOGS_SINCE_LAST`) | Entries logged since last snapshot before triggering a new one |
+| `heartbeat_interval` | 50 ms | leader 心跳间隔 / Leader heartbeat interval |
+| `election_timeout_min` | 150 ms | 随机选举超时下限 / Lower election-timeout bound |
+| `election_timeout_max` | 300 ms | 随机选举超时上限 / Upper election-timeout bound |
+| `snapshot_policy` | `SnapshotPolicy::LogsSinceLast(50_000)` | 距上次快照的日志阈值 / Entries since last snapshot |
 
-**错误配置的后果 / Consequences of misconfiguration**:
-- `election_timeout < heartbeat_interval` → 不必要的选举，集群颠簸
-- `election_timeout ≥ client_timeout` → 客户端在选举完成前就返回错误
-- `heartbeat_interval > RTT * 2` → 正常运行中也会触发选举
+选举超时应为心跳和网络延迟留出余量；客户端超时应覆盖可预期的选举窗口。过小的选举超时会造成无必要
+的换主，过短的客户端超时会在选举完成前返回错误。
 
----
+Election timeouts need headroom over heartbeats and network latency; client timeouts should cover the expected
+election window. Too-small election timeouts cause unnecessary leadership changes, while too-short client timeouts
+return errors before election completes.
 
-- `election_timeout < heartbeat_interval` → spurious elections, cluster flapping
-- `election_timeout ≥ client_timeout` → clients error out before election completes
-- `heartbeat_interval > RTT * 2` → elections triggered even during normal operation
+## Split Vote 与多组选举 / Split Votes and Multi-group Elections
 
-## 选举风暴 / Election Storms
+多个 candidate 同时参选可能都没有多数票。`[min, max]` 区间内的随机超时会错开下一轮。group 之间任务和
+定时器独立，但 VoteRequest 仍共享连接池、CPU 和网络资源。
 
-如果多个 follower 同时超时并发起选举，可能会出现**split vote**（没有候选者获得多数）。Raft 通过**随机化超时时间**（在 [min, max] 区间内均匀随机）来降低这种情况的概率。出现 split vote 时，下一轮会自然错开重试。
-
-If multiple followers time out simultaneously and start elections, a **split vote** can occur (no candidate gets a majority). Raft mitigates this by **randomizing election timeouts** (uniform random within `[min, max]`). When a split vote happens, the next round naturally staggers.
-
-rr 的实现中，每个 group 独立选举——**一个 group 的选举风暴不会影响另一个 group 的 leader 稳定性**。
-
-In rr's implementation, each group elects independently — **an election storm in one group does not destabilize another group's leader**.
-
-## 多组场景下的并发选举 / Concurrent Elections in Multi-Group
-
-当整个节点崩溃时，**N 个 Raft 组同时失去一个成员**——如果这个节点是多个组的 leader，多个组会并发发起选举：
-
-When an entire node crashes, **N Raft groups simultaneously lose a member** — if that node was the leader of multiple groups, multiple elections start concurrently:
+Simultaneous candidates can each fail to win a majority. Randomized timeouts in `[min, max]` stagger the next
+round. Groups have independent tasks and timers, but VoteRequests still share channel pools, CPU, and network
+resources.
 
 ```plantuml
 @startuml
@@ -159,17 +140,7 @@ t0 --> g7
 @enduml
 ```
 
-rr 通过 **独立的 openraft 任务和独立的随机超时**，让每个 group 的选举互不干扰。但要注意：
-- **网络资源竞争**：选举风暴期间，所有 group 的 VoteRequest 共享同一个 ChannelPool。
-- **CPU**：每个 group 的日志比较、签名验证并行执行——多核 CPU 能平滑此负载。
-
----
-
-rr, via **independent openraft tasks and independent randomized timeouts**, keeps each group's election independent. Note however:
-- **Network resource contention**: during election storm, all groups' VoteRequests share one ChannelPool.
-- **CPU**: log comparison, signature verification run in parallel per group — multi-core CPUs absorb this.
-
 ## 相关 / Related
 
-- 客户端如何感知 leader 变化：[dynamic-put-request.md](./dynamic-put-request.md)
-- 路由表变更（不含 leader——leader 是 raft 运行时状态）：[dynamic-config-update.md](./dynamic-config-update.md)
+- [客户端发现 leader / Client leader discovery](./dynamic-put-request.md)
+- [路由表不含 leader / Leaders stay out of routing tables](./dynamic-config-update.md)

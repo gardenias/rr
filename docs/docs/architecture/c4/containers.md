@@ -2,13 +2,12 @@
 sidebar_position: 2
 ---
 
-# Level 2 — 容器图 / Container Diagram
+# 第 2 级：容器图 / Level 2: Container Diagram
 
-容器图展示 rr 系统的**可部署单元**——独立运行的进程、CLI 工具和外部依赖。它是大多数团队理解 rr 部署形态的最重要视图。
+本图展示 rr 的可部署单元、外部依赖和通信协议。这里的“容器”是 C4 概念，不限于 Docker。
 
----
-
-The Container diagram shows **deployable units** in an rr system — independently running processes, CLI tools, and external dependencies. It's the most important diagram for most teams to understand rr's deployed shape.
+This diagram shows rr's deployable units, external dependencies, and communication protocols. Here “container”
+is a C4 concept, not necessarily Docker.
 
 ## 图示 / Diagram
 
@@ -23,7 +22,7 @@ Person(operator, "Cluster Operator")
 Person_Ext(end_user, "End User")
 
 System_Boundary(client_side, "Client Side") {
-  Container(user_app, "User Application", "Rust + rr-client SDK", "Implements Service trait; uses RrClient with auto leader-redirect & retry")
+  Container(user_app, "User Application", "Rust + rr-client SDK", "Uses RrClient with automatic leader redirect & retry")
   Container(admin_cli, "rr-admin CLI", "Rust binary, clap + tonic", "Interactive REPL & one-shot commands for cluster administration")
 }
 
@@ -53,67 +52,67 @@ LAYOUT_WITH_LEGEND()
 
 ## 容器清单 / Container Inventory
 
-### 部署单元 / Deployable
+### 部署单元 / Deployable Units
 
-| Container | Technology | Deployable Form | Runs Where |
+| 容器 / Container | 技术 / Technology | 部署形态 / Deployable Form | 运行位置 / Runs Where |
 | :--- | :--- | :--- | :--- |
-| **rr-server Node** | Rust binary (built from `examples/kv-store`, `examples/counter`, or custom) | Linux binary, Docker image, systemd unit | 1 process per node, N nodes per cluster (typically 3, 5, or 7) |
-| **rr-admin CLI** | Rust binary (`crates/rr-admin`) | CLI tool | Operator workstation or bastion host |
-| **User Application** | Rust binary (or any language with a future gRPC SDK) | Varies — could be a web server, batch job, cronjob | Any machine that can reach the cluster over gRPC |
+| **rr-server Node** | Rust binary | Linux binary, Docker image, systemd unit | 每节点一个进程 / One process per node |
+| **rr-admin CLI** | `crates/rr-admin` | CLI tool | 运维主机或 bastion / Operator workstation or bastion |
+| **User Application** | Rust + rr-client | 应用自定义 / Application-defined | 可通过 gRPC 访问集群的进程 / Any process with gRPC access |
 
-### 外部系统 / External
+### 外部依赖 / External Dependencies
 
-| External | Role |
+| 依赖 / Dependency | 作用 / Role |
 | :--- | :--- |
-| **RocksDB Data Dir** | Per-group persistent Raft log, vote, and SM-snapshot storage (`{base_path}/{group_id}`, one independent RocksDB per group, plus `sm-snapshot.bin`). Not a separate process — a library embedded in the node writing to local disk. Wired by the stock `rr-server --storage rocks` (ADR A-0016 + T1); `--storage mem` keeps everything in-memory. |
-| **Prometheus** | Optional metrics scraper |
-| **External ConfigProvider** | Optional production source of routing table (vs. in-process `MemConfigProvider` used in dev/tests) |
+| **RocksDB Data Dir** | rocks 模式下按 group 持久化日志、vote 和 `sm-snapshot.bin`；不是独立进程。<br />Per-group log, vote, and `sm-snapshot.bin` persistence in rocks mode; not a separate process. |
+| **Prometheus** | 可选指标抓取。 / Optional metrics scraper. |
+| **External ConfigProvider** | 可选的外部路由表来源；开发默认使用进程内 `MemConfigProvider`。 / Optional external routing-table source; development defaults to in-process `MemConfigProvider`. |
 
-## Library Crates - NOT Containers
+## 库 Crate 不是容器 / Library Crates Are Not Containers
 
-以下 crate 是 **库 / libraries**，被链接进 rr-server 或用户应用进程——它们不是独立部署的容器，不会在容器图中出现：
+以下库链接进 rr-server 或应用进程，不是独立部署单元。
 
-The following crates are **libraries** linked into rr-server or the user application — they are not independently deployed containers and do not appear in the Container diagram:
+The following libraries are linked into rr-server or application processes; they are not independently deployed.
 
-| Crate | Linked Into |
+| Crate | 链接进 / Linked Into |
 | :--- | :--- |
-| `rr-core` | rr-server, rr-client, rr-admin, every other crate |
-| `rr-storage` | rr-server (provides `MemStorage` / `RocksStorage`) |
-| `rr-config` | rr-server (provides `MemConfigProvider`) |
-| `rr-raft` | rr-server (provides `RaftGroupManager`, `RaftNode`) |
-| `rr-router` | rr-server (provides `ShardRouter`) |
-| `rr-network` | rr-server, rr-client, rr-admin (provides gRPC stubs & `ChannelPool`) |
+| `rr-core` | rr-server, rr-client, rr-admin, other crates |
+| `rr-storage` | rr-server (`MemStorage` / `RocksStorage`) |
+| `rr-config` | rr-server (`MemConfigProvider`) |
+| `rr-raft` | rr-server (`RaftGroupManager`, `RaftNode`) |
+| `rr-router` | rr-server (`ShardRouter`) |
+| `rr-network` | rr-server, rr-client, rr-admin |
 | `rr-client` | User Application |
 
-For internal breakdown of each crate, see the [Component-level diagrams](./components-server.md).
+内部结构见[组件图](./components-server.md)。
+
+See the [component diagrams](./components-server.md) for internal structure.
 
 ## 通信矩阵 / Communication Matrix
 
-| From → To | Protocol | Service / Port | Purpose |
+| 来源 → 目标 / From → To | 协议 / Protocol | 服务与端口 / Service / Port | 用途 / Purpose |
 | :--- | :--- | :--- | :--- |
 | User App → rr-server | gRPC | `ClientService` @ 51001 | `Request`, `ReadLocal`, `ReadLinearizable`, `GetClusterInfo` |
-| rr-admin → rr-server | gRPC | `AdminService` @ `admin_port` | Node/group status, snapshots, leader transfer, membership, backup, metrics |
-| rr-server ↔ rr-server | gRPC (bidirectional) | `RaftService` @ 51001 | `AppendEntries`, `Vote`, `InstallSnapshot` (streaming) |
-| Prometheus → rr-server | HTTP | `/metrics` @ `metrics_port` | Metrics scraping |
-| rr-server → Disk | File I/O (RocksDB) | Local path | Raft log + sm-snapshot persistence (`--storage rocks`, ADR A-0016/T1) |
-| rr-server → ConfigProvider | Trait call | Impl-defined | Load routing table (`get_routing_table`), watch `RoutingTableChange` stream |
+| rr-admin → rr-server | gRPC | `AdminService` @ `admin_port` | 状态、快照、成员与管理 / Status, snapshots, membership, administration |
+| rr-server ↔ rr-server | gRPC | `RaftService` @ 51001 | `AppendEntries`, `Vote`, `InstallSnapshot` |
+| Prometheus → rr-server | HTTP | `/metrics` @ `metrics_port` | 指标抓取 / Metrics scraping |
+| rr-server → Disk | File I/O | Local path | rocks 模式日志与快照 / Rocks-mode log and snapshot |
+| rr-server → ConfigProvider | Trait call | 实现定义 / Implementation-defined | 读取路由表并监听变更 / Read table and watch changes |
 
-**关键点 / Key points**:
+## 边界与客户端行为 / Boundaries and Client Behavior
 
-1. **一个端口承载两种服务** — `RaftService` 与 `ClientService` 默认共享同一个 gRPC 端口（51001）。这简化部署，但生产环境可配置 `admin_port` 与 `metrics_port` 单独暴露。
-2. **客户端是"智能客户端"** — `RrClient` 会缓存每个 group 的 leader 地址，在收到携带 `leader_info` 的重定向响应（`success=false`）时自动更新缓存、退避后重试。
-3. **没有独立网关 / 代理** — 集群没有独立的路由层；任何节点都能接收客户端请求并路由到正确 group 的 leader。
-
----
-
-1. **One port hosts two services** — `RaftService` and `ClientService` share the same gRPC port (51001 by default). This simplifies deployment, but in production the `admin_port` and `metrics_port` can be exposed separately.
-2. **Smart client** — `RrClient` caches each group's leader address and, upon receiving a redirect response carrying `leader_info` (`success=false`), updates its cache and retries after a backoff.
-3. **No dedicated gateway / proxy** — there is no separate routing tier; any node can receive a client request and route it to the correct group's leader.
+1. `RaftService` 与 `ClientService` 共享 `listen_addr`；Admin 和 metrics 分别使用可选的独立端口。
+   `RaftService` and `ClientService` share `listen_addr`; Admin and metrics use optional separate ports.
+2. `RrClient` 缓存 group leader；收到带 `leader_info` 的普通响应后更新缓存、退避并重试。
+   `RrClient` caches group leaders; a normal response carrying `leader_info` updates the cache and triggers a
+   backoff and retry.
+3. 没有独立网关；任何节点都可接收请求，非 leader 通过响应重定向客户端。
+   There is no dedicated gateway; any node can receive a request, and a non-leader redirects the client.
 
 ## 下钻 / Drill-down
 
-- 进入节点内部 → [components-server.md](./components-server.md)
-- 多 Raft 组细节 → [components-raft.md](./components-raft.md)
-- 分片路由细节 → [components-router.md](./components-router.md)
-- gRPC 层细节 → [components-network.md](./components-network.md)
-- 物理部署 → [deployment.md](./deployment.md)
+- [节点内部 / Node internals](./components-server.md)
+- [多 Raft 组 / Multi-Raft groups](./components-raft.md)
+- [分片路由 / Shard routing](./components-router.md)
+- [gRPC 层 / gRPC transport](./components-network.md)
+- [物理部署 / Physical deployment](./deployment.md)

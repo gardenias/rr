@@ -5,57 +5,53 @@ sidebar_position: 1
 # 架构概览 / Architecture Overview
 
 :::tip C4 架构图 / C4 Architecture Diagrams
-本页提供高层散文说明。若需要**视觉化的多层次结构图**（Context / Container / Component / Deployment / Dynamic），请参阅 [**C4 架构图目录 / C4 Architecture Diagrams**](./c4/README.md)。
+本页给出高层说明；Context / Container / Component / Deployment / Dynamic 视图见 [**C4 架构图目录**](./c4/README.md)。
 
-This page provides a prose overview. For **visual multi-level structural diagrams** (Context / Container / Component / Deployment / Dynamic), see the [**C4 Architecture Diagrams index**](./c4/README.md).
-- 系统级定位 / System-level framing → [c4/context.md](./c4/context.md)
-- 部署单元 / Deployable units → [c4/containers.md](./c4/containers.md)
+This page gives the high-level view. For Context / Container / Component / Deployment / Dynamic diagrams, see the [**C4 Architecture Diagrams index**](./c4/README.md).
+- [系统级定位 / System-level framing](./c4/context.md)
+- [部署单元 / Deployable units](./c4/containers.md)
 :::
 
-## rr 是什么 / What is rr
+## rr 是什么 / What rr Is
 
-rr 是一个基于 Rust 开发的分布式多 Raft 共识框架。它的核心目标是提供一个高度模块化、易于扩展且生产可用的共识层，让开发者可以专注于业务逻辑（通过 `Service` 或 `StateMachine` 接口），而无需处理复杂的共识算法细节、网络传输和成员变更。
+rr 是用 Rust 编写的分布式 Multi-Raft 共识框架。业务逻辑通过 `Service` 或 `StateMachine` 接口接入，框架负责共识、网络传输和成员变更。
 
-rr 采用了多 Raft（Multi-Raft）设计哲学。与传统的单 Raft 实例不同，rr 允许在同一个节点上运行多个 Raft 共识组（Raft Groups）。这种设计极大地提升了系统的水平扩展能力和并发性能，是构建分布式数据库、分布式锁服务等高可用系统的理想选择。
+rr is a distributed Multi-Raft consensus framework written in Rust. Business logic plugs in through the `Service` or `StateMachine` traits; the framework handles consensus, networking, and membership changes.
 
----
+一个节点可运行多个相互独立的 Raft 组。写吞吐通过跨组分片扩展，而不是通过增加单组副本扩展。
 
-rr is a distributed multi-Raft consensus framework built with Rust. Its primary goal is to provide a highly modular, extensible, and production-ready consensus layer, allowing developers to focus on business logic via `Service` or `StateMachine` traits without dealing with the complexities of consensus algorithms, networking, and membership changes.
+Each node can run multiple independent Raft groups. Write throughput scales by sharding across groups, not by adding replicas to one group.
 
-rr adopts a multi-Raft design philosophy. Unlike traditional single-Raft instances, rr allows multiple Raft consensus groups to run on a single node. This design significantly improves horizontal scalability and concurrency, making it an ideal choice for building high-availability systems like distributed databases and lock services.
+## rr 解决什么问题 / What Problem rr Solves
 
-## rr 解决什么问题 / What Problem Does rr Solve
+[openraft](https://github.com/datafuselabs/openraft) 提供单个 Raft 组的引擎，日志存储、状态机和网络传输 trait 由使用方实现。分片系统还需要多组生命周期管理、`Partition → Group → Node` 路由、gRPC 与连接池、leader 发现与重定向、框架级幂等，以及成员编排、备份、限流和 TLS。rr 集成这些组件并提供联测过的技术栈。
 
-[openraft](https://github.com/datafuselabs/openraft) 这样的共识库给你的是**一个** Raft 组的引擎——日志存储、状态机、网络传输三大 trait 都需要自己实现。而一个生产级的分片系统远不止于此。如果直接从 openraft 出发，你必须自行构建：单节点上的**多共识组生命周期管理**、**分片路由表**（Partition → Group → Node）、**gRPC 网络层与连接池**、**客户端 leader 发现与重定向**、**框架级幂等去重**、以及成员变更编排、备份、限流、TLS 等**运维工具链**。rr 存在的意义就是把这一整块"从共识库到生产系统"的gap一次性补齐，并且各组件之间已经完成集成与联测。
+[openraft](https://github.com/datafuselabs/openraft) provides the engine for one Raft group; you implement its log-storage, state-machine, and network traits. A sharded system also needs multi-group lifecycle management, `Partition → Group → Node` routing, gRPC and connection pooling, leader discovery and redirects, framework-level idempotency, plus membership orchestration, backup, rate limiting, and TLS. rr integrates these pieces into a jointly tested stack.
 
-**rr 不适合你的场景**：你需要 SQL、事务或二级索引（rr 是共识框架，不是数据库）；你需要 AP 语义或指望"加副本扩展写吞吐"（Raft 是 CP，单组写入不随副本数扩展，multi-raft 靠跨组分片扩展）；单个 etcd / rqlite / consul 已能满足需求；或你需要跨地域低延迟写入（quorum 往返是硬下限）。更详细的对比见 [与 openraft 的关系](./openraft-relationship.md) 与 [常见问题](../faq.md)。
+**非目标**：rr 不是数据库，不提供 SQL、事务或二级索引；Raft 提供 CP 而非 AP 语义；单组写入不随副本数扩展；quorum 往返使跨地域写入存在延迟下限。如果单个 etcd、rqlite 或 consul 已满足需求，无需引入 rr。详见 [与 openraft 的关系](./openraft-relationship.md) 和 [常见问题](../faq.md)。
 
----
-
-A consensus library like [openraft](https://github.com/datafuselabs/openraft) gives you the engine for **one** Raft group — and you implement the log storage, state machine, and network transport traits yourself. A production sharded system needs far more. Starting from raw openraft, you would have to build on your own: **multi-group lifecycle management** on each node, a **shard routing table** (Partition → Group → Node), the **gRPC networking layer with connection pooling**, **client-side leader discovery and redirect**, **framework-level idempotency and dedup**, plus an **operational toolchain** — membership orchestration, backup, rate limiting, TLS. rr exists to close this entire "from consensus library to production system" gap in one integrated, jointly tested stack.
-
-**rr is not for you if**: you need SQL, transactions, or secondary indexes (rr is a consensus framework, not a database); you need AP semantics or expect "more replicas to scale writes" (Raft is CP; a single group's writes do not scale with replica count — multi-raft scales by sharding across groups); a single etcd / rqlite / consul already covers you; or you need low-latency cross-region writes (quorum round-trips are a hard floor). See [Relationship with openraft](./openraft-relationship.md) and the [FAQ](../faq.md) for detailed comparisons.
+**Non-goals**: rr is not a database and provides no SQL, transactions, or secondary indexes. Raft is CP, not AP; one group's writes do not scale with replicas; quorum round-trips impose a latency floor on cross-region writes. If one etcd, rqlite, or consul deployment already meets your needs, rr adds no value. See [Relationship with openraft](./openraft-relationship.md) and the [FAQ](../faq.md).
 
 ## 核心概念 / Key Concepts
 
 | 概念 / Concept | 描述 / Description |
 | :--- | :--- |
-| **Node (节点)** | 运行 rr 实例的物理机或虚拟机，由唯一的 `NodeId` 标识。 |
-| **Group (共识组)** | 一个 Raft 共识实例，包含多个 Peer 节点，由 `GroupId` 标识。 |
-| **Partition (分片)** | 数据路由的最小单位，映射到具体的共识组，由 `PartitionId` 标识。 |
-| **Leader/Follower** | Raft 角色，只有 Leader 节点可以处理写请求。 |
-| **RoutingTable (路由表)** | 维护分片到节点、分片到共识组的映射关系。 |
-| **ConfigProvider (配置提供者)** | 提供动态配置更新的抽象接口；内置实现为内存版（`MemConfigProvider`）和基于 etcd 的只读实现（`EtcdConfigProvider`）。 |
+| **Node / 节点** | 运行 rr 实例的物理机或虚拟机，由 `NodeId` 标识。<br />A physical or virtual machine running rr, identified by `NodeId`. |
+| **Group / 共识组** | 一个 Raft 共识实例，由 `GroupId` 标识。<br />One Raft consensus instance, identified by `GroupId`. |
+| **Partition / 分片** | 数据路由的最小单位，映射到共识组，由 `PartitionId` 标识。<br />The smallest routing unit, mapped to a group and identified by `PartitionId`. |
+| **Leader / Follower** | Raft 角色；只有 Leader 接受写请求。<br />Raft roles; only the Leader accepts writes. |
+| **RoutingTable / 路由表** | 维护分片到组、节点到地址的映射。<br />Maps partitions to groups and nodes to addresses. |
+| **ConfigProvider / 配置提供者** | 动态配置接口；内置可写内存实现 `MemConfigProvider` 和只读 etcd 实现 `EtcdConfigProvider`。<br />Dynamic-configuration interface, with writable in-memory `MemConfigProvider` and read-only etcd-backed `EtcdConfigProvider`. |
 
 ## 系统架构 / System Architecture
 
 ```plantuml
 @startuml
-!include <C4/C4_Container.puml>
+!include <C4/C4_Component.puml>
 
-title Container Diagram - rr System Architecture
+title Component Diagram - rr System Architecture
 
-Container(client, "Client App", "Rust + rr-client", "Application using the cluster")
+Component(client, "Client App", "Rust + rr-client", "Application using the cluster")
 
 Container_Boundary(server, "rr-server / RrNode") {
   Component(router, "ShardRouter", "rr-router", "Partition → group resolver")
@@ -80,24 +76,15 @@ Rel(router, config, "Loads routing table")
 @enduml
 ```
 
-## 设计哲学 / Design Philosophy
+## 设计原则 / Design Principles
 
-- **模块化 Crate / Modular Crates**: 核心功能被拆分为多个独立 Crate，通过 Trait 进行解耦。
-- **可插拔后端 / Pluggable Backends**: 存储（Storage）和配置（Config）提供者均可根据需求定制。
-- **无魔法路由 / No Magic Routing**: 路由逻辑清晰，完全基于路由表（Routing Table）查找。
-- **业务导向 / Business Oriented**: 通过简单的 `Service` 或 `StateMachine` 接口嵌入业务逻辑。
-
----
-
-- **Modular Crates**: Core functionalities are split into independent crates, decoupled via traits.
-- **Pluggable Backends**: Both storage and config providers can be customized as needed.
-- **No Magic Routing**: Routing logic is explicit and based entirely on routing table lookups.
-- **Business Oriented**: Embed business logic easily through simple `Service` or `StateMachine` traits.
+- **模块化 Crate / Modular crates**：按职责拆分 crate，以 trait 解耦。<br />Crates are split by responsibility and decoupled through traits.
+- **可插拔后端 / Pluggable backends**：存储和配置提供者可替换。<br />Storage and configuration providers are replaceable.
+- **显式路由 / Explicit routing**：请求路由由路由表决定。<br />Request routing is determined by the routing table.
+- **业务接口 / Business interfaces**：业务代码实现 `Service` 或 `StateMachine`。<br />Business code implements `Service` or `StateMachine`.
 
 ## 与 openraft 的关系 / Relationship with openraft
 
-rr 并不是从零开始实现 Raft 算法，而是深度封装了 [openraft](https://github.com/datafuselabs/openraft) (v0.10.0-alpha.34)。rr 在 openraft 之上添加了多共识组管理、gRPC 网络层、自动化的路由发现以及统一的生命周期管理，从而提供了一个开箱即用的分布式框架。
+rr 使用 [openraft](https://github.com/datafuselabs/openraft) `v0.10.0-alpha.34` 的 Raft 实现，在其上增加多组管理、gRPC 网络、路由发现和统一生命周期管理。
 
----
-
-rr is not a Raft implementation from scratch. Instead, it deeply wraps [openraft](https://github.com/datafuselabs/openraft) (v0.10.0-alpha.34). rr adds multi-group management, a gRPC networking layer, automated routing discovery, and unified lifecycle management on top of openraft to provide an out-of-the-box distributed framework.
+rr uses the Raft implementation from [openraft](https://github.com/datafuselabs/openraft) `v0.10.0-alpha.34`, adding multi-group management, gRPC networking, routing discovery, and unified lifecycle management.

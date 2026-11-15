@@ -4,134 +4,66 @@ sidebar_position: 7
 
 # 读一致性模型 / Read Consistency Model
 
-rr 提供三个明确区分的请求级别：**写（始终线性一致）**、**本地读（可能过期）**、**线性一致读（ReadIndex）**。它们是不同的 gRPC 方法，而不是同一个 RPC 上的开关——这是刻意的安全设计（见下文 ADR A-0009）。
+rr 将写、本地读和线性一致读定义为三个独立 gRPC 方法，而不是同一 RPC 的开关。
+rr defines writes, local reads, and linearizable reads as three separate gRPC methods rather than a flag on one RPC.
 
-## 三个级别对比
+## 请求路径对比 / Request Paths
 
-| 级别 | 客户端 API | gRPC 方法 | 机制 | 一致性保证 | 延迟成本 | 典型用途 |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **写** | `send_request` / `send_request_idempotent` | `Request` | 提交到 leader → Raft 复制 → 法定人数提交 → 串行 apply | 线性一致 | 一次 quorum 复制往返 | 所有状态变更 |
-| **本地读** | `read` | `ReadLocal` | 直接读本节点状态机副本（`StateMachineReader`），绕过共识 | 可能**过期**（stale） | 最低，本地读取 | 延迟不敏感的读、缓存、监控展示 |
-| **线性一致读** | `read_linearizable` | `ReadLinearizable` | leader 执行 ReadIndex 确认提交位点，等待本地 apply 追平后读取 | 线性一致（Raft 论文 §6.4） | 一次 quorum 往返（心跳确认） | 读己之写、基于最新值做决策 |
+| 级别 / Level | 客户端 API / Client API | gRPC | 机制 / Mechanism | 保证与成本 / Guarantee and Cost |
+| :--- | :--- | :--- | :--- | :--- |
+| 写 / Write | `send_request`, `send_request_idempotent` | `Request` | leader 提交、quorum 复制、串行 apply / leader proposal, quorum replication, serial apply | 线性一致；一次复制往返 / Linearizable; one replication round trip |
+| 本地读 / Local read | `read` | `ReadLocal` | 直接读取本地状态机 / Read the local state machine | 可能过期；无共识往返 / May be stale; no consensus round trip |
+| 线性一致读 / Linearizable read | `read_linearizable` | `ReadLinearizable` | leader 执行 ReadIndex，等待 apply 后读取 / ReadIndex, wait for apply, then read | 线性一致；一次 quorum 确认 / Linearizable; one quorum confirmation |
 
-## 写：始终走 leader
+## 写请求 / Writes
 
-写请求只能由共识组的 leader 处理。如果请求落到 follower 上，服务端**不做转发**，而是返回 `ClientResponse{success=false, leader_info}`，由 `rr-client` SDK 自动更新 leader 缓存并重试到 leader 地址。服务端不转发是刻意的：它让热点路径保持简单，也让客户端始终知道真正的 leader 是谁。
+写只能由 leader 处理。服务端不转发 follower 收到的写，而是返回 `success=false` 和 `leader_info`；SDK 更新 leader 缓存并重试。
+Only the leader handles writes. The server does not proxy a write received by a follower; it returns `success=false` with `leader_info`, and the SDK updates its leader cache and retries.
 
 ```rust
-// 写：自动 leader 重定向 + 指数退避重试
-let resp = client.send_request(group_id, payload).await?;
+let response = client.send_request(group_id, payload).await?;
 
-// 幂等写：携带 IdempotencyKey，框架层去重
-let resp = client.send_request_idempotent(group_id, payload, key).await?;
+// 幂等写在重试时由框架去重 / Idempotent writes are deduplicated across retries.
+let response = client.send_request_idempotent(group_id, payload, key).await?;
 ```
 
-## 本地读（ReadLocal）：最快，可能过期
+成功响应表示请求已提交并应用；超时或错误响应的结果可能不确定，需要按业务键查询或幂等重试。
+A success response means the request was committed and applied. After a timeout or error, the outcome may be unknown; query by business key or retry idempotently.
 
-`client.read(group_id, payload)`（`crates/rr-client/src/lib.rs:330`）把请求发给任意可达节点，该节点通过 `StateMachineReader::read`（`crates/rr-core/src/state_machine.rs:38`）直接读取**本地状态机副本**，完全绕过 Raft 共识。
+## 本地读 / Local Reads
 
-- **可以在 follower 上服务**——这正是它的价值：读负载可以摊到所有副本上；
-- **可能读到旧值**：follower 的 apply 落后于 leader 的 commit，落后的窗口取决于复制延迟；
-- **没有 leader 重定向**：SDK 在 bootstrap 地址间轮询重试，因为它不需要找到 leader。
+`client.read(group_id, payload)` 可发往任意副本，通过 `StateMachineReader::read` 读取本地状态，不经过 Raft。
+`client.read(group_id, payload)` may contact any replica and reads local state through `StateMachineReader::read` without Raft consensus.
+
+- follower 可以应答，读负载可分布到各副本。/ Followers can answer, distributing read load.
+- follower 的 apply 可能落后，因此值可能过期。/ Follower apply may lag, so values may be stale.
+- 该路径不需要 leader 重定向；重试会尝试其他引导地址。/ No leader redirect is needed; retries try other bootstrap addresses.
 
 ```rust
-// 本地读：最低延迟，允许轻微过期
 let value = client.read(group_id, payload).await?;
 ```
 
-## 线性一致读（ReadLinearizable）：不过期，更贵
+## 线性一致读 / Linearizable Reads
 
-`client.read_linearizable(group_id, payload)`（`crates/rr-client/src/lib.rs:391`）的服务端流程（`crates/rr-raft/src/group_manager.rs:857` 的 `linearizable_read`）：
-
-1. 被联系的副本调用 openraft 的 `get_read_linearizer(ReadPolicy::ReadIndex)`；
-2. **如果它是 leader**：ReadIndex 向 quorum 确认自己的 commit 位点仍然有效（确认自己仍是合法 leader），然后 `await_ready` 等待本地状态机 apply 到该位点，最后执行本地读返回；
-3. **如果它是 follower**：openraft 返回 `ForwardToLeader`；rr 服务端把它压平成 `ReadLocalResponse.leader_info` 重定向（与写路径相同），SDK 自动改拨 leader 地址重试。
-
-这满足 Raft 论文 §6.4 的线性一致读语义，代价是一次 quorum 往返。
+`client.read_linearizable(group_id, payload)` 在 leader 上通过 ReadIndex 确认领导权和提交位点，等待本地 apply 追平后读取。follower 返回 leader 提示，SDK 自动重试。
+`client.read_linearizable(group_id, payload)` uses ReadIndex on the leader to confirm leadership and the commit point, waits for local apply, then reads. A follower returns a leader hint and the SDK retries.
 
 ```rust
-// 线性一致读：保证读到最新已提交状态
 let value = client.read_linearizable(group_id, payload).await?;
 ```
 
-## 为什么是独立的 RPC，而不是一个布尔开关（ADR A-0009)
+该路径满足线性一致读，但增加一次 quorum 确认和必要的 apply 等待。
+This path provides linearizable reads at the cost of a quorum confirmation and any required apply wait.
 
-早期设计用 `ClientRequest.read_only: bool` 区分读写。问题是：调用方一旦把写请求错标成 `read_only=true`，服务端会把它路由到本地读路径——**不报错、不修改状态、数据静默丢失**。这比返回错误危险得多。
+## 为什么不用布尔开关 / Why Not a Boolean Flag
 
-因此 ADR A-0009 决定：**写、本地读、线性一致读是三个独立的 gRPC 方法**，由协议层强制语义分离。一致性级别不可能因为一个布尔参数被静默降级；直接手写 gRPC 的客户端也无法犯这个错误。
+早期 `ClientRequest.read_only` 允许把写误标为只读，导致不修改状态却不报错。独立 RPC 在协议层阻止这种静默语义降级；ADR A-0009 记录了该决定。
+The earlier `ClientRequest.read_only` flag could misclassify a write as a read, returning without an error or state change. Separate RPCs prevent that silent downgrade at the protocol layer; ADR A-0009 records the decision.
 
-## 实践建议
+## 选择与错误处理 / Selection and Error Handling
 
-- **默认用 `read`**：只要业务能容忍轻微过期（缓存、列表展示、监控），本地读的延迟和负载分布最优；
-- **必须不过期时用 `read_linearizable`**：读己之写（写后立刻读）、基于最新状态做决策（如抢锁前检查）、结算类逻辑；
-- **写永远走 `send_request` / `send_request_idempotent`**——不要试图用读路径"确认"写结果，需要确认就用线性一致读；
-- **重试是 SDK 内置的**：leader 重定向和指数退避（`retry_delay_ms * 2^attempt`）由 `rr-client` 处理，业务层通常只需配置 `RetryConfig`；
-- `GetClusterInfo` 返回的是 raft 运行时拓扑（leader/副本真实，选举中 leader 为 0），但 leader 发现的实际机制是上面的 `leader_info` 重定向——SDK 不依赖 `GetClusterInfo` 做路由。
+可容忍过期时使用 `read`；读己之写或依赖最新状态做决策时使用 `read_linearizable`；状态变更只使用写 API。
+Use `read` when staleness is acceptable, `read_linearizable` for read-your-writes or decisions based on current state, and write APIs for all mutations.
 
----
-
-# Read Consistency Model
-
-rr offers three explicitly separated request levels: **writes (always linearizable)**, **local reads (possibly stale)**, and **linearizable reads (ReadIndex)**. These are distinct gRPC methods, not a flag on a single RPC — a deliberate safety design (see ADR A-0009 below).
-
-## The three levels at a glance
-
-| Level | Client API | gRPC method | Mechanism | Guarantee | Latency cost | Typical use |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Write** | `send_request` / `send_request_idempotent` | `Request` | Submit to leader → Raft replication → quorum commit → serial apply | Linearizable | One quorum replication round-trip | All state mutations |
-| **Local read** | `read` | `ReadLocal` | Reads the node's local state-machine replica (`StateMachineReader`), bypassing consensus | May be **stale** | Lowest — local read | Latency-insensitive reads, caches, dashboards |
-| **Linearizable read** | `read_linearizable` | `ReadLinearizable` | Leader runs ReadIndex to confirm its commit point, waits for local apply to catch up, then reads | Linearizable (Raft paper §6.4) | One quorum round-trip (heartbeat confirmation) | Read-your-writes, decisions on latest state |
-
-## Writes: always to the leader
-
-Only the group's leader can serve writes. If a write lands on a follower, the server **does not forward it** — it returns `ClientResponse{success=false, leader_info}`, and the `rr-client` SDK updates its leader cache and retries against the leader address. The no-forwarding rule is deliberate: it keeps the hot path simple and ensures the client always learns who the real leader is.
-
-```rust
-// Write: automatic leader redirect + exponential-backoff retry
-let resp = client.send_request(group_id, payload).await?;
-
-// Idempotent write: carries an IdempotencyKey, deduplicated by the framework
-let resp = client.send_request_idempotent(group_id, payload, key).await?;
-```
-
-## Local read (ReadLocal): fastest, possibly stale
-
-`client.read(group_id, payload)` (`crates/rr-client/src/lib.rs:330`) sends the request to any reachable node, which reads its **local state-machine replica** directly via `StateMachineReader::read` (`crates/rr-core/src/state_machine.rs:38`), completely bypassing Raft consensus.
-
-- **Followers can serve it** — that is the point: read load spreads across all replicas;
-- **Values may be stale**: a follower's apply lags the leader's commit; the staleness window is bounded by replication lag;
-- **No leader redirect**: the SDK round-robins bootstrap addresses on retry, because it does not need the leader.
-
-```rust
-// Local read: lowest latency, tolerates slight staleness
-let value = client.read(group_id, payload).await?;
-```
-
-## Linearizable read (ReadLinearizable): never stale, more expensive
-
-The server-side flow of `client.read_linearizable(group_id, payload)` (`crates/rr-client/src/lib.rs:391`) is `linearizable_read` at `crates/rr-raft/src/group_manager.rs:857`:
-
-1. The contacted replica calls openraft's `get_read_linearizer(ReadPolicy::ReadIndex)`;
-2. **If it is the leader**: ReadIndex confirms with a quorum that its commit point is still valid (i.e. it is still the legitimate leader), then `await_ready` waits until the local state machine has applied through that point, and finally serves the read locally;
-3. **If it is a follower**: openraft returns `ForwardToLeader`; the rr server flattens this into a `ReadLocalResponse.leader_info` redirect (same shape as the write path), and the SDK automatically dials the leader and retries.
-
-This satisfies the linearizable-read semantics of §6.4 of the Raft paper, at the cost of one quorum round-trip.
-
-```rust
-// Linearizable read: guaranteed to see the latest committed state
-let value = client.read_linearizable(group_id, payload).await?;
-```
-
-## Why separate RPCs instead of a boolean flag (ADR A-0009)
-
-An early design distinguished reads from writes with `ClientRequest.read_only: bool`. The problem: if a caller mislabeled a write as `read_only=true`, the server would route it to the local-read path — **no error, no state change, silent data loss**. That is far more dangerous than returning an error.
-
-ADR A-0009 therefore decided: **write, local read, and linearizable read are three independent gRPC methods**, with semantics enforced at the protocol layer. The consistency level can never be silently downgraded by a boolean parameter, and even hand-rolled gRPC clients cannot make that mistake.
-
-## Practical guidance
-
-- **Default to `read`**: whenever the business can tolerate slight staleness (caches, listings, monitoring), local reads have the best latency and load distribution;
-- **Use `read_linearizable` when staleness is unacceptable**: read-your-writes (reading right after writing), decisions based on the latest state (e.g. checking before acquiring a lock), settlement-style logic;
-- **Always write via `send_request` / `send_request_idempotent`** — don't try to "confirm" a write through the read path; if you need confirmation, use a linearizable read;
-- **Retries are built into the SDK**: leader redirects and exponential backoff (`retry_delay_ms * 2^attempt`) are handled by `rr-client`; the business layer usually only tunes `RetryConfig`;
-- `GetClusterInfo` returns real raft-runtime topology (leader/replicas; leader is 0 mid-election). Still, the leader-discovery mechanism is the `leader_info` redirect described above — the SDK does not rely on `GetClusterInfo` for routing.
+leader 重定向和带抖动的指数退避由 SDK 处理；应用应处理重试耗尽、确定性 gRPC 拒绝和幂等过期等错误。`GetClusterInfo` 可查看运行时拓扑，选举期间 `leader_node_id` 为 0，但 SDK 的写路由不依赖它。
+The SDK handles leader redirects and jittered exponential backoff. Applications must still handle exhausted retries, deterministic gRPC rejections, and idempotency expiry. `GetClusterInfo` exposes runtime topology with `leader_node_id = 0` during elections, but SDK write routing does not depend on it.

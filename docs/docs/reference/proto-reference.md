@@ -4,27 +4,20 @@ sidebar_position: 2
 
 # Protobuf 参考 / Protobuf Reference
 
-## 概述 / Overview
+rr 使用 Protocol Buffers 定义 gRPC 通信：`raft.proto` 承载节点间 Raft RPC，`client.proto` 承载客户端
+请求与读取，`admin.proto` 承载运维管理。protobuf 的 `bytes` 字段传输不透明负载；Raft 内部负载使用
+bincode，业务负载可选择应用自己的编码，框架另可能添加带版本的信封。
 
-rr 使用 Protocol Buffers (protobuf) 处理所有的 gRPC 通信。该框架包含两个主要的 proto 文件：`raft.proto` 用于内部 Raft 共识节点间通信，`client.proto` 用于面向客户端的 RPC 服务。
+rr uses Protocol Buffers for gRPC: `raft.proto` carries inter-node Raft RPCs, `client.proto` carries
+client requests and reads, and `admin.proto` carries administration. Protobuf `bytes` fields carry opaque
+payloads. Raft internals use bincode; applications can choose their own payload encoding, while the
+framework may add versioned envelopes.
 
-为了保持灵活性，二进制负载（如 Raft 日志条目和状态机数据）首先使用 bincode v2 进行序列化，然后封装在 protobuf 的 `bytes` 字段中。这种分层方法允许应用层在需要时选择不同的序列化格式，同时保持统一的网络传输层。
+## Raft 服务 / Raft Service
 
----
-
-rr uses Protocol Buffers (protobuf) for all gRPC communication. The framework defines two primary proto files: `raft.proto` for internal Raft consensus between nodes, and `client.proto` for client-facing RPC services.
-
-To maintain flexibility, binary payloads (such as Raft log entries and state machine data) are serialized with bincode v2 before being wrapped in protobuf `bytes` fields. This layered approach allows the application layer to choose different serialization formats if needed while maintaining a unified network transport layer.
-
-## Raft 服务协议 / Raft Service Proto
-
-`RaftService` 定义了节点间用于达成共识的内部 RPC。所有请求都包含一个 `group_id` 字段，用于在单节点多 Raft 实例的环境中进行多路分解（demultiplexing）。
-
----
-
-`RaftService` defines the internal RPCs used between nodes to reach consensus. All requests include a `group_id` field to enable demultiplexing across multiple Raft instances on a single node.
-
-### 服务定义 / Service Definition
+`RaftService` 用于内部共识；请求中的 `group_id` 在单节点多 Raft 组时用于分解。
+`RaftService` provides internal consensus RPCs. `group_id` demultiplexes multiple Raft groups on one
+node.
 
 ```protobuf
 service RaftService {
@@ -34,67 +27,71 @@ service RaftService {
 }
 ```
 
-### 核心消息 / Core Messages
-
-| 消息 / Message | 字段 / Fields | 描述 / Description |
+| 消息 / Message | 字段 / Fields | 说明 / Notes |
 | :--- | :--- | :--- |
-| **AppendEntriesRequest** | `group_id` (u64)<br/>`payload` (bytes) | 日志复制和心跳请求。`payload` 是 bincode 编码的 openraft 请求。 / Log replication and heartbeat. `payload` is bincode-encoded openraft request. |
-| **VoteRequest** | `group_id` (u64)<br/>`payload` (bytes) | 领导者选举投票请求。 / Leader election vote request. |
-| **SnapshotChunk** | `group_id` (u64)<br/>`offset` (u64)<br/>`data` (bytes)<br/>`done` (bool)<br/>`metadata` (bytes) | 流式快照传输分片。`metadata` 仅在最后一个分片中发送。 / Streaming snapshot chunk. `metadata` is only sent in the final chunk. |
+| `AppendEntriesRequest` / `AppendEntriesResponse` | `group_id` (`uint64`)<br/>`payload` (`bytes`) | 日志复制、心跳及响应；payload 为 bincode 编码的 openraft 数据。 / Replication, heartbeats, and responses; payload contains bincode-encoded openraft data. |
+| `VoteRequest` / `VoteResponse` | `group_id` (`uint64`)<br/>`payload` (`bytes`) | Leader 选举及响应。 / Leader-election request and response. |
+| `SnapshotChunk` | `group_id` (`uint64`)<br/>`offset` (`uint64`)<br/>`data` (`bytes`)<br/>`done` (`bool`)<br/>`metadata` (`bytes`) | 流式快照分片；`metadata` 仅在最后分片发送。 / Streaming snapshot chunk; `metadata` is sent only in the final chunk. |
+| `SnapshotResponse` | `group_id` (`uint64`)<br/>`success` (`bool`)<br/>`payload` (`bytes`) | 快照安装响应。 / Snapshot-install response. |
 
-## 客户端服务协议 / Client Service Proto
+## 客户端服务 / Client Service
 
-`ClientService` 是集群的对外接口，允许客户端提交指令并查询集群状态。
-
----
-
-`ClientService` is the public interface to the cluster, allowing clients to submit commands and query cluster state.
-
-### 服务定义 / Service Definition
+`ClientService` 提供写入、本地读、线性一致读和拓扑查询。
+`ClientService` provides writes, local reads, linearizable reads, and topology discovery.
 
 ```protobuf
 service ClientService {
     rpc Request(ClientRequest) returns (ClientResponse);
+    rpc ReadLocal(ReadLocalRequest) returns (ReadLocalResponse);
+    rpc ReadLinearizable(ReadLocalRequest) returns (ReadLocalResponse);
     rpc GetClusterInfo(Empty) returns (ClusterInfo);
 }
 ```
 
-### 核心消息 / Core Messages
-
-| 消息 / Message | 字段 / Fields | 描述 / Description |
+| 消息 / Message | 字段 / Fields | 说明 / Notes |
 | :--- | :--- | :--- |
-| **ClientRequest** | `partition_id` (u64)<br/>`payload` (bytes) | 客户端提交的业务请求。`partition_id` 用于路由到对应的 Raft 组。 / Business request. `partition_id` routes to the correct Raft group. |
-| **ClientResponse** | `success` (bool)<br/>`payload` (bytes)<br/>`leader_info` (msg) | 请求结果。如果请求发送到了非领导者节点，会返回领导者重定向信息。 / Request result. Includes leader redirect info if sent to a non-leader. |
-| **ClusterInfo** | `groups` (repeated msg) | 集群拓扑信息，包括各组的领导者和副本节点 ID。 / Cluster topology, including leader and replica IDs for each group. |
+| `ClientRequest` | `partition_id` (`uint64`)<br/>`payload` (`bytes`)<br/>`optional IdempotencyKey idem_key` | `partition_id` 选择 Raft 组；`idem_key` 可选启用框架去重。 / `partition_id` selects the Raft group; optional `idem_key` enables framework deduplication. |
+| `IdempotencyKey` | `request_type` (`string`)<br/>`request_id` (`uint64`)<br/>`optional string client_id` | 去重身份为 `(request_type, request_id)`；`client_id` 仅用于诊断。 / Dedup identity is `(request_type, request_id)`; `client_id` is diagnostic only. |
+| `ClientResponse` | `success` (`bool`)<br/>`payload` (`bytes`)<br/>`LeaderInfo leader_info`<br/>`optional IdempotencyError idem_error`<br/>`optional NamespaceLimitError ns_limit_error` | 携带结果、Leader 重定向或类型化幂等拒绝。 / Carries the result, leader redirect, or typed idempotency rejection. |
+| `LeaderInfo` | `node_id` (`uint64`)<br/>`addr` (`string`) | 客户端可缓存的 Leader 线索。 / Leader hint that clients may cache. |
+| `ReadLocalRequest` | `partition_id` (`uint64`)<br/>`payload` (`bytes`) | 本地读与线性一致读共用的请求。 / Request shared by local and linearizable reads. |
+| `ReadLocalResponse` | `payload` (`bytes`)<br/>`optional LeaderInfo leader_info` | `leader_info` 存在时必须重定向；只有未设置时 `payload` 才是读结果。 / A present `leader_info` requires redirect; `payload` is a read result only when it is absent. |
+| `ClusterInfo` | `repeated GroupInfo groups` | 集群拓扑。 / Cluster topology. |
+| `GroupInfo` | `group_id` (`uint64`)<br/>`leader_node_id` (`uint64`)<br/>`repeated uint64 replica_node_ids` | 组 Leader 与副本节点 ID。 / Group leader and replica node IDs. |
+
+`IdempotencyError` 包含 `request_type`、`request_id`、`watermark`；`NamespaceLimitError` 包含
+`request_type`、`request_id`、`namespaces`、`max`。两者均与有效 `payload` 互斥，且 `success=false`。
+`IdempotencyError` contains `request_type`, `request_id`, and `watermark`; `NamespaceLimitError` contains
+`request_type`, `request_id`, `namespaces`, and `max`. Both are mutually exclusive with meaningful
+`payload` and set `success=false`.
+
+## 管理服务 / Admin Service
+
+节点状态、成员变更、快照、备份、路由与 formation 状态见 `admin.proto`；常用 RPC 的说明见
+[Admin API 参考](admin-api.md)。
+See `admin.proto` for node status, membership, snapshots, backup, routing, and formation status; common
+RPCs are covered in the [Admin API reference](admin-api.md).
 
 ## 负载编码 / Payload Encoding
 
-rr 的设计原则是将共识层与数据序列化层解耦：
+1. proto 层把业务数据与 Raft 内部状态视为不透明 `bytes`。
+   The proto layer treats application data and internal Raft state as opaque `bytes`.
+2. Raft 内部数据使用 bincode v2 `standard()`；应用可选择 JSON、Protobuf 或其他业务编码。
+   Raft internals use bincode v2 `standard()`; applications may choose JSON, Protobuf, or another encoding.
+3. 客户端原始字节可能由框架包装为 `FramedEntry` 或批处理帧，不再保证逐字节等同于 Raft 日志中的
+   payload；格式与版本规则见[兼容性承诺](compatibility.md#字节格式版本约定--byte-format-versioning-policy)。
+   Raw client bytes may be wrapped in a `FramedEntry` or batch frame, so the Raft log payload is not
+   guaranteed to be byte-for-byte identical. See the
+   [compatibility policy](compatibility.md#字节格式版本约定--byte-format-versioning-policy) for framing and
+   versioning rules.
 
-1. **不透明传输**：Proto 层将业务数据和 Raft 内部状态视为不透明的 `bytes`。
-2. **应用灵活性**：虽然框架默认使用 bincode v2 (`standard()` 配置)，但您可以根据需要使用 JSON、Protobuf 或其他格式包装您的业务负载。
-3. **日志项结构**：Raft 日志条目直接存储客户端发送的原始字节流。
-
----
-
-rr is designed to decouple the consensus layer from the data serialization layer:
-
-1. **Opaque Transport**: The Proto layer treats business data and internal Raft state as opaque `bytes`.
-2. **Application Flexibility**: While the framework defaults to bincode v2 (with `standard()` config), you can wrap your business payloads in JSON, Protobuf, or any other format.
-3. **Log Entry Structure**: Raft log entries store the raw byte streams exactly as received from the client.
-
-## Proto 文件位置 / Proto File Locations
-
-源代码树中相关文件的位置：
-
----
-
-Location of relevant files in the source tree:
+## 文件位置 / File Locations
 
 ```text
 crates/rr-network/
 ├── proto/
-│   ├── raft.proto      # 内部 Raft 共识 RPC / Internal Raft consensus RPCs
-│   └── client.proto    # 面向客户端的请求 RPC / Client-facing request RPCs
-└── build.rs            # prost 代码生成配置 / prost codegen configuration
+│   ├── raft.proto      # 内部 Raft RPC / Internal Raft RPCs
+│   ├── client.proto    # 客户端 RPC / Client RPCs
+│   └── admin.proto     # 管理 RPC / Admin RPCs
+└── build.rs            # prost 代码生成 / prost code generation
 ```

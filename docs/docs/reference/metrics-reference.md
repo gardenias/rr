@@ -2,1118 +2,590 @@
 sidebar_position: 7
 ---
 
-# Metrics 参考 / Metrics Reference
+# 指标参考 / Metrics Reference
 
-`rr` 框架通过 `metrics` crate（v0.24）内部记录指标，并通过 `rr-server` 中的 Prometheus exporter 对外暴露。
-通过 `NodeConfig::with_metrics_port(port)` 启用后，指标将以 Prometheus 文本格式在
-`http://<host>:<metrics_port>/metrics` 上提供。
+rr 使用 `metrics` crate（v0.24）记录指标，由 `rr-server` 的 Prometheus exporter 暴露。通过
+`NodeConfig::with_metrics_port(port)` 启用后，端点为 `http://<host>:<metrics_port>/metrics`。
+rr records metrics with the `metrics` crate (v0.24) and exposes them through `rr-server`'s Prometheus
+exporter. After `NodeConfig::with_metrics_port(port)`, scrape `http://<host>:<metrics_port>/metrics`.
 
----
-
-The `rr` framework records metrics internally using the `metrics` crate (v0.24) and exposes them
-via the Prometheus exporter in `rr-server`.
-After enabling with `NodeConfig::with_metrics_port(port)`, metrics are served in Prometheus text
-format at `http://<host>:<metrics_port>/metrics`.
-
-## 启用 Metrics 端口 / Enabling the Metrics Port
+## 启用与验证 / Enable and Verify
 
 ```rust
 let config = NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)
     .with_metrics_port(62001); // Prometheus HTTP 端口 / Prometheus HTTP port
 ```
 
-验证端点 / Verify the endpoint:
-
 ```bash
 curl http://127.0.0.1:62001/metrics
 ```
 
----
-
 ## 命名惯例 / Naming Conventions
 
-rr 当前混用两种命名风格，将来版本会统一：
+rr 当前混用两种命名风格，未来版本会统一 / rr currently mixes two naming styles; future versions will
+unify them:
 
-rr currently mixes two naming styles; future versions will unify them:
+- `rr_` 前缀 + 下划线（Prometheus 推荐）/ `rr_` prefix with underscores (recommended by Prometheus):<br />
+  `rr_proposal_duration_seconds`, `rr_raft_current_term`, `rr_channel_reconnects_total`
+- 点分隔（legacy）/ Dot-separated legacy names:<br />
+  `router.route.not_found`, `node.started`, `raft.group.start`
 
-- **`rr_` 前缀 + 下划线**（Prometheus 推荐）/ `rr_` prefix + underscores (Prometheus idiomatic): `rr_proposal_duration_seconds`, `rr_raft_current_term`, `rr_channel_reconnects_total`
-- **点分隔**（老式）/ Dot-separated (legacy): `router.route.not_found`, `node.started`, `raft.group.start`
+Prometheus 会把点转换为下划线，例如 `router.route.not_found` 查询为 `router_route_not_found`。
+为保持稳定的指标契约，新代码应使用 `rr_` 前缀。
+Prometheus converts dots to underscores, so `router.route.not_found` is queried as
+`router_route_not_found`. New code should use the `rr_` prefix for a stable metric contract.
 
-Prometheus 会把点自动转换为下划线，所以在 Prometheus 查询时两种都写成 `router_route_not_found` 等。但为了**稳定的指标契约**，新代码应使用 `rr_` 前缀。
+## 服务端指标 / Server-Side Metrics
 
-Prometheus auto-converts dots to underscores, so either style queries as `router_route_not_found` etc. in Prometheus. For a **stable metric contract**, new code should use the `rr_` prefix style.
+所有指标由 Prometheus exporter 在 scrape 时收集。histogram 以原生 Prometheus histogram（`_bucket`
+序列）导出，可用于 `histogram_quantile()` 与跨实例聚合；bucket 边界在 `rr-server/src/node.rs` 的
+recorder 安装处配置，`*_seconds` 共用延迟 bucket 组。
+The Prometheus exporter collects all metrics at scrape time. Histograms are exported as native Prometheus
+histograms (`_bucket` series) for `histogram_quantile()` and cross-instance aggregation. Bucket boundaries
+are configured where the recorder is installed in `rr-server/src/node.rs`; `*_seconds` metrics share one
+latency bucket set.
 
----
-
-## 指标列表 / Metric Inventory
-
-所有指标均通过 `metrics` crate 在运行时由 Prometheus exporter 收集。
-
-All metrics are collected at runtime via the `metrics` crate and scraped by the Prometheus exporter.
-
-### Histograms (直方图)
-
-所有 histogram 以原生 Prometheus histogram（`_bucket` 序列）导出，可直接用于
-`histogram_quantile()` 与跨实例聚合；bucket 边界在 `rr-server/src/node.rs` 的
-recorder 安装处配置（`*_seconds` 使用统一的延迟 bucket 组）。
-
-All histograms are exported as native Prometheus histograms (`_bucket` series), ready for
-`histogram_quantile()` and cross-instance aggregation; bucket boundaries are configured where
-the recorder is installed in `rr-server/src/node.rs` (all `*_seconds` metrics share one
-latency bucket set).
-
----
+### 直方图 / Histograms
 
 #### `rr_proposal_duration_seconds`
 
-记录一次 Raft `client_write` 的耗时（秒）：从提交提案到 quorum 提交并 apply
-完成。`source` 标签区分调用路径：`client` = dispatch 的客户端单条写（含
-`group_manager.write()`）；`batch` = ingestor 的 `write_batch()`（一次往返约
-100 条命令，形状不同，勿与 client 混算均值）。leader 转向（ForwardToLeader）
-不计入——请求从未到达 raft。
+`client_write` 从提案到 quorum commit + apply 的秒数；Leader 重定向不计。`source=client` 为 dispatch
+单写，`batch` 为 ingestor `write_batch`（约 100 条/往返），勿混算均值。
+Proposal-to-commit-and-apply seconds; redirects excluded. `client` is single dispatch writes; `batch` is
+ingestor batches (~100 commands/round trip), so do not mix their means.
 
----
-
-Records one Raft `client_write` duration in seconds: from proposal submission to
-quorum commit + apply. The `source` label distinguishes call paths: `client` =
-single client writes via dispatch (incl. `group_manager.write()`); `batch` =
-ingestor `write_batch()` (~100 commands per round trip — a different shape; do not
-mix its mean with client writes). Leader redirects (ForwardToLeader) are not
-recorded — the request never reached raft.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id`, `source` (`client` \| `batch`) |
-| 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()`；`rr-raft/src/group_manager.rs` — `write()`, `write_batch()` |
-
----
+- **标签 / Labels**：`group_id`, `source` (`client` | `batch`)
+- **位置 / Recorded in**：`rr-server/src/dispatch.rs` `submit_write()`；`rr-raft/src/group_manager.rs`
+  `write()`, `write_batch()`
 
 #### `rr_replication_batch_entries`
 
-记录每次 AppendEntries RPC 中携带的日志条目数量，用于观测批量复制效率。
+每次 AppendEntries 携带的日志条目数，用于观测批量复制效率。
+Log entries per AppendEntries RPC, for observing replication batch efficiency.
 
----
-
-Records the number of log entries per AppendEntries RPC, for observing replication batch efficiency.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/network_factory.rs` — `append_entries()` |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/network_factory.rs` `append_entries()`
 
 #### `rr_raft_append_entries_rtt_seconds`
 
-leader→follower 的 AppendEntries RPC 往返耗时（秒）。`kind` 标签区分心跳
-（`heartbeat`，空 entries）与真实复制流量（`append`）——前者是空闲期的网络
-基线，后者是复制同步延迟。混沌场景（延迟/丢包注入）下最先抬升的曲线。
+Leader→follower AppendEntries RTT；`heartbeat` 为空 entries，`append` 为真实复制流量。
+Leader→follower RTT; `heartbeat` has no entries and `append` carries replication traffic.
 
----
-
-Leader→follower AppendEntries RPC round-trip time in seconds. The `kind` label splits
-heartbeats (`heartbeat`, empty entries) from real replication traffic (`append`) — the
-former is the idle network baseline, the latter is replication sync latency. This is the
-first curve to rise under chaos (latency/packet-loss injection).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id`, `follower_node_id`, `kind` (`heartbeat` \| `append`) |
-| 记录位置 / Recorded in | `rr-raft/src/network_factory.rs` — `append_entries()` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`, `follower_node_id`, `kind` (`heartbeat` | `append`)
+- **位置 / Recorded in**：`rr-raft/src/network_factory.rs` `append_entries()`
+- **版本 / Since**：v0.2.0
 
 #### `rr_server_request_duration_seconds`
 
-服务端客户端协议边界（dispatch）的单请求耗时（秒）。`write` = propose→quorum
-commit；`read` = 本地读；`lin_read` = 线性一致读。Kafka ingestor 路径不经过
-此边界（直接调 `write_batch`）。
+dispatch 边界单请求秒数；`write` = propose→quorum commit，`read` = 本地读，`lin_read` = 线性一致读；
+Kafka ingestor 不经过此边界。
+Dispatch-boundary request seconds. Kafka ingestor bypasses this boundary and calls `write_batch` directly.
 
----
-
-Per-request latency at the server's client-protocol boundary (dispatch), in seconds.
-`write` = propose→quorum commit; `read` = local read; `lin_read` = linearizable read.
-The Kafka ingestor path does NOT cross this boundary (it calls `write_batch` directly).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`) |
-| 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()` / `submit_read()` / `submit_linearizable_read()` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`, `op` (`write` | `read` | `lin_read`)
+- **位置 / Recorded in**：`rr-server/src/dispatch.rs` `submit_write()` / `submit_read()` /
+  `submit_linearizable_read()`
+- **版本 / Since**：v0.2.0
 
 #### `rr_raft_apply_duration_seconds`
 
-状态机 apply 段耗时（秒）：幂等层 + 业务 `Service::handle`。每个节点对每条已提交
-日志记录一次。是全链路延迟的最内层段：`proposal ≈ replication + apply`。
+状态机 apply 秒数：幂等层 + `Service::handle`，每个节点逐条记录；是写延迟链的最内层。
+State-machine apply seconds: idempotency + `Service::handle`, recorded per entry on every node. This is the
+innermost write-latency segment.
 
----
-
-State-machine apply segment duration in seconds: idempotency layer + business
-`Service::handle`. Recorded on every node for each committed entry. The innermost
-segment of the write latency chain: `proposal ≈ replication + apply`.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply()` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/service_adapter.rs` `apply()`
+- **版本 / Since**：v0.2.0
 
 #### `rr_ingestor_poll_duration_seconds`
 
-Kafka ingestor 单次 poll 的耗时（秒），含批聚合等待。用于观察摄取循环的健康度。
+ingestor 单次 poll 秒数，含批聚合等待。
+One ingestor poll in seconds, including batch-aggregation wait.
 
----
-
-Duration of one ingestor `poll()` call (seconds), including batch-aggregation
-wait. Health signal for the ingestion loop.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` — poll loop |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/ingestor_runner.rs` poll loop
+- **版本 / Since**：v0.2.0
 
 #### `rr_output_send_duration_seconds`
 
-outbox 单条 output 的投递耗时（秒），按投递目标类型分标签。
+outbox 单条 output 投递秒数，按目标类型分标签。
+Per-output outbox delivery seconds, labelled by target type.
 
----
-
-Per-output delivery latency (seconds), labelled by delivery target type.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id`, `target` (`raft_write` \| `kafka_publish`) |
-| 记录位置 / Recorded in | `rr-raft/src/output_runner.rs` — send loop |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`, `target` (`raft_write` | `kafka_publish`)
+- **位置 / Recorded in**：`rr-raft/src/output_runner.rs` send loop
+- **版本 / Since**：v0.2.0
 
 #### `rr_config_etcd_probe_duration_seconds`
 
-etcd 前缀指纹探针（revision 缓存的每调用校验）耗时（秒）。
+etcd 前缀指纹探针秒数，用于校验 revision 缓存。
+Etcd prefix-fingerprint probe seconds for revision-cache validation.
 
----
-
-Latency of the etcd prefix-fingerprint probe guarding the revision cache
-(seconds).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-config-etcd/src/lib.rs` — `probe_revision()` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-config-etcd/src/lib.rs` `probe_revision()`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_formation_duration_seconds`
 
-formation reconcile（genesis / adopt-legacy / 启动对齐）的墙钟耗时（秒），
-成功与失败都记录。genesis 首 reconcile 的耗时即集群成形时间。
+formation reconcile 墙钟秒数，成功失败均记录；首次 genesis reconcile 即集群成形时间。
+Formation-reconcile wall seconds on success and failure; the first genesis reconcile is cluster formation
+time.
 
----
-
-Wall duration of a formation reconcile pass (genesis / legacy adoption /
-startup alignment), in seconds, recorded on success and failure alike. The
-first genesis reconcile's duration is the cluster formation time.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-server/src/formation.rs` — `FormationSupervisor::reconcile()` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-server/src/formation.rs` `FormationSupervisor::reconcile()`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_snapshot_transfer_duration_seconds`
 
-快照传输耗时（秒）。`direction="send"` 为 leader 侧从流式发送开始到对端确认的墙钟时间，
-仅记录成功完成的传输；`direction="recv"` 为接收侧安装耗时（fail-closed 落盘 +
-状态机恢复）。注意 recv 语义：节点启动时从本地 SnapshotStore 重建也计入（与
-`rr_snapshot_installs_total` 同口径）。
+`send` 为开始流式发送到对端确认的成功传输时间；`recv` 为 fail-closed 落盘 + 状态机恢复时间，启动时本地
+SnapshotStore 重建也计入（与 `rr_snapshot_installs_total` 同口径）。
+`send` covers successful streaming through acknowledgement; `recv` covers fail-closed persistence plus
+restore and includes startup rebuilds from the local SnapshotStore, matching `rr_snapshot_installs_total`.
 
----
+- **标签 / Labels**：`direction` (`send` | `recv`), `group_id`
+- **位置 / Recorded in**：`send`: `rr-raft/src/network_factory.rs` `full_snapshot()`; `recv`: `rr-raft/src/sm_adapter.rs` `install_snapshot()`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
-Snapshot transfer duration (seconds). `direction="send"` is the leader-side wall
-time from streaming start to peer acknowledgement, recorded for successful
-transfers only; `direction="recv"` is the receiver-side install time
-(fail-closed persist + state-machine restore). Note the recv semantics:
-startup rebuilds from the local SnapshotStore are also counted (same
-convention as `rr_snapshot_installs_total`).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `direction` (`send`\|`recv`), `group_id` |
-| 记录位置 / Recorded in | send: `rr-raft/src/network_factory.rs` `full_snapshot()`；recv: `rr-raft/src/sm_adapter.rs` `install_snapshot()` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
-
-### Gauges (仪表盘)
+### 仪表盘 / Gauges
 
 #### `rr_raft_is_leader`
 
-标识当前节点是否为该 Raft 组的 Leader：1 表示是，0 表示否。
+当前节点是否为该组 Leader：1 是，0 否。
+Whether this node leads the group: 1 yes, 0 no.
 
----
-
-Indicates whether this node is the leader for the Raft group: 1 = leader, 0 = not leader.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `write()` |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/group_manager.rs` `write()`
 
 #### `rr_raft_current_term`
 
 当前 Raft 任期编号。
-
----
-
 Current Raft term number.
 
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `write()` |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/group_manager.rs` `write()`
 
 #### `rr_raft_last_log_index`
 
-最新日志条目的索引。
+最新日志条目索引。
+Index of the latest log entry.
 
----
-
-Index of the most recent log entry.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `write()` 和 `rr-raft/src/metrics_ticker.rs` — 周期性发射 / `write()` and periodic ticker |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/group_manager.rs` `write()` 与 `rr-raft/src/metrics_ticker.rs`
+  周期发射 / `rr-raft/src/group_manager.rs` `write()` and the periodic ticker in
+  `rr-raft/src/metrics_ticker.rs`
 
 #### `rr_raft_replication_lag`
 
-每个 follower 相对 leader 的 log index 差距（`leader.last_log_index -
-follower.matched.index`）。**仅在 leader 上发射**——follower 不会发射
-该指标，避免 Prometheus 误以为"lag = 0"。告警时务必 predicate 在
-`rr_raft_is_leader{group_id} == 1`。
+`leader.last_log_index - follower.matched.index`，仅 Leader 发射；follower 不发射，避免把缺席误读为
+lag=0。告警必须同时谓词 `rr_raft_is_leader{group_id} == 1`。
+Leader-minus-follower matched index, emitted only on leaders so absence is not mistaken for zero lag.
+Predicate alerts on `rr_raft_is_leader{group_id} == 1`.
 
----
-
-For each follower, the gap between leader's `last_log_index` and the
-follower's matched index. **Emitted only on the leader** —
-followers do NOT emit this gauge to avoid Prometheus reading the
-absence as "lag is 0". Always predicate alerts on
-`rr_raft_is_leader{group_id} == 1`.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id`, `follower_node_id` |
-| 记录位置 / Recorded in | `rr-raft/src/metrics_ticker.rs` — 5s 周期性发射 / 5s periodic ticker |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`, `follower_node_id`
+- **位置 / Recorded in**：`rr-raft/src/metrics_ticker.rs`，5s 周期 / `rr-raft/src/metrics_ticker.rs`, 5s ticker
+- **版本 / Since**：v0.2.0
 
 #### `rr_idempotency_cache_size`
 
-幂等层 LRU 响应缓存的当前条数。接近容量上限时重放命中会退化为 `Expired`。
+幂等 LRU 当前条数；接近容量上限时重放会退化为 `Expired`。
+Current idempotency LRU occupancy; near the cap, replays degrade to `Expired`.
 
----
-
-Current occupancy of the idempotency layer's LRU response cache. Near the cap,
-replays degrade into `Expired`.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/service_adapter.rs`
+- **版本 / Since**：v0.2.0
 
 #### `rr_output_pending`
 
-outbox 待投递条数（watermark 之后）。持续增长 = 投递卡滞。
+watermark 后的 outbox 待投递条数；持续增长表示投递卡滞。
+Outbox entries past the watermark; sustained growth means delivery is stuck.
 
----
-
-Outbox backlog depth (entries past the watermark). Sustained growth means
-delivery is stuck.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/output_runner.rs` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/output_runner.rs`
+- **版本 / Since**：v0.2.0
 
 #### `rr_security_insecure_mode`
 
-`allow_insecure=true` 启动时置 1。生产环境应配置告警（`== 1` 即报警）。
+`allow_insecure=true` 时为 1；生产环境应对 `== 1` 告警。
+Set to 1 with `allow_insecure=true`; alert on `== 1` in production.
 
----
-
-Set to 1 when the node runs with `allow_insecure=true`. Alert on `== 1` in
-production deployments.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-server/src/node.rs` — startup |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-server/src/node.rs` startup
+- **版本 / Since**：v0.2.0
 
 #### `rr_raft_pending_deferred`
 
-deferred（两阶段）apply 当前挂起的客户端响应数；有上限（10 000），溢出见
+当前挂起的 deferred 客户端响应数，上限 10 000；溢出见
 `rr_raft_pending_deferred_overflow_total`。
 
----
+Currently parked deferred responses, capped at 10,000; see `rr_raft_pending_deferred_overflow_total` for
+overflow.
 
-Currently parked deferred (two-phase) client responses; bounded (10 000) —
-overflow is counted by `rr_raft_pending_deferred_overflow_total`.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/sm_adapter.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_formation_state`
 
-每个 raft 组的 formation 状态：`0` = Forming（已初始化、尚未达到激活条件），
-`1` = Active（可正常服务成员变更等管控操作）。启动加载/创建 lifecycle 记录时发布，
-每次 Forming→Active 迁移时更新。
+每组 formation 状态：0 = Forming（已初始化、未到激活条件），1 = Active；加载/创建 lifecycle 记录时发布，
+Forming→Active 时更新。
+Per-group state: 0 = Forming (initialized but not active), 1 = Active; published on lifecycle load/create
+and updated on Forming→Active.
 
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-server/src/formation.rs` `FormationSupervisor`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
-Per-group formation state: `0` = Forming (initialized, activation conditions
-not yet met), `1` = Active (serving administrative operations such as
-membership changes). Published when the lifecycle record is loaded/created
-and updated on every Forming→Active transition.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Gauge |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-server/src/formation.rs` — `FormationSupervisor` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
-
-### Counters (计数器)
+### 计数器 / Counters
 
 #### `rr_snapshot_installs_total`
 
-快照安装（状态机恢复）的总次数，通常发生在节点落后后通过快照追赶时。
+快照安装/状态机恢复总次数，通常用于节点落后后的快照追赶。
+Snapshot installs/state-machine restores, typically for catch-up after falling behind.
 
----
-
-Total number of snapshot installs (state machine restores), typically occurring when
-a node catches up via snapshot after falling behind.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `restore()` |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/service_adapter.rs` `restore()`
 
 #### `rr_snapshot_transfer_bytes`
 
-快照传输字节数。`direction="send"` 统计实际交给传输层的字节（取消/超时已发出的
-部分也计入，可观测部分发送）；`direction="recv"` 统计成功安装的载荷字节
-（含启动时本地 SnapshotStore 重建，与 `rr_snapshot_installs_total` 同口径）。
+`send` 统计交给传输层的字节，含取消/超时前已发送部分；`recv` 统计成功安装载荷，含启动时本地
+SnapshotStore 重建（与 `rr_snapshot_installs_total` 同口径）。
+`send` counts bytes handed to transport, including partial sends on cancellation/timeout; `recv` counts
+successfully installed payload, including startup rebuilds, matching `rr_snapshot_installs_total`.
 
----
-
-Snapshot transfer payload bytes. `direction="send"` counts bytes actually
-handed to the transport (partial sends on cancel/timeout are included);
-`direction="recv"` counts successfully installed payload bytes (startup
-rebuilds from the local SnapshotStore included, same convention as
-`rr_snapshot_installs_total`).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `direction` (`send`\|`recv`), `group_id` |
-| 记录位置 / Recorded in | send: `rr-raft/src/network_factory.rs` `full_snapshot()`；recv: `rr-raft/src/sm_adapter.rs` `install_snapshot()` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：`direction` (`send` | `recv`), `group_id`
+- **位置 / Recorded in**：`send`: `rr-raft/src/network_factory.rs` `full_snapshot()`; `recv`: `rr-raft/src/sm_adapter.rs` `install_snapshot()`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_formation_cas_total`
 
-formation lifecycle store 的 CAS 写结果计数：`result="applied"` 成功写入，
-`result="conflict"` 竞争失败（会重载对端记录重试，属正常的多节点并发 genesis）。
-持续增长且不收敛 = 节点间 seed/roster 不一致或 lifecycle store 分区。
+lifecycle store CAS：`applied` 成功，`conflict` 竞争失败后重载重试；持续不收敛表示 seed/roster 不一致或
+store 分区。
+CAS outcomes: `applied` succeeded; `conflict` reloads and retries. Persistent conflicts indicate divergent
+seeds/rosters or a partitioned store.
 
----
-
-Formation lifecycle-store CAS write outcomes: `result="applied"` for a
-committed write, `result="conflict"` for a lost race (the record is reloaded
-and retried — normal when several nodes race genesis). Sustained conflicts
-without convergence mean divergent seeds/rosters across nodes or a
-partitioned lifecycle store.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `result` (`applied`\|`conflict`) |
-| 记录位置 / Recorded in | `rr-server/src/formation.rs` — `create_if_absent` / `compare_and_swap` 调用点 |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：`result` (`applied` | `conflict`)
+- **位置 / Recorded in**：`rr-server/src/formation.rs` 的 `create_if_absent` 和 `compare_and_swap` 调用点 /
+  `create_if_absent` and `compare_and_swap` call sites in `rr-server/src/formation.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_admin_membership_changes_total` / `rr_admin_transfer_leader_total` / `rr_admin_snapshot_trigger_total`
 
-Admin RPC 管控操作结果计数，每个 RPC 恰好记录一次（含校验/前置条件拒绝等
-错误路径）：成员变更按 `op` 区分（`change_membership`\|`remove_group_member`\|
-`add_learner`），leader 转移与手动快照各自独立成指标；`result` 均为
-`ok`\|`error`。
+Admin 操作结果，每 RPC 恰好一次，含校验/前置条件拒绝。membership 的 `op` 为
+`change_membership` | `remove_group_member` | `add_learner`；`result` 均为 `ok` | `error`。
+Exactly one outcome per Admin RPC, including validation/precondition errors. Membership uses the listed
+`op`; all use `result=ok|error`.
 
----
-
-Admin RPC administrative-operation outcomes, recorded exactly once per RPC
-(validation and failed-precondition rejections count as errors): membership
-operations are split by `op` (`change_membership`\|`remove_group_member`\|
-`add_learner`); leader transfer and manual snapshot trigger have their own
-counters. `result` is `ok`\|`error` throughout.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `rr_admin_membership_changes_total`: `op`, `result`；其余两个: `result` |
-| 记录位置 / Recorded in | `rr-server/src/admin.rs` — 各 RPC 入口包装 |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：membership 为 `op`, `result`；其余两个为 `result` / Membership has `op` and
+  `result`; the other two have `result`
+- **位置 / Recorded in**：`rr-server/src/admin.rs` RPC wrappers
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_channel_reconnects_total`
 
-因 gRPC 连接不可用而主动驱逐并重连的次数，用于监控连接健康状况。
+gRPC `UNAVAILABLE` 后主动连接驱逐与重连次数。
+Channel evictions and reconnects after gRPC `UNAVAILABLE`.
 
----
-
-Total number of channel evictions due to gRPC `UNAVAILABLE` errors, indicating
-how often the connection pool detects and recovers from stale connections.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `node_id` |
-| 记录位置 / Recorded in | `rr-raft/src/network_factory.rs` — `append_entries()`, `vote()`, `install_snapshot()` |
-
----
+- **标签 / Labels**：`node_id`
+- **位置 / Recorded in**：`rr-raft/src/network_factory.rs` `append_entries()`, `vote()`,
+  `install_snapshot()`
 
 #### `rr_server_requests_total`
 
-服务端客户端协议边界的请求总数，`op` 区分操作类型，`outcome` 区分结果
-（`redirect` = 非 leader，返回 leader 地址给客户端；`idempotency_expired` /
-`idempotency_namespace_limit` = 幂等层的类型化拒绝，仅 keyed write——条目
-正常 apply，不走 group-fatal 的 apply error，客户端收到类型化错误）。
-`rate()` 即按操作类型的 TPS。
+dispatch 边界请求数；`rate()` 为按 op 的 TPS。`redirect` 为非 Leader；`idempotency_expired` /
+`idempotency_namespace_limit` 为 keyed write 类型化拒绝，条目正常 apply，不走 group-fatal apply error。
+Dispatch requests; `rate()` gives TPS by op. Typed idempotency rejections apply cleanly and never become
+group-fatal apply errors.
 
----
-
-Total requests at the server's client-protocol boundary, with `op` for the operation
-kind and `outcome` for the result (`redirect` = not leader; the client gets the leader
-address when known, or a retriable `Unavailable` when the node is mid-election and
-cannot name one; `idempotency_expired` / `idempotency_namespace_limit` = typed
-idempotency-layer rejections on keyed writes — the entry still applies cleanly,
-never an apply error, and the client receives a typed error). `rate()` gives TPS by
-operation type.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id`, `op` (`write` \| `read` \| `lin_read`) |
-|  | `outcome` (`success` \| `redirect` \| `error` \| `idempotency_expired` \| `idempotency_namespace_limit`) |
-| 记录位置 / Recorded in | `rr-server/src/dispatch.rs` — `submit_write()` / `submit_read()` / `submit_linearizable_read()` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`, `op` (`write` | `read` | `lin_read`), `outcome` (`success` | `redirect` |
+  `error` | `idempotency_expired` | `idempotency_namespace_limit`)
+- **位置 / Recorded in**：`rr-server/src/dispatch.rs` `submit_write()` / `submit_read()` /
+  `submit_linearizable_read()`
+- **版本 / Since**：v0.2.0
 
 #### `rr_ingestor_commands_committed_total`
 
-Kafka ingestor 路径经 Raft 持久化提交的命令总数（按批内命令数递增）。
-`rate()` 即 Kafka 链路 TPS，可与 producer 发送速率、应用层计数器三方对账。
+Kafka ingestor 经 Raft 提交的命令数，按批内命令数递增；`rate()` 为 Kafka TPS，可与 producer 与应用计数
+对账。
+Commands committed through Raft by the Kafka ingestor, incremented per batched command; `rate()` is
+Kafka-path TPS and can be reconciled with producer and application counters.
 
----
-
-Total commands durably committed via Raft on the Kafka ingestor path (incremented by
-batch command count). `rate()` is the Kafka-path TPS, cross-checkable against the
-producer's send rate and application-level counters.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` — poll/write loop |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/ingestor_runner.rs` poll/write loop
+- **版本 / Since**：v0.2.0
 
 #### `rr_raft_applied_entries_total`
 
-状态机成功 apply 的日志条目总数，每个节点各自发射。`rate()` 即精确的集群写入
-TPS——不受 InstallSnapshot 阶跃影响，换主时无 series 断档（新 leader 继续发射）。
+各节点成功 apply 的日志条目数；`rate()` 为精确集群写入 TPS，不受快照阶跃或换主 series 断档影响。
 集群口径用 `max by (group_id) (rate(...[1m]))`。
+Successfully applied entries per node. Its rate is exact cluster write TPS, unaffected by snapshot steps or
+leader-switch series gaps; use `max by (group_id) (rate(...[1m]))` cluster-wide.
 
----
-
-Total log entries successfully applied by the state machine, emitted independently on
-every node. `rate()` is the exact cluster write TPS — immune to InstallSnapshot steps
-and leader-switch series gaps (the new leader keeps emitting). For a cluster-level
-value use `max by (group_id) (rate(...[1m]))`.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply()` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/service_adapter.rs` `apply()`
+- **版本 / Since**：v0.2.0
 
 #### `node.started`
 
-节点启动完成（所有子系统 wired up，gRPC 服务已绑定）时 +1。
+节点子系统接线且 gRPC 绑定完成后 +1。
++1 after node wiring and gRPC binding complete.
 
----
-
-Incremented by 1 when the node finishes startup (all subsystems wired, gRPC servers bound).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-server/src/node.rs` — `start()` |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-server/src/node.rs` `start()`
 
 #### `node.shutdown`
 
 节点优雅关闭开始时 +1。
++1 when graceful node shutdown begins.
 
----
-
-Incremented by 1 when graceful shutdown begins on the node.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-server/src/node.rs` — `shutdown()` |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-server/src/node.rs` `shutdown()`
 
 #### `node.group.started`
 
-`RrNode` 在 `start()` 的初始路由表循环中成功启动一个本地 Raft group 时 +1。
-注意：config watch 循环后续启动的组**不**重复发射此指标（仅初始循环）。
+仅在 `RrNode::start()` 初始路由表循环成功启动本地组时 +1；watch 后续启动不重复发射。
++1 only for local groups started by the initial routing-table loop; later watch-loop starts do not emit it.
 
----
-
-Incremented by 1 when `RrNode` successfully starts a local Raft group during the
-initial routing-table loop in `start()`. Groups started later by the config watch
-loop do NOT re-emit this metric.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-server/src/node.rs` — `start()` initial routing-table loop |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-server/src/node.rs` `start()` initial routing-table loop
 
 #### `raft.group.start`
 
-`RaftGroupManager::start_group()` 成功启动一个 Raft group 时 +1（`init_cluster()`
-不发射）。区别于 `node.group.started`：此指标在较低层（GroupManager 本身）发出，
-无论触发方是 config watch 还是直接调用。
+`RaftGroupManager::start_group()` 成功时 +1，无论调用方；`init_cluster()` 不发射。
++1 on every successful `start_group()`, regardless of caller; `init_cluster()` does not emit.
 
----
-
-Incremented by 1 whenever `RaftGroupManager::start_group()` successfully starts a Raft
-group (`init_cluster()` does not emit). Emitted at a lower layer (the GroupManager
-itself) than `node.group.started` — regardless of whether the caller is the
-config-watch loop or a direct API call.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `node_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `start_group()` |
-
----
+- **标签 / Labels**：`node_id`
+- **位置 / Recorded in**：`rr-raft/src/group_manager.rs` `start_group()`
 
 #### `raft.group.stop`
 
-`RaftGroupManager::stop_group()` 优雅停止一个 Raft group 时 +1。
+`RaftGroupManager::stop_group()` 优雅停止组时 +1。
++1 when `stop_group()` gracefully stops a group.
 
----
-
-Incremented by 1 when `RaftGroupManager::stop_group()` gracefully stops a Raft group.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `node_id` |
-| 记录位置 / Recorded in | `rr-raft/src/group_manager.rs` — `stop_group()` |
-
----
+- **标签 / Labels**：`node_id`
+- **位置 / Recorded in**：`rr-raft/src/group_manager.rs` `stop_group()`
 
 #### `router.route.not_found`
 
-客户端请求携带的 `partition_id` 在 `ShardRouter` 的路由表中找不到时 +1。通常表示路由表陈旧或客户端使用了错误的 partition。
+请求的 `partition_id` 不在路由表时 +1，通常表示路由表陈旧或客户端 partition 错误。
++1 when a request's `partition_id` is absent, usually indicating a stale table or wrong client partition.
 
----
-
-Incremented by 1 when an inbound client request carries a `partition_id` that does not
-exist in `ShardRouter`'s routing table. Usually indicates a stale routing table or a
-client using a wrong partition.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-router/src/router.rs` — `route()` |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-router/src/router.rs` `route()`
 
 #### `rr_idempotency_replays_total` / `rr_idempotency_expired_total` / `rr_idempotency_collisions_total`
 
-幂等层判定计数：重放命中（返回缓存响应）/ 因 watermark 过期被拒（`IdempotencyExpired`）/
-键冲突（同键不同负载，响亮拒绝）。持续增长碰撞率 = 客户端键生成有 bug。
+分别为重放命中、低于 watermark 且已逐出而拒绝、同键但 `client_id` 不同。collision 不比较 payload，也不拒绝
+请求，而是记录 `rr::audit` 警告并返回首次缓存的成功响应；持续增长表示不同客户端的 ID 分配冲突。
+Replay hits, expired rejections below the watermark, and cache hits where the same key arrives with another
+`client_id`. A collision does not compare payloads or reject the request; it logs an `rr::audit` warning and
+returns the first cached successful response. Growth indicates conflicting ID allocation across clients.
 
----
-
-Idempotency-layer decisions: replay hits (cached response served) / requests
-refused as expired below the watermark (`IdempotencyExpired`) / key collisions
-(same key, different payload — loudly rejected). A growing collision rate means
-a client key-generation bug.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — keyed apply path |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/service_adapter.rs` keyed apply path
+- **版本 / Since**：v0.2.0
 
 #### `rr_idempotency_namespace_rejects_total`
 
-幂等层拒绝**新** `request_type`（namespace）的计数：该组的 namespace 数已达
-上限（`MAX_IDEMPO_NAMESPACES` = 1024）。与 `Expired` 路径同构——拒绝被编码为
-apply outcome（条目在每个节点干净 apply，不走 group-fatal 的 apply error，
-见 ADR A-0018），客户端收到类型化的 `NamespaceLimitError`。注意：换一个新的
-`request_id` 无用——只要组处于上限，该 namespace 内所有 ID 都会被拒；
-修复方向是复用已有 `request_type`、提高上限或回收 namespace。持续增长 =
-客户端 `request_type` 生成失控（如把 user id / Kafka topic 拼进 namespace）。
-dispatch 侧对应 `rr_server_requests_total{outcome="idempotency_namespace_limit"}`，
-并伴随一条 `rr::audit` warn 日志。
+组已达 `MAX_IDEMPO_NAMESPACES = 1024` 时拒绝新 `request_type`；作为 apply outcome 干净应用，客户端收到
+`NamespaceLimitError`。换新 ID 无效，应复用已有 namespace、提高上限或回收；dispatch 同时记录
+`rr_server_requests_total{outcome="idempotency_namespace_limit"}` 并写 `rr::audit` warn。
+Rejects a new `request_type` at the 1024-namespace cap as a clean apply outcome and typed
+`NamespaceLimitError`. Fresh IDs do not help; reuse, raise, or retire namespaces. Also emits the dispatch
+outcome and an audit warning.
 
----
-
-Idempotency-layer rejections of a NEW `request_type` (namespace) while the
-group is at its namespace cap (`MAX_IDEMPO_NAMESPACES` = 1024). Mirrors the
-`Expired` path: the rejection is encoded as an apply outcome — the entry
-applies cleanly on every node instead of poisoning the log with a group-fatal
-apply error (ADR A-0018) — and the caller receives a typed
-`NamespaceLimitError`. Picking a fresh `request_id` does NOT help: every ID
-in the rejected namespace is refused while the group is at cap; remediation
-is reusing a tracked `request_type`, raising the cap, or retiring namespaces.
-A growing rate means client-side `request_type` fan-out (e.g. embedding user
-ids / Kafka topics in the namespace). Also surfaced as
-`rr_server_requests_total{outcome="idempotency_namespace_limit"}` at the
-dispatch boundary, plus an `rr::audit` warn log.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/service_adapter.rs` — `apply_keyed()` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/service_adapter.rs` `apply_keyed()`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_learner_promotions_total` / `rr_learner_promotion_failures_total`
 
-learner 自动提升为 voter 的成功/失败计数（`learner_promoter`，仅 leader 发射）。
+learner 自动提升为 voter 的成功/失败计数，仅 Leader 发射。
+Learner auto-promotion successes/failures, emitted only by leaders.
 
----
-
-Learner auto-promotion successes/failures (`learner_promoter`; leader-only).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/learner_promoter.rs` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/learner_promoter.rs`
+- **版本 / Since**：v0.2.0
 
 #### `rr_snapshot_build_failures_total`
 
-快照构建失败计数（fail-closed poisoned-builder 路径，ADR A-0011）。出现即查日志。
+快照构建失败（fail-closed poisoned-builder，ADR A-0011）；非零即查日志。
+Snapshot build failures on the fail-closed poisoned-builder path; investigate logs when nonzero.
 
----
-
-Snapshot build failures (the fail-closed poisoned-builder path, ADR A-0011).
-Investigate logs when nonzero.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-raft/src/sm_adapter.rs`
+- **版本 / Since**：v0.2.0
 
 #### `rr_framing_decode_failures_total`
 
-字节信封解码失败计数，按 `kind` 分（`framed_entry_body` / `framed_entry_future_version` /
-`framed_snapshot_body` / `framed_snapshot_future_version` / `apply_outcome_too_short` /
-`apply_outcome_bad_tag` / `apply_outcome_future_version` / `apply_outcome_body`）。
-非零 = 有不兼容或损坏的写入方。
+信封解码失败；`kind` 为 `framed_entry_body` / `framed_entry_future_version` / `framed_snapshot_body` /
+`framed_snapshot_future_version` / `apply_outcome_too_short` / `apply_outcome_bad_tag` /
+`apply_outcome_future_version` / `apply_outcome_body`。非零表示写入方不兼容或损坏。无 `batch_*` kind；
+批帧在 ingress 无分配校验，不计入此指标。
+Envelope decode failures by the listed `kind`; nonzero means an incompatible or corrupt writer. No
+`batch_*` kinds exist; ingress validates batch frames without allocation and does not count them here.
 
----
-
-Envelope decode failures by `kind` (`framed_entry_body` / `framed_entry_future_version` /
-`framed_snapshot_body` / `framed_snapshot_future_version` / `apply_outcome_too_short` /
-`apply_outcome_bad_tag` / `apply_outcome_future_version` / `apply_outcome_body`).
-Nonzero means an incompatible or corrupt writer. (No `batch_*` kinds exist —
-batch frames are validated no-alloc at ingress, never counted here.)
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `kind` |
-| 记录位置 / Recorded in | `rr-core/src/{framed_entry,framed_snapshot,idempotency}.rs` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`kind`
+- **位置 / Recorded in**：`rr-core/src/{framed_entry,framed_snapshot,idempotency}.rs`
+- **版本 / Since**：v0.2.0
 
 #### `rr_ingestor_seed_failures_total` / `rr_ingestor_seek_total` / `rr_ingestor_offset_map_failures_total` / `rr_ingestor_step_down_drops_total` / `rr_ingestor_seed_snapshot_refreshes_total`
 
-ingestor 生命周期计数：种子 offset 失败（fail-closed，致命）/ seek 次数 /
-offset→request_id 映射失败（fail-closed）/ 下台丢弃的批尾命令 / 种子快照刷新次数。
+依次为 seed offset 失败（fail-closed、致命）、seek、offset→request_id 映射失败（fail-closed）、下台丢弃
+批尾命令、seed 快照刷新。
+Fatal fail-closed seed failures, seeks, fail-closed offset-mapping failures, batch-tail commands dropped on
+step-down, and seed-snapshot refreshes.
 
----
-
-Ingestor lifecycle counters: seed-offset failures (fail-closed, fatal) / seeks /
-offset→request-id mapping failures (fail-closed) / batch-tail commands dropped
-on step-down / seed snapshot refreshes.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/ingestor_runner.rs`
+- **版本 / Since**：v0.2.0
 
 #### `rr_ingestor_seek_below_watermark_total` / `rr_ingestor_seek_above_watermark_total`
 
-Kafka seek 目标超出 broker 水位线的计数（below = 数据已被保留期删除；above =
-持久 offset 超过 topic 末尾，fail-closed 报错——疑似 topic 重建）。
+seek 低于/高于 broker 水位；below 表示保留期已删数据，above 表示持久 offset 超过 topic 末尾并
+fail-closed，疑似 topic 重建。
+Seek below/above broker watermarks. Below means retention deleted data; above fails closed because the
+persisted offset is past the topic end, suggesting topic recreation.
 
----
-
-Seek target outside broker watermarks (below = retention already deleted data;
-above = persisted offset past the topic end, fail-closed — likely a recreated
-topic).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-ingestor-kafka/src/backend.rs` — `seek()` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-ingestor-kafka/src/backend.rs` `seek()`
+- **版本 / Since**：v0.2.0
 
 #### `rr_ingestor_encode_failures_total`
 
-ingestor 消息编码为 FramedEntry 失败的计数（fail-closed：supervisor 退出，
-不推进 offset）。非零需要人工介入。
+消息编码为 FramedEntry 失败；fail-closed，supervisor 退出且不推进 offset，需人工介入。
+Message-to-FramedEntry encoding failed; the supervisor fails closed, exits without advancing the offset,
+and needs operator attention.
 
----
-
-Ingestor message→FramedEntry encode failures (fail-closed: the supervisor exits
-without advancing the offset). Nonzero requires operator attention.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-raft/src/ingestor_runner.rs` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-raft/src/ingestor_runner.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_output_send_total` / `rr_output_send_failures_total`
 
-outbox 投递成功/失败计数，按目标类型分。失败会持续退避重试（at-least-once）。
+outbox 投递成功/失败；失败按退避持续重试（at-least-once）。
+Outbox delivery successes/failures; failures retry with backoff (at-least-once).
 
----
-
-Outbox delivery successes/failures by target type. Failures retry with backoff
-(at-least-once).
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id`, `target` (`raft_write` \| `kafka_publish`) |
-| 记录位置 / Recorded in | `rr-raft/src/output_runner.rs` |
-| 可用版本 / Available since | v0.2.0 |
-
----
+- **标签 / Labels**：`group_id`, `target` (`raft_write` | `kafka_publish`)
+- **位置 / Recorded in**：`rr-raft/src/output_runner.rs`
+- **版本 / Since**：v0.2.0
 
 #### `rr_raft_pending_deferred_overflow_total` / `rr_raft_pending_deferred_duplicate_total`
 
-deferred 挂起注册表异常：溢出（新写被拒，客户端收到错误）/ 重复 correlation id
-（旧 responder 被覆盖，其客户端收到错误）。两者都应罕见，非零即服务实现有 bug。
+deferred 注册表溢出（新写被拒）/ correlation ID 重复（旧 responder 被覆盖，其客户端收到错误）；
+非零表示 Service 实现 bug。
+Deferred-registry overflow rejects new writes; duplicate correlation IDs displace the old responder and
+error its client. Nonzero indicates a Service implementation bug.
 
----
-
-Deferred-registry anomalies: overflow (new write refused, client gets an error)
-/ duplicate correlation id (old responder displaced; its client gets an error).
-Both should be rare — nonzero means a `Service` implementation bug.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — (无标签；组上下文见同位置的 `rr_raft_pending_deferred` gauge / no labels — see the `rr_raft_pending_deferred` gauge for per-group depth) |
-| 记录位置 / Recorded in | `rr-raft/src/sm_adapter.rs` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：—；组上下文见 `rr_raft_pending_deferred` / No labels; see `rr_raft_pending_deferred`
+  for per-group depth
+- **位置 / Recorded in**：`rr-raft/src/sm_adapter.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_deferred_pending_via_non_deferred_total`
 
-`DeferredApply::Pending` 到达非 deferred 响应路径（`into_response()`）的防御性
-计数。非 deferred 的 `apply` / `apply_with_ctx` 入口从不走两阶段分发，出现
-`Pending` 意味着一个会 defer 的 Service 应答了从未挂起 deferred responder 的
-调用方——这是 Service 接线的编程错误信号（R-2 / A-0033），不是客户端故障。
-框架防御性映射为空字节响应以保持 apply 循环不被卡死，同时以 warn 日志 +
-本计数保持可观测。非零即检查 Service 实现（该调用的客户端收到的是空的成功
-响应）。与 `rr_raft_pending_deferred_*` 不同：那些是注册表容量/重复异常，
-本指标是错误路径防御。
+`DeferredApply::Pending` 到达非 deferred `into_response()` 的防御计数；表示 Service 接线错误
+（R-2/A-0033），不是客户端故障。框架映射为空成功响应以保持 apply 循环，并记录 warn；该客户端会收到
+空成功响应。与注册表容量/重复异常指标不同，本指标守护错误路径。
+Defensive count of `Pending` reaching non-deferred `into_response()`, indicating incorrect Service wiring,
+not a client fault. The framework returns an empty successful response to keep apply alive and logs a
+warning; that client receives the empty success. Unlike registry capacity/duplication metrics, this guards a
+wrong-path defense.
 
----
-
-Defensive count of `DeferredApply::Pending` reaching the non-deferred response
-path (`into_response()`). The non-deferred `apply` / `apply_with_ctx` entry
-points never dispatch through the two-phase path, so a `Pending` here means a
-deferring service answered a caller that never parked a deferred responder —
-a programming-error signal in `Service` wiring (R-2 / A-0033), not a client
-fault. The framework defensively maps it to empty response bytes to keep the
-apply loop alive, staying observable via a warn log plus this counter. Nonzero
-means: inspect the `Service` wiring (that call's client receives an empty
-success response). Distinct from `rr_raft_pending_deferred_*`: those are
-registry capacity/duplication anomalies; this one guards a wrong-path defense.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-core/src/deferred.rs` — `DeferredApply::into_response()` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-core/src/deferred.rs` `DeferredApply::into_response()`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_storage_wal_flush_errors_total`
 
-`ReplicatedOnly` 组提交任务的后台 WAL fsync 失败计数。持续非零 = 磁盘子系统故障。
+`ReplicatedOnly` 组提交任务的后台 WAL fsync 失败；持续非零表示磁盘子系统故障。
+Background WAL-fsync failures in the `ReplicatedOnly` group-commit task; sustained nonzero indicates disk
+failure.
 
----
-
-Background WAL-fsync failures of the `ReplicatedOnly` group-commit task.
-Sustained nonzero means disk-subsystem failure.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-storage/src/rocks.rs` — group-commit task |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-storage/src/rocks.rs` group-commit task
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_config_mem_watch_lagged_total`
 
-`MemConfigProvider`（dev/test 后端）watch 溢出丢弃的事件数。生产后端（etcd）是
-背压而非丢弃；此计数在 dev 集群非零 = 消费端滞后。
+`MemConfigProvider`（dev/test）watch 因滞后丢弃的事件数；生产 etcd 使用背压而非丢弃。
+Events dropped by lagging `MemConfigProvider` (dev/test) watches; production etcd applies backpressure
+instead.
 
----
-
-Events dropped on lag by the `MemConfigProvider` (dev/test backend) watch
-broadcast. The production etcd backend back-pressures instead of dropping; a
-nonzero value in dev clusters means a lagging consumer.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-config/src/mem.rs` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-config/src/mem.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_config_etcd_watch_reconnects_total{domain}` / `rr_config_etcd_watch_events_total{domain}` / `rr_config_etcd_watch_compactions_total`
 
-etcd watch 通道健康度：重连次数（按 domain: nodes/partitions/groups）/ 收到的事件 /
-因 compaction 触发的全量对账次数。
+etcd watch 重连、收到事件、compaction 触发全量对账次数；domain 为 nodes/partitions/groups。
+Etcd watch reconnects, received events, and compaction-triggered full reconciliations; domains are
+nodes/partitions/groups.
 
----
-
-etcd watch-channel health: reconnects (by domain: nodes/partitions/groups) /
-events received / full reconciliations triggered by compaction.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `domain`（仅前两个 / first two） |
-| 记录位置 / Recorded in | `rr-config-etcd/src/lib.rs` — watch loop |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
+- **标签 / Labels**：仅前两个有 `domain` / Only the first two have `domain`
+- **位置 / Recorded in**：`rr-config-etcd/src/lib.rs` watch loop
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
 #### `rr_config_etcd_stale_serves_total` / `rr_config_etcd_cache_hits_total` / `rr_config_etcd_cache_misses_total` / `rr_config_etcd_rescans_total` / `rr_config_etcd_bad_keys_total` / `rr_config_etcd_fabricated_groups_total`
 
-etcd revision 缓存行为：探针失败时用缓存应答（stale serve，伴随 warn）/ 缓存命中 /
-未命中 / 全量重扫 / 跳过的不良 key / 缺 replicas 时编造的空组（均伴随日志）。
+探针失败时缓存应答（stale serve + warn）、缓存命中/未命中、全量重扫、跳过不良 key、缺 replicas 时编造
+空组；均伴随日志。
+Stale cached serves on probe failure (with warning), cache hits/misses, full rescans, skipped malformed
+keys, and fabricated empty groups when replicas are missing; all are logged.
 
----
+- **标签 / Labels**：—
+- **位置 / Recorded in**：`rr-config-etcd/src/lib.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
-etcd revision-cache behaviour: stale serves on probe failure (with a warn) /
-cache hits / misses / full rescans / skipped malformed keys / fabricated empty
-groups on a missing replicas key (all accompanied by logs).
+## 客户端指标 / Client-Side Metrics
 
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | — |
-| 记录位置 / Recorded in | `rr-config-etcd/src/lib.rs` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
-
----
-
-### Client-side (rr-client, emitted by applications that embed the SDK)
+由嵌入 `rr-client` SDK 的应用发射 / Emitted by applications embedding the `rr-client` SDK.
 
 #### `rr_client_request_duration_seconds`
 
-`RrClient::send_request` 的端到端耗时（含所有重试）。`outcome` 标签区分成功与最终失败。
+`RrClient::send_request` 端到端秒数，含全部重试；`outcome` 区分成功、最终失败与幂等拒绝。
+End-to-end `send_request` seconds, including retries; `outcome` distinguishes success, terminal failure,
+and idempotency rejection.
 
-End-to-end latency of `RrClient::send_request` including all retry attempts. The `outcome` label distinguishes success, terminal failure, and idempotency-layer rejections.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Histogram |
-| 标签 / Labels | `group_id`, `outcome` (`success` \| `failure` \| `idempotency_expired` \| `idempotency_namespace_limit`) |
-| 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
-
----
+- **类型 / Type**：Histogram
+- **标签 / Labels**：`group_id`, `outcome` (`success` | `failure` | `idempotency_expired` |
+  `idempotency_namespace_limit`)
+- **位置 / Recorded in**：`rr-client/src/lib.rs` `RrClient::send_request`
 
 #### `rr_client_retries_total`
 
-客户端重试次数。第 0 次尝试不计；只有第 1 次及之后的尝试才递增。
+客户端重试次数；首次尝试不计，仅从第 1 次重试起递增。
+Retry attempts; the initial attempt is excluded.
 
-Client retry attempts. The initial attempt is not counted; only attempts ≥ 1 increment.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
-
----
+- **类型 / Type**：Counter
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-client/src/lib.rs` `RrClient::send_request`
 
 #### `rr_client_leader_cache_hits_total` / `rr_client_leader_cache_misses_total`
 
-客户端 leader cache 的命中/失效次数。失效意味着必须 fallback 到 bootstrap 地址轮询。两者之比反映路由稳定性；缓存命中率持续低（`<80%`）说明 leader 频繁切换或集群不稳。
+Leader cache 命中/失效；失效后回退 bootstrap 轮询。持续命中率 `<80%` 表示 Leader 频繁切换或集群不稳。
+Leader-cache hits/misses; misses fall back to bootstrap round-robin. A sustained hit rate `<80%` indicates
+frequent leader changes or instability.
 
-Hit / miss counts for the client's leader cache. A miss means fallback to round-robin through bootstrap addresses. The ratio reflects routing stability; a sustained low hit rate (`<80%`) signals frequent leader changes or cluster instability.
-
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter |
-| 标签 / Labels | `group_id` |
-| 记录位置 / Recorded in | `rr-client/src/lib.rs` — `RrClient::send_request` |
-
----
+- **类型 / Type**：Counter
+- **标签 / Labels**：`group_id`
+- **位置 / Recorded in**：`rr-client/src/lib.rs` `RrClient::send_request`
 
 #### `rr_client_batch_flush_total` / `rr_client_batch_entries` / `rr_client_batch_buffer_rejected_total`
 
-客户端批处理（opt-in，默认关）：flush 次数（`trigger` = `size` \| `bytes` \|
-`linger` \| `immediate`）/ 每批条数（histogram）/ 缓冲拒绝计数（`limit` =
-`entries` \| `bytes`，背压 fail-fast 信号）。
+opt-in 批处理（默认关）：flush 的 `trigger` 为 `size` | `bytes` | `linger` | `immediate`；每批条数；
+缓冲拒绝的 `limit` 为 `entries` | `bytes`，是 fail-fast 背压信号。
+Opt-in batching, off by default: flushes, entries per batch, and fail-fast backpressure rejections with the
+listed `trigger` and `limit` values.
 
----
+- **类型 / Type**：Counter / Histogram / Counter
+- **标签 / Labels**：flush 为 `partition_id` + `trigger`；rejected 仅 `limit`，无 `partition_id` /
+  Flush has `partition_id` and `trigger`; rejected has only `limit` and no `partition_id`
+- **位置 / Recorded in**：`rr-client/src/batch.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
-Client write batching (opt-in, off by default): flush count (`trigger` =
-`size` \| `bytes` \| `linger` \| `immediate`) / entries per batch (histogram) /
-buffer rejections (`limit` = `entries` \| `bytes` — the fail-fast backpressure
-signal).
+## 写链路延迟分解 / Write-Path Latency Breakdown
 
-| 属性 / Attribute | 值 / Value |
-| :--- | :--- |
-| 类型 / Type | Counter / Histogram / Counter |
-| 标签 / Labels | flush 指标为 `partition_id`（+ `trigger`）；`rr_client_batch_buffer_rejected_total` 仅 `limit`（`entries` \| `bytes`，无 `partition_id`） |
-| 记录位置 / Recorded in | `rr-client/src/batch.rs` |
-| 可用版本 / Available since | Unreleased (v0.3.0) |
+每段链路都有对应指标 / Each segment has a corresponding metric:
 
----
-
-## 全链路延迟分解 / Write-Path Latency Breakdown
-
-一个写请求从客户端发起到交付结果的完整链路，每一段都有对应指标：
-
-The full write-request chain from client send to response, with the metric covering
-each segment:
-
-```
+```text
 client t0 ──network──▶ dispatch t1 ──route/queue──▶ client_write ──quorum──▶ apply ──▶ response
 │                      │                              │                     │
 │ rr_client_request_   │ rr_server_request_            │ rr_proposal_        │ rr_raft_apply_
@@ -1129,44 +601,40 @@ client t0 ──network──▶ dispatch t1 ──route/queue──▶ client_w
 - `proposal ≈ replication_quorum + apply`
 - `client_total ≈ network + server_total`
 
-**分位数不可相减，均值可组合** / Quantiles do not subtract; means do:
+分位数不可相减，均值可组合。构成分析使用 `rr:server_request_seconds:mean_1m`、
+`rr:proposal_seconds:mean_1m`、`rr:apply_seconds:mean_1m`，replication/routing 段由减法得出。
+尾部分析使用各段自身分位数：`rr:server_request_duration_seconds:p99_1m`、
+`rr:proposal_duration_seconds:p99_1m`、`rr:apply_duration_seconds:p99_1m`、
+`rr:append_entries_rtt_seconds:p99_1m`。
 
-- 构成分析用均值规则 / Use means for composition: `rr:server_request_seconds:mean_1m`,
-  `rr:proposal_seconds:mean_1m`, `rr:apply_seconds:mean_1m`（replication/routing 段由减法得出 /
-  replication and routing segments derive by subtraction）
-- 尾部分析用各段自身分位数 / Use per-segment quantiles for tails:
-  `rr:server_request_duration_seconds:p99_1m`, `rr:proposal_duration_seconds:p99_1m`,
-  `rr:apply_duration_seconds:p99_1m`, `rr:append_entries_rtt_seconds:p99_1m`
+Quantiles do not subtract; means do. Use `rr:server_request_seconds:mean_1m`,
+`rr:proposal_seconds:mean_1m`, and `rr:apply_seconds:mean_1m` for composition, deriving replication and
+routing by subtraction. For tails, use each segment's own
+`rr:server_request_duration_seconds:p99_1m`, `rr:proposal_duration_seconds:p99_1m`,
+`rr:apply_duration_seconds:p99_1m`, and `rr:append_entries_rtt_seconds:p99_1m`.
 
-**窗口口径** / Window semantics: 延迟分位数规则一律使用 1m 窗口——分位数只有绑定当前
-工况才有意义；长拖尾窗口（如 5m）会在负载停止后重播历史最坏样本（假平台），并在负载
-爬升时混合工况。/ Latency quantile rules use 1m windows by design — a percentile is only
-meaningful bound to the current regime; long trailing windows (e.g. 5m) replay worst-case
-history after load stops (stale plateaus) and mix regimes while load ramps.
+`deploy/observability/prometheus/rr-recording-rules.yml` 中预计算的 `rr:*:p99_1m` recording rules 使用 1m
+窗口；直接查询原始 histogram 时可选其他窗口，下方 `histogram_quantile()` 示例使用 5m。长拖尾窗口会在负载
+停止后保留历史最坏样本，并在爬升时混合工况；需要当前工况时优先使用 1m 规则。`read` 与 `lin_read` 不经过
+Raft 复制，`rr_server_request_duration_seconds{op}` 的 total 即全链路。
+The precomputed `rr:*:p99_1m` recording rules in
+`deploy/observability/prometheus/rr-recording-rules.yml` use a 1m window. Direct queries against raw
+histograms may choose other windows; the `histogram_quantile()` example below uses 5m. Long trailing windows
+retain historical worst samples after load stops and mix regimes during ramp-up, so prefer the 1m rules for
+the current regime. `read` and `lin_read` skip Raft replication, so the total from
+`rr_server_request_duration_seconds{op}` is the full chain.
 
-**读路径** / Read path: `read`（本地读）与 `lin_read`（线性一致读）不经过 raft 复制，
-`rr_server_request_duration_seconds{op}` 的 total 即全链路。/ `read` (local) and
-`lin_read` (linearizable) skip raft replication; the `rr_server_request_duration_seconds{op}`
-total IS the full chain.
+## 链路追踪 / Tracing
 
----
+原 Phase 3 观测性计划已全部落地：`rr_raft_replication_lag` 自 v0.2.0 可用；W3C trace context 传播自
+v0.2.0 由 `rr-network::tracing` 的 `extract_/attach_traceparent` 助手和 `examples/otel-client` 示例提供。
+OpenTelemetry SDK（OTLP exporter）按设计不内置，由用户自带。
+The original Phase 3 observability plan has landed: `rr_raft_replication_lag` is available since v0.2.0,
+and W3C trace-context propagation shipped in v0.2.0 through `rr-network::tracing`
+`extract_/attach_traceparent` helpers and `examples/otel-client`. The OpenTelemetry SDK and OTLP exporter
+are deliberately not bundled; bring your own OTLP stack.
 
-## 规划中的指标 / Planned Metrics
-
-原 Phase 3 观测性计划已全部落地：/ The original Phase 3 observability plan has fully landed:
-
-- `rr_raft_replication_lag` — 已实现，见上文 Gauge 表 / Implemented, see the gauge table above (since v0.2.0)
-- W3C trace context 传播 — 已实现（`rr-network::tracing` 的 `extract_/attach_traceparent` 助手 + `examples/otel-client` 集成示例）/ Shipped in v0.2.0 via `rr-network::tracing` helpers and the `examples/otel-client` integration example。OpenTelemetry SDK (OTLP exporter) 按设计不内置，由用户自带 / The OTel SDK itself is deliberately not bundled — bring your own OTLP stack.
-
----
-
-## Prometheus 集成示例 / Prometheus Integration Example
-
-在 `prometheus.yml` 中配置抓取任务：
-
----
-
-Configure a scrape job in `prometheus.yml`:
+## Prometheus 配置 / Prometheus Configuration
 
 ```yaml
 scrape_configs:
@@ -1179,25 +647,25 @@ scrape_configs:
     scrape_interval: 15s
 ```
 
-## 有用的查询示例 / Useful Query Examples
+## 查询示例 / Query Examples
 
 ```promql
-# 每秒提案吞吐率 / Proposals per second per group
+# 每组每秒提案数 / Proposals per second per group
 sum by (group_id) (rate(rr_proposal_duration_seconds_count[1m]))
 
 # p99 提案延迟 / p99 proposal latency
 histogram_quantile(0.99, sum by (le, group_id) (rate(rr_proposal_duration_seconds_bucket[5m])))
 
-# 当前集群所有 leader / All current leaders in the cluster
+# 当前全部 Leader / All current leaders
 rr_raft_is_leader == 1
 
-# 路由失败速率 / Routing lookup failures per second
+# 每秒路由失败 / Routing lookup failures per second
 rate(router_route_not_found[1m])
 
-# 连接池不稳定性 / Connection-pool churn
+# 连接池抖动 / Connection-pool churn
 sum(rate(rr_channel_reconnects_total[5m])) by (node_id)
 
-# 集群写入 TPS（精确：apply 计数）/ Cluster write TPS (exact: applied entries)
+# 集群写入 TPS（apply 精确口径）/ Cluster write TPS (exact applied entries)
 rr:applied_entries_rate_1m
 
 # 按操作类型的请求 TPS / Request TPS by op
@@ -1206,14 +674,14 @@ rr:server_request_rate_1m:by_op
 # Kafka 链路 TPS / Kafka-path TPS
 rr:ingestor_commands_rate_1m
 
-# p99 客户端请求延迟（按操作类型，1m 窗口）/ p99 client request latency by op (1m window)
+# p99 客户端请求延迟（按 op，1m）/ p99 client request latency by op (1m)
 rr:server_request_duration_seconds:p99_1m
 
-# p99 leader→follower 同步 RTT / p99 leader→follower AppendEntries RTT
+# p99 Leader→follower AppendEntries RTT
 rr:append_entries_rtt_seconds:p99_1m
 
 # 写延迟构成（均值堆叠）/ Write latency budget (stacked means)
 rr:apply_seconds:mean_1m
-rr:proposal_seconds:mean_1m - on(group_id) rr:apply_seconds:mean_1m            # replication 段
-rr:server_request_seconds:mean_1m{op="write"} - on(group_id) rr:proposal_seconds:mean_1m  # routing/encode 段
+rr:proposal_seconds:mean_1m - on(group_id) rr:apply_seconds:mean_1m            # replication
+rr:server_request_seconds:mean_1m{op="write"} - on(group_id) rr:proposal_seconds:mean_1m  # routing/encode
 ```

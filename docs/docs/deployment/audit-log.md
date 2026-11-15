@@ -4,150 +4,124 @@ sidebar_position: 4
 
 # 审计日志 / Audit Log
 
-rr 的每个 AdminService RPC 都会在专用 tracing target `rr::audit` 上发射一条 `info!` 事件，包含调用者 peer 地址、操作名、参数、结果。这些事件与普通应用日志一起通过 `tracing` 流出，但可以用 `EnvFilter` 独立路由，写入不可篡改的审计日志 sink（例如只读文件、syslog、云端 immutable log）。
+AdminService、认证和限流事件写入专用 tracing target `rr::audit`。事件与应用日志共享 subscriber，但可用 `EnvFilter` 保留
+并路由到独立 append-only sink。
 
----
+AdminService, authentication, and rate-limit events use the dedicated tracing target `rr::audit`. They share the
+application subscriber, but `EnvFilter` can retain them for routing into a separate append-only sink.
 
-Every AdminService RPC in rr emits an `info!` event on the dedicated
-tracing target `rr::audit` including the caller's peer address, operation
-name, arguments, and result. These flow through `tracing` alongside
-application logs but can be routed independently via `EnvFilter` into an
-append-only audit sink (e.g. read-only file, syslog, cloud immutable log).
+## 事件字段 / Event Schema
 
-## 事件 schema / Event schema
-
-| Field | Type | Example |
+| Field | 类型 / Type | 示例或用途 / Example or Use |
 | :--- | :--- | :--- |
-| `target` | always `rr::audit` | — |
-| `op` | operation | `TriggerSnapshot`, `TransferLeader`, `GetNodeStatus`, `GetGroupStatus`, `GetMetricsSummary`, `auth`, `rate_limit` |
-| `service` | gRPC surface (auth/rate_limit events) | `admin`, `client`, `raft` |
-| `peer` | caller socket addr (from tonic) | `10.0.1.23:51234` or `unknown` |
-| `node_id` | local node id serving the RPC | `1` |
-| `group_id` | for group-scoped operations | `7` |
-| `target_node_id` | for `TransferLeader` only | `3` |
-| `result` | event lifecycle | `started`, `succeeded`, `failed`, `rejected` |
-| `success` | on mutation result | `true` / `false` |
-| `reason` | on reject (auth / rate_limit) | `missing_credential`, `invalid_credential` |
-| `message` | on mutation result | free-form response |
+| `target` | 固定值 / constant | `rr::audit` |
+| `op` | 操作 / operation | `TriggerSnapshot`、`TransferLeader`、`auth`、`rate_limit` |
+| `service` | gRPC 面 / surface | `admin`、`client`、`raft` |
+| `peer` | 调用方 socket 地址 / caller socket address | `10.0.1.23:51234` / `unknown` |
+| `node_id` | 处理请求的本地节点 / local serving node | `1` |
+| `group_id` | 组级操作 / group-scoped operation | `7` |
+| `target_node_id` | 目标节点 / target node | `3` |
+| `result` | 生命周期 / lifecycle | `started`、`succeeded`、`failed`、`rejected`、`force_accepted` |
+| `success` | 操作结果 / operation outcome | `true` / `false` |
+| `reason` | 拒绝或失败原因 / rejection or failure reason | `missing_credential`、`invalid_credential` |
+| `message` | 结果说明 / result detail | 自由文本 / free-form text |
 
-Mutation operations (`TriggerSnapshot`, `TransferLeader`) emit **two**
-events — one at dispatch (`result="started"`) and one at completion
-(`result="succeeded"|"failed"`). Read-only operations emit one event.
+变更操作通常在分发时写 `started`，完成时写 `succeeded` 或 `failed`；查询操作的事件数量取决于具体 RPC。认证和限流拦截器对
+每个被拒绝请求写一条 `rejected` 事件。
 
-`BearerInterceptor` and `RateLimitInterceptor` emit one **reject** event
-per blocked request (`op="auth"` or `op="rate_limit"`,
-`result="rejected"`), tagged with the `service` they protect. This makes
-credential abuse and runaway-script detection greppable from the same sink
-as RPC audit trail.
+Mutation operations normally emit `started` at dispatch and `succeeded` or `failed` at completion; the number of events
+for query RPCs varies by handler. Authentication and rate-limit interceptors emit one `rejected` event per blocked
+request.
 
-## 配置独立的审计 sink / Routing audit events to a dedicated sink
+## 路由到独立 sink / Route to a Dedicated Sink
 
-### Option A — JSON 到 stdout，由 journald / Docker 捕获
+### 标准输出与日志采集器 / Standard Output and a Log Collector
 
-Since rr-server uses `tracing-subscriber::fmt`, enable JSON output via the
-default log level. Audit events mix with app events but are distinguishable
-by `target`:
+`rr-server` 默认使用 compact tracing 文本输出，不是 JSON。用下面的过滤器同时保留普通 warn 和审计 info/warn，再由 Fluent
+Bit、Vector、journald 等按 `rr::audit` target 分流。
+
+`rr-server` uses compact tracing text by default, not JSON. This filter retains normal warnings plus info/warn audit
+events; Fluent Bit, Vector, journald, or another collector can then split on the `rr::audit` target.
 
 ```bash
-RUST_LOG="rr::audit=info,info" rr-server serve --config ...
+RUST_LOG="warn,rr::audit=info" rr-server serve --config /etc/rr/config.toml
 ```
 
-Downstream (Fluent Bit, Vector, journald) can grep `rr::audit` to split
-the stream.
+### 独立文件 / Dedicated File
 
-### Option B — 独立文件 / Dedicated file
+嵌入 rr 或 fork `rr-server` 时，可增加自定义 `tracing-subscriber` layer，把 `target="rr::audit"` 写到独立文件，再由平台
+设置 append-only/immutable 属性。默认二进制的 stdout 配置本身不会创建独立审计文件。
 
-用自定义 `tracing-subscriber` layer（需要 fork rr-server 或 embed rr as library），把 `target="rr::audit"` 的 events 写到独立 file，并加上 `append-only` / `immutable` 文件系统标志（e.g. `chattr +a`）。
+When embedding rr or forking `rr-server`, add a custom `tracing-subscriber` layer for `target="rr::audit"` and protect
+the resulting file with platform append-only/immutable attributes. The stock binary's stdout configuration does not
+create a separate audit file.
 
-Use a custom `tracing-subscriber` layer (requires forking rr-server or
-embedding rr as a library) to split `target="rr::audit"` events into a
-dedicated file, which you then protect with filesystem `append-only` /
-`immutable` attributes (e.g. `chattr +a`).
+### 日志平台 / Loki, CloudWatch, or Datadog
 
-### Option C — Loki / CloudWatch / DataDog
+把 tracing 输出转发到日志平台，再按 `target:"rr::audit"` 持久化和查询。传输、索引和不可篡改保留策略由该平台负责，rr 不直
+接提供这些 sink。
 
-将所有 `tracing` 事件转发到这些系统，并在这些系统里做 `target:"rr::audit"` 的持久化+查询。大多数云端观测栈可以这样处理。
+Forward tracing output to the platform and filter on `target:"rr::audit"` for persistence and queries. Transport,
+indexing, and immutable retention belong to that platform; rr does not provide these sinks directly.
 
-Forward all `tracing` events into these systems and filter on
-`target:"rr::audit"` downstream. Works out-of-the-box with most cloud
-observability stacks.
+## 保留策略 / Retention Policy
 
-## 保留政策建议 / Retention recommendations
+按组织政策、适用法规和取证需求确定保留期，不要把通用模板当作合规保证。至少明确热/冷存储时长、访问控制、删除流程和恢复演
+练，并用 logrotate 或云端保留策略执行。
 
-| 合规要求 / Compliance | 保留期 / Retention |
-| :--- | :--- |
-| SOC2 | ≥ 1 year |
-| PCI-DSS | ≥ 1 year (3 months hot + 9 months cold) |
-| HIPAA | ≥ 6 years |
-| 一般生产 / General production | ≥ 90 days |
+Set retention from organizational policy, applicable regulations, and forensic needs; a generic table is not a
+compliance guarantee. Define hot/cold retention, access control, deletion, and restore drills, then enforce them through
+logrotate or cloud logging policies.
 
-设置 logrotate / cloud log policy 以匹配你的合规要求。
+## 威胁模型 / Threat Model
 
-## 威胁模型 / Threat model
+审计日志用于检测和取证，不能阻止未授权变更。生产至少组合以下控制：
 
-审计日志**检测**未授权变更，而**不能阻止**它们。防御层次：
+Audit logs support detection and forensics; they do not prevent unauthorized changes. Combine at least:
 
-Audit logs **detect** unauthorized changes; they do not **prevent** them.
-Layered defenses:
+1. TLS + mTLS，见 [TLS 指南](./tls.md)，验证对端身份。<br />
+   TLS + mTLS, described in the [TLS guide](./tls.md), verifies peers.
+2. Bearer-token 认证，使用 `[auth]` 引用的环境变量。<br />
+   Bearer-token authentication uses environment variables referenced by `[auth]`.
+3. 网络隔离，Admin 端口只暴露给运维 VPN 或 bastion。<br />
+   Network isolation exposes Admin only to an operations VPN or bastion.
+4. 独立审计 sink，降低攻击者抹除痕迹的能力。<br />
+   A separate audit sink reduces an attacker's ability to erase evidence.
 
-1. **TLS + mTLS**（[tls.md](./tls.md)）— 防止冒名顶替
-2. **Bearer-token auth**（`[auth]` config）— 要求有效凭证
-3. **网络隔离** — admin_port 只暴露给 ops VPN / bastion
-4. **审计日志** — 检测 + 事后取证（本文档）
-5. **immutable log sink** — 防止攻击者抹掉痕迹
+## 调用者身份 / Caller Identity
 
-## 调用者身份 / Caller identity (since v0.2.0)
+认证拒绝以及带调用方指纹的限流拒绝可包含 `caller_token_fp`：基于 siphash 的 16 位十六进制、非密码学指纹，用于关联同一
+token 的多次事件，不暴露 token 本身。`peer` 仍提供网络层地址。
 
-Auth reject 事件携带 `caller_token_fp` 字段——一个**非密码学**的 16-hex
-fingerprint（基于 siphash），用于在多个 reject 之间关联同一调用者，
-不暴露 token 本身。`peer` 字段继续提供网络层身份。
+Authentication rejects and per-caller rate-limit rejects can include `caller_token_fp`: a non-cryptographic,
+16-hex-character siphash fingerprint that correlates events for one token without exposing it. `peer` still provides the
+network address.
 
 ```json
 {"op":"auth","service":"client","peer":"10.0.1.23:51234","caller_token_fp":"7f3e9a02b1c4d5e6","result":"rejected","reason":"invalid_credential"}
 ```
 
-调查 spray 攻击或撞库尝试时，按 `caller_token_fp` group-by 即可看到
-同一 token（无论正确或错误）多次试探的全貌。
+调查撞库或 spray 时可按该字段聚合，但它不是可验证的用户身份，也不能跨不同哈希键当作永久标识。当前没有完整传播 mTLS CN、
+JWT subject 等 subject claims。
 
-完整 subject claim（mTLS 证书 CN、JWT subject 等）propagation 仍是
-**future work**——当前只在 reject 事件中携带 fingerprint。
+For credential-stuffing or spray investigations, group by this field, but do not treat it as authenticated user identity
+or a permanent identifier across different hash keys. Full subject-claim propagation, such as mTLS CN or JWT subject, is
+not currently available.
 
----
+## 已知限制 / Known Limitations
 
-Auth reject events carry a `caller_token_fp` field — a
-**non-cryptographic** 16-hex fingerprint (siphash) that lets operators
-correlate multiple reject events from the same caller without
-exposing the token itself. `peer` still provides network-layer
-identity.
-
-```json
-{"op":"auth","service":"client","peer":"10.0.1.23:51234","caller_token_fp":"7f3e9a02","result":"rejected","reason":"invalid_credential"}
-```
-
-When investigating spray or credential-stuffing attempts, group-by
-`caller_token_fp` to see all attempts (correct or wrong) from the
-same token.
-
-Full subject-claim propagation (mTLS cert CN, JWT subject, etc.)
-remains future work — only reject events carry the fingerprint today.
-
-## 已知限制 / Known limitations
-
-- Auth / rate-limit reject 事件以 `warn!` 级别发，AdminService RPC
-  事件以 `info!` 级别发——确保 EnvFilter 至少包含两者：
-  `RUST_LOG="warn,rr::audit=info"`。
-- 审计事件**与应用日志共享 subscriber**——如果 ops 团队配置了 `RUST_LOG=warn`
-  则 admin rpc 的 info 会被过滤掉。**建议用独立的 EnvFilter**:
-  `RUST_LOG="warn,rr::audit=info"`.
-
----
-
-- Audit events **share the subscriber with app logs** — if operators set
-  `RUST_LOG=warn` the audit info level is filtered out. Recommended:
-  `RUST_LOG="warn,rr::audit=info"`.
+- 认证/限流拒绝通常为 `warn!`，Admin RPC 为 `info!`；`RUST_LOG=warn` 会过滤 Admin info 事件。使用
+  `RUST_LOG="warn,rr::audit=info"`。<br />
+  Auth/rate-limit rejects are usually `warn!`, while Admin RPCs are `info!`; `RUST_LOG=warn` drops Admin info events.
+  Use `RUST_LOG="warn,rr::audit=info"`.
+- 默认审计事件与应用日志共享 subscriber 和输出；独立文件需要自定义 layer 或下游采集。<br />
+  By default, audit and application events share the subscriber and output; separate files require a custom layer or
+  downstream collection.
+- stdout 被丢弃、进程崩溃或 sink 不可达时，rr 不提供独立持久化补发队列。<br />
+  rr has no separate durable replay queue if stdout is lost, the process crashes, or the sink is unreachable.
 
 ## 相关 / Related
 
-- [tls.md](./tls.md) — 加密传输
-- [../operations/runbooks/](../operations/runbooks/) — 事故响应
-- [../reference/compatibility.md](../reference/compatibility.md) — API 稳定性承诺（审计 schema 也适用）
+- [加密传输 / Encrypted transport](./tls.md)
+- [事故响应 / Incident response](../operations/runbooks/)
+- [API 稳定性 / API stability](../reference/compatibility.md)

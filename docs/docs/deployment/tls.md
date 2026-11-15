@@ -2,42 +2,46 @@
 sidebar_position: 2
 ---
 
-# TLS — 加密 gRPC 流量 / Encrypting gRPC Traffic
+# TLS：加密 gRPC 流量 / TLS: Encrypting gRPC Traffic
 
-rr 通过 rustls 在所有 gRPC 端点（Client / Raft / Admin）上支持 TLS 和可选的 mTLS。默认**不启用**（便于 dev），生产必须启用。
+rr 通过 rustls 在 Client、Raft、Admin gRPC 端点支持 TLS 和可选 mTLS。默认不启用 TLS；生产 Raft 必须启用 TLS + mTLS。
 
----
+rr supports TLS and optional mTLS on Client, Raft, and Admin gRPC endpoints through rustls. TLS is off by default;
+production Raft requires TLS + mTLS.
 
-rr supports TLS and optional mTLS on every gRPC endpoint (Client / Raft / Admin) via rustls. TLS is **off by default** (to keep the dev loop simple); production deployments MUST enable it.
-
-## 本地开发：生成自签名证书 / Local dev: generate self-signed certs
+## 本地开发证书 / Local Development Certificates
 
 ```bash
 ./scripts/gen-dev-certs.sh dev-certs 3
 ```
 
-This creates `dev-certs/ca.pem`, `dev-certs/ca.key`, and per-node pairs `dev-certs/node{1,2,3}.pem` + `.key`, all signed by a single dev CA with SANs for `localhost`, `127.0.0.1`, `rr-N`, and `nodeN.rr.local`.
+生成 `dev-certs/ca.pem`、`ca.key` 和每节点 `node{1,2,3}.pem` + `.key`。SAN 覆盖 `localhost`、`127.0.0.1`、`::1`、`rr-N`
+和 `nodeN.rr.local`。
 
-> **不要在生产中使用这些证书。** 密钥不加密、保护期 1 年、CA 10 年、SAN 仅覆盖本地开发主机名。
+This creates `dev-certs/ca.pem`, `ca.key`, and per-node `node{1,2,3}.pem` + `.key`. SANs cover `localhost`, `127.0.0.1`,
+`::1`, `rr-N`, and `nodeN.rr.local`.
+
+> **不要在生产中使用这些证书。** 私钥不加密，节点证书有效期 1 年、CA 10 年，SAN 只覆盖本地开发主机名。
 >
-> **Do not use these in production.** Keys are unencrypted; validity is 1 year (node) / 10 years (CA); SANs only cover local-dev hostnames.
+> **Do not use these certificates in production.** Private keys are unencrypted, node certificates last one year and the
+> CA ten years, and SANs cover local development hostnames only.
 
-## 启动 rr-server with TLS / Starting rr-server with TLS
+## 启动 rr-server / Start rr-server with TLS
 
-### Via CLI flags
+### CLI 参数 / CLI Flags
 
 ```bash
 rr-server serve \
   --node-id 1 --listen-addr 127.0.0.1:51001 \
   --tls-cert dev-certs/node1.pem \
-  --tls-key  dev-certs/node1.key \
-  --tls-ca   dev-certs/ca.pem \
+  --tls-key dev-certs/node1.key \
+  --tls-ca dev-certs/ca.pem \
   --tls-domain node1.rr.local \
   --tls-require-client-cert \
   --bootstrap
 ```
 
-### Via config file
+### 配置文件 / Configuration File
 
 ```toml
 [node]
@@ -45,16 +49,18 @@ id = 1
 listen_addr = "0.0.0.0:51001"
 
 [tls]
-cert_path           = "/etc/rr/tls/node1.pem"
-key_path            = "/etc/rr/tls/node1.key"
-ca_path             = "/etc/rr/tls/ca.pem"
+cert_path = "/etc/rr/tls/node1.pem"
+key_path = "/etc/rr/tls/node1.key"
+ca_path = "/etc/rr/tls/ca.pem"
 require_client_cert = true
-domain_name         = "node1.rr.internal"
+domain_name = "node1.rr.internal"
 ```
 
-Then: `rr-server serve --config /etc/rr/node1.toml`.
+```bash
+rr-server serve --config /etc/rr/node1.toml
+```
 
-### Via env vars
+### 环境变量 / Environment Variables
 
 ```bash
 export RR_TLS_CERT=/etc/rr/tls/node1.pem
@@ -65,91 +71,112 @@ export RR_TLS_DOMAIN=node1.rr.internal
 rr-server serve --config /etc/rr/node1.toml
 ```
 
-CLI flags > env vars > config file values > built-in defaults.
+优先级为 CLI > 环境变量 > 配置文件 > 内置默认值。
+
+Precedence is CLI > environment > configuration file > built-in defaults.
 
 ## 字段含义 / Field Semantics
 
-| Field | 含义 / Meaning | Required |
+| Field | 含义 / Meaning | 必需条件 / Required When |
 | :--- | :--- | :--- |
-| `cert_path` / `--tls-cert` / `RR_TLS_CERT` | PEM-encoded server cert; also used as client identity when this node dials peers | Yes (if TLS enabled) |
-| `key_path` / `--tls-key` / `RR_TLS_KEY` | Matching private key | Yes (if TLS enabled) |
-| `ca_path` / `--tls-ca` / `RR_TLS_CA` | PEM CA bundle used to verify peer certs. Required for mTLS. | Iff `require_client_cert` or custom CA |
-| `require_client_cert` / `--tls-require-client-cert` | Server rejects connections without a valid client cert (mTLS). | No (default false) |
-| `domain_name` / `--tls-domain` | SNI name expected in the peer's cert when this node dials others | Recommended |
+| `cert_path` / `--tls-cert` / `RR_TLS_CERT` | PEM 服务端证书，也用作拨入 peer 时的客户端身份 / PEM server certificate and outbound client identity | 启用 TLS / TLS enabled |
+| `key_path` / `--tls-key` / `RR_TLS_KEY` | 匹配的私钥 / Matching private key | 启用 TLS / TLS enabled |
+| `ca_path` / `--tls-ca` / `RR_TLS_CA` | 验证对端证书的 PEM CA bundle / PEM CA bundle for peer verification | mTLS 或私有 CA / mTLS or a private CA |
+| `require_client_cert` / `--tls-require-client-cert` | 拒绝无有效客户端证书的连接 / Reject clients without a valid certificate | 生产 Raft 必须为 true / Required for production Raft |
+| `domain_name` / `--tls-domain` | 拨入其他节点时使用的 SNI/证书名称覆盖 / SNI and certificate-name override when dialing peers | 地址与 SAN 不一致时 / When dial address differs from SAN |
 
-## TLS 模式 / Modes
+## TLS 模式 / TLS Modes
 
-| 模式 / Mode | Settings | Trust model |
+| 模式 / Mode | 设置 / Settings | 信任模型 / Trust Model |
 | :--- | :--- | :--- |
-| **Plaintext (dev only)** | No TLS fields set | None — ⚠️ never use in production |
-| **Server TLS only** | `cert_path` + `key_path` set | Clients verify server (like HTTPS); server does not verify clients |
-| **mTLS** | + `ca_path` + `require_client_cert = true` | Mutual — server also rejects unknown clients |
+| 明文，仅开发 / Plaintext, dev only | 不设置 TLS / No TLS fields | 无身份或加密；禁止生产 / No identity or encryption; never production |
+| 仅服务端 TLS / Server TLS only | `cert_path` + `key_path` | 客户端验证服务端，服务端不验证客户端 / Client verifies server; server does not verify client |
+| mTLS | 再加 `ca_path` + `require_client_cert = true` / Add both | 双向验证 / Mutual verification |
 
-**生产建议 / Production recommendation**: mTLS with a per-deployment CA. All nodes + client applications get certs signed by the same CA. The CA private key is kept offline.
+生产使用部署专用 CA 和每节点独立证书，CA 私钥离线保存。Client/Admin 应用也需要签发证书和对应 token；`rr-admin` 的三个
+TLS 参数必须同时提供。
 
-## 对称 TLS / Symmetric TLS Between Peers
+Use a deployment-specific CA and distinct node certificates in production, with the CA private key offline. Client/Admin
+applications also need certificates and appropriate tokens; all three `rr-admin` TLS flags must be supplied together.
 
-rr 中节点间的 Raft RPC 是**对称**的 —— 每个节点既是服务端也是客户端。因此：
+## 节点间对称 TLS / Symmetric TLS Between Peers
 
-- 同一套 `cert_path` + `key_path` 被**服务端**用于接受 inbound TLS，也被 **ChannelPool** 用作 outbound client identity（发给对等节点做 mTLS 认证）。
-- `ca_path` 在服务端用于验证客户端证书，在客户端用于验证 peer 服务端证书。
+每个节点既是服务端也是客户端。同一 `cert_path` + `key_path` 用于 inbound TLS 和 ChannelPool outbound 客户端身份；
+`ca_path` 同时用于验证 inbound 客户端和 outbound peer 服务端。因此每节点只需一对 cert/key，SAN 必须覆盖其他节点实际使用
+的 DNS 名或 `--tls-domain` 覆盖名。
 
-这意味着**每个节点只需要一对 cert+key**。多个节点可以共用一个 cert（SAN 必须覆盖所有主机名），或每节点独立 cert（推荐）。
-
----
-
-In rr, inter-node Raft RPCs are **symmetric** — every node is both server and client. So:
-
-- The same `cert_path` + `key_path` pair is used **both** by the inbound server to accept TLS connections **and** by the outbound `ChannelPool` as the client identity (for mTLS auth to peers).
-- `ca_path` is used on the server to verify client certs and on the client to verify peer server certs.
-
-This means **each node only needs one cert+key pair**. You may share a single cert across all nodes (SANs must cover every hostname), or give each node its own (recommended for blast-radius control).
+Every node is both server and client. The same `cert_path` + `key_path` pair serves inbound TLS and identifies the
+outbound ChannelPool client; `ca_path` verifies both inbound clients and outbound peer servers. Each node therefore
+needs one cert/key pair, whose SANs must cover the DNS names peers actually dial or the `--tls-domain` override.
 
 ## 故障排查 / Troubleshooting
 
-### "unable to locate CA in the native certificate store"
+### 找不到 CA：`unable to locate CA in the native certificate store`<br />CA Not Found: `unable to locate CA in the native certificate store`
 
-你没有设置 `ca_path` 而 peer 的 cert 不是 WebPKI-信任的。**解决方案**：用 `--tls-ca` 或 `[tls].ca_path` 指定你的内部 CA。
+对端证书不由当前信任库信任。用 `--tls-ca` 或 `[tls].ca_path` 指向签发它的内部 CA，并确认 bundle 可读。
 
-You didn't set `ca_path` and the peer's cert isn't trusted by WebPKI. **Fix**: point `--tls-ca` / `[tls].ca_path` at your internal CA.
+The peer certificate is not trusted by the current roots. Point `--tls-ca` or `[tls].ca_path` at the issuing internal CA
+and confirm the bundle is readable.
 
-### "CertificateRequired" from client
+### 客户端证书缺失：`CertificateRequired`<br />Missing Client Certificate: `CertificateRequired`
 
-客户端没有发 cert 但服务端设了 `require_client_cert = true`。**解决方案**：要么在 client 里也配 cert+key+ca，要么关闭 `require_client_cert`。
+服务端启用了 `require_client_cert = true`，但客户端未提供证书。为客户端配置 cert + key + CA；不要为了消除生产错误而关闭
+mTLS。
 
-Client didn't send a cert but server has `require_client_cert = true`. **Fix**: either configure a client-side cert+key+ca, or disable `require_client_cert`.
+The server requires a client certificate but the client did not present one. Configure client cert + key + CA; do not
+disable mTLS to hide a production error.
 
-### "HandshakeFailure" / "UnknownIssuer"
+### 握手或签发者错误：`HandshakeFailure` / `UnknownIssuer`<br />Handshake or Issuer Errors: `HandshakeFailure` / `UnknownIssuer`
 
-Server 的 cert 由一个 client 不信任的 CA 签发。**解决方案**：确认客户端的 `ca_path` 指向对应的 CA bundle。
+确认客户端 CA bundle 包含实际签发 CA、证书未过期，且拨入名称匹配 SAN。可使用 `openssl s_client` 同时带 CA 和客户端证书验
+证。
 
-Server's cert is signed by a CA the client doesn't trust. **Fix**: point client's `ca_path` at the correct CA bundle.
+Confirm that the client CA bundle contains the actual issuer, the certificate is unexpired, and the dial name matches a
+SAN. Test with `openssl s_client` using both the CA and client certificate.
 
-### "Could not automatically determine the process-level CryptoProvider"
+### 无法选择 CryptoProvider：`Could not automatically determine the process-level CryptoProvider`<br />Cannot Select CryptoProvider: `Could not automatically determine the process-level CryptoProvider`
 
-rustls 0.23 要求显式选 crypto provider。rr-server 二进制已经在 `main()` 里调用 `rustls::crypto::ring::default_provider().install_default()`，所以**不应该**触发此错误。如果你把 rr-server 作为库嵌入到自己的二进制，需要在 `main()` 最早处加同样一行。
+`rr-server` 二进制已在 `main()` 安装 ring provider。如果把 rr-server 作为库嵌入自己的二进制，在 `main()` 最早处安装同一
+个 provider：
 
-rustls 0.23 requires picking a crypto provider. The `rr-server` binary calls `rustls::crypto::ring::default_provider().install_default()` in `main()`, so you **shouldn't** hit this. If you embed rr-server as a library in your own binary, add the same line at the top of your `main()`.
+The `rr-server` binary installs the ring provider in `main()`. If embedding rr-server as a library, install the same
+provider at the start of your own `main()`:
+
+```rust
+let _ = rustls::crypto::ring::default_provider().install_default();
+```
 
 ## 证书轮换 / Certificate Rotation
 
-目前 rr **不支持热轮换**：更新 cert/key 需要重启进程。滚动重启的流程：
+当前不支持热加载，更新 cert/key 或 CA bundle 后必须重启。每次只重启一个节点，等待 `/ready`、leader 和复制追平后再继续。
 
-rr does **not** currently support hot rotation: updating a cert/key requires restarting the process. Rolling-restart recipe:
+Hot reload is not supported; restarting is required after changing cert/key or CA bundle. Restart one node at a time and
+wait for `/ready`, stable leadership, and replication catch-up before continuing.
 
-1. 同时更新所有节点的 CA bundle（`ca_path`）—— 这是**先决条件**，否则你更新后的 peer 拿新 cert 来握手会失败。
-2. 一次重启一个节点：用新 cert+key 启动，确认它重新加入集群、成为 follower、稳定。
-3. 全部重启完毕后，旧 cert 可以删除。
+如果只是用同一 CA 换发节点证书，直接逐节点替换 cert/key 并滚动重启。其他节点已信任该 CA，不需要先换 CA。
 
----
+When reissuing node certificates under the same CA, replace each cert/key and rolling-restart directly. Peers already
+trust that CA, so no CA transition is needed.
 
-1. Update every node's CA bundle (`ca_path`) first — **prerequisite**, otherwise peers with updated certs will fail TLS handshake to nodes still using the old trust store.
-2. Restart one node at a time: bring it up with the new cert+key, verify it rejoins, becomes follower, stays stable.
-3. Once all nodes are rotated, old certs can be deleted.
+如果更换 CA，必须先让所有节点同时信任旧、新 CA，再切换身份证书：
 
-**规划中 / Planned**: hot-reload via `SIGHUP` or `rr-admin tls reload` (tracked in Phase 3 roadmap).
+When changing CAs, every node must trust both old and new CAs before any identity certificate changes:
+
+1. 在所有节点部署包含旧、新 CA 的 bundle，逐节点重启以加载它。只覆盖文件而不重启不会生效。<br />
+   Deploy a bundle containing both CAs everywhere and rolling-restart to load it. Replacing the file without restarting
+   has no effect.
+2. 逐节点部署新 CA 签发的 cert/key 并重启，验证 mTLS、成员和追平。<br />
+   Deploy certificates signed by the new CA and restart one node at a time, verifying mTLS, membership, and catch-up.
+3. 全部节点切换完成后，如需移除旧 CA，再从 bundle 删除并做第三轮滚动重启。旧私钥按 secret-management 流程安全删除。<br />
+   After every node has switched, optionally remove the old CA and perform a third rolling restart. Delete old private
+   keys through your secret-management process.
+
+若握手失败，停止后续轮换，恢复该节点上一份可用配置并验证集群；不要同时重启其余节点。
+
+If a handshake fails, stop the rotation, restore that node's last working configuration, and verify cluster health; do
+not restart the remaining nodes.
 
 ## 相关 / Related
 
-- 整体部署 / Full deployment guide: [deployment.md](./deployment.md)
-- C4 Components (TLS 绑点 / TLS touch-points): [../architecture/c4/components-network.md](../architecture/c4/components-network.md)
+- [整体部署 / Full deployment](./deployment.md)
+- [C4 TLS 绑点 / C4 TLS touch-points](../architecture/c4/components-network.md)

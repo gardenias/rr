@@ -2,15 +2,14 @@
 sidebar_position: 8
 ---
 
-# Dynamic — Client PUT with Leader Redirect
+# 动态：客户端写入与 Leader 重定向 / Dynamic: Client PUT with Leader Redirect
 
-这是 rr 最常见的执行流：用户应用调用 `rr-client` 发起一个写请求，请求被路由到错误的节点，客户端自动重定向到 leader 并完成写入。**这个流程演示了 rr "智能客户端（smart client）" 的核心价值**。
+写请求先到达 follower 时，server 返回 leader 地址，`rr-client` 更新缓存、退避并重试。
 
----
+When a write reaches a follower, the server returns the leader address; `rr-client` updates its cache, backs off,
+and retries.
 
-The most common execution flow in rr: a user application calls `rr-client` to issue a write request, the request lands on the wrong node, the client auto-redirects to the leader, and the write completes. **This flow demonstrates the core value of rr's "smart client" approach.**
-
-## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
+## 高层流程 / High-level Flow
 
 ```plantuml
 @startuml
@@ -48,7 +47,7 @@ Rel(l_raft, user_app, "9. ClientWriteResponse(data)", "gRPC")
 @enduml
 ```
 
-## 详细时序图 / Detailed Sequence
+## 详细时序 / Detailed Sequence
 
 ```plantuml
 @startuml
@@ -56,7 +55,7 @@ autonumber
 participant App as "User App"
 participant Client as "RrClient\n(leader_cache, RetryConfig)"
 participant NodeA as "Node A\n(Follower for G7)"
-participant Router as "ShardRouter\n(on Node A)"
+participant Router as "ShardRouter\n(each node)"
 participant NodeB as "Node B\n(Leader for G7)"
 participant RaftB as "RaftNode G7\n(on Node B)"
 participant NodeC as "Node C\n(Follower for G7)"
@@ -73,7 +72,7 @@ Router --> NodeA : group_id=7 (no leader info — group only)
 note over NodeA : this is not the leader:\nclient_write fails with openraft ForwardToLeader,\ntranslated into a normal response field
 NodeA --> Client : ClientResponse{success=false, leader_info={node_id=B, addr=host-B:51001}}
 
-note over Client : Update leader_cache[group=7] = (B, host-B:51001)\nBack off (retry_delay_ms * 2^attempt), then retry
+note over Client : Update leader_cache[group=7] = (B, host-B:51001)\nBack off (retry_delay_ms * 2^attempt, with jitter), then retry
 
 Client -> NodeB : gRPC ClientRequest(partition=42, payload)
 NodeB -> Router : route(42)
@@ -103,117 +102,81 @@ note over Client : Next request to partition 42 goes directly to Node B
 @enduml
 ```
 
-## 关键设计点 / Key Design Points
+## 客户端行为 / Client Behavior
 
-### 1. 客户端侧领导者缓存 / Client-side Leader Cache
-`RrClient` 内部维护 `leader_cache: Arc<RwLock<HashMap<GroupId, (NodeId, String)>>>`：
+### Leader 缓存 / Leader Cache
 
-`RrClient` internally maintains `leader_cache: Arc<RwLock<HashMap<GroupId, (NodeId, String)>>>`:
+`RrClient` 为每个 group 缓存 `(NodeId, String)`；没有 TTL，连接失败或新 `leader_info` 会删除或覆盖旧值。
+
+`RrClient` caches `(NodeId, String)` per group. Entries have no TTL; connection failures or new `leader_info`
+remove or replace them.
 
 ```rust
-// rr-client/src/lib.rs — 就是 (NodeId, addr) 二元组：
-// 没有 cached_at 时间戳，没有 TTL —— 缓存项只在
-// 连接失败或收到新的 leader_info 重定向时被驱逐/覆盖。
 leader_cache: Arc<RwLock<HashMap<GroupId, (NodeId, String)>>>
 ```
 
-- 命中缓存：直接发到 leader（快路径）
-- 未命中：从 bootstrap 地址列表轮询
-- 收到携带 `leader_info` 的响应：更新缓存，退避后重试
-- 连接失败：**驱逐缓存项**，避免反复连接已死节点
+- 命中时直接发送给缓存 leader；未命中时轮询 bootstrap 地址。
+  A hit goes directly to the cached leader; a miss round-robins bootstrap addresses.
+- 重定向响应更新缓存；连接失败删除缓存项并回退到 bootstrap 列表。
+  Redirects update the cache; connection failures evict the entry and fall back to bootstrap addresses.
 
----
+### 重试 / Retry
 
-- Hit: send directly to leader (fast path)
-- Miss: round-robin through bootstrap addresses
-- Response carrying `leader_info` received: update cache, back off, retry
-- Connection failed: **evict cache entry**, avoid repeatedly dialing a dead node
+`RetryConfig` 默认 `max_retries = 3`、`retry_delay_ms = 100`。退避基数为
+`retry_delay_ms * 2^attempt`，并带 ±20% jitter；重定向也使用退避。
 
-### 2. 指数退避重试 / Exponential Backoff Retry
+`RetryConfig` defaults to `max_retries = 3` and `retry_delay_ms = 100`. Backoff starts from
+`retry_delay_ms * 2^attempt` with ±20% jitter; redirects also back off.
 
-`RetryConfig`:
-- `max_retries`: 默认 3 / default 3
-- `retry_delay_ms`: 基础延迟 / base delay, default 100 ms
-- 第 n 次重试延迟：`retry_delay_ms * 2^attempt` → 100ms, 200ms, 400ms...
+- 网络错误和带 `leader_info` 的响应会重试，总尝试次数为 `max_retries + 1`。
+  Network errors and responses with `leader_info` are retried, with at most `max_retries + 1` total attempts.
+- `idem_error`、业务错误和序列化错误立即返回，不做普通重试。
+  `idem_error`, application errors, and serialization errors return immediately without normal retries.
 
-**什么情况下重试 / When to retry**:
-- 携带 `leader_info` 的重定向响应 — 更新 leader 缓存后**同样按指数退避**重试（rr-client 对 redirect 也 sleep，没有 no-sleep 快路径），最多 `max_retries` 次
-- 网络错误（连接失败、超时）— 驱逐缓存项，指数退避后重试
+### 不由 Follower 代理 / No Follower Proxying
 
-**什么情况下不重试 / When NOT to retry**:
-- 幂等键过期（`idem_error`）— 立即返回 `RrError::IdempotencyExpired`（见下）
-- 业务逻辑错误（`StateMachine::apply` 返回的错误）— 直接冒泡给应用
-- 序列化失败 — 立即失败
+rr 不在 follower 上代理写入，避免额外一跳、follower 持有等待状态以及被代理流量掩盖真实 leader 变化。
+代价由 `rr-client` 的重定向逻辑承担；无幂等键时，应用仍需处理重试造成的重复写风险。
 
----
+rr does not proxy writes through followers, avoiding an extra hop, pending response state on followers, and hidden
+leader changes. `rr-client` owns the redirect logic instead; without idempotency keys, applications must still
+handle duplicate-write risk from retries.
 
-**When to retry**:
-- Redirect responses carrying `leader_info` — update the leader cache, then retry **with the same exponential backoff** (rr-client sleeps on redirects too; there is no no-sleep fast path), up to `max_retries` times
-- Network errors (connect fail, timeout) — evict cache entry, retry with exponential backoff
+## 幂等性 / Idempotency
 
-**When NOT to retry**:
-- Expired idempotency key (`idem_error`) — returns `RrError::IdempotencyExpired` immediately (see below)
-- Business logic errors (from `StateMachine::apply`) — bubble to application immediately
-- Serialization errors — fail fast
+框架提供可选的幂等层（ADR A-0003）；不带 key 的请求不去重。
 
-### 3. 为什么不在 Node A 上代理转发？/ Why Doesn't Node A Proxy Forward?
+The framework provides an optional idempotency layer (ADR A-0003); requests without keys are not deduplicated.
 
-一种替代设计：follower 直接把请求转发给 leader，对客户端透明。rr 明确**不这么做**，因为：
+- 客户端调用 `send_request_idempotent(group_id, payload, IdempotencyKey::new(request_type, request_id))`。
+  去重身份是 `(request_type, request_id)`；可选 `client_id` 仅用于诊断。
+  The client calls `send_request_idempotent(group_id, payload, IdempotencyKey::new(request_type, request_id))`.
+  Deduplication uses `(request_type, request_id)`; optional `client_id` is diagnostic only.
+- `ClientRequest.idem_key` 是 proto3 optional；`ClientResponse.idem_error` 携带
+  `{request_type, request_id, watermark}`。无 key 请求保持旧路径。
+  `ClientRequest.idem_key` is proto3 optional; `ClientResponse.idem_error` carries
+  `{request_type, request_id, watermark}`. Unkeyed requests keep the legacy path.
+- `ClientDispatchImpl` 把带 key 的 payload 包成 `FramedEntry{version, offset, idem_key, payload}` 后提交。
+  `ClientDispatchImpl` wraps keyed payloads as `FramedEntry{version, offset, idem_key, payload}` before submit.
+- 每个 group 的 `IdempotencyLayer` 维护 LRU 响应缓存和每 `request_type` 的 watermark。缓存命中返回首次
+  响应；`request_id ≤ watermark` 且缓存已逐出则返回 Expired。状态随快照 capture/restore。
+  Each group's `IdempotencyLayer` keeps an LRU response cache and a watermark per `request_type`. A cache hit
+  replays the first response; an evicted `request_id ≤ watermark` returns Expired. State is captured and restored
+  with snapshots.
+- 收到 `idem_error` 后，客户端返回 `RrError::IdempotencyExpired`；调用方应选择大于 watermark 的新 `request_id`。<br />On `idem_error`, the client returns `RrError::IdempotencyExpired`; the caller should choose a new `request_id` above the watermark.
 
-An alternative design: the follower could proxy the request to the leader transparently. rr explicitly **does not** do this because:
+## 失败路径 / Failure Paths
 
-1. **性能**：多一跳（client → follower → leader → follower → client）增加尾延迟。
-2. **状态**：follower 需要等待响应；leader 故障会导致 follower 超时；客户端重试会触发重复写入风险。
-3. **可观测性**：客户端直接看到 leader 变化，便于诊断。
-4. **公平性**：follower 不会因为"帮忙转发"而积压请求；集群流量直接体现真实路由。
-
-代价：客户端必须实现重定向逻辑——这正是 `rr-client` SDK 的核心职责。
-
----
-
-1. **Performance**: extra hop (client → follower → leader → follower → client) increases tail latency.
-2. **State**: the follower must hold the response; leader failure causes follower timeouts; client retries risk duplicate writes.
-3. **Observability**: clients see leader changes directly, easier to diagnose.
-4. **Fairness**: followers don't accumulate "helping" backlog; cluster traffic reflects true routing.
-
-Tradeoff: the client must implement redirect logic — this is exactly what the `rr-client` SDK is for.
-
-### 4. 幂等性 / Idempotency
-
-客户端重试**不是天然幂等**——但 rr **提供框架级幂等层**（ADR A-0003），应用可选择启用：
-
-- **客户端**：`send_request_idempotent(group_id, payload, IdempotencyKey::new(request_type, request_id))`（`rr-client`）。去重身份是 `(request_type, request_id)`；可选的 `client_id` 仅用于诊断。
-- **协议**：`ClientRequest.idem_key`（proto3 optional，v0.2.x 兼容——不带 key 的请求完全走旧路径）；`ClientResponse.idem_error` 携带 `{request_type, request_id, watermark}`。
-- **写路径**：`ClientDispatchImpl` 把带 key 的 payload 包成 `FramedEntry{version, offset, idem_key, payload}` 再提交 `client_write`（不带 key 则原样透传）。
-- **状态机侧**：`ServiceStateMachineAdapter` 内的 `IdempotencyLayer`（`rr-raft`）对每个 group 维护 **LRU 响应缓存 + 每 request_type 的 watermark**：缓存命中 → 直接返回首次 apply 的响应（Replay）；`request_id ≤ watermark` 且已被逐出缓存 → Expired；否则正常 apply 并记录。该层状态随快照一起 capture/restore，leader 切换后仍然有效。
-- **过期处理**：客户端收到 `idem_error` 后得到 `RrError::IdempotencyExpired{request_type, request_id, watermark}`——应选用大于 watermark 的新 request_id 重试。
-
-不带 key 的请求不做任何框架级去重——此时仍需应用层保证幂等（如 Put 的覆盖语义）。
-
----
-
-Client retries are **not naturally idempotent** — but rr **ships a framework-level idempotency layer** (ADR A-0003) that applications can opt into:
-
-- **Client**: `send_request_idempotent(group_id, payload, IdempotencyKey::new(request_type, request_id))` (`rr-client`). The dedup identity is `(request_type, request_id)`; the optional `client_id` is diagnostic-only.
-- **Protocol**: `ClientRequest.idem_key` (proto3 optional, v0.2.x compatible — unkeyed requests take the legacy path unchanged); `ClientResponse.idem_error` carries `{request_type, request_id, watermark}`.
-- **Write path**: `ClientDispatchImpl` wraps a keyed payload as `FramedEntry{version, offset, idem_key, payload}` before `client_write` (unkeyed payloads pass through verbatim).
-- **State machine side**: the `IdempotencyLayer` inside `ServiceStateMachineAdapter` (`rr-raft`) keeps a per-group **LRU response cache + per-request_type watermark**: cache hit → return the first apply's response (Replay); `request_id ≤ watermark` and already evicted → Expired; otherwise apply normally and record. The layer's state is captured/restored with snapshots, so it survives leader changes.
-- **Expiry**: on `idem_error` the client gets `RrError::IdempotencyExpired{request_type, request_id, watermark}` — it should retry with a fresh request_id above the watermark.
-
-Unkeyed requests get no framework dedup — the application must then ensure idempotency itself (e.g. Put's overwrite semantics).
-
-## 错误路径 / Failure Paths
-
-| At Step | Failure | Client Behavior |
+| 步骤 / Step | 失败 / Failure | 客户端行为 / Client Behavior |
 | :--- | :--- | :--- |
-| 1 (first RPC) | Connection refused | Try next bootstrap address |
-| 4 (redirect) | Leader address unreachable | Evict cache, fall back to bootstrap list |
-| 5 (retry to leader) | `ForwardToLeader` again (stale leader) | Update cache with new leader, retry (up to `max_retries`) |
-| 7 (client_write) | `RaftError::Timeout` on replication | Increment retry counter; may land on same leader again |
-| 8 (replication) | Only 1/3 nodes reply → no quorum → timeout | Leader eventually steps down; client sees timeout → retries trigger leader re-election cycle |
+| 首次 RPC / First RPC | 连接拒绝 / Connection refused | 尝试下一 bootstrap 地址 / Try the next bootstrap address |
+| 重定向 / Redirect | leader 地址不可达 / Leader unreachable | 删除缓存并回退 bootstrap / Evict cache and use bootstrap |
+| 重试 / Retry | 再次收到 `ForwardToLeader`。<br />Another `ForwardToLeader` redirect. | 更新缓存并在限额内重试 / Update cache and retry within the limit |
+| `client_write` | 复制超时 / Replication timeout | 按配置退避重试 / Back off and retry as configured |
+| 复制 / Replication | 不足 quorum / No quorum | 写入不提交；客户端超时后重试 / No commit; client retries after timeout |
 
 ## 相关 / Related
 
-- 分片路由细节：[dynamic-shard-routing.md](./dynamic-shard-routing.md)
-- Leader 故障处理：[dynamic-leader-election.md](./dynamic-leader-election.md)
-- 原有文档的叙述版本：[../data-flow.md#write-request-lifecycle](../data-flow.md)
+- [分片路由 / Shard routing](./dynamic-shard-routing.md)
+- [Leader 故障 / Leader failure](./dynamic-leader-election.md)
+- [数据流 / Data flow](../data-flow.md)

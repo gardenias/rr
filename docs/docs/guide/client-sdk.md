@@ -4,236 +4,106 @@ sidebar_position: 6
 
 # 客户端 SDK / Client SDK
 
-## 概述 / Overview
+Rust `rr-client` 和 `sdks/java` 中的 Java SDK 使用同一 gRPC 协议，负责 leader 发现、重试和连接管理。
+Rust `rr-client` and the Java SDK under `sdks/java` share the gRPC protocol and handle leader discovery, retries, and connection management.
 
-`RrClient` 为连接到 rr 集群提供了客户端 SDK。它位于 `rr-client` crate 中，负责处理领导者发现、领导者变更时的自动重试以及连接管理。
-此外，仓库还在 `sdks/java` 提供了 Java SDK（`io.github.gardenias:rr-client`），见下文 [Java SDK](#java-sdk) 一节。
+## Rust 连接与重试 / Rust Connection and Retries
 
----
-
-`RrClient` provides the client-side SDK for connecting to rr clusters. Located in the `rr-client` crate, it handles leader discovery, automatic retry on leader changes, and connection management.
-A Java SDK (`io.github.gardenias:rr-client`) also ships under `sdks/java` — see the [Java SDK](#java-sdk) section below.
-
-## 连接到集群 / Connecting to a Cluster
-
-你可以使用默认的重试配置或自定义配置来连接到集群。连接时需要提供一个或多个引导地址（bootstrap addresses）。
-
----
-
-You can connect to a cluster using either the default retry configuration or a custom one. One or more bootstrap addresses must be provided during connection.
+提供一个或多个引导地址。默认重试 3 次、基础延迟 100 ms，采用带抖动的指数退避。
+Provide one or more bootstrap addresses. Defaults are three retries and a 100 ms base delay with jittered exponential backoff.
 
 ```rust
-use rr_client::{RrClient, RetryConfig};
+use rr_client::{RetryConfig, RrClient};
 
-// 使用默认重试配置连接 / Connect with default retry config
 let client = RrClient::connect(vec!["127.0.0.1:51001".to_string()]).await?;
 
-// 使用自定义重试配置连接 / Connect with custom retry config
 let client = RrClient::connect_with_config(
     vec!["127.0.0.1:51001".to_string()],
-    RetryConfig { 
-        max_retries: 5, 
-        retry_delay_ms: 200 
+    RetryConfig {
+        max_retries: 5,
+        retry_delay_ms: 200,
     },
 ).await?;
 ```
 
-## 重试配置 / RetryConfig
+TLS 与 mTLS、bearer token、严格安全检查、单次尝试超时和连接扇出通过 `RrClientBuilder` 配置。bearer token 应与 TLS 一起使用。
+Configure TLS/mTLS, bearer authentication, strict security, per-attempt timeout, and channel fanout through `RrClientBuilder`. Use bearer tokens together with TLS.
 
-`RetryConfig` 结构体用于控制发生暂时性错误或领导者重定向时的重试行为。
+## 请求与读取 / Requests and Reads
 
----
-
-The `RetryConfig` struct controls retry behavior during transient failures or leader redirects.
-
-- `max_retries: u32` — 返回错误前的最大重试次数（默认值：3）。
-- `retry_delay_ms: u64` — 重试之间的基础延迟，单位为毫秒。重试采用指数退避策略，每次尝试延迟会翻倍（默认值：100）。
-
----
-
-- `max_retries: u32` — Maximum number of retry attempts before returning an error (default: 3).
-- `retry_delay_ms: u64` — Base delay between retries in milliseconds. It uses an exponential backoff strategy, doubling the delay each attempt (default: 100).
-
-## 发送请求 / Sending Requests
-
-`RrClient` 提供了多种发送请求的方法。通常，你需要先将请求编码为字节向量（如使用 `bincode`）。
-
----
-
-`RrClient` provides several methods for sending requests. Typically, you need to encode your request into a byte vector first (e.g., using `bincode`).
-
-- `send_request(group_id, payload)` — 向特定的 Raft 组发送请求。
-- `send_request_with_partition(partition_id, payload)` — 根据分区 ID 路由请求（目前与 `group_id` 1:1 映射）。
-
----
-
-- `send_request(group_id, payload)` — Send a request to a specific Raft group.
-- `send_request_with_partition(partition_id, payload)` — Route a request by partition ID (currently maps 1:1 to `group_id`).
-
-### 代码示例 / Code Example
+负载是服务定义的字节格式。`kv-store` 使用 bincode v2：
+Payloads use the service-defined byte format. `kv-store` uses bincode v2:
 
 ```rust
-// 编码请求 / Encode request
-let request = KvRequest::Put { key: "hello".to_string(), value: b"world".to_vec() };
+let request = KvRequest::Put {
+    key: "hello".to_string(),
+    value: b"world".to_vec(),
+};
 let payload = bincode::serde::encode_to_vec(&request, bincode::config::standard())?;
-
-// 发送到组 1 / Send to group 1
-let response_bytes = client.send_request(1, payload).await?;
-
-// 解码响应 / Decode response
-let (response, _): (KvResponse, _) = bincode::serde::decode_from_slice(&response_bytes, bincode::config::standard())?;
+let response = client.send_request(1, payload).await?;
+let (response, _): (KvResponse, _) =
+    bincode::serde::decode_from_slice(&response, bincode::config::standard())?;
 ```
 
-### 读取路径 / Read Paths
+- `send_request(group_id, payload)`：向指定组写入。<br />Write to a specific group.
+- `send_request_with_partition(partition_id, payload)`：当前实现直接把 `partition_id` 作为 `group_id` 调用 `send_request`，不查询分区映射；通用 `RoutingTable` 仍允许多个分区映射到同一组。<br />The current implementation passes `partition_id` directly as `group_id` to `send_request` without a partition lookup; the general `RoutingTable` still allows multiple partitions to map to one group.
+- `send_request_idempotent(group_id, payload, key)`：携带幂等键，重试时由框架去重。<br />Attach a key for framework deduplication across retries.
+- `read(group_id, payload)`：本地读，可能过期。<br />Local, potentially stale read.
+- `read_linearizable(group_id, payload)`：通过 ReadIndex 线性一致读。<br />Linearizable read through ReadIndex.
 
-除了写入用的 `send_request`，`RrClient` 还提供两种读取 API：
+写或线性一致读落到 follower 时，服务端返回 leader 提示而不转发；客户端更新缓存并重试。最终拒绝或重试耗尽会向调用方返回错误。
+When a write or linearizable read reaches a follower, the server returns a leader hint instead of proxying. The client updates its cache and retries; final rejection or exhausted retries returns an error.
 
-- `read(group_id, payload)` — 本地/过期读（stale read）：由任一副本直接应答，不经过 Raft 共识，延迟最低，但数据可能略落后于最新已提交的写入。
-- `read_linearizable(group_id, payload)` — 线性一致读：服务端通过 Raft ReadIndex 确认提交进度后再应答；若打到 follower 会自动重定向到 leader 并重试。
+```rust
+let cluster_info = client.get_cluster_info().await?;
+println!("Groups: {:?}", cluster_info.groups);
+```
 
----
+`GetClusterInfo` 返回运行时拓扑；选举期间 `leader_node_id` 为 0。正常写路由使用 `leader_info`，不依赖该查询。
+`GetClusterInfo` returns runtime topology, with `leader_node_id = 0` during elections. Normal write routing uses `leader_info`, not this query.
 
-Besides `send_request` for writes, `RrClient` offers two read APIs:
+## 客户端写批处理 / Client Write Batching
 
-- `read(group_id, payload)` — stale/local read: served directly by any replica without Raft consensus; lowest latency, but the data may lag slightly behind the latest committed write.
-- `read_linearizable(group_id, payload)` — linearizable read: the server confirms the commit index via Raft ReadIndex before answering; follower redirects to the leader are retried automatically.
-
-## 写批处理 / Client Write Batching（opt-in）
-
-:::warning 未发布特性 / Unreleased — 随 v0.3.0 落地 / lands in v0.3.0
-客户端批处理**尚未发布**：当前 release（v0.2.x）不包含该 API，且即使发布后也**默认关闭**。
-重试语义须知：批处理只承载**不带幂等键**的写，批次在客户端重试（leader 重定向、网络抖动）
-时可能被**重复应用**——unkeyed 写不具备幂等性。因此它只适用于按业务键天然幂等的工作负载；
-需要恰好一次语义的写请使用 `send_request_idempotent`（始终绕过批处理）。
-
-Client batching is **unreleased** (lands in v0.3.0): current releases (v0.2.x)
-do not carry this API, and it stays **off by default** once shipped. Retry
-semantics: batches carry only **unkeyed** writes, so a retried batch (leader
-redirect, network flake) can be **applied twice** — unkeyed writes are
-non-idempotent. It suits workloads that are idempotent by business key; writes
-needing exactly-once semantics must use `send_request_idempotent` (which
-always bypasses the batcher).
+:::warning 未发布特性 / Unreleased Feature
+该 API 不在 v0.2.x 中，计划随 v0.3.0 提供且默认关闭。只批处理无幂等键的写；批次重试可能重复应用，需要恰好一次效果时使用 `send_request_idempotent`，它会绕过批处理。
+This API is absent from v0.2.x, planned for v0.3.0, and off by default. It batches only unkeyed writes, which may be applied again after a retry. Use `send_request_idempotent` for exactly-once apply; it bypasses batching.
 :::
 
-`RrClientBuilder::with_batching(BatchConfig)` 开启 Kafka-producer 式写批处理（**默认关闭**）。
-开启后，未带幂等键的 `send_request` 先按 partition 进入客户端缓冲，满足任一条件即整批
-作为**一条 Raft entry** 提交：攒够 `max_entries` 条、或累计 `max_bytes` 字节、或首条入队后
-等待满 `linger`。apply 侧把批帧逐条拆开调用 `Service::handle`，响应按序打包回客户端，
-每个等待者拿到自己的响应。带幂等键的写（`send_request_idempotent`）始终绕过批处理。
+`RrClientBuilder::with_batching(BatchConfig)` 按分区缓冲写，在条数、字节数或 linger 达到阈值时将整批作为一条 Raft entry 提交。apply 侧逐条调用 `Service::handle` 并按序返回响应。
+`RrClientBuilder::with_batching(BatchConfig)` buffers writes per partition and commits a batch as one Raft entry when its entry count, byte size, or linger threshold is reached. Apply calls `Service::handle` for each item and returns responses in order.
 
 ```rust
 let client = RrClientBuilder::new(addrs)
     .with_batching(rr_client::BatchConfig {
-        max_entries: 64,                       // 批大小（条数）
-        max_bytes: 1 << 20,                    // 批大小（字节）
-        linger: std::time::Duration::from_millis(5), // 时间限制（linger.ms）
-        max_buffered: 8192,                    // 缓冲上限——超限立即报错（背压）
+        max_entries: 64,
+        max_bytes: 1 << 20,
+        linger: std::time::Duration::from_millis(5),
+        max_buffered: 8192,
     })
     .build()
     .await?;
 ```
 
-- 收益（S2 k=200、128B、64 条/批、linger 1ms 实测）：**175.2k TPS vs ~29k（6×）**，p99 2.4ms。
-- 代价：串行写要付 linger（S1 p50 161µs → ~3.1ms）。**延迟敏感的串行写场景请保持关闭**。
-- 兼容性：需要服务端框架带批帧拆分（v0.3.0 起）；对旧服务端开启会在首个批次响亮报错
-  （绝不假成功）。与 A-0033 deferred（两阶段）apply 的服务不兼容。
-- 背压：缓冲总量超过 `max_buffered` 时 `send_request` 立即返回错误，由调用方降速/重试。
+缓冲超过 `max_buffered` 时立即报错，由调用方降速或稍后重试。串行低延迟写应保持关闭。服务端必须支持批帧拆分；旧服务端和 A-0033 deferred apply 服务不兼容。
+Exceeding `max_buffered` fails immediately so the caller can slow down or retry. Keep batching off for latency-sensitive serial writes. Servers must support batch-frame splitting; older servers and A-0033 deferred-apply services are incompatible.
 
----
+## 常见错误 / Common Errors
 
-`RrClientBuilder::with_batching(BatchConfig)` enables Kafka-producer-style write batching
-(**off by default**). Unkeyed `send_request` writes accumulate per partition and flush as
-**one Raft entry** when `max_entries` / `max_bytes` is reached or `linger` elapses; the
-apply side splits the batch frame and calls `Service::handle` per item, packing responses
-positionally. Idempotency-keyed writes always bypass the batcher. Measured gain: 6×
-throughput on concurrent writes; cost: serial writes pay the linger — keep it off for
-latency-bound callers. Requires servers with batch-aware apply; incompatible with deferred
-(A-0033) services; `max_buffered` caps memory with fail-fast backpressure.
+| 错误 / Error | 含义与处理 / Meaning and Action |
+| :--- | :--- |
+| `NetworkError::ConnectionFailed` | 地址或网络不可用；检查端点后重试 / Address or network unavailable; check endpoints and retry |
+| `NetworkError::RpcFailed` | gRPC 调用失败 / gRPC call failed |
+| `NetworkError::RpcRejected` | 确定性拒绝，保留 gRPC code；修正认证或请求 / Deterministic rejection with gRPC code; fix authentication or request |
+| `RaftError::NotLeader` | 非 leader；通常由 SDK 重定向 / Not leader; normally redirected by the SDK |
+| `RouterError::PartitionNotFound` | 路由表没有该分区 / Partition absent from the routing table |
+| `RrError::IdempotencyExpired` | 幂等响应已淘汰且 ID 低于水位；分配新 ID / Cached response evicted and ID expired; allocate a fresh ID |
 
-## 自动领导者重定向 / Auto Leader Redirect
+## Java SDK 安装 / Java SDK Installation
 
-`RrClient` 实现了透明的领导者重定向逻辑：
-
-1. 当客户端向非领导者节点发送请求时，节点会返回包含当前已知领导者信息的错误。
-2. `RrClient` 捕获此错误，自动更新其内部的领导者缓存。
-3. 客户端随后向真实的领导者重新发送请求。
-4. 这种机制对调用者是完全透明的，你只需调用 `send_request()`。
-
----
-
-`RrClient` implements transparent leader redirect logic:
-
-1. When a client sends a request to a non-leader node, the node returns an error containing the current known leader's information.
-2. `RrClient` catches this error and automatically updates its internal leader cache.
-3. The client then retries the request to the actual leader.
-4. This mechanism is completely transparent to the caller — you just use `send_request()`.
-
-## 集群信息 / Cluster Info
-
-你可以使用 `get_cluster_info()` 获取集群的组列表。它会尝试连接引导地址，直到有一个节点响应。
-
----
-
-You can use `get_cluster_info()` to retrieve the cluster's group list. It attempts to connect to the bootstrap addresses until one node responds.
-
-```rust
-let cluster_info = client.get_cluster_info().await?;
-println!("Groups in cluster: {:?}", cluster_info.groups);
-```
-
-:::info
-`GetClusterInfo` 返回真实运行时拓扑（`leader_node_id` 来自 raft metrics，选主窗口期为 `0`——0 不是合法 NodeId；`replica_node_ids` 为完整成员集）。
-
-`GetClusterInfo` returns real runtime topology (`leader_node_id` comes from raft metrics and is `0` mid-election — 0 is not a valid NodeId; `replica_node_ids` is the full membership).
-:::
-
-## 错误处理 / Error Handling
-
-客户端在交互过程中可能会遇到以下常见的 `RrError` 变体：
-
----
-
-Clients may encounter the following common `RrError` variants during interaction:
-
-- `RrError::Network(NetworkError::ConnectionFailed)` — 无法连接到节点（如网络断开或地址错误）。
-- `RrError::Network(NetworkError::RpcFailed)` — gRPC 调用失败。
-- `RrError::Raft(RaftError::NotLeader)` — 目标不是领导者（通常由 `RrClient` 内部处理）。
-- `RrError::Router(RouterError::PartitionNotFound)` — 路由表中找不到请求的分区 ID。
-
----
-
-- `RrError::Network(NetworkError::ConnectionFailed)` — Failed to connect to a node (e.g., network down or wrong address).
-- `RrError::Network(NetworkError::RpcFailed)` — gRPC call failed.
-- `RrError::Raft(RaftError::NotLeader)` — Target is not the leader (usually handled internally by `RrClient`).
-- `RrError::Router(RouterError::PartitionNotFound)` — Partition ID not found in the routing table.
-
-## Java SDK
-
-仓库在 `sdks/java` 提供了一个 Java SDK（Gradle 构建，需 JDK 17+）。它与 Rust 客户端使用同一套 gRPC wire 协议
-（proto 直接取自 `crates/rr-network/proto`），API 覆盖核心能力：领导者发现与自动重定向、指数退避重试、
-TLS/mTLS、bearer 认证、幂等键写入、线性一致读与 Micrometer 指标。
-
----
-
-The repository ships a Java SDK under `sdks/java` (Gradle build, requires JDK 17+). It speaks the same gRPC
-wire protocol as the Rust client (protos are sourced directly from `crates/rr-network/proto`) and covers the
-core capabilities: leader discovery with automatic redirect, exponential-backoff retry, TLS/mTLS, bearer auth,
-idempotency-keyed writes, linearizable reads, and Micrometer metrics.
-
-### 安装 / Install
-
-构件坐标为 `io.github.gardenias:rr-client`（当前版本 `0.2.0`，以 `sdks/java/gradle.properties` 的
-`sdkVersion` 为准）。它**发布在 GitHub Packages，未发布到 Maven Central**；读取 GitHub Packages 上的构件
-需要 GitHub 凭证：
-
----
-
-The artifact coordinates are `io.github.gardenias:rr-client` (current version `0.2.0`; see `sdkVersion` in
-`sdks/java/gradle.properties`). It is **published to GitHub Packages, not Maven Central**; reading artifacts
-from GitHub Packages requires GitHub credentials:
+Java SDK 需要 JDK 17+。构件为 `io.github.gardenias:rr-client:0.2.0`，发布在 GitHub Packages 而非 Maven Central，读取需要 GitHub 凭证。
+The Java SDK requires JDK 17+. Artifact `io.github.gardenias:rr-client:0.2.0` is published to GitHub Packages, not Maven Central, and requires GitHub credentials to read.
 
 ```kotlin
-// Gradle (Kotlin DSL)
 repositories {
     maven {
         url = uri("https://maven.pkg.github.com/gardenias/rr")
@@ -250,7 +120,6 @@ dependencies {
 ```
 
 ```xml
-<!-- Maven -->
 <dependency>
   <groupId>io.github.gardenias</groupId>
   <artifactId>rr-client</artifactId>
@@ -258,151 +127,70 @@ dependencies {
 </dependency>
 ```
 
-也可以从源码构建并发布到本机 Maven Local（`~/.m2`），然后在消费方使用 `mavenLocal()`：
-
----
-
-Alternatively, build from source and publish to the local Maven repository (`~/.m2`), then consume it via
-`mavenLocal()`:
+也可从源码发布到 Maven Local，并在消费方启用 `mavenLocal()`：
+Alternatively, publish from source to Maven Local and enable `mavenLocal()` in the consumer:
 
 ```bash
-just java-publish-local   # 等价于 / equivalent to: cd sdks/java && ./gradlew publishToMavenLocal
+just java-publish-local
 ```
 
-### 快速上手 / Quick start
+## Java 快速上手 / Java Quick Start
 
-SDK 传输的是不透明字节负载（编解码由服务的 wire 格式决定）。最小示例——连接、写入、线性一致读：
-
----
-
-The SDK transports opaque byte payloads (encoding is defined by the service's wire format). A minimal
-example — connect, write, linearizable read:
+SDK 传输不透明字节；以下负载必须与目标服务的协议一致。
+The SDK transports opaque bytes; these payloads must match the target service's protocol.
 
 ```java
 import io.github.gardenias.rr.client.RrClient;
-
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
-public class QuickStart {
-    public static void main(String[] args) {
-        RrClient client = RrClient.connect(List.of("127.0.0.1:51001")).join();
-
-        byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
-        byte[] response = client.sendRequest(1L, payload).join();        // 写入 / write
-        byte[] value = client.readLinearizable(1L, payload).join();      // 线性一致读 / linearizable read
-        System.out.println("got " + value.length + " bytes");
-
-        client.close();
-    }
-}
+RrClient client = RrClient.connect(List.of("127.0.0.1:51001")).join();
+byte[] payload = "hello".getBytes(StandardCharsets.UTF_8);
+byte[] response = client.sendRequest(1L, payload).join();
+byte[] value = client.readLinearizable(1L, payload).join();
+client.close();
 ```
 
-所有响应式方法返回 `CompletableFuture`（I/O 由 Netty 事件循环驱动，不占用线程）；每个方法都有对应的
-阻塞变体（`sendRequestSync`、`readSync`、`readLinearizableSync`、`getClusterInfoSync`）。TLS、bearer 认证、
-请求超时与重试策略通过 `RrClientBuilder` 配置；幂等写入使用 `sendRequestIdempotent(groupId, payload,
-IdempotencyKey)`。完整 API 示例见 [Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md)
-与[响应式使用手册](https://github.com/gardenias/rr/blob/main/sdks/java/docs/reactive-guide.md)。
+响应式方法返回 `CompletableFuture`，另有 `sendRequestSync`、`readSync`、`readLinearizableSync` 和 `getClusterInfoSync` 阻塞变体。TLS、认证、超时和重试通过 `RrClientBuilder` 配置；幂等写使用 `sendRequestIdempotent(groupId, payload, IdempotencyKey)`。
+Reactive methods return `CompletableFuture`, with `sendRequestSync`, `readSync`, `readLinearizableSync`, and `getClusterInfoSync` blocking variants. Configure TLS, authentication, timeouts, and retries through `RrClientBuilder`; use `sendRequestIdempotent(groupId, payload, IdempotencyKey)` for keyed writes.
 
----
+完整示例见 [Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md) 和 [响应式使用手册](https://github.com/gardenias/rr/blob/main/sdks/java/docs/reactive-guide.md)。
+See the [Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md) and [reactive guide](https://github.com/gardenias/rr/blob/main/sdks/java/docs/reactive-guide.md) for complete examples.
 
-All reactive methods return `CompletableFuture` (I/O is driven by Netty's event loop — no thread is blocked);
-each has a blocking counterpart (`sendRequestSync`, `readSync`, `readLinearizableSync`, `getClusterInfoSync`).
-TLS, bearer auth, request timeout, and retry policy are configured via `RrClientBuilder`; idempotent writes
-use `sendRequestIdempotent(groupId, payload, IdempotencyKey)`. For the full API see the
-[Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/README.md) and the
-[reactive usage guide](https://github.com/gardenias/rr/blob/main/sdks/java/docs/reactive-guide.md).
+## 能力对照 / Capability Comparison
 
-### 能力对照 / Capability Comparison
-
-以下每一行均已对照两侧源码核实（Rust：`crates/rr-client`；Java：`sdks/java`）：
-
----
-
-Every row below is verified against the sources on both sides (Rust: `crates/rr-client`; Java: `sdks/java`):
-
-| 能力 / Capability | Rust `rr-client` | Java SDK |
+| 能力 / Capability | Rust | Java |
 | :--- | :--- | :--- |
-| 领导者发现与重定向 / Leader discovery & redirect | ✅ leader 缓存 + 自动重试 | ✅ LeaderCache + 自动重试 |
-| 指数退避重试（含抖动）/ Exponential-backoff retry (jittered) | ✅ 默认 3 次 / 100ms | ✅ 默认 3 次 / 100ms |
-| 单次尝试超时 / Per-attempt request timeout | ✅ `with_request_timeout` | ✅ `withRequestTimeout` |
-| TLS / mTLS | ✅ `with_tls` | ✅ `withTls` + `TlsConfig` |
-| Bearer token 认证 / Bearer-token auth | ✅ `with_bearer_token` | ✅ `withBearerToken` |
-| 严格安全检查 / Strict-security check | ✅ `with_strict_security` | ✅ `withStrictSecurity` |
-| 幂等键写入 / Idempotency-keyed writes | ✅ `send_request_idempotent` | ✅ `sendRequestIdempotent` |
-| 本地（过期）读 / Stale (local) read | ✅ `read` | ✅ `read` |
-| 线性一致读 / Linearizable read (ReadIndex) | ✅ `read_linearizable` | ✅ `readLinearizable` |
-| 集群拓扑查询 / Cluster info | ✅ `get_cluster_info` | ✅ `getClusterInfo` |
-| 客户端写批处理 / Client-side write batching | ✅ `with_batching`（未发布，随 v0.3.0 落地，默认关闭） | ❌ 无 |
-| 连接扇出 / Channel fanout | ✅ `with_channel_fanout` | ❌ 每个地址仅一条 channel |
-| 指标 / Metrics | ✅ `metrics` crate 计数器/直方图 | ✅ Micrometer（`rr.client.*`） |
-| 异步/阻塞双 API / Async + blocking APIs | ✅ async / `*_blocking` / `*_reactive` | ✅ `CompletableFuture` / `*Sync` |
+| leader 发现与重定向 / Leader discovery and redirect | `RrClient` | `RrClient` |
+| 超时、TLS、认证 / Timeout, TLS, authentication | `RrClientBuilder` | `RrClientBuilder` |
+| 幂等写 / Idempotent writes | `send_request_idempotent` | `sendRequestIdempotent` |
+| 本地读与线性一致读 / Local and linearizable reads | `read`, `read_linearizable` | `read`, `readLinearizable` |
+| 异步与阻塞 API / Async and blocking APIs | async, `*_blocking`, `*_reactive` | `CompletableFuture`, `*Sync` |
+| 指标 / Metrics | `metrics` crate | Micrometer `rr.client.*` |
+| 写批处理 / Write batching | `with_batching`，未发布 / `with_batching`, unreleased | 不支持 / Not available |
+| 连接扇出 / Channel fanout | `with_channel_fanout` | 每地址一条 channel / One channel per address |
 
-### 与 Rust 客户端的差距 / Gaps vs the Rust Client
+Java 的 `CompletableFuture` 并发组合不是写合并；不要把响应式手册中的批量请求等同于 Rust 写批处理。
+Java `CompletableFuture` composition is not write coalescing; concurrent requests in the reactive guide are not equivalent to Rust write batching.
 
-Java SDK 目前缺少以下 Rust 客户端能力（差距已被跟踪，但尚未排期，不承诺时间）：
+## rr-admin REPL / rr-admin REPL
 
----
-
-The Java SDK currently lacks the following Rust client capabilities (parity is tracked but not scheduled —
-no dates are promised):
-
-- **客户端写批处理 / Client-side write batching** — Rust 的 `RrClientBuilder::with_batching(BatchConfig)`
-  （`crates/rr-client/src/batch.rs`）可把多条无幂等键的写合并为一条 Raft entry；Java 的每个 `sendRequest`
-  都是一次独立 RPC。注意：Java 响应式手册中的"并发批量请求"指的是 `CompletableFuture` 并发组合，
-  并非写合并。Rust 侧该特性本身也尚未发布（随 v0.3.0 落地且默认关闭，见上文"写批处理"一节）。
-- **连接扇出 / Channel fanout** — Rust 的 `with_channel_fanout(n)` 对同一地址维持多条 H2 连接并轮询，
-  以并行化服务端连接任务的串行瓶颈；Java 每个地址只建立一条 `ManagedChannel`。
-
----
-
-- **Client-side write batching** — Rust's `RrClientBuilder::with_batching(BatchConfig)`
-  (`crates/rr-client/src/batch.rs`) merges multiple unkeyed writes into one Raft entry; in Java every
-  `sendRequest` is its own RPC. Note: the Java reactive guide's "concurrent batch requests" section is
-  `CompletableFuture` fan-in composition, not write coalescing. On the Rust side this feature is itself
-  unreleased (lands in v0.3.0, off by default — see the "Client Write Batching" section above).
-- **Channel fanout** — Rust's `with_channel_fanout(n)` keeps `n` H2 connections per address and
-  round-robins across them, parallelizing the server-side connection-task bottleneck; Java opens one
-  `ManagedChannel` per address.
-
----
-
-## rr-admin repl 交互式输入 / rr-admin Interactive REPL
-
-`rr-admin repl` 提供了一个交互式命令行界面，可直接对使用 kv-store wire 格式的集群进行临时测试和调试。
-它支持 readline 历史（方向键 + Ctrl+R）和标准终端编辑功能。
-
----
-
-`rr-admin repl` provides an interactive command-line interface for ad-hoc testing and debugging
-clusters that use the kv-store wire format. It supports readline history (arrow keys, Ctrl+R)
-and standard terminal editing.
-
-### 启动 REPL / Launching the REPL
+REPL 直接测试使用 kv-store bincode wire 格式的服务。默认客户端地址是 `127.0.0.1:51001`，可显式指定地址和组：
+The REPL tests services using the kv-store bincode wire format. Its default client address is `127.0.0.1:51001`; address and group can be set explicitly:
 
 ```bash
-# 连接默认地址和组 / Connect to default address and group
 rr-admin repl
-
-# 指定地址和组 / Specify address and group
-rr-admin repl --addr 127.0.0.1:52001 --group 1
+rr-admin repl --addr 127.0.0.1:51001 --group 1
 ```
 
-### 支持的命令 / Supported Commands
-
-| 命令 / Command | 说明 / Description |
+| 命令 / Command | 行为 / Behavior |
 | :--- | :--- |
-| `get <key>` | 读取一个键的值 / Fetch a value by key |
-| `put <key> <value>` | 写入一个键值对 / Write a key-value pair |
-| `delete <key>` | 删除一个键 / Delete a key |
-| `status` | 显示节点状态（通过 Admin RPC）/ Show node status (via Admin RPC) |
-| `members` | 显示组成员信息（通过 Admin RPC）/ Show group membership (via Admin RPC) |
-| `help` | 显示帮助信息 / Show help |
+| `get <key>` | 读取键 / Read a key |
+| `put <key> <value>` | 写入键值 / Write a key-value pair |
+| `delete <key>` | 删除键 / Delete a key |
+| `status` | 通过 Admin RPC 查询状态 / Query status through Admin RPC |
+| `members` | 通过 Admin RPC 查询成员 / Query membership through Admin RPC |
+| `help` | 显示帮助 / Show help |
 
-:::note
-REPL 的 `get`/`put`/`delete` 命令使用 kv-store wire 格式（bincode 编码的 `KvRequest`/`KvResponse`）。
-This means the REPL is specifically designed for services using the kv-store wire format.
-
-`get`/`put`/`delete` use kv-store wire format (bincode-encoded `KvRequest`/`KvResponse`).
-:::
-
+KV 命令使用客户端端口，不是 Admin 端口。REPL 只有收到 `success=true` 才打印 `OK`；其他服务若没有相同 wire 格式，不能使用这些 KV 命令。
+KV commands use the client port, not the Admin port. The REPL prints `OK` only after `success=true`; services without the same wire format cannot use these KV commands.

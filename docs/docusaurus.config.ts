@@ -1,39 +1,37 @@
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
-
-// This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
+import remarkBilingual from './src/remark/bilingual';
 
 const config: Config = {
-  title: 'rr Framework',
-  tagline: 'Distributed Multi-Raft Consensus Framework for Rust',
+  title: 'Rr — Rust Raft Framework',
+  tagline: 'Production-grade Multi-Raft for Rust',
   favicon: 'img/favicon.ico',
 
-  // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
-    v4: true, // Improve compatibility with the upcoming Docusaurus v4
+    v4: true,
   },
 
-  // Set the production url of your site here
   url: 'https://rr-framework.github.io',
-  // Set the /<baseUrl>/ pathname under which your site is served
-  // For GitHub pages deployment, it is often '/<projectName>/'
   baseUrl: '/',
 
-  // GitHub pages deployment config.
-  // If you aren't using GitHub pages, you don't need these.
-  organizationName: 'rr-framework', // Usually your GitHub org/user name.
-  projectName: 'rr', // Usually your repo name.
+  organizationName: 'rr-framework',
+  projectName: 'rr',
 
-  onBrokenLinks: 'warn',
+  onBrokenLinks: 'throw',
 
-  // Even if you don't use internationalization, you can use this field to set
-  // useful metadata like html lang. For example, if your site is Chinese, you
-  // may want to replace "en" with "zh-Hans".
   i18n: {
     defaultLocale: 'en',
     locales: ['en'],
   },
+
+  headTags: [
+    {
+      tagName: 'script',
+      attributes: {},
+      innerHTML: `(function(){var mode='both';try{var saved=localStorage.getItem('rr-docs-language-mode');if(saved==='zh'||saved==='en'||saved==='both'){mode=saved;}}catch{}document.documentElement.dataset.languageMode=mode;})();`,
+    },
+  ],
 
   presets: [
     [
@@ -41,7 +39,8 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          routeBasePath: '/',
+          routeBasePath: 'docs',
+          beforeDefaultRemarkPlugins: [remarkBilingual],
         },
         blog: false,
         theme: {
@@ -51,30 +50,65 @@ const config: Config = {
     ],
   ],
 
+  plugins: [
+    [
+      '@docusaurus/plugin-client-redirects',
+      {
+        createRedirects(existingPath) {
+          if (existingPath.startsWith('/docs/')) {
+            const legacyPath = existingPath.replace(/^\/docs\//, '/');
+            return legacyPath === '/' ? undefined : legacyPath;
+          }
+          return undefined;
+        },
+      },
+    ],
+  ],
+
   themeConfig: {
-    // Replace with your project's social card
-    image: 'img/docusaurus-social-card.jpg',
+    image: 'img/rr-social-card.png',
+    metadata: [
+      {
+        name: 'description',
+        content:
+          'Build production-grade distributed systems with multi-Raft consensus, sharding, client SDKs, and operational tooling for Rust.',
+      },
+    ],
     colorMode: {
+      defaultMode: 'dark',
       respectPrefersColorScheme: true,
     },
     navbar: {
-      title: 'rr Framework',
       logo: {
-        alt: 'My Site Logo',
-        src: 'img/logo.svg',
+        alt: 'Rr — Rust Raft Framework',
+        src: 'img/rr-wordmark-light.svg',
+        srcDark: 'img/rr-wordmark-dark.svg',
       },
       items: [
         {
-          type: 'docSidebar',
-          sidebarId: 'tutorialSidebar',
+          to: '/docs',
           position: 'left',
-          label: 'Documentation',
+          label: '文档 / Docs',
         },
-
+        {
+          to: '/docs/architecture/overview',
+          position: 'left',
+          label: '架构 / Architecture',
+        },
+        {
+          to: '/docs/reference/api-overview',
+          position: 'left',
+          label: 'API 参考 / API Reference',
+        },
+        {
+          type: 'custom-languageModeSwitcher',
+          position: 'right',
+        },
         {
           href: 'https://github.com/rr-framework/rr',
-          label: 'GitHub',
           position: 'right',
+          className: 'header-github-link',
+          'aria-label': 'rr on GitHub',
         },
       ],
     },
@@ -82,46 +116,43 @@ const config: Config = {
       style: 'dark',
       links: [
         {
-          title: 'Docs',
+          title: 'Learn',
           items: [
-            {
-              label: 'Tutorial',
-              to: '/',
-            },
+            {label: 'Getting started', to: '/docs/guide/getting-started'},
+            {label: 'Architecture', to: '/docs/architecture/overview'},
+            {label: 'C4 diagrams', to: '/docs/architecture/c4'},
           ],
         },
         {
-          title: 'Community',
+          title: 'Build',
           items: [
-            {
-              label: 'Stack Overflow',
-              href: 'https://stackoverflow.com/questions/tagged/docusaurus',
-            },
-            {
-              label: 'Discord',
-              href: 'https://discordapp.com/invite/docusaurus',
-            },
-            {
-              label: 'X',
-              href: 'https://x.com/docusaurus',
-            },
+            {label: 'Service trait', to: '/docs/guide/service-trait'},
+            {label: 'Client SDK', to: '/docs/guide/client-sdk'},
+            {label: 'API reference', to: '/docs/reference/api-overview'},
           ],
         },
         {
-          title: 'More',
+          title: 'Operate',
           items: [
-            {
-              label: 'GitHub',
-              href: 'https://github.com/rr-framework/rr',
-            },
+            {label: 'Deployment', to: '/docs/deployment'},
+            {label: 'Observability', to: '/docs/reference/metrics-reference'},
+            {label: 'Runbooks', to: '/docs/operations/runbooks/leader-flapping'},
+          ],
+        },
+        {
+          title: 'Project',
+          items: [
+            {label: 'GitHub', href: 'https://github.com/rr-framework/rr'},
+            {label: 'FAQ', to: '/docs/faq'},
+            {label: 'Compatibility', to: '/docs/reference/compatibility'},
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} rr Framework. Built with Docusaurus.`,
+      copyright: `Copyright © ${new Date().getFullYear()} Rr contributors. Built for reliable distributed systems.`,
     },
     prism: {
       theme: prismThemes.github,
-      darkTheme: prismThemes.dracula,
+      darkTheme: prismThemes.oneDark,
     },
   } satisfies Preset.ThemeConfig,
 };

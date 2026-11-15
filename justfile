@@ -10,6 +10,7 @@ RR_DOCKER_HOST := env_var_or_default("RR_DOCKER_HOST", env_var_or_default("DOCKE
 KV_BASE_PORT := env_var_or_default("RR_KV_BASE_PORT", "53101")
 GENESIS_BASE_PORT := env_var_or_default("RR_GENESIS_BASE_PORT", "53201")
 JAVA_DIR := ROOT / "sdks/java"
+DOCS_PORT := env_var_or_default("DOCS_PORT", "3000")
 
 default:
     @just --list
@@ -81,11 +82,22 @@ clean-target-just:
     fi
 
 [group("docs")]
+docs-fix-page PAGE WRITE="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{WRITE}}" in
+      "") npm --prefix "{{ROOT}}/docs" run fix-bilingual-page -- "{{PAGE}}" ;;
+      "--write") npm --prefix "{{ROOT}}/docs" run fix-bilingual-page -- "{{PAGE}}" --write ;;
+      *) echo "usage: just docs-fix-page <page> [--write]" >&2; exit 2 ;;
+    esac
+
+[group("docs")]
 docs-build:
     #!/usr/bin/env bash
     set -euo pipefail
     command -v npm >/dev/null || { echo "npm is required for docs-build" >&2; exit 1; }
     [[ -d "{{ROOT}}/docs/node_modules" ]] || { echo "docs/node_modules is missing; run npm --prefix docs ci first" >&2; exit 1; }
+    npm --prefix "{{ROOT}}/docs" run diagrams
     npm --prefix "{{ROOT}}/docs" run build
 
 [group("docs")]
@@ -94,7 +106,8 @@ docs-serve:
     set -euo pipefail
     command -v npm >/dev/null || { echo "npm is required for docs-serve" >&2; exit 1; }
     [[ -d "{{ROOT}}/docs/node_modules" ]] || { echo "docs/node_modules is missing; run npm --prefix docs ci first" >&2; exit 1; }
-    npm --prefix "{{ROOT}}/docs" run start
+    npm --prefix "{{ROOT}}/docs" run diagrams
+    npm --prefix "{{ROOT}}/docs" run start -- --port "{{DOCS_PORT}}"
 
 [group("deploy")]
 helm-test:

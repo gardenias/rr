@@ -2,13 +2,14 @@
 sidebar_position: 7
 ---
 
-# Deployment — 部署拓扑 / Production Deployment Topology
+# 部署：生产拓扑 / Deployment: Production Topology
 
-本图展示一个典型的**三节点生产部署**：rr-server 运行在独立主机上，监听分离的 Raft/Client 与 Admin 端口，由 Prometheus 抓取指标，由运维通过 rr-admin CLI 管理。存储注意：`--storage rocks` 时每 group 在 `{data_dir}/raft-log/{group_id}` 打开独立 RocksDB 实例，持久化 raft 日志、vote 与 SM 快照（`sm-snapshot.bin`，ADR A-0016 + T1）；`--storage mem` 则全内存、重启即丢。
+示例使用三个跨可用区节点，分离 Client/Raft、Admin 和 metrics 端口。`--storage rocks` 按 group 持久化
+Raft 日志、vote 和 `sm-snapshot.bin`；`--storage mem` 不跨重启保留状态。
 
----
-
-This diagram shows a typical **three-node production deployment**: rr-server running on separate hosts, listening on separated Raft/Client and Admin ports, scraped by Prometheus, administered via rr-admin CLI. Storage note: with `--storage rocks` each group opens an independent RocksDB instance at `{data_dir}/raft-log/{group_id}`, persisting the raft log, vote, and SM snapshot (`sm-snapshot.bin`, ADR A-0016 + T1); `--storage mem` is fully in-memory and loses everything on restart.
+The example uses three nodes across availability zones, with separate Client/Raft, Admin, and metrics ports.
+`--storage rocks` persists each group's Raft log, vote, and `sm-snapshot.bin`; `--storage mem` does not preserve
+state across restart.
 
 ## 图示 / Diagram
 
@@ -31,15 +32,15 @@ Deployment_Node(ops_zone, "Operator Workstation", "Developer/SRE laptop or basti
 Deployment_Node(cluster_zone, "rr Cluster", "VPC / 3 availability zones") {
   Deployment_Node(host1, "Node Host 1", "Linux, AZ-a") {
     Container(rr1, "rr-server #1", "Rust binary", "node_id=1, listen=:51001, admin=:52001, metrics=:9100")
-    ContainerDb(disk1, "Data Volume 1", "Local SSD / EBS", "/var/lib/rr/data — RocksDB (rocks feature; not wired by the stock binary today)")
+    ContainerDb(disk1, "Data Volume 1", "Local SSD / EBS", "/var/lib/rr/data — per-group RocksDB + sm-snapshot.bin with --storage rocks")
   }
   Deployment_Node(host2, "Node Host 2", "Linux, AZ-b") {
     Container(rr2, "rr-server #2", "Rust binary", "node_id=2, listen=:51001, admin=:52001, metrics=:9100")
-    ContainerDb(disk2, "Data Volume 2", "Local SSD / EBS", "/var/lib/rr/data")
+    ContainerDb(disk2, "Data Volume 2", "Local SSD / EBS", "/var/lib/rr/data — per-group RocksDB + sm-snapshot.bin with --storage rocks")
   }
   Deployment_Node(host3, "Node Host 3", "Linux, AZ-c") {
     Container(rr3, "rr-server #3", "Rust binary", "node_id=3, listen=:51001, admin=:52001, metrics=:9100")
-    ContainerDb(disk3, "Data Volume 3", "Local SSD / EBS", "/var/lib/rr/data")
+    ContainerDb(disk3, "Data Volume 3", "Local SSD / EBS", "/var/lib/rr/data — per-group RocksDB + sm-snapshot.bin with --storage rocks")
   }
 }
 
@@ -77,129 +78,132 @@ LAYOUT_WITH_LEGEND()
 @enduml
 ```
 
-## 端口方案 / Port Scheme
+## 端口 / Ports
 
-| Port | Protocol | Service | Exposed To | Firewall Rule |
-| :--- | :--- | :--- | :--- | :--- |
-| **51001** | gRPC / HTTP2 | `ClientService` + `RaftService` | App tier + peer rr nodes | Open to app subnet + intra-cluster |
-| **52001** | gRPC / HTTP2 | `AdminService` | Operator workstation / bastion only | Restrict to ops VPN |
-| **9100** | HTTP | Prometheus `/metrics` | Prometheus scrape target | Open to monitoring network only |
-
-**为什么 Raft 和 Client 共享端口？/ Why share Raft and Client port?**
-简化防火墙规则——只需开放一个 gRPC 端口就能同时处理集群内部和外部流量。tonic 可以在同一个 `Server` 上注册多个服务。**如果你需要严格的流量隔离**，可以修改 `RrNode` 将 `RaftService` 绑定到独立端口。
-
-Simpler firewall rules — a single gRPC port handles both intra-cluster and external traffic. tonic can register multiple services on one `Server`. **If you need strict traffic isolation**, modify `RrNode` to bind `RaftService` on a separate port.
-
-## 硬件推荐 / Hardware Recommendations
-
-| Resource | Dev / Test | Small Prod | Medium Prod |
+| 端口 / Port | 协议 / Protocol | 服务 / Service | 暴露范围 / Exposed To |
 | :--- | :--- | :--- | :--- |
-| Nodes | 1 (bootstrap) | 3 | 5 |
+| **51001** | gRPC / HTTP2 | `ClientService` + `RaftService` | 应用子网与集群节点 / App subnet and peer nodes |
+| **52001** | gRPC / HTTP2 | `AdminService` | 仅运维主机或 bastion / Operator workstation or bastion only |
+| **9100** | HTTP | `/health`, `/ready`, `/metrics` | 监控与探针网络 / Monitoring and probe networks |
+
+Client 与 Raft 共享端口减少防火墙规则；Admin 使用独立端口并应限制访问。Admin 和 metrics 默认只绑定
+`127.0.0.1`；跨主机访问必须显式设置 `--admin-bind-host` 和 `--metrics-bind-host`，并配合网络策略。
+需要进一步隔离 Raft 与 Client 时，需要自定义传输装配。
+
+Sharing the Client/Raft port reduces firewall rules; Admin uses a separate port and must be access-restricted.
+Admin and metrics bind to `127.0.0.1` by default; cross-host access requires explicit `--admin-bind-host` and
+`--metrics-bind-host` settings plus network policy. Further Raft/Client isolation requires custom transport wiring.
+
+## 硬件示例 / Hardware Examples
+
+这些是容量规划起点，不是基准测试结果。
+
+These are capacity-planning starting points, not benchmark results.
+
+| 资源 / Resource | 开发/测试 / Dev/Test | 小型生产 / Small Prod | 中型生产 / Medium Prod |
+| :--- | :--- | :--- | :--- |
+| Nodes | 1 | 3 | 5 |
 | vCPU / node | 2 | 4–8 | 16+ |
 | RAM / node | 4 GB | 8–16 GB | 32+ GB |
 | Disk / node | SSD 20 GB | NVMe SSD 200 GB | NVMe SSD 1 TB+ |
-| Network | Localhost | 1 Gbps, same AZ optional | 10 Gbps, multi-AZ |
+| Network | Localhost | 1 Gbps | 10 Gbps, multi-AZ |
 
-**关键考量 / Key considerations**:
-
-- **节点数量必须是奇数**（3, 5, 7）以形成 quorum。4 个节点和 3 个节点的容错能力相同。
-- **低延迟磁盘**：Raft 需要 fsync 日志；机械硬盘不可行。
-- **跨可用区部署**：为了防止单 AZ 故障导致集群不可用，将节点分布到至少 3 个 AZ。
-- **同一可用区内部署 5 节点并不会显著提升可用性**——AZ 故障仍然会同时下线所有节点。
-
----
-
-- **Node count must be odd** (3, 5, 7) to form a quorum. 4 nodes tolerate the same failures as 3.
-- **Low-latency disk**: Raft requires fsync on log writes; spinning disks are unworkable.
-- **Spread across AZs**: to prevent single-AZ failure from taking down the cluster, distribute nodes across at least 3 AZs.
-- **5 nodes in one AZ does not improve availability** — the AZ failure still kills all of them simultaneously.
+- 通常选择奇数节点数；4 节点与 3 节点都只能容忍 1 个节点故障，但 4 节点 quorum 要求更高。
+  Odd node counts are typical: four nodes tolerate the same single failure as three, while requiring a larger
+  quorum.
+- Raft 日志需要低延迟持久化磁盘；rocks 模式应使用 SSD/NVMe。
+  Raft logs need low-latency durable storage; use SSD/NVMe for rocks mode.
+- 节点应跨至少 3 个 AZ，避免单 AZ 故障失去 quorum。
+  Spread nodes across at least three AZs so one AZ failure cannot remove the quorum.
 
 ## 启动顺序 / Bootstrap Sequence
 
 ```bash
-# Node 1 — bootstrap (first and only time)
+# Node 1 — initialize hosted groups once per cluster life
 rr-server serve \
   --node-id 1 --listen-addr 0.0.0.0:51001 \
   --admin-port 52001 --metrics-port 9100 \
-  --data-dir /var/lib/rr/data \
+  --admin-bind-host 0.0.0.0 --metrics-bind-host 0.0.0.0 \
+  --data-dir /var/lib/rr/data --storage rocks \
   --bootstrap \
-  --allow-insecure   # DEV ONLY — see note below; in production configure TLS instead
+  --allow-insecure   # DEV ONLY; configure TLS and tokens in production
 
-# Nodes 2 and 3 — start with a peer list
+# Nodes 2 and 3 — populate the local bootstrap routing table
 rr-server serve \
   --node-id 2 --listen-addr 0.0.0.0:51001 \
   --admin-port 52001 --metrics-port 9100 \
-  --data-dir /var/lib/rr/data \
+  --admin-bind-host 0.0.0.0 --metrics-bind-host 0.0.0.0 \
+  --data-dir /var/lib/rr/data --storage rocks \
   --peers host-1:51001 \
   --allow-insecure
 
 rr-server serve \
   --node-id 3 --listen-addr 0.0.0.0:51001 \
   --admin-port 52001 --metrics-port 9100 \
-  --data-dir /var/lib/rr/data \
+  --admin-bind-host 0.0.0.0 --metrics-bind-host 0.0.0.0 \
+  --data-dir /var/lib/rr/data --storage rocks \
   --peers host-1:51001,host-2:51001 \
   --allow-insecure
 ```
 
-> **注意 / Notes**：
->
-> - `--bootstrap` 标志**只应使用一次**——集群的首次初始化（把 group 1 初始化为单成员集群）。重启已有节点时不要使用此标志。
-> - **未配置 TLS 时生产安全门禁会拒绝启动**：RaftService / AdminService 无 TLS、AdminService 无 `admin_token` 等都会触发拒绝（`RrNode::new` 的 `validate_security_invariants`）。开发/CI 环境必须显式传 `--allow-insecure`（或 `RR_ALLOW_INSECURE=1`）；生产环境应配置 `--tls-cert/--tls-key/--tls-ca`（RaftService 还需 `--tls-require-client-cert` 做 mTLS）并设置 admin token。
-> - **`--peers` 不会把新节点自动加入 raft group**。它只做一件事：把 peer 地址列表**按位置猜测 node id**（第 i 个 peer → id `i+1`）并写入本节点的内存路由表（group 1 的 replicas），使 `start()` 在本地启动该 group。raft 成员关系仍需手动变更——在已有 leader 上执行：
->
->   ```bash
->   # 先把新节点加为 learner，等它追赶上日志
->   rr-admin --addr host-1:52001 group add-learner --group 1 --node-id 2 --addr host-2:51001
->   # 再提升为 voter（joint consensus）
->   rr-admin --addr host-1:52001 group change-membership --group 1 --voters 1,2
->   ```
->
-> - `--bootstrap` should be used **exactly once** — at cluster initialization (initializes group 1 as a single-member cluster). Do NOT use when restarting an existing node.
-> - **Without TLS, the production safety gates refuse startup**: RaftService / AdminService without TLS, AdminService without `admin_token`, etc. all trigger rejection (`validate_security_invariants` in `RrNode::new`). Dev/CI must explicitly pass `--allow-insecure` (or `RR_ALLOW_INSECURE=1`); production should configure `--tls-cert/--tls-key/--tls-ca` (RaftService additionally requires `--tls-require-client-cert` for mTLS) and set an admin token.
-> - **`--peers` does NOT auto-join the node into any raft group.** It only writes the peer list into this node's in-memory routing table with node ids **guessed by list position** (i-th peer → id `i+1`), so that `start()` starts the group locally. The raft membership change is still a manual step — run against the existing leader:
->
->   ```bash
->   # Add the new node as a learner first, let it catch up
->   rr-admin --addr host-1:52001 group add-learner --group 1 --node-id 2 --addr host-2:51001
->   # Then promote it to voter (joint consensus)
->   rr-admin --addr host-1:52001 group change-membership --group 1 --voters 1,2
->   ```
+- `--bootstrap` 只用于集群初始化，不应作为常规重启参数；已初始化 group 会跳过重复初始化。
+  Use `--bootstrap` for cluster initialization, not routine restarts; already initialized groups skip repeated
+  initialization.
+- 默认安全门禁会拒绝缺少 TLS/mTLS 或 `admin_token` 的生产配置。`--allow-insecure` 和
+  `RR_ALLOW_INSECURE=1` 仅用于开发/CI；生产应配置 `--tls-cert`、`--tls-key`、`--tls-ca`，并在需要
+  mTLS 时设置 `--tls-require-client-cert` 和 admin token。
+  Default safety gates reject production configurations missing TLS/mTLS or `admin_token`.
+  `--allow-insecure` and `RR_ALLOW_INSECURE=1` are for development/CI only. Production should configure
+  `--tls-cert`, `--tls-key`, `--tls-ca`, plus `--tls-require-client-cert` for mTLS and an admin token.
+- `--peers` 只按列表位置推测 node id 并填充本节点内存路由表，不会自动变更 Raft 成员。
+  `--peers` only infers node ids by list position and populates the local in-memory routing table; it does not
+  change Raft membership.
+
+默认 `auto_promote_learners = true`，追平且满足 quorum guard 的 learner 会自动提升。禁用自动提升时，
+在现有 leader 上手动执行：
+
+With `auto_promote_learners = true` by default, caught-up learners that satisfy the quorum guard are promoted
+automatically. If auto-promotion is disabled, run these commands against the existing leader:
+
+```bash
+rr-admin --addr host-1:52001 group add-learner --group 1 --node-id 2 --addr host-2:51001
+# Wait for catch-up before promotion.
+rr-admin --addr host-1:52001 group change-membership --group 1 --voters 1,2
+```
 
 ## 失败模式 / Failure Modes
 
-| Failure | Cluster Impact | Recovery |
+| 失败 / Failure | 集群影响 / Cluster Impact | 恢复 / Recovery |
 | :--- | :--- | :--- |
-| 1/3 nodes down | ✅ Still operational (quorum = 2) | Replace node, sync via snapshot |
-| 2/3 nodes down | ❌ Writes blocked (no quorum) | Restore any 2 nodes |
-| Disk full on leader | ❌ Leader stalls; group unavailable until disk freed | Rotate logs, retain snapshots only |
-| Network partition (leader side) | Leader → minority → steps down; majority elects new leader | Heal partition, stale leader rejoins as follower |
-| Split-brain across 2/1 | Only majority side proceeds; minority rejects writes | No data loss; minority catches up when partition heals |
+| 3 节点中 1 个宕机 / 1 of 3 down | 仍有 quorum / Quorum remains | 替换或恢复节点，按需同步快照 / Replace or restore; sync snapshot as needed |
+| 3 节点中 2 个宕机 / 2 of 3 down | 写入阻塞 / Writes blocked | 恢复至少 2 个成员 / Restore at least two members |
+| leader 磁盘满 / Leader disk full | 写入或快照失败 / Writes or snapshots fail | 释放或扩容磁盘并检查错误 / Free or expand disk and inspect errors |
+| leader 位于少数分区 / Leader in minority | 多数侧选出新 leader / Majority elects a leader | 修复分区，旧 leader 作为 follower 追赶 / Heal partition; old leader catches up |
 
-详细故障处理 → [dynamic-leader-election.md](./dynamic-leader-election.md) + [dynamic-snapshot-transfer.md](./dynamic-snapshot-transfer.md)
+故障流程见 [leader 选举](./dynamic-leader-election.md) 和 [快照传输](./dynamic-snapshot-transfer.md)。
 
-Detailed failure handling → [dynamic-leader-election.md](./dynamic-leader-election.md) + [dynamic-snapshot-transfer.md](./dynamic-snapshot-transfer.md)
+See [leader election](./dynamic-leader-election.md) and [snapshot transfer](./dynamic-snapshot-transfer.md) for the
+failure flows.
 
-## 推荐的 SLI/SLO 监控 / Recommended SLIs/SLOs
+## 监控示例 / Monitoring Examples
 
-从 Prometheus 抓取以下指标建立基线：
+阈值是告警起点，应按工作负载校准。
 
-Scrape these from Prometheus to establish a baseline:
+Thresholds are starting points and should be calibrated to the workload.
 
-| Metric | Meaning | Alert Threshold (example) |
+| Metric | 含义 / Meaning | 告警示例 / Example Alert |
 | :--- | :--- | :--- |
-| `rr_raft_current_term{group_id}` | Current Raft term per group | Term increasing > 3× / hour = unstable leadership |
-| `rr_raft_is_leader{group_id}` | 1 on the node's leading groups, 0 otherwise | Sum per group ≠ 1 = no leader / split brain symptom |
-| `rr_proposal_duration_seconds{group_id}` | Proposal latency histogram (client_write → committed) | p99 > 200 ms for 5 min |
-| `rr_raft_replication_lag{group_id, follower_node_id}` | Leader-side per-follower log lag (emitted only on leaders) | Sustained > 0 = slow follower catching up |
-| `rr_snapshot_installs_total` | Cumulative snapshot installs | Rate spike = followers repeatedly falling behind compaction |
-| `rr_client_retries_total{group_id}` | Client-side retry counter (emitted by the app process using rr-client) | Rate > 1/min = leader flapping / network issues |
-| `up{job="rr"}` | Node liveness | Any node down > 1 min |
+| `rr_raft_current_term{group_id}` | 每 group 当前 term / Current term per group | 频繁增长 / Frequent increases |
+| `rr_raft_is_leader{group_id}` | 本节点是否为 leader / Whether this node is leader | 每 group 聚合后没有 leader / No leader after per-group aggregation |
+| `rr_proposal_duration_seconds{group_id}` | 写提案延迟 / Proposal latency | p99 持续超标 / Sustained p99 regression |
+| `rr_raft_replication_lag{group_id, follower_node_id}` | leader 侧 follower 日志延迟 / Leader-side follower lag | 持续增长 / Sustained growth |
+| `rr_snapshot_installs_total` | 累计快照安装 / Cumulative snapshot installs | 速率突增 / Rate spike |
+| `rr_client_retries_total{group_id}` | 客户端重试 / Client retries | 持续增长 / Sustained increase |
+| `up{job="rr"}` | 节点存活 / Node liveness | 节点掉线 / Node down |
 
-> 客户端指标（`rr_client_*`，如 `rr_client_request_duration_seconds`、`rr_client_retries_total`）由使用 rr-client 的**应用进程**暴露，而非 rr-server。完整指标清单见 [metrics-reference.md](../../reference/metrics-reference.md)。
->
-> Client metrics (`rr_client_*`, e.g. `rr_client_request_duration_seconds`, `rr_client_retries_total`) are exposed by the **application process** using rr-client, not by rr-server. See [metrics-reference.md](../../reference/metrics-reference.md) for the full catalog.
+`rr_client_*` 指标由使用 rr-client 的应用进程暴露，不是 rr-server。<br />`rr_client_*` metrics are exposed by the application process using rr-client, not rr-server.<br />[完整指标清单 / Full metrics catalog](../../reference/metrics-reference.md)
 
 ## 相关 / Related
 
-- 容器级别结构：[containers.md](./containers.md)
-- 现有部署指南：[../../deployment/deployment.md](../../deployment/deployment.md)
+- [容器结构 / Containers](./containers.md)
+- [部署指南 / Deployment guide](../../deployment/deployment.md)

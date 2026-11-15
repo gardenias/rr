@@ -4,161 +4,148 @@ sidebar_position: 1
 
 # API 概览 / API Overview
 
-## 概述 / Overview
-
-本页摘要了 rr 框架各 crate 的公共 API。
----
-This page summarizes the public API of each rr crate.
-
-如需查看完整的 API 文档，请生成 rustdoc：
----
-For full API documentation, please generate rustdoc:
-
-```bash
-cargo doc --workspace --no-deps --open
-```
+本页汇总各 crate 的公共 API；完整签名、默认方法与 trait 契约以 rustdoc 为准。
+This page summarizes each crate's public API. Rustdoc is authoritative for complete signatures, default
+methods, and trait contracts.
 
 ## 各 Crate 摘要 / Per-Crate Summary
 
-| Crate | 描述 / Description | 核心公共类型 / Key Public Types | 核心 Trait / Key Traits |
-|-------|-------------|-----------------|------------|
-| `rr-core` | 基础类型、Trait 和错误 / Foundation types, traits, errors | `NodeId`, `GroupId`, `PartitionId`, `LogIndex`, `NodeAddr`, `RoutingTable`, `RrError` | `Service`, `StateMachine`, `StorageEngine`, `ConfigProvider` |
-| `rr-config` | 配置提供者实现 / Config provider implementations | `MemConfigProvider` | `ConfigProvider` |
-| `rr-storage` | 存储引擎实现 / Storage engine implementations | `MemStorage`, `RocksStorage`, `RocksConfig` | `StorageEngine` |
-| `rr-raft` | Raft 共识引擎 / Raft consensus engine | `RaftGroupManager`, `RaftNode` | — |
-| `rr-network` | gRPC 传输层 / gRPC transport | `RaftServiceImpl`, `ClientServiceImpl`, `ChannelPool`, `BearerInterceptor`, `RateLimitInterceptor` | `RaftGroupLookup`, `ClientDispatch` |
+| Crate | 用途 / Purpose | 核心公共类型 / Key Public Types | 核心 Trait / Key Traits |
+| :--- | :--- | :--- | :--- |
+| `rr-core` | 基础类型、Trait 和错误 / Core types, traits, and errors | `NodeId`, `GroupId`, `PartitionId`, `LogIndex`, `NodeAddr`, `RoutingTable`, `RrError` | `Service`, `StateMachine`, `StorageEngine`, `ConfigProvider` |
+| `rr-config` | 内存配置提供者 / In-memory config provider | `MemConfigProvider` | `ConfigProvider` |
+| `rr-storage` | 存储引擎实现 / Storage engines | `MemStorage`, `RocksStorage`, `RocksConfig` | `StorageEngine` |
+| `rr-raft` | Raft 共识引擎 / Raft consensus | `RaftGroupManager`, `RaftNode` | — |
+| `rr-network` | gRPC 传输 / gRPC transport | `RaftServiceImpl`, `ClientServiceImpl`, `ChannelPool`, `BearerInterceptor`, `RateLimitInterceptor` | `RaftGroupLookup`, `ClientDispatch` |
 | `rr-router` | 分片路由 / Partition routing | `ShardRouter` | — |
 | `rr-client` | 客户端 SDK / Client SDK | `RrClient`, `RetryConfig` | — |
 | `rr-server` | 节点编排 / Node orchestration | `RrNode`, `NodeConfig` | — |
 
-## 核心 Trait 签名 / Core Trait Signatures
+## 核心 Trait / Core Traits
 
-### Service Trait
+以下片段列出主要方法；带默认实现的扩展方法、生命周期钩子和控制接口见 rustdoc。
+The snippets show the main methods. See rustdoc for default extension methods, lifecycle hooks, and
+control interfaces.
 
-`Service` 是用于实现高层业务逻辑的 Trait，用户无需关心 Raft 内部细节。
----
-`Service` is a high-level trait for implementing business logic without worrying about Raft internals.
+### `Service`
+
+面向业务逻辑的高层接口，由框架适配到 Raft 状态机。
+The high-level business-logic interface, adapted by the framework to a Raft state machine.
 
 ```rust
 #[async_trait]
 pub trait Service: Send + Sync {
-    /// 处理客户端请求 / Handle an incoming client request.
+    /// 处理客户端请求 / Handle a client request.
     async fn handle(&self, request: Vec<u8>) -> Result<Vec<u8>, RrError>;
 
-    /// 返回服务名称 / Return the name of this service.
+    /// 服务名称 / Service name.
     fn name(&self) -> &str;
 
-    /// 创建状态快照 / Create a snapshot of the service state.
+    /// 创建一致的状态快照 / Create a consistent state snapshot.
     async fn snapshot(&self) -> Result<Vec<u8>, RrError>;
 
-    /// 从快照恢复状态 / Restore service state from a snapshot.
+    /// 以快照完整替换状态 / Replace all state from a snapshot.
     async fn restore(&mut self, data: &[u8]) -> Result<(), RrError>;
 }
 ```
 
-### StateMachine Trait
+`snapshot()` 必须与 `handle()` 并发安全；`handle()` 返回前须完成状态更新；`restore()` 必须替换而非
+合并状态。完整安全契约见 [Service Trait 指南](../guide/service-trait.md)。
+`snapshot()` must be safe to run concurrently with `handle()`; `handle()` must finish mutations before
+returning; `restore()` must replace rather than merge state. See the
+[Service trait guide](../guide/service-trait.md) for the full safety contract.
 
-`StateMachine` 是底层 Trait，直接接收 Raft 日志条目。
----
-`StateMachine` is a low-level trait that directly receives Raft log entries.
+### `StateMachine`
+
+直接处理 Raft 日志字节的底层接口。
+The low-level interface that applies raw Raft log entries.
 
 ```rust
 #[async_trait]
 pub trait StateMachine: Send + Sync {
-    /// 应用已提交的日志条目 / Apply a committed Raft log entry.
+    /// 应用已提交日志 / Apply a committed log entry.
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError>;
 
-    /// 创建一致性状态快照 / Create a consistent snapshot of the current state.
+    /// 创建一致的状态快照 / Create a consistent state snapshot.
     async fn snapshot(&self) -> Result<Vec<u8>, RrError>;
 
-    /// 从快照恢复状态 / Restore state from a snapshot.
+    /// 以快照完整替换状态 / Replace all state from a snapshot.
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError>;
 
-    /// 返回最后应用的日志索引 / Return the index of the last applied log entry.
+    /// 最后应用的日志索引 / Last applied log index.
     async fn last_applied(&self) -> Option<LogIndex>;
 }
 ```
 
-### StorageEngine Trait
+### `StorageEngine`
 
-`StorageEngine` 定义了可插拔的存储后端接口。
----
-`StorageEngine` defines the interface for pluggable storage backends.
+可插拔的列族存储接口。`scan` 的范围为 `[start, end)`。
+The pluggable column-family storage interface. `scan` covers `[start, end)`.
 
 ```rust
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
-    /// 插入或更新键值对 / Insert or update a key-value pair.
     async fn put(&self, cf: &str, key: &[u8], value: &[u8]) -> Result<(), StorageError>;
-
-    /// 根据键获取值 / Get a value by key.
     async fn get(&self, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
-
-    /// 删除键 / Delete a key.
     async fn delete(&self, cf: &str, key: &[u8]) -> Result<(), StorageError>;
-
-    /// 范围扫描 / Scan a range of keys [start, end).
-    async fn scan(&self, cf: &str, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
-
-    /// 原子应用批量操作 / Apply multiple operations atomically.
+    async fn scan(&self, cf: &str, start: &[u8], end: &[u8])
+        -> Result<Vec<(Vec<u8>, Vec<u8>)>, StorageError>;
     async fn write_batch(&self, ops: Vec<BatchOp>) -> Result<(), StorageError>;
-
-    /// 刷新写入到持久化存储 / Flush pending writes to durable storage.
     async fn flush(&self) -> Result<(), StorageError>;
-
-    /// 创建列族 / Create a new column family.
     async fn create_cf(&self, name: &str) -> Result<(), StorageError>;
 }
 ```
 
-### ConfigProvider Trait
+`flush()` 是维护操作，不是已 ACK 写入的持久化屏障；持久性由每次写入的 durability 选项决定。
+另有默认 O(n) 的 `last_key_value()`，有序存储后端应覆写它。
+`flush()` is maintenance, not a durability barrier for acknowledged writes; per-write durability options
+govern that contract. A default O(n) `last_key_value()` is also available and should be overridden by
+ordered backends.
 
-`ConfigProvider` 用于读取集群配置（如路由表、节点地址）。
----
-`ConfigProvider` is used for reading cluster configuration (e.g., routing table, node addresses).
+### `ConfigProvider`
+
+读取路由表与节点地址，并订阅配置变更。
+Reads routing tables and node addresses, and subscribes to configuration changes.
 
 ```rust
 #[async_trait]
 pub trait ConfigProvider: Send + Sync {
-    /// 获取当前完整的路由表 / Get the current full routing table.
     async fn get_routing_table(&self) -> Result<RoutingTable, ConfigError>;
 
-    /// 当前路由表的共享快照；内存后端应覆写为廉价 Arc clone。
-    /// 默认实现包装 get_routing_table()。每次调用都取最新快照（INV-6）。
-    /// Current table as a shared snapshot; in-memory backends should override
-    /// with a cheap Arc clone. Default wraps get_routing_table().
+    /// 默认包装 get_routing_table()；内存后端可覆写为廉价 Arc clone。
+    /// Defaults to get_routing_table(); in-memory backends can override with a cheap Arc clone.
     async fn routing_table_snapshot(&self) -> Result<Arc<RoutingTable>, ConfigError>;
 
-    /// 订阅路由表变更事件流 / Subscribe to routing table change events as a stream.
-    async fn watch_changes(&self) -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError>;
+    async fn watch_changes(&self)
+        -> Result<Pin<Box<dyn Stream<Item = RoutingTableChange> + Send>>, ConfigError>;
 
-    /// 获取特定节点的 gRPC 地址 / Get the gRPC address for a specific node.
     async fn get_node_addr(&self, node_id: NodeId) -> Result<NodeAddr, ConfigError>;
 }
 ```
 
+`watch_changes()` 不发送初始快照；调用方应先读取完整路由表。内存后端在消费者滞后时丢弃事件并告警，
+etcd 后端施加背压并在断线后重连。需要零遗漏的消费者应定期全量对账。
+`watch_changes()` sends no initial snapshot; fetch the full table first. The in-memory backend drops and
+reports events when a consumer lags, while etcd applies backpressure and reconnects after disconnects.
+Consumers that cannot miss changes should periodically reconcile the full table.
+
 ## 类型别名 / Type Aliases
 
-定义在 `rr-core` 中的核心类型别名：
----
-Core type aliases defined in `rr-core`:
+`rr-core` 定义以下别名 / `rr-core` defines these aliases:
 
 - `NodeId = u64`
 - `GroupId = u64`
 - `PartitionId = u64`
 - `LogIndex = u64`
-- `NodeAddr`: 包含 `addr: String` 的结构体 / Struct containing `addr: String`
+- `NodeAddr`：包含 `addr: String` 的结构体 / `NodeAddr`: struct containing `addr: String`
 
 ## 生成本地文档 / Generating Local Docs
 
-你可以通过以下命令在本地生成并查看完整的 API 文档：
----
-You can generate and view the full API documentation locally using the following commands:
+生成并打开完整 rustdoc / Generate and open the full rustdoc:
 
 ```bash
-# 为所有 crate 生成并打开 rustdoc / Generate and open rustdoc for all crates
 cargo doc --workspace --no-deps --open
 
-# 生成包含私有项的文档（供贡献者使用） / Generate with private items (for contributors)
+# 包含私有项，供贡献者使用 / Include private items for contributors
 cargo doc --workspace --no-deps --document-private-items --open
 ```

@@ -2,15 +2,14 @@
 sidebar_position: 12
 ---
 
-# Dynamic — Dynamic Config Update Propagation
+# 动态：配置变更传播 / Dynamic: Config Update Propagation
 
-rr 的一大特性是**运行时动态配置**：添加分片、迁移 group 成员、调整路由，都不需要重启集群。本图展示从运维触发变更到所有节点收敛的完整流程。
+路由变更在运行时通过 `ConfigProvider` 传播。Raft 成员操作与路由表更新是两个独立层面，不由同一事务编排。
 
----
+Routing changes propagate at runtime through `ConfigProvider`. Raft membership operations and routing-table updates
+are separate layers, not one transaction.
 
-A key rr feature is **runtime dynamic configuration**: adding partitions, migrating group members, adjusting routing — all without cluster restart. This diagram shows the complete flow from operator trigger to cluster-wide convergence.
-
-## 高层流程（C4 Dynamic）/ High-Level Flow (C4 Dynamic)
+## 高层流程 / High-level Flow
 
 ```plantuml
 @startuml
@@ -48,16 +47,15 @@ Rel(watch_loop, raft_mgr_x, "6. start_group / stop_group per membership")
 @enduml
 ```
 
-> **关键事实 / Key facts**：
-> - `ConfigProvider` trait 是**只读的**（`get_routing_table` / `watch_changes` / `get_node_addr`）。rr 自身从不写路由表——变更由嵌入应用直接调用 `MemConfigProvider` 的 inherent 方法，或由运维/工具直接写外部存储完成。
-> - admin RPC（`AddLearner` / `ChangeMembership`）是**纯 raft 层**操作——handler 不会编排任何路由层步骤。
-> - leader 选举不会产生路由表事件；客户端通过重定向响应发现新 leader。
->
-> - The `ConfigProvider` trait is **read-only** (`get_routing_table` / `watch_changes` / `get_node_addr`). rr itself never writes the routing table — changes are made by the embedding application calling `MemConfigProvider`'s inherent methods, or by operator tooling writing the external store directly.
-> - Admin RPCs (`AddLearner` / `ChangeMembership`) are **purely raft-level** — the handlers do not orchestrate any routing-level steps.
-> - Leader elections never produce routing-table events; clients discover the new leader via redirect responses.
+- `ConfigProvider` trait 只读；嵌入应用调用 `MemConfigProvider` inherent 方法，或运维工具直接写外部存储。
+  The `ConfigProvider` trait is read-only; the embedding app calls `MemConfigProvider` inherent methods, or
+  operator tooling writes the external store.
+- `AddLearner` 和 `ChangeMembership` 只操作 Raft，admin handler 不修改 ConfigProvider。
+  `AddLearner` and `ChangeMembership` operate only on Raft; admin handlers do not modify ConfigProvider.
+- leader 选举不产生路由表事件，客户端通过重定向发现新 leader。
+  Leader elections produce no routing-table events; clients discover leaders through redirects.
 
-## 详细时序图 / Detailed Sequence
+## 详细时序 / Detailed Sequence
 
 ```plantuml
 @startuml
@@ -96,7 +94,7 @@ RMgr4 -> RMgr4 : Create RaftNode for group 7\n(as learner — catches up via App
 
 note over RMgr1, RMgr4 : Normal Raft replication starts\n(may trigger snapshot transfer if log-gap too large)
 
-== Raft level: promote to voter (rr-admin) ==
+== Raft level: promote to voter (manual path; auto-promote disabled) ==
 Op -> CLI : rr-admin group change-membership --group 7 --voters 1,2,3,4
 CLI -> N1 : gRPC AdminService.ChangeMembership(group=7, voters=[1,2,3,4])
 N1 -> RMgr1 : change_membership(7, [1,2,3,4])
@@ -106,29 +104,26 @@ note over Cfg, Ext : Nothing writes back to the ConfigProvider after the change.
 @enduml
 ```
 
-## ConfigProvider 的两种形态 / Two Shapes of ConfigProvider
+## Provider 形态 / Provider Shapes
 
-### 形态 1: MemConfigProvider（开发）/ Shape 1: MemConfigProvider (development)
+### MemConfigProvider：开发与测试 / MemConfigProvider: Development and Tests
 
-```
+```text
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
 │   Node 1    │  │   Node 2    │  │   Node 3    │
-│             │  │             │  │             │
 │ MemCfgProv  │  │ MemCfgProv  │  │ MemCfgProv  │
 │  (isolated) │  │  (isolated) │  │  (isolated) │
 └─────────────┘  └─────────────┘  └─────────────┘
 ```
 
-- 每个节点独立的内存状态
-- **变更不会自动传播到其他节点**
-- 使用场景：单节点开发、单元测试、integration test（测试 harness 主动调用所有节点）
-- **不要在生产中使用**
+每个节点持有独立内存副本，变更不会自动传播；调用方必须更新所有节点。它不适合作为生产集群的共享事实源。
 
-Each node has isolated in-memory state. **Changes do NOT auto-propagate to other nodes.** Use cases: single-node development, unit tests, integration tests (test harness calls every node manually). **Do not use in production.**
+Each node has an isolated in-memory copy and changes do not propagate automatically; the caller must update every
+node. It is not a shared source of truth for a production cluster.
 
-### 形态 2: 外部存储 ConfigProvider（生产）/ Shape 2: External Store ConfigProvider (production)
+### 外部存储：生产 / External Store: Production
 
-```
+```text
 ┌──────────────────────────────────────────────┐
 │             External Store (etcd)            │
 │   ┌──────────────────────────────────────┐   │
@@ -143,93 +138,87 @@ Each node has isolated in-memory state. **Changes do NOT auto-propagate to other
     └─────────┘    └─────────┘    └─────────┘
 ```
 
-- 单一事实源在外部存储
-- 每个节点本地 `ConfigProvider` 订阅 watch 事件
-- **变更一次，全集群收敛**
-- 使用场景：生产部署
+`rr-config-etcd` 提供只读 `EtcdConfigProvider`；外部工具写 etcd，各节点读取并 watch。stock
+`rr-server` 仍使用 `MemConfigProvider`；etcd 装配示例见 `examples/etcd-config-quickstart`。
 
-Single source of truth lives in external store. Each node's local `ConfigProvider` subscribes to watch events. **Change once, whole cluster converges.** Use case: production deployment.
+`rr-config-etcd` provides the read-only `EtcdConfigProvider`; external tools write etcd and each node reads and
+watches it. Stock `rr-server` still uses `MemConfigProvider`; see `examples/etcd-config-quickstart` for etcd
+wiring.
 
-> **rr 自带 etcd 实现** —— `rr-config-etcd` 是 workspace 成员 crate，提供 `EtcdConfigProvider`（`crates/rr-config-etcd`）。它实现 `ConfigProvider` 的读与 watch：**rr 从不把路由写回 etcd**（read-only at the trait surface）——路由变更须由运维/工具直接写 etcd。stock `rr-server` 二进制仍使用 `MemConfigProvider`；使用 etcd 需要自行组装（见 `examples/etcd-config-quickstart`）。
->
-> **rr ships an etcd implementation** — `rr-config-etcd` is a workspace member crate providing `EtcdConfigProvider` (`crates/rr-config-etcd`). It implements the `ConfigProvider` reads and watches: **rr never writes routing back to etcd** (read-only at the trait surface) — routing changes must be written to etcd by operator tooling. The stock `rr-server` binary still uses `MemConfigProvider`; using etcd requires wiring it yourself (see `examples/etcd-config-quickstart`).
+watch stream 不发送初始快照；启动路径先读取完整表再订阅。内存后端在消费者落后时丢弃事件并记录
+warning/metric，etcd 后端施加背压并在断线后重连；需要严格对账的消费者应定期重新读取完整表。
 
-## 两类变更：Raft-level vs Routing-level / Two Classes of Change
+The watch stream has no initial snapshot; startup reads the full table before subscribing. The in-memory backend
+drops lagged events with a warning/metric, while etcd applies backpressure and reconnects after disconnects.
+Consumers requiring strict reconciliation should periodically re-read the full table.
 
-rr 的配置变更实际上分两层：
+## 两层变更 / Two Classes of Change
 
-rr's configuration changes span two layers:
+### Raft 层 / Raft Level
 
-### Raft-level（共识层）
-- `add_learner(group_id, node_id, addr)` — 新 learner 开始从日志追赶
-- `change_membership(group_id, voters)` — joint consensus 切换 voter 集合
+`add_learner(group_id, node_id, addr)` 添加学习者，`change_membership(group_id, voters)` 通过 joint
+consensus 修改 voter 集合。已提交成员记录进入 Raft 日志，其重启持久性仍取决于所选日志存储。
 
-**这些变更通过 Raft 自身持久化** —— 写入每个成员的日志、提交后应用。不能"丢失"。
+`add_learner(group_id, node_id, addr)` adds a learner, and `change_membership(group_id, voters)` changes voters
+through joint consensus. Committed membership records enter the Raft log; restart durability still depends on the
+selected log storage.
 
-**These changes are persisted by Raft itself** — written to every member's log, applied after commit. Cannot be "lost".
+### 路由层 / Routing Level
 
-### Routing-level（路由层）
-- `add_partition(partition_id, config, group_id, replicas)` — 新分片映射
-- `remove_partition(partition_id)` / `add_node(node_id, addr)` / `remove_node(node_id)` / `update_group_membership(group_id, replicas)`
+`add_partition`、`remove_partition`、`add_node`、`remove_node` 和 `update_group_membership` 是
+`MemConfigProvider` inherent 方法，或对外部存储的直接写入；trait 没有写 API。持久性和传播范围由后端决定。
 
-**这些都是 `MemConfigProvider` 的 inherent 方法（或对外部存储的直接写入）**——`ConfigProvider` trait 本身没有写接口。持久性取决于后端：`MemConfigProvider` 只存在进程内存（且各节点互不同步）；`EtcdConfigProvider` 读 etcd，由写入 etcd 的一方保证持久。如果只更新了单个节点的 MemConfigProvider，其他节点不会看到！
+`add_partition`, `remove_partition`, `add_node`, `remove_node`, and `update_group_membership` are inherent
+`MemConfigProvider` methods or direct external-store writes; the trait has no write API. Durability and propagation
+depend on the backend.
 
-**These are inherent methods of `MemConfigProvider` (or direct writes to an external store)** — the `ConfigProvider` trait itself has no write API. Persistence depends on the backend: `MemConfigProvider` lives in process memory (and nodes never sync with each other); `EtcdConfigProvider` reads from etcd, where durability is guaranteed by whoever writes to etcd. If you update only one node's MemConfigProvider, the other nodes won't see it!
+### 协调顺序 / Coordination
 
-### 协调两者 / Coordinating Both
+一个手动添加成员的顺序如下；这些步骤不是一个事务，`rr-admin` 只执行 Raft 层命令。
 
-典型的"添加成员"操作需要（**路由层步骤由嵌入应用或运维工具完成，rr-admin 只做 raft 层**）：
+One manual add-member sequence follows. These steps are not transactional, and `rr-admin` performs only the Raft
+commands.
 
-A typical "add member" operation requires (**the routing-level steps are done by the embedding application or operator tooling — rr-admin only performs the raft-level ones**):
-
+```text
+1. Raft:    rr-admin group add-learner --group 7 --node-id 4 --addr host-4:51001
+2. Routing: add_node(4, addr) and update_group_membership(7, [1,2,3,4])
+            on every MemConfigProvider, or in the external store
+3. Wait for the learner to catch up through AppendEntries or snapshot transfer
+4. Raft:    rr-admin group change-membership --group 7 --voters 1,2,3,4
 ```
-1. Routing level:  MemConfigProvider.add_node(4, addr)          → nodes[4] = addr   (by the app/tooling)
-2. Routing level:  MemConfigProvider.update_group_membership(7, [1,2,3,4])            (by the app/tooling)
-3. Raft level:     rr-admin group add-learner --group 7 --node-id 4 --addr host-4:51001
-                   → RaftGroupManager.add_learner(7, 4, addr) — openraft knows the new member
-4. Wait for catchup via AppendEntries + snapshot
-5. Raft level:     rr-admin group change-membership --group 7 --voters 1,2,3,4
-                   → promote to voter (joint consensus)
-6. Routing level:  (optional) update_group_membership(7, ...) to reflect final voter set (by the app/tooling)
-```
 
-**顺序很重要 / Order matters**:
+必须在 learner 追平后再提升为 voter。默认 `auto_promote_learners = true`，本地 promoter 会在复制延迟和
+稳定性条件满足后自动提升，因此第 4 步是禁用自动提升时的手动路径。路由更新仍需应用或运维工具完成。
 
-- **Step 3 必须在 step 1 和 2 之后**：Raft 需要路由表里已经有 node 4 的地址才能发送 AppendEntries
-- **Step 5 必须在 step 4 catchup 完成后**：否则把一个远远落后的 learner 提升为 voter，会立刻影响 quorum
-- **这个顺序由运维 / 嵌入应用负责维护**——admin handlers 只执行 raft 层操作，不会替你编排路由层步骤
+A learner must catch up before promotion. `auto_promote_learners = true` by default, so the local promoter handles
+step 4 once replication-lag and stability conditions are met; the command is the manual path when auto-promotion is
+disabled. Routing updates still belong to the application or operator tooling.
 
----
-
-**Order matters**:
-
-- **Step 3 must come after steps 1–2**: Raft needs node 4's address in the routing table before it can send AppendEntries.
-- **Step 5 must come after step 4 catchup**: otherwise promoting a far-behind learner to voter immediately affects quorum.
-- **This ordering is the operator's / embedding application's responsibility** — admin handlers only perform the raft-level operations and will not orchestrate routing-level steps for you.
-
-## 观察配置变更 / Observing Config Changes
+## 观察配置 / Observing Configuration
 
 ```bash
-# Dump the current routing table snapshot on a node (AdminService.GetRoutingTable)
+# Routing table snapshot (AdminService.GetRoutingTable)
 rr-admin --addr host-1:52001 config show
 
-# Node-level status: node_id, listen_addr, group_ids, uptime_secs
-# (NodeStatus carries NO routing table — use `config show` for that)
+# Node status; NodeStatus does not contain the routing table
 rr-admin --addr host-1:52001 node status
 
-# Raft-level membership of a group (voters + learners)
+# Raft voters and learners
 rr-admin --addr host-1:52001 group membership --group 7
 
-# Verify all nodes have converged on the same routing table
+# Compare partition mappings across nodes
 for host in host-1 host-2 host-3; do
   rr-admin --addr $host:52001 config show --output json | jq -S '.partitions'
 done
-# All should output the same partition list; if not, propagation is lagging
-# (with MemConfigProvider they will NEVER converge unless the app updates every node)
 ```
+
+若输出不同，说明传播或更新尚未完成；使用 `MemConfigProvider` 时，只有逐节点更新才会一致。
+
+Different outputs indicate incomplete propagation or updates. With `MemConfigProvider`, convergence requires
+updating every node.
 
 ## 相关 / Related
 
-- 分片路由的静态视图：[components-router.md](./components-router.md)
-- 分片路由的动态解析：[dynamic-shard-routing.md](./dynamic-shard-routing.md)
-- 多 Raft 架构概念：[../multi-raft.md](../multi-raft.md)
+- [路由组件 / Router components](./components-router.md)
+- [动态路由 / Dynamic routing](./dynamic-shard-routing.md)
+- [多 Raft / Multi-Raft](../multi-raft.md)

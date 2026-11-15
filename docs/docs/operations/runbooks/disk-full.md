@@ -2,134 +2,136 @@
 sidebar_position: 2
 ---
 
-# Runbook — 节点磁盘满 / Node Disk Full
+# 节点磁盘满手册 / Runbook: Node Disk Full
 
-## Symptom / 症状
+## 症状 / Symptoms
 
-一个或多个 rr-server 节点的日志开始输出 RocksDB I/O 错误，客户端写入开始超时或失败。常见日志条目：
+RocksDB 报 `No space left on device`，写入超时或失败，proposal 延迟升高。进程仍可能健康，因此不能只依赖 Prometheus `up`
+。
 
-One or more rr-server nodes start logging RocksDB I/O errors and client
-writes time out or fail. Typical log lines:
+RocksDB reports `No space left on device`, writes time out or fail, and proposal latency rises. The process can remain
+alive, so Prometheus `up` alone is insufficient.
 
-```
+```text
 ERROR rr_raft::group_manager: client_write failed: storage error: io error: No space left on device (os error 28)
 ERROR openraft::storage: apply_to_state_machine failed: storage error: Io(...)
 ```
 
-典型指标 / Typical metrics:
-
-- `rr_proposal_duration_seconds` p99 飙升
-- `rr_raft_last_log_index` 停止增长（该节点）
-- Prometheus `up{job="rr"}` 开始翻 `0`
-
-## Detection / 检测
-
-自动告警应基于：
-
-Automated alerts should fire on:
+## 检测 / Detection
 
 ```promql
-# PromQL — 节点可用磁盘 < 10% 持续 5 分钟
 node_filesystem_avail_bytes{mountpoint="/var/lib/rr"}
   / node_filesystem_size_bytes{mountpoint="/var/lib/rr"} < 0.1
 
-# 或应用层：Raft 组 last_log_index 20 分钟没增长
+# 仅在有持续写入时成立 / meaningful only during sustained writes
 increase(rr_raft_last_log_index[20m]) == 0
 ```
 
-手动确认 / Manual confirm:
-
 ```bash
-# SSH 到涉事节点 / SSH to the affected node
-ssh rr-N
 df -h /var/lib/rr
-du -sh /var/lib/rr/data/* | sort -h | tail -5
+du -sh /var/lib/rr/data/* | sort -h
+rr-admin --addr rr-N:52001 group list
 ```
 
-## Immediate Mitigation / 立即处置
+安全模式下，为 `rr-admin` 添加 `--token-env RR_ADMIN_TOKEN` 和三个 TLS 参数。
 
-**Rules of engagement**:
-- 如果集群仍有 quorum（≥ ⌈N/2⌉+1 节点健康），优先保持 quorum，不要动健康节点。
-- 不要 `rm -rf` 任何 RocksDB 文件 —— 即使是 `.log` 或 `.sst`。RocksDB 对自己的文件布局有严格依赖。
+In secure mode, add `--token-env RR_ADMIN_TOKEN` and all three TLS flags to `rr-admin`.
 
-### Option A — 放逐受影响节点（推荐）/ Evacuate the affected node (preferred)
+## 立即处置 / Immediate Mitigation
+
+多数派数量为 `floor(N/2)+1`。只要仍有健康多数派，优先保持它，不要重启健康节点。不要删除任何 RocksDB `.log`、`.sst`、
+`MANIFEST` 或其他文件。
+
+A majority is `floor(N/2)+1`. Preserve a healthy majority and do not restart healthy nodes. Never delete RocksDB `.log`,
+`.sst`, `MANIFEST`, or other database files.
+
+### 可离线受影响节点 / When the Affected Node Can Go Offline
+
+1. 在受影响节点自己的 Admin API 上 drain 所有组。<br />
+   Drain every group through the affected node's own Admin API.
+2. 优雅停止节点，保留数据目录和 PVC。<br />
+   Stop the node gracefully while retaining its data directory and PVC.
+3. 扩容文件系统，或只清理由其他服务产生的已知文件。<br />
+   Grow the filesystem, or remove only known files owned by other services.
+4. 启动节点并检查追平。<br />
+   Start the node and verify catch-up.
 
 ```bash
-# 1. 把该节点上的所有 leader 转走 / Transfer all leaderships off the node
-for gid in $(rr-admin --addr OTHER_NODE:52001 node status --output json | jq -r '.group_ids[]'); do
-  # Find alternative voter
-  rr-admin --addr OTHER_NODE:52001 group transfer-leader --group $gid --to OTHER_VOTER_ID
-done
-
-# 2. 停止该节点 / Stop the node
-systemctl stop rr-server  # or kubectl delete pod rr-N
-
-# 3. 给它更大的盘（或清理非 rr 的占用）/ Grow the disk or clean non-rr occupants
-# (cloud: resize volume; on-prem: delete unrelated files)
-
-# 4. 启动节点 / Start again
+rr-admin --addr rr-N:52001 node drain --node-id N
+systemctl stop rr-server
+# 扩容磁盘或清理非 rr 文件 / grow the disk or clean non-rr files
 systemctl start rr-server
 ```
 
-Cluster continues serving while the node is down (as long as quorum is
-maintained).
+Kubernetes 不要直接 `kubectl delete pod` 当作停机扩容：控制器会立即重建 Pod。先使用能保留 PVC 且阻止重建的运维流程，再扩
+卷或挂载离线任务。
 
-### Option B — 受影响节点是最后一个 quorum 成员 / Affected node is the last quorum member
+On Kubernetes, do not use `kubectl delete pod` as a disk-resize procedure; the controller recreates it immediately. Use
+an outage procedure that preserves the PVC while preventing recreation, then resize the volume or attach an offline
+task.
 
-Then you CANNOT take it offline without losing availability. Options:
+### 不能离线或已无 quorum / When It Cannot Go Offline or Quorum Is Lost
 
-- **Quick win**: 识别并删除**非 rr** 的占用（`/var/log/*`、`core.*` 等）在同一 filesystem 上。
-- **Medium**: 在另一个 mountpoint 挂卷，然后 `rr-admin backup` → shutdown → 把 data_dir 拷到新卷 → 修改 config 的 `data_dir` → 重启。
-- **Risky last resort**: 在 RocksDB 相对较小的 group 上 `rr-admin group snapshot --group G` 触发日志压缩释放空间。**先在非 quorum 成员上试**。
+优先在线扩卷、挂载额外空间，或删除同一文件系统上确认属于其他服务的日志/core dump。不要为“释放空间”触发新快照：构建快照本
+身需要临时空间，且不能立即解决 RocksDB compaction 占用。
 
-## Root-Cause Investigation / 根因分析
+Prefer online volume growth, additional mounted capacity, or removal of verified non-rr logs/core dumps on the same
+filesystem. Do not trigger a fresh snapshot to reclaim emergency space: snapshot construction needs temporary space and
+does not immediately solve RocksDB compaction usage.
 
-按可能性从高到低：
+若整目录迁移不可避免，先 drain、正常停止，再离线 `rr-admin backup`，恢复到新卷上的空目录，更新 `data_dir` 后启动。不要对
+运行中的目录做普通文件复制。
 
-In order of likelihood:
+If whole-directory migration is unavoidable, drain and stop gracefully, create an offline `rr-admin backup`, restore
+into an empty directory on the new volume, update `data_dir`, then start. Never copy a live data directory with ordinary
+file commands.
 
-1. **log growth outpacing snapshots** — 检查 `rr_raft_last_log_index` 与 `rr_snapshot_installs_total` 的比率。正常应每 `snapshot_logs_since_last`（`SnapshotPolicy::LogsSinceLast(N)`，默认 50_000）条目一次快照。如果 snapshot 间隔过大，快照阈值可能配置太保守。
-2. **compaction backlog** — 在 RocksDB `LOG` (`/var/lib/rr/data/LOG`) 里 grep `compaction`；若看到 "Slowdown" 或 "Stop" 条目，说明 L0 堆积。需要调高 `max_background_jobs` 或 `level_zero_stop_trigger`。
-3. **runaway write rate** — Prometheus `rate(rr_proposal_duration_seconds_count[5m])` 是否比平时高 10×？若是，上游问题（应用 bug、流量激增），不单纯是 rr 问题。
-4. **非 rr 租户** — 同一 volume 上的其他进程（日志、core dump、其他数据库）。`ncdu /var/lib/rr/..`。
+## 根因分析 / Root-Cause Investigation
 
----
+1. **日志增长快于快照。** 用 `group snapshot-status` 检查 `last_snapshot_index` 是否推进，并监测
+   `rr_snapshot_build_failures_total`。默认每 50,000 条日志触发一次，阈值由 `snapshot_logs_since_last` 控制。<br />
+   **Log growth outpacing snapshots.** Check whether `last_snapshot_index` advances and monitor
+   `rr_snapshot_build_failures_total`. The default trigger is every 50,000 entries, controlled by
+   `snapshot_logs_since_last`.
+2. **RocksDB compaction 积压。** 检查各组实际 RocksDB 目录下的 `LOG` 是否有 `Slowdown`、`Stop`、写失败或重复
+   compaction。<br />
+   **Compaction backlog.** Inspect each group's actual RocksDB `LOG` for `Slowdown`, `Stop`, write failures, or repeated
+   compaction.
+3. **写入激增。** 比较 `rate(rr_proposal_duration_seconds_count[5m])` 与正常基线，排查上游流量或重试风暴。<br />
+   **Runaway writes.** Compare proposal rate with baseline and inspect upstream traffic or retry storms.
+4. **共享文件系统。** 检查日志、core dump、其他数据库和备份是否写入同一卷。<br />
+   **Other tenants.** Check whether logs, core dumps, other databases, or backups share the volume.
 
-1. **log growth outpacing snapshots** — check `rr_raft_last_log_index`
-   vs `rr_snapshot_installs_total`. Normal behavior: snapshot every
-   `snapshot_logs_since_last` entries (`SnapshotPolicy::LogsSinceLast(N)`,
-   default 50_000). If the gap is too large, the snapshot threshold is
-   set too conservatively.
-2. **compaction backlog** — grep `compaction` in RocksDB's `LOG` at
-   `/var/lib/rr/data/LOG`. "Slowdown" or "Stop" entries indicate L0
-   pile-up. Raise `max_background_jobs` or
-   `level_zero_stop_trigger`.
-3. **runaway write rate** — is
-   `rate(rr_proposal_duration_seconds_count[5m])` 10× normal? If so,
-   the upstream application is the cause.
-4. **non-rr tenant** — other processes on the same volume (logs, core
-   dumps, another database). `ncdu /var/lib/rr/..`.
+## 恢复 / Recovery
 
-## Recovery / 恢复
+1. 确认节点重新加入所有预期 group，leader 与其他节点一致。<br />
+   Confirm that the node rejoins every expected group and observes the same leader.
+2. 观察 leader 上的 `rr_raft_replication_lag{follower_node_id="N"}` 持续下降，或在暂停写入时比较各节点
+   `last_log_index`。<br />
+   Watch the leader's `rr_raft_replication_lag{follower_node_id="N"}` decline, or compare `last_log_index` across nodes
+   while writes are paused.
+3. 若 leader 使用 InstallSnapshot，等待对应接收指标和日志确认完成；恢复时间取决于状态大小、磁盘和网络，不使用固定估算。<br />
+   If the leader sends InstallSnapshot, wait for receiver metrics and logs to confirm completion. Recovery time depends
+   on state size, disk, and network; do not assume a fixed estimate.
 
-在解除磁盘压力后：
+```bash
+rr-admin --addr rr-N:52001 node status
+rr-admin --addr rr-N:52001 group snapshot-status --group 1
+```
 
-After relieving disk pressure:
+## 预防 / Prevention
 
-1. **确认节点重新加入 quorum** — `rr-admin node status` 返回它所在的所有 group_ids 并且 leader 与其他节点一致。
-2. **等待追赶完成** — `rr_raft_last_log_index` 与 leader 上的差距应持续收敛；根据磁盘性能，1GB 状态大约 1-5 分钟。
-3. **如果该节点落后过远**，leader 会触发 `InstallSnapshot`；`rr_snapshot_installs_total{node_id=<N>}` 会 +1。等待完成。
-
-## Prevention / 预防
-
-- **告警** — 设置磁盘 `<20%` 的警告、`<10%` 的 ticket/page。
-- **容量预留** — RocksDB 在 compaction 期间可能瞬时占用 2× 数据大小；确保 overhead ≥ 100%。
-- **配置 tuning** — 在 `RocksConfig` 里合理设置 `max_background_jobs`（≥4）与 `level_zero_stop_trigger`。
-- **专用 volume** — `/var/lib/rr/data` 独占一个 volume，避免和日志、swap 抢空间。
-- **定期 `rr-admin group snapshot`** — 对写密集的 group 定时（每小时或每万条）触发 snapshot 以 cap 日志增长。
+- 磁盘低于 20% 警告，低于 10% 分页告警；同时监测 inodes。<br />
+  Warn below 20% free disk and page below 10%; monitor inodes too.
+- 为 RocksDB compaction 和快照临时文件预留空间，生产数据使用专用卷。<br />
+  Reserve headroom for RocksDB compaction and snapshot temporary files, using a dedicated production volume.
+- 根据恢复时间目标设置 `snapshot_logs_since_last`，不要依赖定时手工快照控制正常日志增长。<br />
+  Tune `snapshot_logs_since_last` to recovery objectives rather than relying on manual snapshots for normal log growth.
+- 备份输出必须放在 `data_dir` 外的独立卷。<br />
+  Keep backup output outside `data_dir`, on a separate volume.
 
 ## 相关 / Related
 
-- [leader-flapping.md](./leader-flapping.md) — 磁盘压力也是 leader 不稳定的常见诱因
-- [../../reference/metrics-reference.md](../../reference/metrics-reference.md) — 监控指标
-- [../deployment.md](../../deployment/deployment.md) — 生产部署建议
+- [Leader 不稳定 / Leader instability](./leader-flapping.md)
+- [指标 / Metrics](../../reference/metrics-reference.md)
+- [部署建议 / Deployment guidance](../../deployment/deployment.md)

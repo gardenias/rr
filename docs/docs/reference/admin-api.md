@@ -2,16 +2,16 @@
 sidebar_position: 6
 ---
 
-# Admin API 参考 / Admin API Reference
+# 管理 API 参考 / Admin API Reference
 
-`AdminService` 是一个 gRPC 服务，运行在 `rr-server` 节点的 Admin 端口（默认为主 gRPC 端口 + 1000）。
-通过 `NodeConfig::with_admin_port(port)` 启用。可使用 `rr-admin` CLI 或任何 gRPC 客户端访问。
+`AdminService` 是 `rr-server` 节点的 Admin gRPC 服务。`NodeConfig.admin_port` 默认为 `None`，即服务禁用；
+通过 `NodeConfig::with_admin_port(port)` 显式启用后，可使用 `rr-admin` 或任意 gRPC 客户端访问。
+`examples/kv-store` 使用主 gRPC 端口 + 1000，这是该示例的端口约定，不是 `rr-server` 默认值。
 
----
-
-`AdminService` is a gRPC service running on the admin port of an `rr-server` node
-(default: main gRPC port + 1000). Enable it via `NodeConfig::with_admin_port(port)`.
-Accessible via the `rr-admin` CLI or any gRPC client.
+`AdminService` is an `rr-server` node's admin gRPC service. `NodeConfig.admin_port` defaults to `None`,
+leaving it disabled; enable it explicitly with `NodeConfig::with_admin_port(port)`, then use `rr-admin` or
+any gRPC client. `examples/kv-store` uses the main gRPC port + 1000 as an example-specific convention, not
+an `rr-server` default.
 
 ## 启用 Admin 端口 / Enabling the Admin Port
 
@@ -20,147 +20,105 @@ let config = NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_
     .with_admin_port(52001); // Admin gRPC 端口 / Admin gRPC port
 ```
 
+完整服务与消息定义见 `crates/rr-network/proto/admin.proto`。
+The complete service and message definitions live in `crates/rr-network/proto/admin.proto`.
+
 ## RPC 方法 / RPC Methods
 
 ### `GetNodeStatus(Empty) → NodeStatus`
 
-返回节点级别的状态信息：节点 ID、监听地址、所有 Raft 组 ID 和节点运行时间。
+返回节点 ID、监听地址、本地全部 Raft 组 ID 和运行时间。
+Returns the node ID, listen address, local Raft group IDs, and uptime.
 
----
+**请求 / Request**：`Empty {}`
 
-Returns node-level status: node ID, listen address, all Raft group IDs, and node uptime.
-
-**请求 / Request**: `Empty {}`
-
-**响应字段 / Response Fields**:
+**响应字段 / Response fields**：
 
 | 字段 / Field | 类型 / Type | 描述 / Description |
 | :--- | :--- | :--- |
-| `node_id` | `uint64` | 节点唯一标识符 / Unique node identifier |
+| `node_id` | `uint64` | 节点 ID / Node ID |
 | `listen_addr` | `string` | gRPC 监听地址 / gRPC listen address |
-| `group_ids` | `repeated uint64` | 该节点托管的 Raft 组 ID 列表 / Raft group IDs hosted on this node |
-| `uptime_secs` | `uint64` | 节点运行时间（秒） / Node uptime in seconds |
-
-**rr-admin 用法 / rr-admin usage**:
+| `group_ids` | `repeated uint64` | 本地托管的 Raft 组 / Locally hosted Raft groups |
+| `uptime_secs` | `uint64` | 运行秒数 / Uptime in seconds |
 
 ```bash
 rr-admin node status --addr 127.0.0.1:52001
 rr-admin --output json node status
 ```
 
----
-
 ### `GetGroupStatus(GroupId) → GroupStatus`
 
-返回单个 Raft 组的状态信息：是否为 Leader、当前任期、最新日志索引和 Leader 节点 ID。
+返回单个 Raft 组的 Leader 状态、任期、最后日志索引和已知 Leader ID。
+Returns leadership state, current term, last log index, and the known leader ID for one Raft group.
 
----
+**请求 / Request**：`GroupId { group_id: uint64 }`
 
-Returns status for a single Raft group: whether this node is leader, current term,
-last log index, and leader node ID.
-
-**请求 / Request**: `GroupId { group_id: uint64 }`
-
-**响应字段 / Response Fields**:
+**响应字段 / Response fields**：
 
 | 字段 / Field | 类型 / Type | 描述 / Description |
 | :--- | :--- | :--- |
 | `group_id` | `uint64` | Raft 组 ID / Raft group ID |
-| `is_leader` | `bool` | 当前节点是否为该组的 Leader / Whether this node is leader for the group |
+| `is_leader` | `bool` | 当前节点是否为 Leader / Whether this node is leader |
 | `current_term` | `uint64` | 当前 Raft 任期 / Current Raft term |
-| `last_log_index` | `uint64` | 最新日志条目索引 / Index of the last log entry |
-| `leader_node_id` | `uint64` | 当前已知的 Leader 节点 ID（0 表示未知） / Current known leader node ID (0 = unknown) |
-
-**rr-admin 用法 / rr-admin usage**:
+| `last_log_index` | `uint64` | 最后日志索引 / Last log index |
+| `leader_node_id` | `uint64` | 已知 Leader ID；0 表示未知 / Known leader ID; 0 means unknown |
 
 ```bash
 rr-admin group status --group 1
 rr-admin --output json group status --group 1
 ```
 
----
+### `TriggerSnapshot(GroupId) → Empty`
 
-### `TriggerSnapshot(GroupId) → TriggerSnapshotResponse`
+手动触发指定 Raft 组的快照与日志压缩，不中断正常写入。成功返回 `Empty`；失败通过 gRPC 状态返回，
+没有 `success` 或 `message` 响应字段。
 
-手动触发指定 Raft 组的日志压缩（快照）操作。不影响正常写入流程。
+Manually triggers snapshotting and log compaction for a Raft group without interrupting normal writes.
+Success returns `Empty`; failures are gRPC status errors. There are no `success` or `message` response
+fields.
 
----
-
-Manually triggers log compaction (snapshot) for the specified Raft group.
-Does not interrupt normal write operations.
-
-**请求 / Request**: `GroupId { group_id: uint64 }`
-
-**响应字段 / Response Fields**:
-
-| 字段 / Field | 类型 / Type | 描述 / Description |
-| :--- | :--- | :--- |
-| `success` | `bool` | 快照是否成功触发 / Whether the snapshot was triggered successfully |
-| `message` | `string` | 状态消息或错误信息 / Status message or error description |
-
-**rr-admin 用法 / rr-admin usage**:
+**请求 / Request**：`GroupId { group_id: uint64 }`
 
 ```bash
 rr-admin group snapshot --group 1
 ```
 
----
+### `TransferLeader(TransferLeaderRequest) → Empty`
 
-### `TransferLeader(TransferLeaderRequest) → google.protobuf.Empty`
+请求**被调用节点**发起选举，成为指定 Raft 组的 Leader（`raft.trigger().elect(false)`）。
+`target_node_id` 必须等于该节点自身的 node ID；远程转移会以 `FAILED_PRECONDITION` 拒绝。
+要让节点 N 成为 Leader，应调用节点 N 的 Admin 端口；要迁出某节点的全部 Leader，使用 `DrainNode`，
+它同样只作用于被调用节点。失败通过 gRPC 状态返回。
 
-请求本节点发起选举成为指定 Raft 组的 Leader（`raft.trigger().elect(false)`）。
-**重要限制**：`target_node_id` 必须等于被调用节点自身的 node id——向远程节点
-转移不受支持，请求会以 `FAILED_PRECONDITION` 拒绝。要让节点 N 成为 Leader，
-请对节点 N 的 admin 端口调用本 RPC；要迁出某节点的全部 Leader，用
-`DrainNode`（同样只作用于被调用节点自身）。
-
----
-
-Triggers an election on the CALLED node to become the leader of the given
-Raft group (`raft.trigger().elect(false)`). **Limitation**: `target_node_id`
-must equal the called node's own node id — transfers to a remote node are
-rejected with `FAILED_PRECONDITION`. To make node N the leader, call this
-RPC on node N's admin port; to move ALL leadership off a node, use
-`DrainNode` (also self-only). The response is `Empty`; failures surface as
-gRPC status errors, not response fields.
-
-**请求字段 / Request Fields**:
+Asks the **called node** to start an election for the Raft group (`raft.trigger().elect(false)`).
+`target_node_id` must equal that node's own ID; remote transfers are rejected with
+`FAILED_PRECONDITION`. To make node N leader, call node N's admin port. To move all leadership off a
+node, use `DrainNode`, which is also self-only. Failures are returned as gRPC status errors.
 
 | 字段 / Field | 类型 / Type | 描述 / Description |
 | :--- | :--- | :--- |
 | `group_id` | `uint64` | Raft 组 ID / Raft group ID |
-| `target_node_id` | `uint64` | 必须等于被调用节点的 node id / Must equal the called node's node id |
-
-**rr-admin 用法 / rr-admin usage**:
+| `target_node_id` | `uint64` | 必须等于被调用节点 ID / Must equal the called node's ID |
 
 ```bash
 rr-admin group transfer-leader --group 1 --to 3
 ```
 
----
-
 ### `GetMetricsSummary(Empty) → MetricsSummary`
 
-返回顶层指标摘要：总提案数、总应用数和总快照安装数。
+:::warning 已弃用 / Deprecated
+自 v0.3.0 起，此 RPC 在服务端返回 `UNIMPLEMENTED`；旧实现恒定返回零，不能作为真实指标使用。
+请抓取 Prometheus `/metrics` 端点。消息和字段号为保持 wire 兼容性而保留，不得重用。
 
----
+Since v0.3.0, the server returns `UNIMPLEMENTED`; the old implementation returned constant zeros and
+was not a truthful metrics source. Scrape the Prometheus `/metrics` endpoint instead. The message and
+field numbers remain reserved for wire compatibility and must not be reused.
+:::
 
-Returns a top-level metrics snapshot: total proposals, total applied entries,
-and total snapshot installs.
+保留的响应 schema 如下 / The retained response schema is:
 
-**请求 / Request**: `Empty {}`
-
-**响应字段 / Response Fields**:
-
-| 字段 / Field | 类型 / Type | 描述 / Description |
+| 字段 / Field | 类型 / Type | 原用途 / Former purpose |
 | :--- | :--- | :--- |
-| `total_proposals` | `uint64` | 自节点启动以来的总提案数 / Total proposals since node start |
-| `total_applied` | `uint64` | 已应用的日志条目总数 / Total log entries applied |
-| `total_snapshots` | `uint64` | 已安装的快照总数 / Total snapshots installed |
-
-**rr-admin 用法 / rr-admin usage**:
-
-```bash
-rr-admin metrics
-rr-admin --output json metrics
-```
+| `total_proposals` | `uint64` | 总提案数 / Total proposals |
+| `total_applied` | `uint64` | 已应用日志条目数 / Applied log entries |
+| `total_snapshots` | `uint64` | 已安装快照数 / Installed snapshots |

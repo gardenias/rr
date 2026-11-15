@@ -2,125 +2,51 @@
 sidebar_position: 3
 ---
 
-# StateMachine Trait / StateMachine 特性
+# StateMachine 特性 / StateMachine Trait
 
-## 什么是 StateMachine Trait / What is the StateMachine Trait
+`StateMachine` 直接处理已提交日志的字节并自行维护 `last_applied`。需要自定义帧格式、快照或底层控制时使用；常规业务优先实现 [Service](service-trait.md)。
+`StateMachine` applies committed entry bytes and tracks `last_applied` itself. Use it for custom framing, snapshots, or low-level control; ordinary business logic should implement [Service](service-trait.md).
 
-`StateMachine` 是 `rr` 框架中用于实现底层状态机的核心接口。它直接处理来自 Raft 日志的原始字节条目（包含索引和任期信息）。
+## 安全条件 / Safety Invariants
 
-如果你需要对状态机的行为进行细粒度控制，或者不希望使用更高层级的 `Service` 抽象，可以直接实现此 Trait。它允许你完全自主地管理序列化、反序列化以及状态转换逻辑。
+除 Service 的三项条件外，底层实现还必须正确维护应用进度。完整契约见当前仓库的 [`StateMachine` 源码与 rustdoc 注释](https://github.com/gardenias/rr/blob/main/crates/rr-core/src/state_machine.rs) 和 [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)。
+In addition to the Service invariants, low-level implementations must maintain apply progress correctly. See the [`StateMachine` source and rustdoc comments](https://github.com/gardenias/rr/blob/main/crates/rr-core/src/state_machine.rs) in this repository and [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md).
 
----
+| 条件 / Invariant | 错误后果 / Failure |
+| :--- | :--- |
+| `snapshot()` 捕获完整原子视图，包括 `last_applied` / Capture an atomic view including `last_applied` | 恢复点与业务状态不一致 / Restore point disagrees with state |
+| `apply()` 返回前完成修改并更新 `last_applied` / Finish mutations and update `last_applied` before returning | 恢复时重放错误区间 / Recovery replays the wrong range |
+| `restore()` 替换全部状态并恢复快照进度 / Replace all state and restore snapshot progress | 旧数据或旧进度残留 / Old state or progress survives |
 
-The `StateMachine` trait is the core low-level interface for implementing state machines in the `rr` framework. It provides direct access to raw byte entries from the Raft log, including their associated index and term.
+`apply()` 的 `entry` 是提案负载；它不会自动携带可信的 Raft index/term。需要真实日志上下文时覆盖 `apply_with_ctx(entry, ApplyContext)`，不要把客户端伪造的元数据当作 fencing 依据。
+The `entry` passed to `apply()` is the proposed payload; it does not automatically carry trusted Raft index or term metadata. Override `apply_with_ctx(entry, ApplyContext)` for real log context instead of trusting client-supplied metadata.
 
-Use this trait when you need fine-grained control over state machine behavior or prefer not to use the higher-level `Service` abstraction. It grants you full autonomy over serialization, deserialization, and state transition logic.
-
-## 安全不变量 / Safety Invariants (MUST uphold)
-
-`StateMachine` 实现必须遵守和 [`Service`](./service-trait.md) 同样的 3 条
-安全不变量——违反任何一条都会导致**静默数据损坏**。低层级 trait 多了一条
-要求：`apply()` 必须在返回前更新 `last_applied`，否则 OpenRaft 的恢复
-流程会算错 replay 起点（见 ADR A-0002 §Contract 2）。
-
----
-
-`StateMachine` implementations must uphold the same 3 safety invariants as
-[`Service`](./service-trait.md) — violating any causes **silent data
-corruption**. The low-level trait has one additional requirement:
-`apply()` must update `last_applied` before returning, or OpenRaft's
-recovery flow will compute the wrong replay anchor (see ADR A-0002
-§Contract 2).
-
-| # | Invariant | Failure mode |
-| :- | :--- | :--- |
-| 1 | `snapshot()` captures an atomically-consistent view | Snapshot bytes mix old + new state |
-| 2 | `apply()` completes mutations synchronously AND updates `last_applied` before returning | Recovery replays wrong range; followers diverge |
-| 3 | `restore()` completely replaces state, including `last_applied` | Restored node uses stale replay anchor |
-
-完整契约见 [trait rustdoc](https://docs.rs/rr-core/latest/rr_core/state_machine/trait.StateMachine.html)
-和 [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)。
-
----
-
-See the [trait rustdoc](https://docs.rs/rr-core/latest/rr_core/state_machine/trait.StateMachine.html)
-and [ADR A-0002](https://github.com/gardenias/rr/blob/main/.sisyphus/adr/A-0002-snapshot-consistency-and-recovery.md)
-for the complete contract.
-
-## StateMachine Trait 方法 / StateMachine Trait Methods
-
-以下是 `StateMachine` Trait 的核心定义（位于 `crates/rr-core/src/state_machine.rs`）：
-
----
-
-Here is the core definition of the `StateMachine` trait (found in `crates/rr-core/src/state_machine.rs`):
+## 必需接口 / Required Interface
 
 ```rust
 #[async_trait]
 pub trait StateMachine: Send + Sync {
-    /// 应用一个已提交的 Raft 日志条目到状态机。
-    /// Apply a committed Raft log entry to the state machine.
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError>;
-
-    /// 创建当前状态的一致性快照。
-    /// Create a consistent snapshot of the current state.
     async fn snapshot(&self) -> Result<Vec<u8>, RrError>;
-
-    /// 从快照恢复状态。
-    /// Restore state from a snapshot.
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError>;
-
-    /// 返回最后一次应用的日志条目的索引。
-    /// Return the index of the last applied log entry, if any.
     async fn last_applied(&self) -> Option<LogIndex>;
 }
 ```
 
-- **apply**: 接收原始字节，执行状态变更，并返回发送给客户端的响应字节。
-- **snapshot**: 将当前内存状态序列化为 `Vec<u8>`。
-- **restore**: 接收字节流并重建内部状态。
-- **last_applied**: 用于 Raft 恢复时确定应用进度。
+`apply_with_ctx` 和 `apply_deferred` 有默认实现。后者可延迟客户端响应；默认路径依次委托到 `apply_with_ctx` 和 `apply`。
+`apply_with_ctx` and `apply_deferred` have defaults. The latter may defer a client response; the default path delegates through `apply_with_ctx` to `apply`.
 
----
+## 自定义帧示例 / Custom Frame Example
 
-- **apply**: Receives raw bytes, performs state transitions, and returns response bytes for the client.
-- **snapshot**: Serializes the current in-memory state into a `Vec<u8>`.
-- **restore**: Rebuilds the internal state from a provided byte stream.
-- **last_applied**: Used during Raft recovery to determine the application progress.
-
-## RrStateMachine 如何包装你的状态机 / How RrStateMachine Wraps Your StateMachine
-
-在 `rr-raft` 内部，`RrStateMachine` 充当了你的 `StateMachine` 实现与 `openraft` 的 `RaftStateMachine` 接口之间的桥梁。
-
----
-
-Internally within `rr-raft`, `RrStateMachine` acts as a bridge between your `StateMachine` implementation and openraft's `RaftStateMachine` interface.
-
-- **适配器模式**: `RrStateMachine` 实现了 `openraft` 所需的复杂接口，而将核心逻辑委托给你的 `StateMachine`。
-- **快照管理**: 它管理 `RrSnapshotBuilder`，处理大快照的分块传输逻辑。
-- **元数据跟踪**: 自动处理 `last_applied` 索引的跟踪以及成员变更（Membership）日志的应用。
-
----
-
-- **Adapter Pattern**: `RrStateMachine` implements the complex interfaces required by `openraft` while delegating core logic to your `StateMachine`.
-- **Snapshot Management**: It manages the `RrSnapshotBuilder` and handles chunked transfer logic for large snapshots.
-- **Metadata Tracking**: It automatically tracks the `last_applied` index and handles the application of membership change logs.
-
-## 完整的 KvStateMachine 示例 / Complete KvStateMachine Example
-
-以下是 `examples/kv-store/src/state_machine.rs` 中一个完整的实现示例。它展示了如何处理自定义的请求和响应类型，并实现快照逻辑。
-
----
-
-Below is a complete implementation example from `examples/kv-store/src/state_machine.rs`. It demonstrates how to handle custom request and response types and implement snapshot logic.
+`examples/kv-store/src/state_machine.rs` 演示了自定义的 `index || request` 帧。下面的快照同时包含业务和进度，避免只恢复 KV map 而丢失 `last_applied`。
+`examples/kv-store/src/state_machine.rs` demonstrates a custom `index || request` frame. This snapshot includes both business state and progress, avoiding a KV-only restore that loses `last_applied`.
 
 ```rust
 use std::collections::HashMap;
 use async_trait::async_trait;
 use bincode::config::standard;
 use rr_core::error::{CodecError, RrError};
-use rr_core::state_machine::StateMachine;
-use rr_core::types::LogIndex;
+use rr_core::{state_machine::StateMachine, types::LogIndex};
 
 pub struct KvStateMachine {
     store: HashMap<String, Vec<u8>>,
@@ -130,47 +56,46 @@ pub struct KvStateMachine {
 #[async_trait]
 impl StateMachine for KvStateMachine {
     async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, RrError> {
-        // 在此示例中，entry 包含 8 字节索引和序列化的 payload
-        // In this example, entry contains an 8-byte index and serialized payload
         if entry.len() < 8 {
-            return Err(RrError::Codec(CodecError::DeserializeFailed("Too short".into())));
+            return Err(RrError::Codec(CodecError::DeserializeFailed(
+                "entry too short".into(),
+            )));
         }
-        let (index_bytes, payload) = entry.split_at(8);
-        let index = u64::from_le_bytes(index_bytes.try_into().unwrap());
+        let (index, payload) = entry.split_at(8);
+        let index = LogIndex::from_le_bytes(index.try_into().unwrap());
+        let (request, _): (KvRequest, _) =
+            bincode::serde::decode_from_slice(payload, standard())
+                .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
 
-        let (req, _): (KvRequest, _) = bincode::serde::decode_from_slice(payload, standard())
-            .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
-
-        let response = match req {
+        let response = match request {
             KvRequest::Put { key, value } => {
                 self.store.insert(key, value);
-                KvResponse::none()
+                KvResponse { value: None }
             }
-            KvRequest::Get { key } => {
-                KvResponse { value: self.store.get(&key).cloned() }
-            }
+            KvRequest::Get { key } => KvResponse {
+                value: self.store.get(&key).cloned(),
+            },
             KvRequest::Delete { key } => {
                 self.store.remove(&key);
-                KvResponse::none()
+                KvResponse { value: None }
             }
         };
-
         self.last_applied = Some(index);
-
         bincode::serde::encode_to_vec(&response, standard())
             .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))
     }
 
     async fn snapshot(&self) -> Result<Vec<u8>, RrError> {
-        bincode::serde::encode_to_vec(&self.store, standard())
+        bincode::serde::encode_to_vec(&(self.last_applied, &self.store), standard())
             .map_err(|e| RrError::Codec(CodecError::SerializeFailed(e.to_string())))
     }
 
     async fn restore(&mut self, snapshot: &[u8]) -> Result<(), RrError> {
-        let (restored, _): (HashMap<String, Vec<u8>>, _) =
+        let ((last_applied, store), _): ((Option<LogIndex>, HashMap<String, Vec<u8>>), _) =
             bincode::serde::decode_from_slice(snapshot, standard())
                 .map_err(|e| RrError::Codec(CodecError::DeserializeFailed(e.to_string())))?;
-        self.store = restored;
+        self.last_applied = last_applied;
+        self.store = store;
         Ok(())
     }
 
@@ -180,44 +105,16 @@ impl StateMachine for KvStateMachine {
 }
 ```
 
-## 快照生命周期 / Snapshot Lifecycle
+该帧格式是示例的私有约定，不是框架通用格式。采用它时，提案方必须显式生成相同格式；需要框架提供的真实 index 时改用 `apply_with_ctx`。
+This frame is the example's private convention, not a framework-wide format. Producers must encode it explicitly; use `apply_with_ctx` when the framework's real index is required.
 
-`rr` 遵循标准的 Raft 快照流程：
+## 适配器与快照 / Adapter and Snapshots
 
-1. **触发**: 当自上次快照以来已提交的日志数量超过 `SnapshotPolicy::LogsSinceLast(N)` 阈值（默认 50_000，可通过 `NodeConfig::snapshot_logs_since_last` 调整）时，`openraft` 触发快照创建。
-2. **构建**: `RrSnapshotBuilder::build_snapshot()` 调用你的 `StateMachine::snapshot()` 方法。
-3. **编码**: 状态机返回序列化后的 `Vec<u8>` 字节流。
-4. **传输**: 如果有节点进度落后太远，Leader 通过 `InstallSnapshot` RPC 将快照发送给 Follower。
-5. **恢复**: Follower 接收完整快照后，通过 `RrStateMachine::install_snapshot()` 调用你的 `StateMachine::restore()`。
+`RrStateMachine` 将底层实现接到 OpenRaft，并处理快照构建、传输和安装。实现仍负责业务字节、原子性和 `last_applied`。
+`RrStateMachine` connects the implementation to OpenRaft and handles snapshot building, transfer, and installation. The implementation still owns business bytes, atomicity, and `last_applied`.
 
----
+默认在距上个快照 50,000 条日志后触发快照，可用 `NodeConfig::with_snapshot_logs_since_last` 调整。落后过多的 follower 通过 `InstallSnapshot` 接收快照，随后调用 `restore()`。
+Snapshots default to every 50,000 entries since the previous snapshot and can be tuned with `NodeConfig::with_snapshot_logs_since_last`. A lagging follower receives one through `InstallSnapshot`, followed by `restore()`.
 
-`rr` follows the standard Raft snapshot workflow:
-
-1. **Trigger**: When the number of logs committed since the last snapshot exceeds the `SnapshotPolicy::LogsSinceLast(N)` threshold (default 50_000, tunable via `NodeConfig::snapshot_logs_since_last`), `openraft` triggers snapshot creation.
-2. **Build**: `RrSnapshotBuilder::build_snapshot()` calls your `StateMachine::snapshot()` method.
-3. **Encode**: The state machine returns a serialized `Vec<u8>` byte stream.
-4. **Transfer**: If a node falls too far behind, the Leader sends the snapshot to the Follower via `InstallSnapshot` RPCs.
-5. **Restore**: After receiving the full snapshot, the Follower calls your `StateMachine::restore()` via `RrStateMachine::install_snapshot()`.
-
-## 序列化模式 / Serialization Patterns
-
-虽然状态快照可以是任何 `Vec<u8>`，但我们建议在 `rr` 生态中使用 `bincode` v2。
-
----
-
-While state snapshots can be any `Vec<u8>`, we recommend using `bincode` v2 within the `rr` ecosystem.
-
-```rust
-// 推荐的序列化模式 / Recommended serialization pattern
-let encoded = bincode::serde::encode_to_vec(&state, bincode::config::standard())?;
-
-// 推荐的反序列化模式 / Recommended deserialization pattern
-let (decoded, _) = bincode::serde::decode_from_slice(data, bincode::config::standard())?;
-```
-
-使用 `bincode::config::standard()` 可以确保跨平台的兼容性和极致的性能。
-
----
-
-Using `bincode::config::standard()` ensures cross-platform compatibility and peak performance.
+序列化格式必须同时版本化业务状态和恢复进度。bincode v2 是仓库示例的选择，不是跨语言兼容性的保证。
+Version the serialization format for both business state and recovery progress. The repository examples use bincode v2; that alone does not guarantee cross-language compatibility.

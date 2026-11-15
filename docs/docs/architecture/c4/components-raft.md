@@ -2,13 +2,12 @@
 sidebar_position: 4
 ---
 
-# Level 3 — rr-raft 组件图 / rr-raft Components
+# 第 3 级：rr-raft 组件 / Level 3: rr-raft Components
 
-`rr-raft` 是 rr 的共识引擎。本图展示其如何在单个节点上同时运行多个独立的 Raft 组，并通过适配器把用户的 `Service` trait 挂到 openraft 的状态机接口上。
+`rr-raft` 在单节点上运行多个独立 Raft group，并把应用 `Service` 适配到 openraft 状态机。
 
----
-
-`rr-raft` is rr's consensus engine. This diagram shows how it runs multiple independent Raft groups on a single node, and how adapters bridge the user's `Service` trait to openraft's state machine interface.
+`rr-raft` runs multiple independent Raft groups on one node and adapts the application `Service` to openraft's
+state machine.
 
 ## 图示 / Diagram
 
@@ -31,7 +30,7 @@ Container_Boundary(rr_raft, "rr-raft") {
 
   Component(log_storage, "RrLogStorage", "rr-raft::log_storage", "In-memory implementation of openraft::RaftLogStorage (BTreeMap)")
   Component(rocks_log, "RocksLogStorage", "rr-raft::rocks_log_storage", "Persistent openraft::RaftLogStorage — per-group independent RocksDB instance at {base_path}/{group_id} (rocks feature)")
-  Component(sm_adapter, "RrStateMachine", "rr-raft::sm_adapter", "Implements openraft::RaftStateMachine. Delegates apply() to ServiceStateMachineAdapter; owns snapshot creation via bincode")
+  Component(sm_adapter, "RrStateMachine", "rr-raft::sm_adapter", "Implements openraft::RaftStateMachine. Delegates apply(); builds/installs snapshots with fail-closed persistence when a store is attached")
   Component(svc_adapter, "ServiceStateMachineAdapter", "rr-raft::service_adapter", "Bridges Service trait (async handle / snapshot / restore) to rr's internal StateMachine trait")
 
   Component(net_factory, "GrpcNetworkFactory", "rr-raft::network_factory", "Implements openraft::RaftNetworkFactory. For each peer node, creates a GrpcRaftNetwork")
@@ -60,82 +59,71 @@ LAYOUT_WITH_LEGEND()
 @enduml
 ```
 
-## 分层适配 / Adapter Layering
+## 适配分层 / Adapter Layering
 
-rr-raft 通过三层适配把**业务 `Service` trait**（用户写的）对接到 **openraft 的 `RaftStateMachine` trait**（共识引擎要求的）：
-
-rr-raft uses three adapter layers to bridge the **business `Service` trait** (user-written) to openraft's **`RaftStateMachine` trait** (required by the consensus engine):
-
-```
-openraft::RaftStateMachine           ← 共识引擎接口 / what openraft needs
-        │
+```text
+openraft::RaftStateMachine           ← openraft consensus-engine contract
         │ implemented by
         ▼
-RrStateMachine                       ← rr 内部类型 / rr's internal wrapper
-        │
+RrStateMachine                       ← internal rr wrapper
         │ delegates to
         ▼
-rr_core::state_machine::StateMachine ← rr 抽象 trait / rr's abstract contract
-        │
+rr_core::state_machine::StateMachine ← rr abstraction
         │ implemented by
         ▼
-ServiceStateMachineAdapter           ← 桥 / the bridge
-        │
+ServiceStateMachineAdapter           ← adapter
         │ wraps
         ▼
-rr_core::service::Service            ← 用户写的业务逻辑 / user's business logic
+rr_core::service::Service            ← application business logic
 ```
 
-**为什么这么多层？/ Why all these layers?**
+- `Service` 面向应用，只处理字节请求、快照和恢复，不暴露 Raft 日志。
+  `Service` is application-facing: byte requests, snapshots, and restore, without exposing Raft logs.
+- `StateMachine` 是 rr 内部契约；`ServiceStateMachineAdapter` 将 `Service` 接到该契约。
+  `StateMachine` is rr's internal contract; `ServiceStateMachineAdapter` bridges `Service` to it.
+- `RrStateMachine` 实现 openraft 接口，维护 applied/snapshot 元数据；`rocks` 只替换日志存储并附加快照持久化。
+  `RrStateMachine` implements openraft, tracking applied/snapshot metadata; `rocks` replaces log storage and adds
+  snapshot persistence.
 
-1. `Service` trait 面向应用开发者（`async handle(bytes) → bytes`），**与共识/日志无关**。
-2. `StateMachine` trait 是 rr 内部中间层，支持未来添加更低层次的用户（例如用户绕过 Service 直接写日志）。
-3. `RrStateMachine` 实现 openraft 要求的 `RaftStateMachine`（带快照元数据、last_applied 追踪等）。
-4. 每层职责单一，允许**测试替身**与**特性切换**（`rocks` feature 只改变 LogStorage 层，不影响上层）。
+## 多组管理 / Multi-group Management
 
----
+### RaftGroupManager：组管理 / RaftGroupManager: Group Management
 
-1. The `Service` trait is for application developers (`async handle(bytes) → bytes`) — **consensus-agnostic**.
-2. The `StateMachine` trait is rr's internal midlayer, allowing future lower-level users (e.g. bypass `Service` and write directly to the log).
-3. `RrStateMachine` implements openraft's `RaftStateMachine` (snapshot metadata, last_applied tracking, etc.).
-4. Single-responsibility layers enable **test doubles** and **feature toggles** (the `rocks` feature only replaces the LogStorage layer; nothing above changes).
+- 内部使用 `DashMap<GroupId, Arc<Mutex<GroupState>>>`；每个状态包含 `RaftNode`、后台任务句柄和在途写计数。
+  It stores `DashMap<GroupId, Arc<Mutex<GroupState>>>`; each state holds a `RaftNode`, background task handles,
+  and an in-flight write counter.
+- `start_group(group_id)` 创建并注册独立 openraft 任务。
+  `start_group(group_id)` creates and registers an independent openraft task.
+- `stop_group(group_id)` 停止后台任务，最多等待 5 秒排空在途写，关闭 Raft，并 flush/关闭 Rocks
+  IoBatcher；不会删除日志。
+  `stop_group(group_id)` stops background tasks, drains in-flight writes for up to 5 seconds, shuts down Raft,
+  and flushes/closes the Rocks IoBatcher; it does not delete logs.
+- 初始化和成员操作转发到对应 openraft API。
+  Initialization and membership operations forward to the corresponding openraft APIs.
 
-## 多组的实现细节 / Multi-Group Implementation Details
+### 并发与存储边界 / Concurrency and Storage Boundaries
 
-### RaftGroupManager
-- 内部：`DashMap<GroupId, Arc<Mutex<GroupState>>>` —— `GroupState` 持有 `RaftNode` 及该 group 的后台任务句柄（ingestor / output / metrics ticker / learner promoter）与在途写计数。
-- `start_group(group_id)`：创建 `RaftNode`（启动一个新的 openraft 任务），注册到 DashMap。
-- `stop_group(group_id)`：先停止 ingestor / output / metrics ticker / learner promoter 任务，排空在途写（5 秒上限），调用 `raft.shutdown()`，最后关闭并 flush Rocks 日志的 IoBatcher。**不会删除该 group 的任何日志数据**——日志保留在存储中供重启恢复。
-- `init_cluster(group_id, members)` / `add_learner` / `change_membership`：转发到 `openraft::Raft` 的对应方法。
+- 每个 group 有独立 openraft 任务，一个 group 的选举不会阻塞另一个 group。
+  Each group has its own openraft task, so one group's election does not block another's.
+- mem 模式每 group 使用独立 `RrLogStorage`；rocks 模式每 group 在 `{base_path}/{group_id}` 打开独立 RocksDB。`NodeConfig.storage_engine` 不承载 Raft 日志，但 managed formation 会将它传给 `FormationSupervisor`。<br />In mem mode each group has its own `RrLogStorage`; in rocks mode each opens its own RocksDB at `{base_path}/{group_id}`. `NodeConfig.storage_engine` does not carry Raft logs, but managed formation passes it to `FormationSupervisor`.
+- 所有 group 复用网络和 gRPC 端口，RPC 用 `group_id` 解复用。
+  Groups share the network and gRPC port; RPCs are demultiplexed by `group_id`.
 
----
+### 本地 Proto 重定义 / Local Proto Redefinition
 
-- Internal: `DashMap<GroupId, Arc<Mutex<GroupState>>>` — `GroupState` holds the `RaftNode` plus the group's background task handles (ingestor / output / metrics ticker / learner promoter) and an in-flight write counter.
-- `start_group(group_id)`: creates a `RaftNode` (starts a new openraft task), registers in the DashMap.
-- `stop_group(group_id)`: stops the ingestor / output / metrics ticker / learner promoter tasks, drains in-flight writes (5 s cap), calls `raft.shutdown()`, then closes + flushes the Rocks log's IoBatcher. It **never deletes the group's log data** — the log stays in storage for restart recovery.
-- `init_cluster` / `add_learner` / `change_membership`: forwards to the corresponding `openraft::Raft` methods.
+依赖方向是 `rr-raft → rr-client → rr-network`，而 `rr-network` 只依赖 `rr-core`。`rr-raft` 在
+`network_factory.rs` 本地定义与 `rr.raft.*` prost 注解一致的消息和 `ChannelPool`，并直接构建 tonic
+客户端；openraft 类型仅在 `payload` 字节字段内做 bincode 编码。两处 proto 字段必须保持 wire-compatible。
 
-### 并发行为 / Concurrency Behavior
-- **每个 group 有独立的 openraft 任务** —— 一个组的选举超时不会阻塞另一个组。
-- **每 group 独立存储** —— 各 group 的日志互不相同：mem 模式下每个 group 一个独立的 `RrLogStorage`（内存 BTreeMap）；rocks 模式下每个 group 在 `{base_path}/{group_id}` 打开**独立的 RocksDB 实例**。不存在共享 StorageEngine + group_id 前缀的隔离方式。（`rr-server` 的 `NodeConfig.storage_engine` 字段目前没有任何消费方——Raft 日志不经过它。）
-- **共享网络** —— 所有 group 的 Raft RPC 通过同一个 `ChannelPool` 和相同的 gRPC 端口；`group_id` 字段在 RPC level 做 demux。
-
----
-
-- **Each group has an independent openraft task** — an election timeout in one group does not block another.
-- **Per-group storage** — group logs are never mixed: in mem mode each group gets its own `RrLogStorage` (in-memory BTreeMap); in rocks mode each group opens an **independent RocksDB instance** at `{base_path}/{group_id}`. There is no shared-StorageEngine-with-group_id-prefix isolation. (rr-server's `NodeConfig.storage_engine` field currently has no consumer — Raft logs do not flow through it.)
-- **Shared network** — all groups' Raft RPCs go through one `ChannelPool` and the same gRPC port; `group_id` field does RPC-level demux.
-
-### 本地 proto 重定义 / Local proto redefinition
-
-rr-raft 需要发送 Raft RPC，但它**不依赖** rr-network（实际依赖方向是 `rr-raft → rr-client → rr-network`，`rr-network` 仅依赖 `rr-core`，不存在循环）。作为替代，`rr-raft` 在 `network_factory.rs` 本地重新定义了与 `rr.raft.*` **prost 注解一致（wire-compatible）的 proto 消息结构**，并内联构建 tonic 客户端；openraft 类型的 bincode 编码只发生在消息的 `payload` 字节字段内部。连接复用也使用 rr-raft **本地定义的 `ChannelPool`**（注释原文："Functionally identical to rr_network::ChannelPool but defined locally"）。详见 [components-network.md](./components-network.md)。
-
----
-
-rr-raft needs to send Raft RPCs, but it does **not** depend on rr-network (the actual dependency direction is `rr-raft → rr-client → rr-network`; `rr-network` depends only on `rr-core`, so there is no cycle). Instead, `rr-raft` locally redefines proto message structs in `network_factory.rs` with **matching prost annotations (wire-compatible with `rr.raft.*`)** and builds the tonic client inline; bincode encoding of openraft types happens only inside the messages' `payload` bytes field. Connection reuse likewise goes through rr-raft's **locally defined `ChannelPool`** (the code comment reads: "Functionally identical to rr_network::ChannelPool but defined locally"). See [components-network.md](./components-network.md).
+The dependency direction is `rr-raft → rr-client → rr-network`, while `rr-network` depends only on `rr-core`.
+`rr-raft` defines locally prost-compatible `rr.raft.*` messages and its own `ChannelPool` in
+`network_factory.rs`, then builds tonic clients directly. Openraft types are bincode-encoded only inside the
+`payload` bytes. The two proto definitions must remain wire-compatible.
 
 ## 相关 / Related
 
-- 执行流：[dynamic-leader-election.md](./dynamic-leader-election.md), [dynamic-snapshot-transfer.md](./dynamic-snapshot-transfer.md)
-- 存储细节：[../storage.md](../storage.md)
-- 多 Raft 概念：[../multi-raft.md](../multi-raft.md)
+- [gRPC 解耦与连接池 / gRPC decoupling and channel pools](./components-network.md)
+- [领导者选举 / Leader election](./dynamic-leader-election.md)
+- [快照传输 / Snapshot transfer](./dynamic-snapshot-transfer.md)
+- [存储 / Storage](../storage.md)
+- [多 Raft 概念 / Multi-Raft concepts](../multi-raft.md)

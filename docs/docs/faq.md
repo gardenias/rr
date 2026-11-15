@@ -1,176 +1,220 @@
 ---
 sidebar_position: 2
-title: FAQ
+title: 常见问题 / FAQ
 ---
 
 # 常见问题 / Frequently Asked Questions
 
 ## 定位 / Positioning
 
-### rr 是一个数据库吗？
+### Rr 是数据库吗？ / Is Rr a database?
 
-不是。rr 是一个**框架/库**，用来构建强一致、分片、高可用的复制服务——它不是一个开箱即用的数据库。你把 rr 嵌入自己的二进制，实现 `Service` / `StateMachine` trait 来表达业务逻辑（参考 `examples/kv-store`、`examples/counter`）。stock `rr-server` 二进制自带的只是一个冒烟测试用的 `EchoStateMachine`。如果你需要的是 SQL、事务或二级索引，应该选择一个真正的数据库。
+不是。Rr 是用于构建强一致、分片复制服务的框架和库，不是开箱即用的数据库。你需要在自己的二进制中实现
+`Service` / `StateMachine` trait；`examples/kv-store` 和 `examples/counter` 展示了接入方式。标准
+`rr-server` 只内置冒烟测试用的 `EchoStateMachine`。需要 SQL、事务或二级索引时，应选择数据库。
 
-### 什么时候不该用 rr？
+No. Rr is a framework and library for building strongly consistent, sharded replicated services, not a turnkey
+database. Implement the `Service` / `StateMachine` traits in your own binary; see `examples/kv-store` and
+`examples/counter`. The stock `rr-server` includes only an `EchoStateMachine` for smoke tests. Choose a database
+if you need SQL, transactions, or secondary indexes.
 
-- 你需要 SQL、事务、二级索引——rr 是共识框架，不是数据库；
-- 你需要 AP 语义，或者希望"加副本提升写吞吐"——Raft 是 CP，且**单个共识组的写入不会随副本数扩展**；multi-raft 的扩展方式是跨共识组**分片**，不是加副本；
-- 一个 etcd / rqlite / consul 已经能满足你——它们是成品，直接用就好；
-- 你需要跨地域低延迟写入——quorum 往返延迟是硬约束。
+### 什么时候不该用 Rr？ / When should I not use Rr?
 
-### rr 和 etcd / rqlite / consul 的区别是什么？
+- 你需要 SQL、事务、二级索引或现成的数据模型。<br />
+  You need SQL, transactions, secondary indexes, or a ready-made data model.
+- 你需要 AP 语义，或希望通过增加副本提升写吞吐；Raft 是 CP，写扩展依靠跨共识组分片。<br />
+  You need AP semantics or expect replicas to scale writes; Raft is CP, and write scaling comes from sharding
+  across consensus groups.
+- etcd、rqlite 或 consul 已经满足需求。<br />
+  etcd, rqlite, or consul already meets your needs.
+- 你要求跨地域低延迟写入；多数派往返延迟无法消除。<br />
+  You require low-latency cross-region writes; quorum round trips cannot be removed.
 
-那些是**成品系统**，各自带有固定的数据模型（KV、SQL 等）。rr 面向的场景是"你在构建**自己的**复制服务"：你定义状态机、请求格式和业务语义，rr 提供共识、分片路由、成员编排、客户端重定向和运维工具链。如果你想要的是它们的数据模型，直接用它们；如果你要造自己的，rr 是对的层次。
+### Rr 与 etcd、rqlite、consul 有什么区别？ / How does Rr differ from etcd, rqlite, or consul?
 
-### 我已经在用 openraft 了，rr 还能给我什么？
+它们是带有固定数据模型的成品系统。Rr 面向需要自己定义状态机、请求格式和业务语义的服务，提供共识、
+分片路由、成员编排、客户端重定向和运维工具。现有系统的数据模型已经适合时，直接使用现有系统。
 
-openraft 给你**一个**共识组的引擎，存储、网络、部署都要自己实现。rr 在此之上补齐了多分片生产系统需要的其余部分：多共识组生命周期管理（`RaftGroupManager`）、表格式分片路由、gRPC 网络层与连接池、客户端 SDK（leader 重定向/重试/缓存）、框架级幂等、Kafka 接入、安全门与 TLS/mTLS、rr-admin 运维工具。详见 [与 openraft 的关系](architecture/openraft-relationship.md)。
+They are finished systems with fixed data models. Rr is for services that define their own state machines,
+request formats, and business semantics; it supplies consensus, shard routing, membership orchestration, client
+redirection, and operational tooling. If an existing system's data model fits, use that system.
 
-## 一致性 / Consistency
+### 已经使用 openraft，Rr 还能提供什么？ / What does Rr add if I already use openraft?
 
-### multi-raft 会让写入更快吗？
+openraft 提供单个共识组的引擎，存储、网络和部署仍由应用实现。Rr 在其上提供多共识组生命周期管理
+（`RaftGroupManager`）、表格式分片路由、gRPC 网络与连接池、客户端 SDK、框架级幂等、Kafka 接入、
+TLS/mTLS 安全门和 `rr-admin`。详见 [与 openraft 的关系](architecture/openraft-relationship.md)。
 
-不会——至少不是"加副本"意义上的更快。Raft 组的每次写入都需要 quorum 确认，**给单个组加副本只会增加写延迟**，不会提升吞吐。multi-raft 的扩展性来自**分片**：不同 partition 落在不同共识组上，写入按组并行，聚合吞吐随组数增长。单个 key 分片的写延迟始终由该组的 quorum 往返决定。
+openraft provides the engine for one consensus group, while the application implements storage, networking, and
+deployment. Rr adds multi-group lifecycle management (`RaftGroupManager`), table-based shard routing, gRPC
+networking and connection pooling, a client SDK, framework-level idempotency, Kafka ingestion, TLS/mTLS safety
+gates, and `rr-admin`. See [Relationship with openraft](architecture/openraft-relationship.md).
 
-### `read` 和 `read_linearizable` 有什么区别？
+## 一致性与扩展 / Consistency and scaling
 
-`read`（ReadLocal）直接读本地状态机副本，绕过共识，**可能过期**，但延迟最低且可以由 follower 服务。`read_linearizable`（ReadLinearizable）走 openraft ReadIndex：leader 先向 quorum 确认自己仍是合法 leader，等待本地 apply 追平后再读，保证线性一致（Raft 论文 §6.4），代价是一次 quorum 往返。完整对比见 [读一致性模型](guide/read-consistency.md)。
+### multi-raft 会让写入更快吗？ / Does multi-raft make writes faster?
 
-### 为什么 follower 不直接转发写请求，而是返回 leader_info？
+增加单个 Raft 组的副本不会提升写吞吐，通常还会增加多数派确认延迟。multi-raft 通过把不同 partition
+分配到不同组来并行写入；单个 key 的写延迟仍由所属组的多数派往返决定。在固定宿主机上增加组数也不会
+提升聚合吞吐，跨机扩展需要各组的副本集合不相交。实测条件见 [容量规划](deployment/capacity-planning.md)。
 
-这是刻意设计：服务端不转发，返回 `ClientResponse{success=false, leader_info}`，由客户端 SDK 更新 leader 缓存并重定向。好处是热点路径简单（无服务端转发跳数），且客户端始终学到真实的 leader 地址，后续请求直达。手写 gRPC 客户端时注意：重定向是通过响应里的 `leader_info` 字段表达的，**不是 gRPC 错误状态**。
+Adding replicas to one Raft group does not increase write throughput and usually adds quorum latency. Multi-raft
+parallelizes writes by assigning different partitions to different groups; a key's write latency still depends on
+its group's quorum round trip. Adding groups on a fixed host does not increase aggregate throughput either;
+scaling across hosts requires disjoint replica sets. See [Capacity Planning](deployment/capacity-planning.md) for
+measurements.
 
-### 客户端怎么找到 leader？
+### `read` 和 `read_linearizable` 有什么区别？ / How do `read` and `read_linearizable` differ?
 
-靠**重定向**，不是靠服务发现。客户端从 bootstrap 地址中任选一个发送请求；若该节点不是 leader，响应里的 `leader_info` 会给出 leader 的 `NodeId` 和地址，SDK 把它写入无 TTL 的 `HashMap<GroupId, (NodeId, String)>` 缓存并重试。`GetClusterInfo` RPC 返回真实的 raft 运行时拓扑（leader 与副本来自 `metrics`，选举中 leader 显示为 0；见 `crates/rr-server/src/dispatch.rs`），但 SDK 的 leader 发现仍走重定向缓存而非它。leader 宕机时缓存会失效：旧 leader 拒绝服务或不可达，SDK 清缓存后重新走 bootstrap 轮询。
+`read`（ReadLocal）直接读取本地状态机，绕过共识，可能返回旧数据，但延迟最低，follower 也能服务。
+`read_linearizable`（ReadLinearizable）使用 openraft ReadIndex：leader 先向多数派确认自身地位，等待本地
+apply 追平后再读，因此提供线性一致读，代价是多数派往返。详见 [读一致性模型](guide/read-consistency.md)。
+
+`read` (ReadLocal) reads the local state machine without consensus. It may return stale data, but has the lowest
+latency and can be served by followers. `read_linearizable` (ReadLinearizable) uses openraft ReadIndex: the leader
+confirms its leadership with a quorum, waits for local apply to catch up, and then reads. This is linearizable at
+the cost of a quorum round trip. See [Read Consistency](guide/read-consistency.md).
+
+### follower 为什么不转发写请求？ / Why do followers not forward writes?
+
+服务端返回 `ClientResponse{success=false, leader_info}`，由客户端 SDK 更新 leader 缓存并重试。这样省去
+服务端转发跳数，也让客户端后续直连 leader。自行实现 gRPC 客户端时，应读取响应中的 `leader_info`，
+不要等待 gRPC 错误状态来表示重定向。
+
+The server returns `ClientResponse{success=false, leader_info}`, and the client SDK updates its leader cache and
+retries. This avoids a server-side forwarding hop and lets later requests go directly to the leader. A custom gRPC
+client must read `leader_info` in the response; redirection is not reported as a gRPC error status.
+
+### 客户端如何找到 leader？ / How do clients find the leader?
+
+客户端先向任一 bootstrap 地址发送请求，再根据响应中的 `leader_info` 缓存 leader 地址并重试。旧 leader
+失效后，SDK 清除缓存并重新遍历 bootstrap 地址。`GetClusterInfo` 可以返回运行时拓扑，但 SDK 的 leader
+发现依赖重定向，不依赖该 RPC。
+
+The client sends a request to any bootstrap address, then caches and retries against the leader reported in
+`leader_info`. When the old leader fails, the SDK evicts the cache entry and returns to the bootstrap addresses.
+`GetClusterInfo` can report runtime topology, but SDK leader discovery uses redirection rather than this RPC.
 
 ## 运维 / Operations
 
-### 为什么在 stock rr-server 上 `get` 会把我的 key 原样返回？
+### 为什么标准 rr-server 的 `get` 会回显 key？ / Why does `get` echo the key on stock rr-server?
 
-因为 stock 二进制内置的是 `EchoStateMachine`（`crates/rr-server/src/builtin_service.rs`）——一个把请求 payload 原样回显的冒烟测试服务，快照为空、restore 是 no-op。它存在的意义是验证集群管线是否打通，**不是真实业务**。要跑真实 KV 语义，请参考 `examples/kv-store` 自行构建二进制。
+标准二进制的 `EchoStateMachine` 会原样返回请求 payload，快照为空，restore 为 no-op。它只用于验证集群
+管线，不提供 KV 语义。真实 KV 示例见 `examples/kv-store`，实现位于
+`crates/rr-server/src/builtin_service.rs`。
 
-### 为什么 REPL 里 `put` 打印了 OK，值却没写进去？
+The stock binary's `EchoStateMachine` returns the request payload verbatim, with empty snapshots and a no-op
+restore. It only verifies cluster plumbing and does not provide KV semantics. See `examples/kv-store` for a real
+KV example and `crates/rr-server/src/builtin_service.rs` for the echo implementation.
 
-现行 REPL 只在服务端返回 `ClientResponse.success=true` 时才打印 OK（`crates/rr-admin/src/main.rs` 的 `kv_call` / `kv_failure_detail`）：写请求落到 follower 时，REPL 会跟随 `leader_info` 重定向，并在当前节点断连或没有 leader 提示时尝试启动时发现的组成员；全部尝试后仍未成功则打印 `Error: request rejected ...`（不会打印 OK）。因此"OK 但值没写进去"在当前版本理论上不应出现；如果你写完立刻读不到值，更可能是随后用 `read`（本地读）在尚未 apply 的副本上验证。排查方法：用 `rr-admin` 的 `group status` 看 `last_log_index` 是否增长，并用 `read_linearizable` 读回验证。
+### 为什么 REPL 的 `put` 打印 OK，值却读不到？ / Why did REPL `put` print OK while the value is missing?
 
-### 第一次启动为什么报 TLS 错误？
+当前 REPL 只在服务端返回 `ClientResponse.success=true` 时打印 OK，并会跟随 `leader_info` 重定向；所有
+尝试失败时会打印错误。因此当前实现不应出现“失败后仍打印 OK”。更常见的原因是写入后立刻在尚未 apply
+的副本上使用可能过期的 `read`。可用 `rr-admin` 的 `group status` 检查 `last_log_index`，再用
+`read_linearizable` 读回。
 
-rr-server 启动时执行 **G1–G7 安全检查**（`crates/rr-server/src/node.rs` 的 `validate_security_invariants`）：RaftService 必须有 TLS 且强制 mTLS（它没有 token 通道）、AdminService 必须有 TLS + admin_token、配置了 bearer token 就必须有 TLS 等。任何违规都会拒绝启动并一次性列出全部问题。开发环境可以用 `--allow-insecure` / `RR_ALLOW_INSECURE=1` / `[node].allow_insecure=true` 显式跳过 G1–G6——但 **G7（TCP raft 传输必须绑定 loopback）在任何模式下都不可绕过**，因为 `RRAF` 帧协议是明文且无任何对端认证。生产部署见 [TLS 配置](deployment/tls.md)。
+The current REPL prints OK only for `ClientResponse.success=true` and follows `leader_info` redirects; failed
+attempts produce an error. A failed write should therefore not print OK. A more likely cause is an immediate,
+potentially stale `read` from a replica that has not applied the write. Check `last_log_index` with `rr-admin`
+`group status`, then read back with `read_linearizable`.
 
-### 我应该部署几个节点？
+### 第一次启动为什么报 TLS 错误？ / Why does the first launch report TLS errors?
 
-**3 或 5 个**（每个共识组）。quorum 是多数派：3 节点容忍 1 个故障，5 节点容忍 2 个。**不要部署 2 节点**——2 的多数派仍是 2，任何一个节点故障都会失去 quorum，可用性反而低于单节点。偶数节点（4、6）增加了 quorum 规模却不增加容错能力，属于纯浪费。
+`rr-server` 启动时执行 G1–G7 安全检查：RaftService 需要 TLS 和 mTLS，AdminService 需要 TLS 和
+`admin_token`，bearer token 也必须配合 TLS。开发环境可用 `--allow-insecure`、
+`RR_ALLOW_INSECURE=1` 或 `[node].allow_insecure=true` 跳过 G1–G6；G7 不可绕过，实验性的明文 TCP
+Raft 传输必须绑定 loopback。生产配置见 [TLS 配置](deployment/tls.md)。
 
-### 如何安全地下线一个节点？
+`rr-server` runs G1–G7 startup checks: RaftService requires TLS and mTLS, AdminService requires TLS and
+`admin_token`, and bearer tokens require TLS. For development, `--allow-insecure`, `RR_ALLOW_INSECURE=1`, or
+`[node].allow_insecure=true` can skip G1–G6. G7 cannot be bypassed: the experimental plaintext TCP Raft transport
+must bind to loopback. See [TLS Configuration](deployment/tls.md) for production setup.
 
-用 `DrainNode` / decommission 流程（rr-admin）。成员变更有安全护栏：`MIN_VOTERS_AFTER_REMOVAL = 2`（`crates/rr-core/src/membership.rs`）——任何会把 voter 集合缩到 2 以下的 `change_membership` 都会被拒绝；缩到 0（拆组）**永远不被允许**，即使加 `force`，拆组请走 `node-reset`。`force` 逃生舱存在，但调用会被审计记录（ADR A-0012）。
+### 应该部署几个节点？ / How many nodes should I run?
 
-### rr 能跨地域部署吗？
+每个共识组通常部署 **3 或 5 个节点**：3 节点容忍 1 个故障，5 节点容忍 2 个。不要部署 2 节点，因为
+多数派仍是 2，任一故障都会失去 quorum。4、6 等偶数会增加多数派规模，却不比前一个奇数规模多容忍
+一次故障。
 
-可以运行，但要清楚代价：每次写都需要组内多数派的往返确认，**跨地域 RTT 直接成为写延迟下限**；线性一致读的 ReadIndex 同理。如果业务要求跨地域低延迟写入，Raft（以及任何强一致共识）都不是合适的工具——这正是"什么时候不该用 rr"里列的场景。
+Run **3 or 5 nodes per consensus group**: three tolerate one failure, and five tolerate two. Do not run two nodes;
+their quorum is still two, so either failure removes availability. Even sizes such as four or six increase the
+quorum without tolerating one more failure than the preceding odd size.
+
+### 如何安全下线节点？ / How do I safely decommission a node?
+
+使用 `rr-admin` 的 `DrainNode` / decommission 流程。默认情况下，会使 voter 少于
+`MIN_VOTERS_AFTER_REMOVAL = 2` 的 `change_membership` 会被拒绝；`force` 可以绕过这一限制，但会记录
+审计日志。缩到 0 属于拆组，即使使用 `force` 也不允许，应改用 `node-reset`。实现见
+`crates/rr-core/src/membership.rs`。
+
+Use the `rr-admin` `DrainNode` / decommission flow. By default, `change_membership` rejects a target with fewer
+than `MIN_VOTERS_AFTER_REMOVAL = 2` voters. `force` can override this guard and is audit-logged. Shrinking to
+zero tears down the group and is never allowed, even with `force`; use `node-reset` instead. See
+`crates/rr-core/src/membership.rs`.
+
+### Rr 能跨地域部署吗？ / Can Rr run across regions?
+
+可以，但每次写入和线性一致读都需要多数派往返，跨地域 RTT 会直接成为延迟下限。如果业务要求跨地域
+低延迟写入，强一致共识并不合适。
+
+Yes, but every write and linearizable read requires a quorum round trip, so cross-region RTT becomes a latency
+floor. Strongly consistent consensus is not a fit when the business requires low-latency writes across regions.
 
 ## 成熟度 / Maturity
 
-### 我能在生产环境用 RocksDB 持久化吗？
+### RocksDB 持久化能用于生产吗？ / Can RocksDB persistence be used in production?
 
-可以。stock `rr-server --storage rocks`（需以 `rocks` feature 构建）持久化全部关键状态：Raft 日志落在 `{data_dir}/raft-log/{group_id}`（ADR A-0016），状态机快照与成员 sidecar 以原子写（write → fsync → rename）落在同目录的 `sm-snapshot.bin` / `sm-membership.bin`（T1/R-P0）。快照持久化是 **fail-closed** 的：写不进盘的快照会中止 build/install，OpenRaft 永远不会 purge 掉没有持久快照兜底的日志前缀；存在但损坏的快照文件会让节点启动时响亮失败，而不是以空状态机悄悄重启。默认 `mem` 后端仍是全内存、不跨重启保留。rocks 路径有单元测试、rocks-gated 集成测试与滚动重启验收测试覆盖，但测试深度仍不及 mem 路径，生产采用前建议按 [存储引擎指南](guide/storage-engines.md) 自行验证。
+可以使用，但应针对业务和部署自行验收。以 `rocks` feature 构建后，`rr-server --storage rocks` 会持久化
+Raft 日志、状态机快照和成员 sidecar；快照写入采用原子替换，失败时会中止 snapshot build/install，损坏的
+快照会导致启动失败。默认 `mem` 后端仍是全内存，重启后不保留数据。RocksDB 路径有单元、集成和滚动重启
+测试，但覆盖深度仍不及 mem 路径。详见 [存储引擎指南](guide/storage-engines.md)。
 
-### openraft 稳定吗？
+It is available, but validate it against your own workload and deployment. When built with the `rocks` feature,
+`rr-server --storage rocks` persists Raft logs, state-machine snapshots, and the membership sidecar. Snapshots use
+atomic replacement; write failures abort snapshot build/install, and a corrupt snapshot fails startup. The default
+`mem` backend remains in-memory and does not survive restarts. The RocksDB path has unit, integration, and
+rolling-restart tests, but less coverage depth than the mem path. See the [Storage Engine Guide](guide/storage-engines.md).
 
-openraft 目前处于 pre-1.0 阶段（rr 使用的是 `0.10.0-alpha.34`），其 API 在版本之间可能变动。rr 通过**精确版本锁定**（`= 0.10.0-alpha.34`）把这种不确定性挡在框架边界上：升级 openraft 是 rr 版本发布中的显式动作，而非用户侧的风险。详见 [与 openraft 的关系](architecture/openraft-relationship.md) 和 [兼容性承诺](reference/compatibility.md)。
+### openraft 稳定吗？ / Is openraft stable?
 
-### rr 的测试覆盖到什么程度？
+openraft 仍处于 pre-1.0 阶段，API 可能变化。Rr 将依赖精确锁定为 `= 0.10.0-alpha.34`，openraft 升级由
+Rr 版本显式完成；这不代表 Rr 自身 API 已稳定。详见 [与 openraft 的关系](architecture/openraft-relationship.md)
+和 [兼容性说明](reference/compatibility.md)。
 
-单元测试 + 集成测试（`tests/integration`，含 4 个在默认测试任务中运行的混沌/故障注入测试）+ 进程级 crash harness（`tests/crash`，真 SIGKILL/SIGTERM 三节点集群 + ack-log oracle）+ 模糊测试目标（`fuzz/`，含提交入仓的种子语料）+ proptest 属性测试 + porcupine 风格线性一致检查器（`tests/integration/src/linearizability.rs`）。另有 `scripts/soak.sh` 数小时级稳定性 harness 与已发布的官方性能基线（`docs/perf/baselines/v0.2.0-baseline.md`）。形式化方面，`formal/tla/` 携带 4 份 TLA+ 规约（MembershipGuard / OffsetExactlyOnce / OutputWatermark / RoutingTableSwitch），TLC 小模型实测零反例。工作区版本为 0.2.0，API 与行为仍可能调整。
+openraft is pre-1.0 and its API may change. Rr pins it exactly to `= 0.10.0-alpha.34`, with upgrades handled
+explicitly in Rr releases; this does not make Rr's own API stable. See [Relationship with openraft](architecture/openraft-relationship.md)
+and the [compatibility policy](reference/compatibility.md).
 
-### learner 会自动提升为 voter 吗？
+### Rr 的测试覆盖到什么程度？ / How well tested is Rr?
 
-组件存在（`crates/rr-raft/src/learner_promoter.rs`），但**尚未接入任何二进制或示例**。当前需要手动编排：`AddLearner` 添加 learner，确认其日志追平后，用 `ChangeMembership` 将其提升为 voter（受 `MIN_VOTERS_AFTER_REMOVAL` 护栏约束）。自动提升接线是路线图项。
+仓库包含单元测试、`tests/integration` 集成测试（默认测试任务含 4 个混沌/故障注入测试）、
+`tests/crash` 进程级 SIGKILL/SIGTERM 测试、`fuzz/` 模糊测试与种子语料、proptest 属性测试，以及
+`tests/integration/src/linearizability.rs` 的 porcupine 风格线性一致检查。`scripts/soak.sh` 支持数小时
+稳定性运行。`formal/tla/` 有 4 份 TLA+ 规约，仓库记录的小模型 TLC 检查均为零反例。测试覆盖不代表
+所有部署场景都已验证。
 
----
+The repository includes unit tests, integration tests in `tests/integration` (including four chaos/fault-injection
+tests in the default test job), process-level SIGKILL/SIGTERM tests in `tests/crash`, fuzz targets and seed corpora
+in `fuzz/`, proptest property tests, and a porcupine-style linearizability checker in
+`tests/integration/src/linearizability.rs`. `scripts/soak.sh` supports hours-long stability runs. `formal/tla/`
+contains four TLA+ specifications, with zero counterexamples recorded for small-model TLC checks. Test coverage
+does not validate every deployment scenario.
 
-# Frequently Asked Questions
+### learner 会自动提升为 voter 吗？ / Are learners automatically promoted to voters?
 
-## Positioning
+取决于启动模式。legacy 模式下 `NodeConfig.auto_promote_learners` 默认为 `true`，`RrNode` 会为本节点托管的组
+启动 learner promoter；只有持续追平且通过成员变更安全检查的 learner 才会提升为 voter。可通过 TOML
+`cluster.auto_promote_learners` 或 `NodeConfig` 控制 legacy 行为；关闭后可手动执行 `AddLearner` 和
+`ChangeMembership`。
 
-### Is rr a database?
+managed formation P1 不自动提升 learner：`RrNode::new_with_formation` 会强制关闭该开关，由
+convergence / adoption 流程显式处理。
 
-No. rr is a **framework/library** for building strongly-consistent, sharded, highly-available replicated services — it is not a turnkey database. You embed rr in your own binary and implement the `Service` / `StateMachine` traits to express your business logic (see `examples/kv-store`, `examples/counter`). The stock `rr-server` binary only ships an `EchoStateMachine` for smoke testing. If you need SQL, transactions, or secondary indexes, choose a real database.
+In legacy mode, `NodeConfig.auto_promote_learners` defaults to `true`, and `RrNode` starts a promoter for each
+hosted group. Only learners that remain caught up and pass membership safety checks become voters. Control legacy
+behavior through TOML `cluster.auto_promote_learners` or `NodeConfig`; when disabled, use `AddLearner` and
+`ChangeMembership` manually.
 
-### When should I NOT use rr?
-
-- You need SQL, transactions, or secondary indexes — rr is a consensus framework, not a database;
-- You need AP semantics, or you expect "more replicas = more write throughput" — Raft is CP, and **a single group's writes do not scale with replica count**; multi-raft scales by **sharding across groups**, not by adding replicas;
-- A single etcd / rqlite / consul already covers you — they are finished products, just use them;
-- You need low-latency writes across geographic regions — quorum round-trips are a hard floor.
-
-### How does rr differ from etcd / rqlite / consul?
-
-Those are **finished products**, each with its own fixed data model (KV, SQL, ...). rr targets the case where you are building **your own** replicated service: you define the state machine, request format, and business semantics, and rr supplies consensus, shard routing, membership orchestration, client redirect, and the operational toolchain. If their data model fits you, use them; if you are building your own, rr is the right layer.
-
-### I already use openraft — what does rr add?
-
-openraft gives you the engine for **one** consensus group; storage, networking, and deployment are yours to build. On top of it, rr adds everything else a sharded production system needs: multi-group lifecycle management (`RaftGroupManager`), table-based shard routing, a gRPC networking layer with connection pooling, a client SDK (leader redirect/retry/cache), framework-level idempotency, Kafka ingest, safety gates with TLS/mTLS, and the rr-admin ops tooling. See [Relationship with openraft](architecture/openraft-relationship.md).
-
-## Consistency
-
-### Does multi-raft make writes faster?
-
-No — at least not in the "add replicas" sense. Every write to a Raft group needs quorum confirmation, so **adding replicas to a single group only increases write latency**, never throughput. Multi-raft scalability comes from **sharding**: different partitions land on different groups, writes proceed in parallel across groups, and aggregate throughput grows with the number of groups. Write latency for a single key's shard is always bounded by that group's quorum round-trip.
-
-### What is the difference between `read` and `read_linearizable`?
-
-`read` (ReadLocal) reads the local state-machine replica directly, bypassing consensus — **possibly stale**, but with the lowest latency and servable by followers. `read_linearizable` (ReadLinearizable) goes through openraft's ReadIndex: the leader confirms with a quorum that it is still the legitimate leader, waits for local apply to catch up, then reads — linearizable per §6.4 of the Raft paper, at the cost of one quorum round-trip. Full comparison in [Read Consistency Model](guide/read-consistency.md).
-
-### Why does a follower return leader_info instead of forwarding my write?
-
-That is deliberate: the server never forwards; it returns `ClientResponse{success=false, leader_info}`, and the client SDK updates its leader cache and redirects. This keeps the hot path simple (no server-side forwarding hops) and ensures the client always learns the real leader address, so subsequent requests go direct. If you hand-roll a gRPC client, note that redirects are expressed via the `leader_info` field in the response, **not** as gRPC error statuses.
-
-### How do clients find the leader?
-
-By **redirect**, not by service discovery. The client sends its request to any bootstrap address; if that node is not the leader, the response's `leader_info` carries the leader's `NodeId` and address, and the SDK stores it in a TTL-less `HashMap<GroupId, (NodeId, String)>` cache and retries. The `GetClusterInfo` RPC returns real raft-runtime topology (leader and replicas from `metrics`; the leader reads 0 mid-election — see `crates/rr-server/src/dispatch.rs`), but the SDK still discovers leaders via the redirect cache rather than this RPC. When a leader dies, the cache self-heals: the old leader refuses or is unreachable, the SDK evicts the entry, and falls back to bootstrap round-robin.
-
-## Operations
-
-### Why does `get` echo my key back on the stock rr-server?
-
-Because the stock binary embeds `EchoStateMachine` (`crates/rr-server/src/builtin_service.rs`) — a smoke-test service that returns the request payload verbatim, with empty snapshots and a no-op restore. It exists to prove the cluster plumbing works, **not** to serve real workloads. For real KV semantics, build your own binary modeled on `examples/kv-store`.
-
-### Why did `put` print OK in the REPL but the value isn't there?
-
-The current REPL only prints OK when the server answers `ClientResponse.success=true` (see `kv_call` / `kv_failure_detail` in `crates/rr-admin/src/main.rs`): when a write lands on a follower, the REPL follows `leader_info` redirects and tries the members discovered at startup after disconnects or missing leader hints; if every attempt fails it prints `Error: request rejected ...` — never OK. So "OK but the value was not written" should not occur in the current version; if a value is missing right after a write, the more likely cause is verifying with `read` (a local read) on a replica that has not applied the entry yet. To diagnose: check `last_log_index` growth via `rr-admin`'s `group status`, and read back with `read_linearizable`.
-
-### Why do I get TLS errors on first launch?
-
-rr-server runs **G1–G7 startup safety gates** (`validate_security_invariants` in `crates/rr-server/src/node.rs`): RaftService requires TLS with mTLS (it has no token path), AdminService requires TLS + admin_token, bearer tokens require TLS, and so on. Any violation refuses startup, listing all problems at once. In development you can explicitly skip G1–G6 with `--allow-insecure` / `RR_ALLOW_INSECURE=1` / `[node].allow_insecure=true` — but **G7 (the TCP raft transport must bind to loopback) cannot be bypassed in any mode**, because the `RRAF` frame protocol is plaintext with no peer authentication. For production, see [TLS configuration](deployment/tls.md).
-
-### How many nodes should I run?
-
-**3 or 5** (per consensus group). A quorum is a majority: 3 nodes tolerate 1 failure, 5 tolerate 2. **Do not run 2 nodes** — a majority of 2 is still 2, so any single failure loses quorum, giving you worse availability than a single node. Even numbers (4, 6) enlarge the quorum without adding fault tolerance — pure waste.
-
-### How do I safely decommission a node?
-
-Use the `DrainNode` / decommission flow (rr-admin). Membership changes are guarded: `MIN_VOTERS_AFTER_REMOVAL = 2` (`crates/rr-core/src/membership.rs`) — any `change_membership` that would shrink the voter set below 2 is rejected; shrinking to 0 (group teardown) is **never allowed**, even with `force` — use `node-reset` for teardown. A `force` escape hatch exists, but invocations are audit-logged (ADR A-0012).
-
-### Does rr work across regions?
-
-It runs, but be clear about the cost: every write requires a round-trip confirmation from a majority of the group, so **cross-region RTT becomes the floor of write latency**; the same applies to ReadIndex for linearizable reads. If your business demands low-latency writes across regions, Raft (like any strong-consensus protocol) is the wrong tool — which is exactly why this case is listed under "when NOT to use rr".
-
-## Maturity
-
-### Can I use RocksDB persistence in production?
-
-Yes. The stock `rr-server --storage rocks` (built with the `rocks` feature) persists all critical state: the Raft log lives at `{data_dir}/raft-log/{group_id}` (ADR A-0016), and the state-machine snapshot plus the membership sidecar are written atomically (write → fsync → rename) to `sm-snapshot.bin` / `sm-membership.bin` in the same directory (T1/R-P0). Snapshot persistence is **fail-closed**: a snapshot that cannot be written aborts the build/install, so OpenRaft never purges a log prefix that has no durable snapshot behind it; a present-but-corrupt snapshot file fails startup loudly instead of restarting empty. The default `mem` backend remains fully in-memory and does not survive restarts. The rocks path is covered by unit tests, rocks-gated integration tests, and a rolling-restart acceptance test, but its test depth still trails the mem path — validate against the [storage engine guide](guide/storage-engines.md) before production adoption.
-
-### Is openraft stable?
-
-openraft is pre-1.0 (rr uses `0.10.0-alpha.34`), and its API may shift between releases. rr contains that uncertainty at the framework boundary through an **exact version pin** (`= 0.10.0-alpha.34`): upgrading openraft is an explicit step in an rr release, not a risk on your side. See [Relationship with openraft](architecture/openraft-relationship.md) and the [compatibility commitments](reference/compatibility.md).
-
-### How well tested is rr?
-
-Unit tests + integration tests (`tests/integration`, including four chaos/fault-injection tests running in the default test job) + a process-level crash harness (`tests/crash`: real SIGKILL/SIGTERM on a 3-node cluster with an ack-log oracle) + fuzz targets (`fuzz/`, with a committed seed corpus) + proptest property tests + a porcupine-style linearizability checker (`tests/integration/src/linearizability.rs`). There is also `scripts/soak.sh` for hours-long stability runs and a published official performance baseline (`docs/perf/baselines/v0.2.0-baseline.md`). On the formal side, `formal/tla/` carries four TLA+ specifications (MembershipGuard / OffsetExactlyOnce / OutputWatermark / RoutingTableSwitch), all model-checked with TLC at small scale with zero counterexamples. The workspace is at version 0.2.0, so APIs and behavior can still change.
-
-### Are learners automatically promoted to voters?
-
-The component exists (`crates/rr-raft/src/learner_promoter.rs`) but is **not wired into any binary or example yet**. Today you orchestrate promotion manually: `AddLearner` to add a learner, confirm its log has caught up, then promote it to voter via `ChangeMembership` (subject to the `MIN_VOTERS_AFTER_REMOVAL` guard). Wiring up auto-promotion is a roadmap item.
+Managed formation P1 does not automatically promote learners: `RrNode::new_with_formation` forces the flag off,
+and the convergence / adoption flow handles them explicitly.
