@@ -10,6 +10,7 @@ RR_DOCKER_HOST := env_var_or_default("RR_DOCKER_HOST", env_var_or_default("DOCKE
 KV_BASE_PORT := env_var_or_default("RR_KV_BASE_PORT", "53101")
 GENESIS_BASE_PORT := env_var_or_default("RR_GENESIS_BASE_PORT", "53201")
 JAVA_DIR := ROOT / "sdks/java"
+CONSOLE_DIR := ROOT / "crates/rr-admin/console"
 DOCS_PORT := env_var_or_default("DOCS_PORT", "3000")
 
 default:
@@ -47,6 +48,34 @@ doctor:
 [group("core")]
 build:
     cargo build
+
+[group("core")]
+build-release: console-build
+    cargo build --release
+
+[group("console")]
+console-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v pnpm >/dev/null || { echo "pnpm is required for console-install" >&2; exit 1; }
+    pnpm --dir "{{CONSOLE_DIR}}" install --frozen-lockfile
+
+[group("console")]
+console-build: console-install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pnpm --dir "{{CONSOLE_DIR}}" build
+    [[ -f "{{CONSOLE_DIR}}/out/index.html" ]] || {
+      echo "console export missing: {{CONSOLE_DIR}}/out/index.html" >&2
+      exit 1
+    }
+
+[group("console")]
+console-test: console-build
+    pnpm --dir "{{CONSOLE_DIR}}" typecheck
+    pnpm --dir "{{CONSOLE_DIR}}" lint
+    pnpm --dir "{{CONSOLE_DIR}}" test:unit
+    pnpm --dir "{{CONSOLE_DIR}}" test:e2e
 
 [group("core")]
 test:

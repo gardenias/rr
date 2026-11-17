@@ -15,6 +15,9 @@ pub enum RrError {
     /// Configuration provider error.
     #[error("config error: {0}")]
     Config(#[from] ConfigError),
+    /// Node discovery directory error.
+    #[error("directory error: {0}")]
+    Directory(#[from] DirectoryError),
     /// Cluster formation lifecycle error.
     #[error("lifecycle error: {0}")]
     Lifecycle(#[from] LifecycleError),
@@ -138,6 +141,28 @@ pub enum ConfigError {
     /// The change-watch stream disconnected; re-fetch and re-subscribe.
     #[error("watch disconnected")]
     WatchDisconnected,
+}
+
+/// Errors raised by a leased node directory.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DirectoryError {
+    #[error("directory backend unavailable: {0}")]
+    ProviderUnavailable(String),
+    #[error("invalid node descriptor: {0}")]
+    InvalidDescriptor(String),
+    #[error("invalid directory cursor: {0}")]
+    InvalidCursor(String),
+    #[error("invalid page size {requested}; expected 1..={maximum}")]
+    InvalidPageSize { requested: usize, maximum: usize },
+    #[error("node {node_id} is already registered")]
+    AlreadyExists { node_id: NodeId },
+    #[error("registration lease for node {node_id} is no longer active")]
+    LeaseExpired { node_id: NodeId },
+    #[error("directory key node ID {expected} does not match descriptor node ID {actual}")]
+    NodeIdMismatch { expected: NodeId, actual: NodeId },
+    #[error("directory data is invalid: {0}")]
+    InvalidData(String),
 }
 
 /// Errors raised by seed validation and cluster lifecycle coordination.

@@ -113,6 +113,49 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
         })
     }
 
+    #[instrument(skip(self, payload), fields(payload_len = payload.len()))]
+    async fn pre_vote(
+        &self,
+        group_id: GroupId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<u8>, tonic::Status> {
+        let raft = self
+            .group_manager
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| tonic::Status::not_found(format!("group {group_id} not found")))?;
+
+        let req: openraft::raft::VoteRequest<RrTypeConfig> =
+            rr_core::bounded_decode::decode_entry_body(&payload)
+                .map(|(v, _)| v)
+                .map_err(|e| {
+                    tracing::warn!(
+                        group_id,
+                        error = %e,
+                        "raft PreVote: payload decode failed (detail sanitized for client)"
+                    );
+                    tonic::Status::invalid_argument("invalid request payload")
+                })?;
+
+        let resp = raft.pre_vote(req).await.map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft PreVote failed (detail sanitized for client)"
+            );
+            tonic::Status::internal("raft rpc failed")
+        })?;
+
+        bincode::serde::encode_to_vec(&resp, bincode::config::standard()).map_err(|e| {
+            tracing::error!(
+                group_id,
+                error = %e,
+                "raft PreVote: response encode failed"
+            );
+            tonic::Status::internal("internal encode error")
+        })
+    }
+
     #[instrument(skip(self, metadata, data), fields(meta_len = metadata.len(), data_len = data.len()))]
     async fn install_snapshot(
         &self,
@@ -172,6 +215,7 @@ impl RaftGroupLookup for RaftGroupLookupImpl {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use openraft::type_config::async_runtime::WatchReceiver;
     use rr_core::error::RrError;
     use rr_core::types::LogIndex;
     use rr_raft::group_manager::{RaftGroupManager, StateMachineFactory};
@@ -228,6 +272,79 @@ mod tests {
         let status = result.unwrap_err();
         assert_eq!(status.code(), tonic::Code::NotFound);
         assert!(status.message().contains("42"));
+    }
+
+    #[tokio::test]
+    async fn test_lookup_unknown_group_pre_vote() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        let lookup = RaftGroupLookupImpl::new(Arc::clone(&mgr));
+
+        let status = lookup.pre_vote(42, vec![]).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(status.message().contains("42"));
+    }
+
+    #[tokio::test]
+    async fn test_lookup_malformed_pre_vote_is_invalid_argument() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        let lookup = RaftGroupLookupImpl::new(Arc::clone(&mgr));
+
+        let status = lookup
+            .pre_vote(1, vec![0xff, 0xff, 0xff])
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), "invalid request payload");
+    }
+
+    #[tokio::test]
+    async fn test_valid_pre_vote_preserves_term_and_persisted_vote() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        let members = std::collections::BTreeMap::from([(
+            1,
+            openraft::BasicNode {
+                addr: "127.0.0.1:1".to_string(),
+            },
+        )]);
+        mgr.init_cluster(1, members).await.unwrap();
+        let raft = mgr.get_raft(1).await.unwrap();
+        let before = raft.metrics().borrow_watched().clone();
+        let request = openraft::raft::VoteRequest::<RrTypeConfig> {
+            vote: openraft::Vote::new(before.current_term + 1, 2),
+            last_log_id: None,
+            leadership_transfer: false,
+        };
+        let payload = bincode::serde::encode_to_vec(&request, bincode::config::standard()).unwrap();
+        let lookup = RaftGroupLookupImpl::new(Arc::clone(&mgr));
+
+        let response = lookup.pre_vote(1, payload).await.unwrap();
+        let (_decoded, _): (openraft::raft::VoteResponse<RrTypeConfig>, _) =
+            rr_core::bounded_decode::decode_entry_body(&response).unwrap();
+
+        let after = raft.metrics().borrow_watched().clone();
+        assert_eq!(after.current_term, before.current_term);
+        assert_eq!(after.vote, before.vote);
+    }
+
+    #[tokio::test]
+    async fn test_lookup_pre_vote_internal_error_is_sanitized() {
+        let mgr = Arc::new(RaftGroupManager::new(1, noop_factory()));
+        mgr.start_group(1).await.unwrap();
+        let raft = mgr.get_raft(1).await.unwrap();
+        raft.shutdown().await.unwrap();
+        let request = openraft::raft::VoteRequest::<RrTypeConfig> {
+            vote: openraft::Vote::new(2, 2),
+            last_log_id: None,
+            leadership_transfer: false,
+        };
+        let payload = bincode::serde::encode_to_vec(&request, bincode::config::standard()).unwrap();
+        let lookup = RaftGroupLookupImpl::new(Arc::clone(&mgr));
+
+        let status = lookup.pre_vote(1, payload).await.unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "raft rpc failed");
     }
 
     #[tokio::test]

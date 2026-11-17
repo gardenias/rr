@@ -61,6 +61,27 @@ cargo run -p rr-admin -- repl --addr 127.0.0.1:51001 --group 1
 # rr> delete k1   → OK
 ```
 
+### 何时需要 `--bootstrap` / When Bootstrap Is Required
+
+无参数 demo 自己初始化内存单副本组，无需 `--bootstrap`。常驻的手动单节点服务只在全新建组时引导一次。
+手动多节点启动时，所有节点使用同一份完整花名册，只在一个全新节点上设置 `--bootstrap`，
+由它把整份花名册初始化为 voter；其他节点不要设置。
+
+The no-argument demo initializes its own in-memory single-replica group without `--bootstrap`. A persistent
+manual single-node service bootstraps once when its fresh group is created. For manual multi-node startup,
+use the same full roster everywhere and set `--bootstrap` on exactly one fresh node, which initializes the
+entire roster as voters; omit it everywhere else.
+
+Genesis 和 Adopt 不使用该旗标；正常重启、已初始化节点和 durable 节点恢复也不要使用。
+已初始化组上的重复初始化即使被当作 no-op，也不是合法的重启或成员变更策略。本次 gRPC Pre-Vote
+故障并非 `--bootstrap` 导致，重复引导不能修复选主、网络隔离或 Pre-Vote 问题。
+
+Genesis and Adopt do not use this flag; neither do normal restarts, already initialized nodes, or
+durable-node recovery. Even when repeated initialization is treated as a no-op on an initialized group,
+it is not a valid restart or membership-change strategy. The gRPC Pre-Vote failure addressed here was not
+caused by `--bootstrap`, and repeated bootstrapping does not fix election, network-isolation, or Pre-Vote
+failures.
+
 ### 多节点集群 / Multi-Node Cluster
 
 `--peers` 携带全量 `id@addr` 花名册（必须包含本节点），三个终端使用同一份花名册。每个节点在 `5100N`

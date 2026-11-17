@@ -35,6 +35,27 @@ kubectl create secret generic rr-admin-token \
   --from-literal=token="$(openssl rand -hex 32)"
 ```
 
+## 为什么不按 Pod 编排 `--bootstrap` / Why Not Bootstrap Individual Pods
+
+`--bootstrap` 是手动/legacy 流程中的一次性初始化动作，不是 StatefulSet 的稳态配置。Kubernetes 部署统一使用 managed
+formation：所有 Pod 获得相同的 `cluster.name`、完整 `cluster.nodes` 和 `[cluster.formation]`，只有节点 ID 随 ordinal 改变；
+不要按 ordinal 添加 `--bootstrap`，也不要生成逐节点递增的 `peers` 列表。
+
+`--bootstrap` is a one-time initialization action in the manual/legacy flow, not steady-state StatefulSet configuration.
+Kubernetes deployments use managed formation instead: every Pod receives the same `cluster.name`, complete `cluster.nodes`,
+and `[cluster.formation]`; only the node ID varies by ordinal. Do not add `--bootstrap` for a selected ordinal or generate
+prefix-based `peers` lists.
+
+全新集群使用 `genesis` 和 `Parallel` 启动。etcd 中的 lifecycle CAS 授权一份共享初始花名册，避免并发 Pod 各自建立不同集群；
+`Active` 记录下已经初始化的节点走本地恢复。正常重启和镜像滚动升级保持相同花名册及 `genesis` 配置，不切换模式，不重新
+bootstrap，也不运行 formation Job。旧 bootstrap/peers 集群接入 managed formation 时必须使用 `adopt`，不能重新 Genesis。
+
+A fresh cluster uses `genesis` with `Parallel` startup. The lifecycle CAS in etcd authorizes one shared initial roster instead
+of allowing concurrent Pods to form divergent clusters. Under an `Active` record, initialized nodes recover from local state.
+Keep the same roster and `genesis` configuration for normal restarts and rolling image upgrades: do not switch modes, bootstrap
+again, or run the formation Job. A legacy bootstrap/peers cluster must use `adopt` when moving to managed formation; never run
+a fresh Genesis for it.
+
 ## 选项 A：原始 manifests / Option A: Raw Manifests
 
 替换所有待 apply 文件中的镜像占位符。Genesis 使用 `statefulset.yaml`；收养还使用 `statefulset-adopt.yaml` 和第二阶段的
@@ -257,14 +278,41 @@ sequence.
 
 ### P1 扩容与替换边界 / P1 Scaling and Replacement Boundary
 
-不要通过 `helm upgrade --set replicaCount=5` 扩容。完整花名册属于 SeedSpec identity，改变它不会扩大 Raft membership，反
-而会让现有 lifecycle 记录拒绝不匹配的节点。P1 不支持动态成员扩容、副本替换或 resharding；adopt-only formation Job 只负责
-初始旧集群收敛。
+不要通过 `helm upgrade --set replicaCount=5` 或 `kubectl scale` 扩容。完整花名册属于 SeedSpec identity，改变它不会扩大
+Raft membership，反而会让现有 lifecycle 记录拒绝不匹配的节点。P1 不支持动态成员扩缩容、副本替换或 resharding；
+adopt-only formation Job 只负责初始旧集群收敛，不能复用为日常扩容 Job。
 
-Do not scale an existing managed cluster by changing `replicaCount`. The complete roster belongs to the SeedSpec
-identity; changing it does not expand Raft membership and makes the existing lifecycle record reject mismatched nodes.
-P1 supports neither dynamic expansion, replica replacement, nor resharding. The adopt-only formation Job performs
-initial legacy convergence, not ongoing automatic scaling.
+Do not scale an existing managed cluster with `helm upgrade --set replicaCount=5` or `kubectl scale`. The complete roster
+belongs to the SeedSpec identity; changing it does not expand Raft membership and makes the existing lifecycle record reject
+mismatched nodes. P1 supports neither dynamic membership scaling, replica replacement, nor resharding. The adopt-only formation
+Job performs initial legacy convergence and is not a routine scaling Job.
+
+当前应按以下边界规划容量：
+
+- 全新集群可在首次 Genesis 前把 `replicaCount` 和完整花名册规划为目标规模；这不能用于已经初始化的集群。
+- 已运行集群可以垂直增加 CPU、内存等资源；磁盘扩容另按存储运维流程处理。
+- 必须水平扩展时，新建目标规模的集群并执行应用层数据迁移与流量切换；当前没有内置的整集群在线迁移能力。
+- `add-learner` + `change-membership` 的手工加节点流程只适用于支持动态成员的 legacy 部署，见
+  [一般部署指南](./deployment.md)；不要将它套用到 Managed P1。
+
+Plan capacity within these boundaries:
+
+- For a fresh cluster, set `replicaCount` and the complete roster to the target size before the first Genesis; this is not
+  valid for an initialized cluster.
+- A running cluster can scale vertically with more CPU, memory, and similar resources; handle disk growth through the
+  storage operations procedure.
+- If horizontal expansion is mandatory, create a cluster at the target size and perform application-level data migration
+  and traffic cutover; built-in online whole-cluster migration is not currently available.
+- The manual `add-learner` + `change-membership` flow applies only to legacy deployments with dynamic membership support;
+  see the [generic deployment guide](./deployment.md). Do not apply it to Managed P1.
+
+增加同一 Raft 组的 voter 主要改变容错和多数派延迟，不会提升该组的写入吞吐。需要水平写扩展时，应使用跨机且副本集合
+不相交的多个 Raft 组；Managed P1 仍不支持在线加组或已有 partition 的 resharding。详见
+[容量规划](./capacity-planning.md)。
+
+Adding voters to one Raft group changes fault tolerance and quorum latency, not its write throughput. Horizontal write scaling
+requires multiple Raft groups on disjoint cross-host replica sets. Managed P1 still supports neither online group addition nor
+resharding of existing partitions. See [Capacity Planning](./capacity-planning.md).
 
 ### Readiness 与 lifecycle store 故障 / Readiness and Lifecycle-Store Outage
 

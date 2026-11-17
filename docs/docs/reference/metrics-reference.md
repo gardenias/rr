@@ -534,6 +534,83 @@ keys, and fabricated empty groups when replicas are missing; all are logged.
 - **位置 / Recorded in**：`rr-config-etcd/src/lib.rs`
 - **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
+### 节点资源 / Node Resources
+
+节点仅在启用 metrics 端口后启动资源采样器，每 5 秒采样一次。平台或 cgroup 不支持的值不会发射；
+缺席不是零。文件系统口径取包含 boot journal 目录的最长前缀挂载点；未配置 journal 目录时使用进程当前目录。
+The resource sampler starts only when the metrics port is enabled and samples every five seconds. Values unsupported by
+the platform or cgroup are omitted, never exported as zero. Filesystem metrics select the longest-prefix mount
+containing the boot-journal directory, or the process working directory when no journal directory is configured.
+
+#### `rr_node_cpu_usage_ratio`
+
+CPU 使用率。`process` 是进程 CPU 百分比除以 100 和 host 逻辑核数，1.0 约等于占满全部 host 核；
+`host` 是整机使用率，0.0–1.0。两种 scope 不可直接互相替代。
+CPU utilization. `process` divides process CPU percentage by 100 and the host logical-core count, so 1.0 approximates
+all host cores; `host` is whole-host utilization from 0.0 to 1.0. The scopes are not interchangeable.
+
+- **类型 / Type**：Gauge
+- **标签 / Labels**：`scope` (`process` | `host`)
+- **位置 / Recorded in**：`rr-server/src/resources.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+
+#### `rr_node_cpu_cores`
+
+host 可见的逻辑 CPU 核数；不是进程实际使用量，也不是 cgroup 配额。
+Logical CPU cores visible on the host; this is neither process usage nor the cgroup quota.
+
+- **类型 / Type**：Gauge
+- **标签 / Labels**：`scope` (`host`)
+- **位置 / Recorded in**：`rr-server/src/resources.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+
+#### `rr_node_cpu_limit_cores`
+
+Linux cgroup v1/v2 CPU quota 换算的核数（quota/period）。无配额、非 Linux 或无法读取时不发射。
+CPU cores derived from the Linux cgroup v1/v2 quota divided by its period. Omitted when unlimited, off Linux, or
+unreadable.
+
+- **类型 / Type**：Gauge
+- **标签 / Labels**：`scope` (`cgroup`)
+- **位置 / Recorded in**：`rr-server/src/resources.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+
+#### `rr_node_memory_bytes`
+
+内存字节数。有效组合为 `process/used`、`host/total`、`host/used`、`cgroup/limit` 和 `cgroup/used`；
+cgroup 值不可用时缺席。比较用量与限制时必须保持同一 `scope`。
+Memory in bytes. Valid combinations are `process/used`, `host/total`, `host/used`, `cgroup/limit`, and `cgroup/used`;
+unavailable cgroup values are omitted. Compare usage and limits only within the same `scope`.
+
+- **类型 / Type**：Gauge
+- **标签 / Labels**：`scope` (`process` | `host` | `cgroup`), `kind` (`used` | `total` | `limit`)
+- **位置 / Recorded in**：`rr-server/src/resources.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+
+#### `rr_node_network_bytes_total`
+
+host 全部网络接口累计 RX/TX 字节的单调计数；采样器每次发布差值，源计数器回退时从当前值重新累计，
+不产生负增量。用 `rate()` 或 `increase()` 计算吞吐；首个样本包含接口已有累计值，不代表进程生命周期流量。
+Monotonic received/transmitted bytes across all host interfaces. The sampler publishes deltas and rebases after a source
+counter reset instead of emitting a negative increment. Use `rate()` or `increase()` for throughput; the first sample
+includes the interfaces' existing totals and is not process-lifetime traffic.
+
+- **类型 / Type**：Counter
+- **标签 / Labels**：`scope` (`host`), `kind` (`rx` | `tx`)
+- **位置 / Recorded in**：`rr-server/src/resources.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+
+#### `rr_node_filesystem_bytes`
+
+所选挂载点的总容量和已用字节。`mount` 是实际挂载点，不是每组 RocksDB 用量；本指标不能分解为组级磁盘占用。
+Total and used bytes on the selected mount. `mount` is the actual mount point, not per-group RocksDB usage; this metric
+cannot be attributed to individual groups.
+
+- **类型 / Type**：Gauge
+- **标签 / Labels**：`scope` (`host`), `kind` (`total` | `used`), `mount`
+- **位置 / Recorded in**：`rr-server/src/resources.rs`
+- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+
 ## 客户端指标 / Client-Side Metrics
 
 由嵌入 `rr-client` SDK 的应用发射 / Emitted by applications embedding the `rr-client` SDK.
@@ -581,48 +658,55 @@ listed `trigger` and `limit` values.
 - **位置 / Recorded in**：`rr-client/src/batch.rs`
 - **版本 / Since**：未发布 / Unreleased (v0.3.0)
 
-## 写链路延迟分解 / Write-Path Latency Breakdown
+## 写链路延迟证据 / Write-Path Latency Evidence
 
-每段链路都有对应指标 / Each segment has a corresponding metric:
+以下指标描述不同边界的样本，应并排分析，而不是拼成互斥的延迟预算：
+These metrics observe samples at different boundaries. Analyze them side by side, not as a partition of one latency
+budget:
 
-```text
-client t0 ──network──▶ dispatch t1 ──route/queue──▶ client_write ──quorum──▶ apply ──▶ response
-│                      │                              │                     │
-│ rr_client_request_   │ rr_server_request_            │ rr_proposal_        │ rr_raft_apply_
-│ duration_seconds     │ duration_seconds{op="write"}  │ duration_seconds    │ duration_seconds
-│ (SDK 侧 / SDK-side)   │ (dispatch 边界 / boundary)     │ (纯 client_write)    │ (状态机 / SM)
-│
-└── client_total ≈ network + server_total
-```
+- `rr_client_request_duration_seconds`：SDK 端到端请求，含重试。/ SDK end-to-end requests, including retries.
+- `rr_server_request_duration_seconds{op="write"}`：dispatch 边界写入。/ Writes at the dispatch boundary.
+- `rr_proposal_duration_seconds`：client/batch 提案到 commit + apply。/ Client/batch proposals through commit and
+  apply.
+- `rr_raft_apply_duration_seconds`：每个副本的状态机 apply。/ State-machine apply on every replica.
+- `rr_raft_append_entries_rtt_seconds`：Leader→follower heartbeat/append RTT。/ Leader-to-follower heartbeat and
+  append RTT.
 
-组合关系 / Composition:
+:::warning 禁止未对齐样本相减 / Never Subtract Unaligned Cohorts
+当前 server histogram 没有 `outcome`，proposal 还区分 `client`/`batch`，apply 又在每个副本逐条记录。
+失败、redirect、重试和 batch 会使样本集合不同；相同 `group_id`、Leader 和时间窗也不能证明对齐。
+因此 **server、proposal、apply 的均值不得相减或堆叠，分位数也不得相减、相加或堆叠**。Console 将此状态标为
+`UNALIGNED_COHORTS`，独立展示各段均值和分位数。
 
-- `server_total ≈ routing_encode + proposal`
-- `proposal ≈ replication_quorum + apply`
-- `client_total ≈ network + server_total`
+The current server histogram has no `outcome`; proposal distinguishes `client` and `batch`; apply is recorded per entry
+on every replica. Failures, redirects, retries, and batches select different samples. Matching `group_id`, leader, and
+time window does not prove alignment. **Never subtract or stack server/proposal/apply means, and never subtract, add,
+or stack their quantiles.** Console reports `UNALIGNED_COHORTS` and presents each segment independently.
 
-分位数不可相减，均值可组合。构成分析使用 `rr:server_request_seconds:mean_1m`、
-`rr:proposal_seconds:mean_1m`、`rr:apply_seconds:mean_1m`，replication/routing 段由减法得出。
-尾部分析使用各段自身分位数：`rr:server_request_duration_seconds:p99_1m`、
-`rr:proposal_duration_seconds:p99_1m`、`rr:apply_duration_seconds:p99_1m`、
-`rr:append_entries_rtt_seconds:p99_1m`。
+只有未来版本提供对齐的 `outcome`/`cohort` 标签，并验证所选 server/proposal/apply 样本计数一致后，才可重新评估
+均值构成；分位数仍永远不可做构成减法。
+Mean composition may be reconsidered only after a future version supplies aligned `outcome`/`cohort` labels and equal
+selected sample counts are verified across server, proposal, and apply. Quantile composition remains invalid.
+:::
 
-Quantiles do not subtract; means do. Use `rr:server_request_seconds:mean_1m`,
-`rr:proposal_seconds:mean_1m`, and `rr:apply_seconds:mean_1m` for composition, deriving replication and
-routing by subtraction. For tails, use each segment's own
-`rr:server_request_duration_seconds:p99_1m`, `rr:proposal_duration_seconds:p99_1m`,
-`rr:apply_duration_seconds:p99_1m`, and `rr:append_entries_rtt_seconds:p99_1m`.
+尾部分析使用各段自身的 `rr:server_request_duration_seconds:p99_1m`、`rr:proposal_duration_seconds:p99_1m`、
+`rr:apply_duration_seconds:p99_1m` 和 `rr:append_entries_rtt_seconds:p99_1m`。P99 必须先按 `le` 和所需维度聚合
+histogram bucket，再调用 `histogram_quantile()`；禁止平均节点或副本的 P99。
+For tail analysis, use each segment's own `rr:server_request_duration_seconds:p99_1m`,
+`rr:proposal_duration_seconds:p99_1m`, `rr:apply_duration_seconds:p99_1m`, and
+`rr:append_entries_rtt_seconds:p99_1m`. Compute P99 by aggregating histogram buckets by `le` and the required
+dimensions before `histogram_quantile()`; never average per-node or per-replica P99 values.
 
 `deploy/observability/prometheus/rr-recording-rules.yml` 中预计算的 `rr:*:p99_1m` recording rules 使用 1m
 窗口；直接查询原始 histogram 时可选其他窗口，下方 `histogram_quantile()` 示例使用 5m。长拖尾窗口会在负载
 停止后保留历史最坏样本，并在爬升时混合工况；需要当前工况时优先使用 1m 规则。`read` 与 `lin_read` 不经过
-Raft 复制，`rr_server_request_duration_seconds{op}` 的 total 即全链路。
+Raft 复制，`rr_server_request_duration_seconds{op}` 的 total 即该 dispatch 边界的全链路。
 The precomputed `rr:*:p99_1m` recording rules in
 `deploy/observability/prometheus/rr-recording-rules.yml` use a 1m window. Direct queries against raw
 histograms may choose other windows; the `histogram_quantile()` example below uses 5m. Long trailing windows
 retain historical worst samples after load stops and mix regimes during ramp-up, so prefer the 1m rules for
 the current regime. `read` and `lin_read` skip Raft replication, so the total from
-`rr_server_request_duration_seconds{op}` is the full chain.
+`rr_server_request_duration_seconds{op}` is the full chain at that dispatch boundary.
 
 ## 链路追踪 / Tracing
 
@@ -636,14 +720,24 @@ are deliberately not bundled; bring your own OTLP stack.
 
 ## Prometheus 配置 / Prometheus Configuration
 
+每个 target 必须带稳定且唯一的 `node_id`，并用精确的集群标签隔离同名 group。不要使用 `instance` 反推
+node ID。Console 历史直接使用原始 histogram/counter/gauge family，并为每次查询强制精确集群 matcher 和节点
+映射校验；它不消费 recording rules。供其他查询使用的 recording rules 也应保留集群和节点标签。
+Every target needs a stable, unique `node_id` and an exact cluster label to isolate same-named groups. Never infer node
+IDs from `instance`. Console history queries raw histogram/counter/gauge families directly and enforces the exact
+cluster matcher and node mapping on every query; it does not consume recording rules. Recording rules used by other
+queries should also preserve cluster and node labels.
+
 ```yaml
 scrape_configs:
   - job_name: 'rr-cluster'
     static_configs:
-      - targets:
-          - '127.0.0.1:62001'  # 节点 1 / Node 1
-          - '127.0.0.1:62002'  # 节点 2 / Node 2
-          - '127.0.0.1:62003'  # 节点 3 / Node 3
+      - targets: ['127.0.0.1:62001']
+        labels: {cluster_id: 'prod-rr', node_id: '1'}
+      - targets: ['127.0.0.1:62002']
+        labels: {cluster_id: 'prod-rr', node_id: '2'}
+      - targets: ['127.0.0.1:62003']
+        labels: {cluster_id: 'prod-rr', node_id: '3'}
     scrape_interval: 15s
 ```
 
@@ -680,8 +774,8 @@ rr:server_request_duration_seconds:p99_1m
 # p99 Leader→follower AppendEntries RTT
 rr:append_entries_rtt_seconds:p99_1m
 
-# 写延迟构成（均值堆叠）/ Write latency budget (stacked means)
+# 各段均值独立比较；不要相减或堆叠 / Compare segment means independently; never subtract or stack
 rr:apply_seconds:mean_1m
-rr:proposal_seconds:mean_1m - on(group_id) rr:apply_seconds:mean_1m            # replication
-rr:server_request_seconds:mean_1m{op="write"} - on(group_id) rr:proposal_seconds:mean_1m  # routing/encode
+rr:proposal_seconds:mean_1m
+rr:server_request_seconds:mean_1m{op="write"}
 ```

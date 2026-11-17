@@ -9,6 +9,10 @@ dev-certs/
 docs/build/
 docs/node_modules/
 docs/.docusaurus/
+crates/rr-admin/console/node_modules/
+crates/rr-admin/console/.next/
+crates/rr-admin/console/test-results/
+crates/rr-admin/console/playwright-report/
 tmp/
 *.log
 *.tar.gz

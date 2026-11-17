@@ -394,6 +394,22 @@ impl RaftGrpcClient {
             .await
     }
 
+    async fn pre_vote(
+        &mut self,
+        req: ProtoVoteReq,
+    ) -> Result<tonic::Response<ProtoVoteResp>, tonic::Status> {
+        self.inner
+            .ready()
+            .await
+            .map_err(|e| tonic::Status::unknown(format!("service not ready: {e}")))?;
+        let path =
+            tonic::codegen::http::uri::PathAndQuery::from_static("/rr.raft.RaftService/PreVote");
+        let codec = tonic_prost::ProstCodec::default();
+        self.inner
+            .unary(tonic::Request::new(req), path, codec)
+            .await
+    }
+
     async fn install_snapshot(
         &mut self,
         stream: impl tonic::IntoStreamingRequest<Message = ProtoSnapshotChunk>,
@@ -537,6 +553,71 @@ impl RaftNetworkV2<RrTypeConfig> for GrpcRaftNetwork {
         .record(rpc_started.elapsed().as_secs_f64());
 
         let (resp, _): (AppendEntriesResponse<RrTypeConfig>, _) =
+            rr_core::bounded_decode::decode_entry_body(&response.payload)
+                .map_err(to_unreachable)?;
+        Ok(resp)
+    }
+
+    async fn pre_vote(
+        &mut self,
+        rpc: VoteRequest<RrTypeConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
+        let ttl = option.soft_ttl();
+        let deadline = tokio::time::Instant::now() + ttl;
+        let channel = match tokio::time::timeout_at(
+            deadline,
+            self.channel_pool
+                .get_or_connect(self.target, &self.target_addr),
+        )
+        .await
+        {
+            Ok(result) => result.map_err(to_unreachable)?,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    target = self.target,
+                    group_id = self.group_id,
+                    "pre_vote connect timed out after {ttl:?}; evicting channel"
+                );
+                self.channel_pool.remove(self.target);
+                return Err(to_unreachable(format!(
+                    "pre_vote connect timed out after {ttl:?}"
+                )));
+            }
+        };
+
+        let fallback_vote = rpc.vote;
+        let payload = bincode::serde::encode_to_vec(&rpc, bincode::config::standard())
+            .map_err(to_unreachable)?;
+        let mut client = RaftGrpcClient::new(channel);
+        let send = client.pre_vote(ProtoVoteReq {
+            group_id: self.group_id,
+            payload,
+        });
+        let response = match tokio::time::timeout_at(deadline, send).await {
+            Err(_elapsed) => {
+                tracing::warn!(
+                    target = self.target,
+                    group_id = self.group_id,
+                    "pre_vote timed out after {ttl:?}; evicting channel"
+                );
+                self.channel_pool.remove(self.target);
+                return Err(to_unreachable(format!("pre_vote timed out after {ttl:?}")));
+            }
+            Ok(Err(status)) if status.code() == tonic::Code::Unimplemented => {
+                return Ok(VoteResponse::new(fallback_vote, None, true));
+            }
+            Ok(Err(status)) => {
+                if status.code() == tonic::Code::Unavailable {
+                    self.channel_pool.remove(self.target);
+                    metrics::counter!("rr_channel_reconnects_total", "node_id" => intern_id_label(self.target)).increment(1);
+                }
+                return Err(to_unreachable(status));
+            }
+            Ok(Ok(response)) => response.into_inner(),
+        };
+
+        let (resp, _): (VoteResponse<RrTypeConfig>, _) =
             rr_core::bounded_decode::decode_entry_body(&response.payload)
                 .map_err(to_unreachable)?;
         Ok(resp)
@@ -792,6 +873,138 @@ mod tests {
             RPCError::Unreachable(_) => {}
             other => panic!("expected Unreachable, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_grpc_network_pre_vote_connection_error_is_unreachable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener);
+
+        let pool: Arc<dyn ChannelPoolLike> = Arc::new(ChannelPool::new());
+        let mut network = GrpcRaftNetwork {
+            target: 99,
+            target_addr: addr,
+            channel_pool: pool,
+            group_id: 1,
+        };
+        let rpc = VoteRequest::<RrTypeConfig> {
+            vote: Vote::new(1, 1),
+            last_log_id: None,
+            leadership_transfer: false,
+        };
+
+        let result = network
+            .pre_vote(rpc, RPCOption::new(Duration::from_secs(1)))
+            .await;
+
+        match result.unwrap_err() {
+            RPCError::Unreachable(_) => {}
+            other => panic!("expected Unreachable, got: {other:?}"),
+        }
+    }
+
+    struct DelayedChannelPool {
+        delay: Duration,
+        addr: String,
+        removals: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelPoolLike for DelayedChannelPool {
+        async fn get_or_connect(
+            &self,
+            _node_id: NodeId,
+            _addr: &str,
+        ) -> Result<Channel, NetworkError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(Channel::from_shared(format!("http://{}", self.addr))
+                .unwrap()
+                .connect_lazy())
+        }
+
+        fn remove(&self, _node_id: NodeId) {
+            self.removals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn len(&self) -> usize {
+            0
+        }
+
+        fn is_empty(&self) -> bool {
+            true
+        }
+
+        async fn remove_and_reconnect(
+            &self,
+            _node_id: NodeId,
+            _addr: &str,
+        ) -> Result<Channel, NetworkError> {
+            unreachable!()
+        }
+    }
+
+    async fn assert_pre_vote_unreachable_and_evicted(pool: Arc<DelayedChannelPool>) -> Duration {
+        let removals = Arc::clone(&pool.removals);
+        let mut network = GrpcRaftNetwork {
+            target: 99,
+            target_addr: pool.addr.clone(),
+            channel_pool: pool,
+            group_id: 1,
+        };
+        let started = std::time::Instant::now();
+        let result = network
+            .pre_vote(
+                pre_vote_request(),
+                RPCOption::new(Duration::from_millis(75)),
+            )
+            .await;
+        match result.unwrap_err() {
+            RPCError::Unreachable(_) => {}
+            other => panic!("expected Unreachable, got: {other:?}"),
+        }
+        assert_eq!(
+            removals.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a soft-TTL timeout must evict the pooled channel"
+        );
+        started.elapsed()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pre_vote_soft_ttl_covers_slow_connect_and_unresponsive_rpc() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let slow_pool = Arc::new(DelayedChannelPool {
+            delay: Duration::from_millis(400),
+            addr: addr.clone(),
+            removals: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let slow_elapsed = assert_pre_vote_unreachable_and_evicted(slow_pool).await;
+        assert!(
+            slow_elapsed < Duration::from_millis(250),
+            "slow connect escaped the 75ms soft TTL: {slow_elapsed:?}"
+        );
+
+        let unresponsive_pool = Arc::new(DelayedChannelPool {
+            delay: Duration::ZERO,
+            addr,
+            removals: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let rpc_elapsed = assert_pre_vote_unreachable_and_evicted(unresponsive_pool).await;
+        assert!(
+            rpc_elapsed < Duration::from_millis(250),
+            "unresponsive RPC escaped the 75ms soft TTL: {rpc_elapsed:?}"
+        );
+        server.abort();
     }
 
     #[test]
@@ -1088,6 +1301,241 @@ mod tests {
             let reencoded =
                 bincode::serde::encode_to_vec(&decoded, bincode::config::standard()).unwrap();
             assert_eq!(bytes, reencoded);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum PreVoteBehavior {
+        Reject,
+        Unimplemented,
+        Internal,
+        InvalidArgument,
+        MalformedResponse,
+    }
+
+    #[derive(Clone)]
+    struct PreVoteServer {
+        behavior: PreVoteBehavior,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> for PreVoteServer {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut tonic::codegen::Context<'_>,
+        ) -> tonic::codegen::Poll<Result<(), Self::Error>> {
+            tonic::codegen::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: tonic::codegen::http::Request<tonic::body::Body>) -> Self::Future {
+            match req.uri().path() {
+                "/rr.raft.RaftService/PreVote" => {
+                    struct Svc {
+                        behavior: PreVoteBehavior,
+                        calls: Arc<std::sync::atomic::AtomicUsize>,
+                    }
+
+                    impl tonic::server::UnaryService<ProtoVoteReq> for Svc {
+                        type Response = ProtoVoteResp;
+                        type Future = tonic::codegen::BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+
+                        fn call(&mut self, request: tonic::Request<ProtoVoteReq>) -> Self::Future {
+                            let behavior = self.behavior;
+                            let calls = Arc::clone(&self.calls);
+                            Box::pin(async move {
+                                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                match behavior {
+                                    PreVoteBehavior::Unimplemented => {
+                                        return Err(tonic::Status::unimplemented(
+                                            "PreVote is not supported by this node",
+                                        ));
+                                    }
+                                    PreVoteBehavior::Internal => {
+                                        return Err(tonic::Status::internal("injected failure"));
+                                    }
+                                    PreVoteBehavior::InvalidArgument => {
+                                        return Err(tonic::Status::invalid_argument(
+                                            "injected rejection",
+                                        ));
+                                    }
+                                    PreVoteBehavior::MalformedResponse => {
+                                        let req = request.into_inner();
+                                        return Ok(tonic::Response::new(ProtoVoteResp {
+                                            group_id: req.group_id,
+                                            payload: vec![0xff],
+                                        }));
+                                    }
+                                    PreVoteBehavior::Reject => {}
+                                }
+
+                                let req = request.into_inner();
+                                let (_vote_req, _): (VoteRequest<RrTypeConfig>, _) =
+                                    rr_core::bounded_decode::decode_entry_body(&req.payload)
+                                        .map_err(|_| {
+                                            tonic::Status::invalid_argument("invalid payload")
+                                        })?;
+                                let vote_resp =
+                                    VoteResponse::<RrTypeConfig>::new(Vote::new(9, 2), None, false);
+                                let payload = bincode::serde::encode_to_vec(
+                                    &vote_resp,
+                                    bincode::config::standard(),
+                                )
+                                .map_err(|_| tonic::Status::internal("encode failed"))?;
+                                Ok(tonic::Response::new(ProtoVoteResp {
+                                    group_id: req.group_id,
+                                    payload,
+                                }))
+                            })
+                        }
+                    }
+
+                    let svc = Svc {
+                        behavior: self.behavior,
+                        calls: Arc::clone(&self.calls),
+                    };
+                    Box::pin(async move {
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec);
+                        Ok(grpc.unary(svc, req).await)
+                    })
+                }
+                _ => Box::pin(async move {
+                    let mut response =
+                        tonic::codegen::http::Response::new(tonic::body::Body::default());
+                    let headers = response.headers_mut();
+                    headers.insert(
+                        tonic::Status::GRPC_STATUS,
+                        (tonic::Code::Unimplemented as i32).into(),
+                    );
+                    headers.insert(
+                        tonic::codegen::http::header::CONTENT_TYPE,
+                        tonic::metadata::GRPC_CONTENT_TYPE,
+                    );
+                    Ok(response)
+                }),
+            }
+        }
+    }
+
+    impl tonic::server::NamedService for PreVoteServer {
+        const NAME: &'static str = "rr.raft.RaftService";
+    }
+
+    async fn spawn_pre_vote_server(
+        behavior: PreVoteBehavior,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = PreVoteServer {
+            behavior,
+            calls: Arc::clone(&calls),
+        };
+        let serve = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(server)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .expect("pre-vote test server failed");
+        });
+        (addr, calls, serve)
+    }
+
+    fn pre_vote_request() -> VoteRequest<RrTypeConfig> {
+        VoteRequest {
+            vote: Vote::new(2, 1),
+            last_log_id: None,
+            leadership_transfer: false,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pre_vote_round_trip_preserves_remote_rejection() {
+        let (addr, calls, serve) = spawn_pre_vote_server(PreVoteBehavior::Reject).await;
+        let mut network = GrpcRaftNetwork {
+            target: 2,
+            target_addr: addr,
+            channel_pool: Arc::new(ChannelPool::new()) as Arc<dyn ChannelPoolLike>,
+            group_id: 17,
+        };
+
+        let response = network
+            .pre_vote(pre_vote_request(), RPCOption::new(Duration::from_secs(2)))
+            .await
+            .expect("a remote rejection is a valid Raft response");
+
+        assert!(!response.vote_granted);
+        assert_eq!(response.vote, Vote::new(9, 2));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        serve.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pre_vote_unimplemented_preserves_rolling_upgrade_fallback() {
+        let (addr, calls, serve) = spawn_pre_vote_server(PreVoteBehavior::Unimplemented).await;
+        let mut network = GrpcRaftNetwork {
+            target: 2,
+            target_addr: addr,
+            channel_pool: Arc::new(ChannelPool::new()) as Arc<dyn ChannelPoolLike>,
+            group_id: 17,
+        };
+        let request = pre_vote_request();
+        let request_vote = request.vote;
+
+        let response = network
+            .pre_vote(request, RPCOption::new(Duration::from_secs(2)))
+            .await
+            .expect("only an old peer's UNIMPLEMENTED response keeps the compatibility fallback");
+
+        assert!(response.vote_granted);
+        assert_eq!(response.vote, request_vote);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the compatibility response must follow a real RPC, not a synthetic local grant"
+        );
+        serve.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pre_vote_non_fallback_statuses_and_decode_failures_are_unreachable() {
+        for behavior in [
+            PreVoteBehavior::Internal,
+            PreVoteBehavior::InvalidArgument,
+            PreVoteBehavior::MalformedResponse,
+        ] {
+            let (addr, calls, serve) = spawn_pre_vote_server(behavior).await;
+            let mut network = GrpcRaftNetwork {
+                target: 2,
+                target_addr: addr,
+                channel_pool: Arc::new(ChannelPool::new()) as Arc<dyn ChannelPoolLike>,
+                group_id: 17,
+            };
+
+            let result = network
+                .pre_vote(pre_vote_request(), RPCOption::new(Duration::from_secs(2)))
+                .await;
+
+            match result {
+                Err(RPCError::Unreachable(_)) => {}
+                Ok(response) => {
+                    panic!("{behavior:?} must never produce a PreVote response: {response:?}")
+                }
+                Err(other) => panic!("{behavior:?} must be Unreachable, got: {other:?}"),
+            }
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            serve.abort();
         }
     }
 

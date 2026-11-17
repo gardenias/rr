@@ -700,10 +700,12 @@ mod tests {
 
     use rr_network::proto::admin::admin_service_server::{AdminService, AdminServiceServer};
     use rr_network::proto::admin::{
-        AddLearnerRequest, ChangeMembershipRequest, DrainResult, FormationStatus, GroupList,
-        GroupMembership, GroupStatus, MetricsSummary, NodeStatus, OnlineBackupChunk,
-        OnlineBackupRequest, RemoveGroupMemberRequest, ResetIngestorOffsetRequest,
-        RoutingTableSnapshot, SnapshotStatus, TransferLeaderRequest,
+        AddLearnerRequest, BootRecordPage, BootRecordsRequest, BootStatus, BuildInfo,
+        ChangeMembershipRequest, ClusterTopology, ClusterTopologyRequest, DrainResult,
+        FormationStatus, GroupList, GroupMembership, GroupReplicaStatus, GroupStatus,
+        MetricsSummary, NodeDescriptorResponse, NodeStatus, OnlineBackupChunk, OnlineBackupRequest,
+        RemoveGroupMemberRequest, ResetIngestorOffsetRequest, RoutingTableSnapshot, SnapshotStatus,
+        TransferLeaderRequest,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -915,6 +917,48 @@ mod tests {
             &self,
             _request: Request<Empty>,
         ) -> std::result::Result<Response<FormationStatus>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_build_info(
+            &self,
+            _request: Request<Empty>,
+        ) -> std::result::Result<Response<BuildInfo>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_node_descriptor(
+            &self,
+            _request: Request<Empty>,
+        ) -> std::result::Result<Response<NodeDescriptorResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_cluster_topology(
+            &self,
+            _request: Request<ClusterTopologyRequest>,
+        ) -> std::result::Result<Response<ClusterTopology>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_group_replica_status(
+            &self,
+            _request: Request<GroupId>,
+        ) -> std::result::Result<Response<GroupReplicaStatus>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn get_boot_status(
+            &self,
+            _request: Request<Empty>,
+        ) -> std::result::Result<Response<BootStatus>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+
+        async fn list_boot_records(
+            &self,
+            _request: Request<BootRecordsRequest>,
+        ) -> std::result::Result<Response<BootRecordPage>, Status> {
             Err(Status::unimplemented("not used"))
         }
     }

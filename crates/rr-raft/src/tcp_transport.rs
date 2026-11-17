@@ -1,7 +1,7 @@
 //! Lightweight binary TCP transport for Raft AppendEntries/Vote.
 //!
-//! `InstallSnapshot` intentionally keeps using gRPC via `GrpcRaftNetwork`
-//! fallback to avoid re-implementing streaming snapshot transfer.
+//! `PreVote` and `InstallSnapshot` use gRPC via `GrpcRaftNetwork`, avoiding
+//! another election RPC frame type and streaming snapshot reimplementation.
 
 use std::io;
 use std::io::BufReader;
@@ -396,7 +396,7 @@ impl RaftNetworkFactory<RrTypeConfig> for TcpRaftNetworkFactory {
     }
 }
 
-/// TCP-backed Raft network (AppendEntries/Vote over TCP, Snapshot over gRPC).
+/// TCP-backed Raft network (AppendEntries/Vote over TCP, PreVote/Snapshot over gRPC).
 pub struct TcpRaftNetwork {
     target: u64,
     target_addr: String,
@@ -517,6 +517,14 @@ impl RaftNetworkV2<RrTypeConfig> for TcpRaftNetwork {
         let (resp, _): (VoteResponse<RrTypeConfig>, _) =
             rr_core::bounded_decode::decode_entry_body(&resp_payload).map_err(to_unreachable)?;
         Ok(resp)
+    }
+
+    async fn pre_vote(
+        &mut self,
+        rpc: VoteRequest<RrTypeConfig>,
+        option: RPCOption,
+    ) -> Result<VoteResponse<RrTypeConfig>, RPCError<RrTypeConfig>> {
+        self.grpc.pre_vote(rpc, option).await
     }
 
     async fn full_snapshot(

@@ -207,6 +207,27 @@ OK
 > **Note**: `kv-store` 会把 Admin API 挂在客户端端口 +1000（51001 → 52001）。REPL 的管理命令默认按 `--addr` 的主机 + 端口+1000 推导 admin 端点（`--admin-addr` 可显式覆盖），所以指向客户端端口 51001 时 `status`/`members` 也会自动打到 52001；一次性子命令用 `--addr 127.0.0.1:52001`（如 `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`）。
 > `kv-store` serves its Admin API on the client port +1000 (51001 → 52001). The REPL derives the admin endpoint as the `--addr` host with port +1000 by default (override with `--admin-addr`), so pointing it at the client port 51001 still reaches admin commands on 52001; for one-shot subcommands use `--addr 127.0.0.1:52001` (e.g. `cargo run -p rr-admin -- --addr 127.0.0.1:52001 node status`).
 
+### 何时使用 `--bootstrap` / When to Use `--bootstrap`
+
+无参数 demo 会自行初始化单副本组，不需要该旗标。常驻的手动单节点服务只在全新建组时引导一次；
+手动多节点集群必须在所有节点使用同一份完整花名册，并且只在一个全新节点上使用 `--bootstrap`，
+由它一次性初始化全部 voter。其他节点不使用该旗标。
+
+The no-argument demo initializes its own single-replica group and needs no flag. A persistent manual
+single-node service bootstraps once when its fresh group is created. For manual multi-node startup, every
+node needs the same full roster and exactly one fresh node uses `--bootstrap` to initialize all voters at
+once; the other nodes omit it.
+
+Genesis 和 Adopt 不使用 `--bootstrap`。正常重启、已初始化节点以及 durable 节点恢复时也必须省略它。
+重复初始化即使因组已存在而成为 no-op，也不能当作重启或成员变更策略。本次 gRPC Pre-Vote 故障并非
+`--bootstrap` 导致；不要用重复引导处理选主、网络隔离或 Pre-Vote 问题。
+
+Genesis and Adopt do not use `--bootstrap`. Omit it for normal restarts and when restarting or recovering
+an already initialized node, including a durable node. A fresh durable node may still bootstrap its
+initial group. Repeating initialization may be a no-op when the group exists, but that is not a restart or
+membership-change strategy. The gRPC Pre-Vote failure addressed here was not caused by `--bootstrap`;
+repeated bootstrapping is not a remedy for election, network-isolation, or Pre-Vote failures.
+
 想以编程方式嵌入节点，请参考 [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) 和[快速入门指南](https://rr-framework.github.io/guide/getting-started)。真实 API 为 `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?`（同步、单参数）→ `node.start().await?`。
 
 To embed a node programmatically, see [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) and the [Getting Started guide](https://rr-framework.github.io/guide/getting-started). The real API is `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?` (synchronous, single argument) → `node.start().await?`.
@@ -260,6 +281,128 @@ cargo run -p kv-store -- --node-id 2 --port 51002 --peers 1@127.0.0.1:51001,2@12
 
 # Terminal 3 — node 3
 cargo run -p kv-store -- --node-id 3 --port 51003 --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
+```
+
+#### 可选：前台监督与逐节点日志 / Optional Foreground Supervision and Logs
+
+以下示例先构建 `kv-store` 和 `rr-admin`，再在默认基础端口 56101 上启动三节点集群。
+客户端端口为 56101–56103，Admin 端口为 57101–57103；运行前确认六个端口均空闲。
+若被占用，先执行 `BASE_PORT=58101`（或选择其他空闲基础端口），再粘贴同一段命令。
+
+This example builds `kv-store` and `rr-admin`, then starts a three-node cluster at default base port 56101.
+Client ports are 56101–56103 and Admin ports are 57101–57103; confirm all six are free first. If they are
+busy, run `BASE_PORT=58101` (or choose another idle base) before pasting the same block.
+
+脚本在前台等待，分别把各节点 stdout/stderr 写入 `target/kv-store-demo/logs/`，把精确子进程 PID 写入
+`target/kv-store-demo/pids/`。按 Ctrl-C 只会向这三个已记录 PID 发信号并等待它们，保留日志且只删除
+本次脚本的 PID 文件；不会使用 `pkill` 或按端口查杀进程。
+
+The script waits in the foreground, writes each node's stdout/stderr under `target/kv-store-demo/logs/`,
+and records exact child PIDs under `target/kv-store-demo/pids/`. Ctrl-C signals and waits for only those
+three recorded PIDs, preserves logs, and removes only this script's PID files; it never uses `pkill` or
+kills by port.
+
+```bash
+BASE_PORT="${BASE_PORT:-56101}" bash <<'RR_DEMO'
+set -u
+
+case "$BASE_PORT" in
+  ''|*[!0-9]*) echo "BASE_PORT must be an integer" >&2; exit 2 ;;
+esac
+base_port=$((10#$BASE_PORT))
+if [ "$base_port" -lt 1024 ] || [ "$base_port" -gt 64533 ]; then
+  echo "BASE_PORT must be between 1024 and 64533" >&2
+  exit 2
+fi
+
+cargo build -p kv-store -p rr-admin || exit $?
+
+demo_dir="target/kv-store-demo"
+mkdir -p "$demo_dir/logs" "$demo_dir/pids" || exit $?
+roster="1@127.0.0.1:${base_port},2@127.0.0.1:$((base_port + 1)),3@127.0.0.1:$((base_port + 2))"
+pids=""
+pid_files=""
+pending_signal=""
+
+cleanup() {
+  trap - INT TERM EXIT
+  for pid in $pids; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  for pid_file in $pid_files; do
+    rm -f "$pid_file"
+  done
+}
+trap 'pending_signal=130' INT
+trap 'pending_signal=143' TERM
+trap cleanup EXIT
+
+for node_id in 1 2 3; do
+  port=$((base_port + node_id - 1))
+  log_file="$demo_dir/logs/node-${node_id}.log"
+  pid_file="$demo_dir/pids/node-${node_id}.pid"
+  bootstrap=""
+  if [ "$node_id" -eq 1 ]; then
+    bootstrap="--bootstrap"
+  fi
+
+  target/debug/kv-store --node-id "$node_id" --port "$port" \
+    --peers "$roster" $bootstrap >"$log_file" 2>&1 &
+  pid=$!
+  pids="$pids $pid"
+  pid_files="$pid_files $pid_file"
+  printf '%s\n' "$pid" >"$pid_file" || exit 1
+  if [ -n "$pending_signal" ]; then
+    exit "$pending_signal"
+  fi
+done
+
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [ -n "$pending_signal" ]; then
+  exit "$pending_signal"
+fi
+
+printf 'Three nodes started at base port %s; logs: %s/logs\n' "$base_port" "$demo_dir"
+printf 'Press Ctrl-C to stop only these PIDs:%s\n' "$pids"
+while :; do
+  for pid in $pids; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null
+      status=$?
+      if [ "$status" -eq 0 ]; then
+        status=1
+      fi
+      printf 'Child PID %s exited; stopping this demo.\n' "$pid" >&2
+      exit "$status"
+    fi
+  done
+  sleep 1
+done
+RR_DEMO
+```
+
+另开终端跟踪日志，并检查三个节点的 leader、复制进度和成员关系。覆盖基础端口时，先在状态终端设置同一个 `BASE_PORT`：
+
+In another terminal, tail the logs and check each node's leader, log progress, and membership. When
+overriding the base port, set the same `BASE_PORT` in the status terminal first:
+
+```bash
+tail -f target/kv-store-demo/logs/node-1.log \
+  target/kv-store-demo/logs/node-2.log target/kv-store-demo/logs/node-3.log
+```
+
+```bash
+BASE_PORT="${BASE_PORT:-56101}"
+base_port=$((10#$BASE_PORT))
+for node_id in 1 2 3; do
+  admin_port=$((base_port + 1000 + node_id - 1))
+  target/debug/rr-admin --addr "127.0.0.1:${admin_port}" group status --group 1
+  target/debug/rr-admin --addr "127.0.0.1:${admin_port}" group membership --group 1
+done
 ```
 
 每个节点在 `5100N` 提供 ClientService，在 `5200N`（port+1000）提供 AdminService。引导节点以全量成员初始化 Raft 组，其余节点通过日志复制自动跟上。验证：

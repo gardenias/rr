@@ -59,6 +59,18 @@ service AdminService {
     /// per-group formation state, and the lifecycle store CAS revision.
     /// Returns OK on success; failures are returned as gRPC Status.
     rpc GetFormationStatus(Empty) returns (FormationStatus);
+    /// Get framework/application build and protocol compatibility data.
+    rpc GetBuildInfo(Empty) returns (BuildInfo);
+    /// Get this process's explicit endpoints and placement metadata.
+    rpc GetNodeDescriptor(Empty) returns (NodeDescriptorResponse);
+    /// Get a stable, paginated directory and routing-table snapshot.
+    rpc GetClusterTopology(ClusterTopologyRequest) returns (ClusterTopology);
+    /// Get local replica state and, on a leader, its replication view.
+    rpc GetGroupReplicaStatus(GroupId) returns (GroupReplicaStatus);
+    /// Get the current boot and journal retention mode.
+    rpc GetBootStatus(Empty) returns (BootStatus);
+    /// List retained boots, newest first.
+    rpc ListBootRecords(BootRecordsRequest) returns (BootRecordPage);
 }
 
 message Empty {}
@@ -231,4 +243,120 @@ message GroupFormationStatus {
     uint64 bootstrap_epoch = 2;
     /// "Forming" or "Active".
     string state = 3;
+}
+
+message ProtocolVersion {
+    uint32 major = 1;
+    uint32 minor = 2;
+    uint32 min_peer_minor = 3;
+}
+
+message BuildInfo {
+    string rr_version = 1;
+    string app_version = 2;
+    string git_commit = 3;
+    bool git_dirty = 4;
+    string build_profile = 5;
+    ProtocolVersion admin_api = 6;
+    ProtocolVersion raft_wire = 7;
+    string boot_id = 8;
+    uint64 process_start_unix_ms = 9;
+    string config_fingerprint = 10;
+}
+
+message NodeDescriptor {
+    uint64 node_id = 1;
+    string client_addr = 2;
+    string admin_addr = 3;
+    string observability_addr = 4;
+    string advertise_addr = 5;
+    string environment = 6;
+    optional string region = 7;
+    optional string zone = 8;
+    optional string rack = 9;
+    string boot_id = 10;
+}
+
+message NodeDescriptorResponse {
+    NodeDescriptor descriptor = 1;
+    /// Directory mod_revision, or 0 when this process has not registered.
+    uint64 directory_revision = 2;
+}
+
+message ClusterTopologyRequest {
+    string cursor = 1;
+    uint32 page_size = 2;
+}
+
+message NodeDirectoryEntry {
+    NodeDescriptor descriptor = 1;
+    uint64 revision = 2;
+    int64 lease_id = 3;
+}
+
+message GroupTopology {
+    uint64 group_id = 1;
+    repeated uint64 replica_node_ids = 2;
+}
+
+message ClusterTopology {
+    string snapshot_id = 1;
+    uint64 config_revision = 2;
+    uint64 directory_revision = 3;
+    repeated NodeDirectoryEntry nodes = 4;
+    repeated GroupTopology groups = 5;
+    repeated PartitionRoute partitions = 6;
+    string next_cursor = 7;
+}
+
+message LeaderReplicaStatus {
+    uint64 node_id = 1;
+    optional uint64 matched_index = 2;
+    /// Present only when both the local last log and matched index are known.
+    optional uint64 lag_entries = 3;
+    optional uint64 last_heartbeat_unix_ms = 4;
+}
+
+message GroupReplicaStatus {
+    uint64 group_id = 1;
+    uint64 node_id = 2;
+    string server_state = 3;
+    optional uint64 leader_node_id = 4;
+    uint64 current_term = 5;
+    optional uint64 last_log_index = 6;
+    optional uint64 local_commit_index = 7;
+    optional uint64 cluster_commit_index = 8;
+    optional uint64 applied_index = 9;
+    optional uint64 last_snapshot_index = 10;
+    optional uint64 last_snapshot_term = 11;
+    /// Empty unless this node currently has a leader-only replication view.
+    repeated LeaderReplicaStatus leader_replication = 12;
+    uint64 observed_at_unix_ms = 13;
+}
+
+message BootRecord {
+    string boot_id = 1;
+    uint64 started_at_unix_ms = 2;
+    optional uint64 ended_at_unix_ms = 3;
+    /// RUNNING, GRACEFUL, or ABNORMAL_OR_UNCERTAIN.
+    string shutdown_state = 4;
+    BuildInfo build_info = 5;
+}
+
+message BootStatus {
+    BootRecord current = 1;
+    /// PERSISTENT or VOLATILE.
+    string persistence = 2;
+}
+
+message BootRecordsRequest {
+    string cursor = 1;
+    uint32 page_size = 2;
+}
+
+message BootRecordPage {
+    repeated BootRecord records = 1;
+    string next_cursor = 2;
+    /// PERSISTENT or VOLATILE.
+    string persistence = 3;
 }

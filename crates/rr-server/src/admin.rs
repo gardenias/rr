@@ -8,12 +8,15 @@
 //! Raft group status monitoring, snapshot triggering, and leader transfer.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use openraft::type_config::async_runtime::WatchReceiver;
+use openraft::Instant as _;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
+use crate::boot_journal::{BootRecord, ShutdownState};
+use crate::runtime::{BuildSnapshot, NodeRuntime};
 use rr_core::config::ConfigProvider;
 use rr_core::error::RaftError;
 use rr_core::membership::{membership_change_is_safe, MIN_VOTERS_AFTER_REMOVAL};
@@ -23,15 +26,19 @@ use rr_network::audit::AUDIT_TARGET;
 use rr_network::error_convert::IntoStatus;
 use rr_network::proto::admin::admin_service_server::AdminService;
 use rr_network::proto::admin::{
-    online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest, ChangeMembershipRequest,
+    online_backup_chunk::Body as OnlineBackupBody, AddLearnerRequest,
+    BootRecord as ProtoBootRecord, BootRecordPage as ProtoBootRecordPage, BootRecordsRequest,
+    BootStatus, BuildInfo, ChangeMembershipRequest, ClusterTopology, ClusterTopologyRequest,
     DrainRequest, DrainResult, Empty, FormationStatus, GroupDrainStatus, GroupFormationStatus,
-    GroupId, GroupList, GroupMembership, GroupStatus, GroupSummary, MetricsSummary, NodeMember,
-    NodeStatus, OnlineBackupChunk, OnlineBackupMetadata, OnlineBackupRequest, PartitionRoute,
+    GroupId, GroupList, GroupMembership, GroupReplicaStatus, GroupStatus, GroupSummary,
+    GroupTopology, LeaderReplicaStatus, MetricsSummary, NodeDescriptor as ProtoNodeDescriptor,
+    NodeDescriptorResponse, NodeDirectoryEntry, NodeMember, NodeStatus, OnlineBackupChunk,
+    OnlineBackupMetadata, OnlineBackupRequest, PartitionRoute, ProtocolVersion,
     RemoveGroupMemberRequest, ResetIngestorOffsetRequest, RoutingTableSnapshot, SnapshotStatus,
     TransferLeaderRequest,
 };
 use rr_raft::group_manager::RaftGroupManager;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -45,6 +52,9 @@ const ONLINE_BACKUP_CHUNK_BYTES: usize = 64 * 1024;
 /// snapshot generation can be slow on large state machines; tune via
 /// future config if needed.
 const ONLINE_BACKUP_SNAPSHOT_WAIT: Duration = Duration::from_secs(60);
+const TOPOLOGY_CURSOR_TTL: Duration = Duration::from_secs(30);
+const DEFAULT_TOPOLOGY_PAGE_SIZE: usize = 50;
+const MAX_TOPOLOGY_PAGE_SIZE: usize = 200;
 
 fn peer_from_request<T>(req: &Request<T>) -> String {
     req.remote_addr()
@@ -133,6 +143,222 @@ fn formation_status_from_record(versioned: VersionedLifecycle) -> FormationStatu
     }
 }
 
+fn protocol_to_proto(version: rr_core::ProtocolVersion) -> ProtocolVersion {
+    ProtocolVersion {
+        major: version.major,
+        minor: version.minor,
+        min_peer_minor: version.min_peer_minor,
+    }
+}
+
+fn build_info_from_snapshot(
+    build: &BuildSnapshot,
+    boot_id: &str,
+    process_start_unix_ms: u64,
+) -> BuildInfo {
+    BuildInfo {
+        rr_version: build.rr_version.clone(),
+        app_version: build.app_version.clone(),
+        git_commit: build.git_commit.clone(),
+        git_dirty: build.git_dirty,
+        build_profile: build.build_profile.clone(),
+        admin_api: Some(protocol_to_proto(build.admin_protocol)),
+        raft_wire: Some(protocol_to_proto(build.raft_protocol)),
+        boot_id: boot_id.to_string(),
+        process_start_unix_ms,
+        config_fingerprint: build.config_fingerprint.clone(),
+    }
+}
+
+fn boot_record_to_proto(record: BootRecord) -> ProtoBootRecord {
+    ProtoBootRecord {
+        boot_id: record.boot_id.clone(),
+        started_at_unix_ms: record.started_at_unix_ms,
+        ended_at_unix_ms: record.ended_at_unix_ms,
+        shutdown_state: match record.shutdown_state {
+            ShutdownState::Running => "RUNNING",
+            ShutdownState::Graceful => "GRACEFUL",
+            ShutdownState::AbnormalOrUncertain => "ABNORMAL_OR_UNCERTAIN",
+        }
+        .to_string(),
+        build_info: Some(build_info_from_snapshot(
+            &record.build,
+            &record.boot_id,
+            record.started_at_unix_ms,
+        )),
+    }
+}
+
+fn leader_replica_status(
+    node_id: NodeId,
+    last_log_index: Option<u64>,
+    matched_index: Option<u64>,
+    last_heartbeat_unix_ms: Option<u64>,
+) -> LeaderReplicaStatus {
+    LeaderReplicaStatus {
+        node_id,
+        matched_index,
+        lag_entries: last_log_index
+            .zip(matched_index)
+            .map(|(last, matched)| last.saturating_sub(matched)),
+        last_heartbeat_unix_ms,
+    }
+}
+
+fn topology_page_size(raw: u32) -> Result<usize, Status> {
+    let page_size = if raw == 0 {
+        DEFAULT_TOPOLOGY_PAGE_SIZE
+    } else {
+        raw as usize
+    };
+    if page_size > MAX_TOPOLOGY_PAGE_SIZE {
+        return Err(Status::invalid_argument(format!(
+            "page_size must be within 1..={MAX_TOPOLOGY_PAGE_SIZE}"
+        )));
+    }
+    Ok(page_size)
+}
+
+fn decode_topology_cursor(
+    cursor: &str,
+    snapshot_id: &str,
+) -> Result<(usize, usize, usize), Status> {
+    let mut parts = cursor.split(':');
+    let (Some("v1"), Some(id), Some(nodes), Some(groups), Some(partitions), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return Err(Status::invalid_argument("invalid topology cursor"));
+    };
+    if id != snapshot_id {
+        return Err(Status::out_of_range(
+            "topology cursor expired; restart pagination without a cursor",
+        ));
+    }
+    let parse = |value: &str| {
+        value
+            .parse::<usize>()
+            .map_err(|_| Status::invalid_argument("invalid topology cursor offset"))
+    };
+    Ok((parse(nodes)?, parse(groups)?, parse(partitions)?))
+}
+
+fn paginate_topology(
+    snapshot: &ClusterTopology,
+    cursor: Option<&str>,
+    page_size: usize,
+) -> Result<ClusterTopology, Status> {
+    let (node_offset, group_offset, partition_offset) = match cursor {
+        Some(cursor) if !cursor.is_empty() => {
+            decode_topology_cursor(cursor, &snapshot.snapshot_id)?
+        }
+        _ => (0, 0, 0),
+    };
+    for (offset, len, kind) in [
+        (node_offset, snapshot.nodes.len(), "nodes"),
+        (group_offset, snapshot.groups.len(), "groups"),
+        (partition_offset, snapshot.partitions.len(), "partitions"),
+    ] {
+        if offset > len {
+            return Err(Status::out_of_range(format!(
+                "topology {kind} cursor is outside the snapshot"
+            )));
+        }
+    }
+    let node_end = (node_offset + page_size).min(snapshot.nodes.len());
+    let group_end = (group_offset + page_size).min(snapshot.groups.len());
+    let partition_end = (partition_offset + page_size).min(snapshot.partitions.len());
+    let has_more = node_end < snapshot.nodes.len()
+        || group_end < snapshot.groups.len()
+        || partition_end < snapshot.partitions.len();
+    let next_cursor = if has_more {
+        format!(
+            "v1:{}:{node_end}:{group_end}:{partition_end}",
+            snapshot.snapshot_id
+        )
+    } else {
+        String::new()
+    };
+    Ok(ClusterTopology {
+        snapshot_id: snapshot.snapshot_id.clone(),
+        config_revision: snapshot.config_revision,
+        directory_revision: snapshot.directory_revision,
+        nodes: snapshot.nodes[node_offset..node_end].to_vec(),
+        groups: snapshot.groups[group_offset..group_end].to_vec(),
+        partitions: snapshot.partitions[partition_offset..partition_end].to_vec(),
+        next_cursor,
+    })
+}
+
+fn group_replica_status_from_metrics(
+    node_id: NodeId,
+    group_id: u64,
+    metrics: openraft::RaftMetrics<rr_raft::RrTypeConfig>,
+    observed_at_unix_ms: u64,
+) -> GroupReplicaStatus {
+    let leader_replication = metrics
+        .replication
+        .as_ref()
+        .map(|replication| {
+            replication
+                .iter()
+                .map(|(replica_id, matched)| {
+                    let matched_index = matched.as_ref().map(|log_id| log_id.index);
+                    let last_heartbeat_unix_ms = metrics
+                        .heartbeat
+                        .as_ref()
+                        .and_then(|heartbeat| heartbeat.get(replica_id))
+                        .and_then(|heartbeat| heartbeat.as_ref())
+                        .map(|heartbeat| {
+                            observed_at_unix_ms.saturating_sub(
+                                heartbeat.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            )
+                        });
+                    leader_replica_status(
+                        *replica_id,
+                        metrics.last_log_index,
+                        matched_index,
+                        last_heartbeat_unix_ms,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    GroupReplicaStatus {
+        group_id,
+        node_id,
+        server_state: format!("{:?}", metrics.state),
+        leader_node_id: metrics.current_leader,
+        current_term: metrics.current_term,
+        last_log_index: metrics.last_log_index,
+        local_commit_index: metrics.local_committed.as_ref().map(|log_id| log_id.index),
+        cluster_commit_index: metrics
+            .cluster_committed
+            .as_ref()
+            .map(|log_id| log_id.index),
+        applied_index: metrics.last_applied.as_ref().map(|log_id| log_id.index),
+        last_snapshot_index: metrics.snapshot.as_ref().map(|log_id| log_id.index),
+        last_snapshot_term: metrics
+            .snapshot
+            .as_ref()
+            .map(|log_id| log_id.leader_id.term),
+        leader_replication,
+        observed_at_unix_ms,
+    }
+}
+
+fn unix_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
 /// Label value for admin operation counters: "ok" when the RPC returned
 /// success, "error" otherwise (including validation rejections).
 fn admin_result_label(result: &Result<Response<Empty>, Status>) -> &'static str {
@@ -141,6 +367,11 @@ fn admin_result_label(result: &Result<Response<Empty>, Status>) -> &'static str 
     } else {
         "error"
     }
+}
+
+struct CachedTopology {
+    snapshot: ClusterTopology,
+    expires_at: Instant,
 }
 
 /// Implementation of the AdminService gRPC interface.
@@ -152,6 +383,8 @@ pub struct AdminServiceImpl {
     group_manager: Arc<RaftGroupManager>,
     config_provider: Arc<dyn ConfigProvider>,
     lifecycle_store: Option<Arc<dyn LifecycleStore>>,
+    runtime: Option<Arc<NodeRuntime>>,
+    topology_cache: tokio::sync::Mutex<Option<CachedTopology>>,
     start_time: Instant,
     /// Tracks every spawned `OnlineBackup` streaming task (no
     /// fire-and-forget): each task terminates itself when the client
@@ -177,6 +410,8 @@ impl AdminServiceImpl {
             group_manager,
             config_provider,
             lifecycle_store: None,
+            runtime: None,
+            topology_cache: tokio::sync::Mutex::new(None),
             start_time: Instant::now(),
             backup_streams: std::sync::Mutex::new(tokio::task::JoinSet::new()),
             snapshot_stub_warned: std::sync::atomic::AtomicBool::new(false),
@@ -186,6 +421,119 @@ impl AdminServiceImpl {
     pub fn with_lifecycle_store(mut self, lifecycle_store: Arc<dyn LifecycleStore>) -> Self {
         self.lifecycle_store = Some(lifecycle_store);
         self
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<NodeRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    fn require_runtime(&self) -> Result<&Arc<NodeRuntime>, Status> {
+        self.runtime.as_ref().ok_or_else(|| {
+            Status::unimplemented("node runtime metadata is not configured for this AdminService")
+        })
+    }
+
+    async fn build_topology_snapshot(&self) -> Result<ClusterTopology, Status> {
+        let mut nodes = Vec::new();
+        let mut directory_revision = 0;
+        if let Some(directory) = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.directory())
+        {
+            let mut cursor = None;
+            loop {
+                let page = directory
+                    .list(cursor.as_deref(), Some(MAX_TOPOLOGY_PAGE_SIZE))
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(%error, "node directory list failed (detail sanitized for client)");
+                        Status::unavailable("node directory is unavailable")
+                    })?;
+                if directory_revision == 0 {
+                    directory_revision = page.revision;
+                } else if directory_revision != page.revision {
+                    return Err(Status::aborted(
+                        "node directory revision changed while building topology; retry",
+                    ));
+                }
+                let next_cursor = page.next_cursor;
+                nodes.extend(page.records.into_iter().map(|record| NodeDirectoryEntry {
+                    descriptor: Some(ProtoNodeDescriptor {
+                        node_id: record.descriptor.node_id,
+                        client_addr: record.descriptor.client_addr,
+                        admin_addr: record.descriptor.admin_addr,
+                        observability_addr: record.descriptor.observability_addr,
+                        advertise_addr: record.descriptor.advertise_addr,
+                        environment: record.descriptor.environment,
+                        region: record.descriptor.region,
+                        zone: record.descriptor.zone,
+                        rack: record.descriptor.rack,
+                        boot_id: record.descriptor.boot_id,
+                    }),
+                    revision: record.revision,
+                    lease_id: record.lease_id,
+                }));
+                cursor = next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+        }
+        nodes.sort_by_key(|entry| {
+            entry
+                .descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.node_id)
+                .unwrap_or(0)
+        });
+
+        let config_revision = match &self.lifecycle_store {
+            Some(store) => store
+                .load_linearizable()
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "topology lifecycle load failed (detail sanitized for client)");
+                    Status::unavailable("cluster configuration revision is unavailable")
+                })?
+                .map(|lifecycle| lifecycle.record.topology_revision)
+                .unwrap_or(0),
+            None => 0,
+        };
+        let table = self.config_provider.get_routing_table().await.map_err(|error| {
+            tracing::warn!(%error, "topology routing table load failed (detail sanitized for client)");
+            Status::unavailable("routing table is unavailable")
+        })?;
+        let groups: BTreeMap<_, _> = table.groups.into_iter().collect();
+        let partitions: BTreeMap<_, _> = table.partitions.into_iter().collect();
+        let partitions = partitions
+            .into_iter()
+            .map(|(partition_id, (_config, group_id))| PartitionRoute {
+                partition_id,
+                group_id,
+                replica_node_ids: groups
+                    .get(&group_id)
+                    .map(|group| group.replicas.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let groups = groups
+            .into_values()
+            .map(|group| GroupTopology {
+                group_id: group.group_id,
+                replica_node_ids: group.replicas,
+            })
+            .collect();
+        Ok(ClusterTopology {
+            snapshot_id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            config_revision,
+            directory_revision,
+            nodes,
+            groups,
+            partitions,
+            next_cursor: String::new(),
+        })
     }
 
     async fn require_active_group(&self, group_id: u64) -> Result<(), Status> {
@@ -1327,6 +1675,123 @@ impl AdminService for AdminServiceImpl {
         };
         Ok(Response::new(formation_status_from_record(versioned)))
     }
+
+    async fn get_build_info(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<BuildInfo>, Status> {
+        let runtime = self.require_runtime()?;
+        Ok(Response::new(build_info_from_snapshot(
+            runtime.build(),
+            runtime.boot_id(),
+            runtime.process_start_unix_ms(),
+        )))
+    }
+
+    async fn get_node_descriptor(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<NodeDescriptorResponse>, Status> {
+        let runtime = self.require_runtime()?;
+        let descriptor = runtime
+            .descriptor()
+            .ok_or_else(|| Status::unimplemented("explicit node descriptor is not configured"))?;
+        Ok(Response::new(NodeDescriptorResponse {
+            descriptor: Some(ProtoNodeDescriptor {
+                node_id: descriptor.node_id,
+                client_addr: descriptor.client_addr.clone(),
+                admin_addr: descriptor.admin_addr.clone(),
+                observability_addr: descriptor.observability_addr.clone(),
+                advertise_addr: descriptor.advertise_addr.clone(),
+                environment: descriptor.environment.clone(),
+                region: descriptor.region.clone(),
+                zone: descriptor.zone.clone(),
+                rack: descriptor.rack.clone(),
+                boot_id: descriptor.boot_id.clone(),
+            }),
+            directory_revision: runtime.directory_revision(),
+        }))
+    }
+
+    async fn get_cluster_topology(
+        &self,
+        request: Request<ClusterTopologyRequest>,
+    ) -> Result<Response<ClusterTopology>, Status> {
+        let request = request.into_inner();
+        let page_size = topology_page_size(request.page_size)?;
+        let mut cache = self.topology_cache.lock().await;
+        if request.cursor.is_empty() {
+            let snapshot = self.build_topology_snapshot().await?;
+            *cache = Some(CachedTopology {
+                snapshot,
+                expires_at: Instant::now() + TOPOLOGY_CURSOR_TTL,
+            });
+        }
+        let cached = cache.as_ref().ok_or_else(|| {
+            Status::out_of_range("topology cursor expired; restart pagination without a cursor")
+        })?;
+        if cached.expires_at <= Instant::now() {
+            *cache = None;
+            return Err(Status::out_of_range(
+                "topology cursor expired; restart pagination without a cursor",
+            ));
+        }
+        Ok(Response::new(paginate_topology(
+            &cached.snapshot,
+            (!request.cursor.is_empty()).then_some(request.cursor.as_str()),
+            page_size,
+        )?))
+    }
+
+    async fn get_group_replica_status(
+        &self,
+        request: Request<GroupId>,
+    ) -> Result<Response<GroupReplicaStatus>, Status> {
+        let group_id = request.into_inner().group_id;
+        let raft = self
+            .group_manager
+            .get_raft(group_id)
+            .await
+            .ok_or_else(|| Status::not_found(format!("group {group_id} not found")))?;
+        let metrics = raft.metrics().borrow_watched().clone();
+        Ok(Response::new(group_replica_status_from_metrics(
+            self.node_id,
+            group_id,
+            metrics,
+            unix_time_millis(),
+        )))
+    }
+
+    async fn get_boot_status(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<BootStatus>, Status> {
+        let runtime = self.require_runtime()?;
+        Ok(Response::new(BootStatus {
+            current: Some(boot_record_to_proto(runtime.journal().current())),
+            persistence: runtime.persistence().as_str().to_string(),
+        }))
+    }
+
+    async fn list_boot_records(
+        &self,
+        request: Request<BootRecordsRequest>,
+    ) -> Result<Response<ProtoBootRecordPage>, Status> {
+        let runtime = self.require_runtime()?;
+        let request = request.into_inner();
+        let page = runtime
+            .journal()
+            .list(
+                (!request.cursor.is_empty()).then_some(request.cursor.as_str()),
+                (request.page_size != 0).then_some(request.page_size as usize),
+            )
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        Ok(Response::new(ProtoBootRecordPage {
+            records: page.records.into_iter().map(boot_record_to_proto).collect(),
+            next_cursor: page.next_cursor.unwrap_or_default(),
+            persistence: runtime.persistence().as_str().to_string(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -1334,6 +1799,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use bincode::config::standard;
+    use openraft::vote::RaftLeaderId as _;
     use rr_config::mem::MemConfigProvider;
     use rr_config::MemLifecycleStore;
     use rr_core::error::{LifecycleError, RrError};
@@ -2139,5 +2605,238 @@ mod tests {
             ),
             "{rendered}"
         );
+    }
+
+    fn test_runtime() -> Arc<NodeRuntime> {
+        Arc::new(
+            NodeRuntime::new(crate::runtime::NodeRuntimeConfig::new(
+                1,
+                "test-fingerprint".into(),
+            ))
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn build_and_boot_rpcs_share_one_boot_identity() {
+        let svc = make_admin_service().with_runtime(test_runtime());
+        let build = svc
+            .get_build_info(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let boot = svc
+            .get_boot_status(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(boot.persistence, "VOLATILE");
+        assert_eq!(boot.current.unwrap().boot_id, build.boot_id);
+        assert_eq!(build.config_fingerprint, "test-fingerprint");
+        assert_eq!(build.admin_api.unwrap().major, 1);
+        assert_eq!(build.raft_wire.unwrap().min_peer_minor, 0);
+
+        let history = svc
+            .list_boot_records(Request::new(BootRecordsRequest {
+                cursor: String::new(),
+                page_size: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(history.records.len(), 1);
+        assert_eq!(history.records[0].boot_id, build.boot_id);
+    }
+
+    #[test]
+    fn replica_mapping_preserves_no_leader_and_distinct_commit_frontiers() {
+        let mut metrics = openraft::RaftMetrics::<rr_raft::RrTypeConfig>::new_initial(2);
+        metrics.current_leader = None;
+        metrics.last_log_index = Some(9);
+        metrics.local_committed = Some(openraft::LogId::new(
+            openraft::vote::leader_id_adv::CommittedLeaderId::new(1, 2),
+            5,
+        ));
+        metrics.cluster_committed = Some(openraft::LogId::new(
+            openraft::vote::leader_id_adv::CommittedLeaderId::new(1, 2),
+            7,
+        ));
+        metrics.last_applied = Some(openraft::LogId::new(
+            openraft::vote::leader_id_adv::CommittedLeaderId::new(1, 2),
+            4,
+        ));
+        let status = group_replica_status_from_metrics(2, 10, metrics, 123);
+        assert_eq!(status.leader_node_id, None);
+        assert_eq!(status.local_commit_index, Some(5));
+        assert_eq!(status.cluster_commit_index, Some(7));
+        assert_eq!(status.applied_index, Some(4));
+        assert!(status.leader_replication.is_empty());
+    }
+
+    #[test]
+    fn follower_has_no_leader_replication_view_and_missing_match_has_no_lag() {
+        let mut follower = openraft::RaftMetrics::<rr_raft::RrTypeConfig>::new_initial(2);
+        follower.current_leader = Some(1);
+        follower.replication = None;
+        assert!(group_replica_status_from_metrics(2, 10, follower, 123)
+            .leader_replication
+            .is_empty());
+
+        let status = leader_replica_status(3, Some(9), None, None);
+        assert_eq!(status.matched_index, None);
+        assert_eq!(status.lag_entries, None);
+        assert_eq!(status.last_heartbeat_unix_ms, None);
+    }
+
+    fn topology_fixture() -> ClusterTopology {
+        ClusterTopology {
+            snapshot_id: "snapshot-1".into(),
+            config_revision: 7,
+            directory_revision: 11,
+            nodes: (1..=3)
+                .map(|node_id| NodeDirectoryEntry {
+                    descriptor: Some(ProtoNodeDescriptor {
+                        node_id,
+                        ..Default::default()
+                    }),
+                    revision: node_id,
+                    lease_id: node_id as i64,
+                })
+                .collect(),
+            groups: (1..=2)
+                .map(|group_id| GroupTopology {
+                    group_id,
+                    replica_node_ids: vec![1, 2, 3],
+                })
+                .collect(),
+            partitions: vec![PartitionRoute {
+                partition_id: 1,
+                group_id: 1,
+                replica_node_ids: vec![1, 2, 3],
+            }],
+            next_cursor: String::new(),
+        }
+    }
+
+    #[test]
+    fn topology_pages_are_stable_and_reject_expired_snapshot_cursors() {
+        let snapshot = topology_fixture();
+        let first = paginate_topology(&snapshot, None, 1).unwrap();
+        assert_eq!(first.nodes.len(), 1);
+        assert_eq!(first.groups.len(), 1);
+        assert_eq!(first.partitions.len(), 1);
+        let second = paginate_topology(&snapshot, Some(&first.next_cursor), 1).unwrap();
+        assert_eq!(second.nodes[0].descriptor.as_ref().unwrap().node_id, 2);
+        let third = paginate_topology(&snapshot, Some(&second.next_cursor), 1).unwrap();
+        assert!(third.next_cursor.is_empty());
+        assert_eq!(third.nodes.len(), 1);
+        assert!(third.groups.is_empty());
+        assert!(third.partitions.is_empty());
+
+        let expired = decode_topology_cursor(&first.next_cursor, "another-snapshot").unwrap_err();
+        assert_eq!(expired.code(), tonic::Code::OutOfRange);
+    }
+
+    #[tokio::test]
+    async fn new_metadata_rpcs_work_over_real_grpc_transport() {
+        use rr_network::proto::admin::admin_service_client::AdminServiceClient;
+        use rr_network::proto::admin::admin_service_server::AdminServiceServer;
+
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(
+            NodeRuntime::new(crate::runtime::NodeRuntimeConfig {
+                node_id: 1,
+                app_version: "wire-app".into(),
+                config_fingerprint: "wire-fingerprint".into(),
+                descriptor: Some(crate::runtime::NodeDescriptorConfig {
+                    client_addr: "node-1:5000".into(),
+                    admin_addr: "node-1:5001".into(),
+                    observability_addr: "node-1:5002".into(),
+                    advertise_addr: "node-1:5000".into(),
+                    environment: "test".into(),
+                    region: None,
+                    zone: None,
+                    rack: None,
+                }),
+                journal_dir: Some(temp.path().to_path_buf()),
+                directory: None,
+            })
+            .unwrap(),
+        );
+        let svc = make_admin_service().with_runtime(runtime);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            let item = listener.accept().await.map(|(stream, _)| stream);
+            Some((item, listener))
+        });
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(AdminServiceServer::new(svc))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .unwrap();
+        });
+        let mut client = AdminServiceClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        let build = client
+            .get_build_info(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(build.app_version, "wire-app");
+        assert_eq!(build.config_fingerprint, "wire-fingerprint");
+        let descriptor = client
+            .get_node_descriptor(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(descriptor.directory_revision, 0);
+        assert_eq!(descriptor.descriptor.unwrap().boot_id, build.boot_id);
+        let boot = client
+            .get_boot_status(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(boot.persistence, "PERSISTENT");
+        assert_eq!(boot.current.unwrap().boot_id, build.boot_id);
+        let boots = client
+            .list_boot_records(Request::new(BootRecordsRequest {
+                cursor: String::new(),
+                page_size: 1,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(boots.records.len(), 1);
+        let topology = client
+            .get_cluster_topology(Request::new(ClusterTopologyRequest {
+                cursor: String::new(),
+                page_size: 50,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!topology.snapshot_id.is_empty());
+        drop(client);
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn replica_rpc_unknown_group_is_not_found() {
+        let svc = make_admin_service();
+        let error = svc
+            .get_group_replica_status(Request::new(GroupId { group_id: 99 }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
     }
 }

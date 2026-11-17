@@ -8,6 +8,8 @@ service RaftService {
     rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
     /// RequestVote RPC — leader election.
     rpc Vote(VoteRequest) returns (VoteResponse);
+    /// PreVote RPC — probe election viability without persisting a vote.
+    rpc PreVote(VoteRequest) returns (VoteResponse);
     /// InstallSnapshot RPC — log compaction snapshot transfer (streaming).
     rpc InstallSnapshot(stream SnapshotChunk) returns (SnapshotResponse);
 }

@@ -49,9 +49,46 @@ pub struct ServeArgs {
     #[arg(long = "listen-addr", env = "RR_LISTEN_ADDR")]
     pub listen_addr: Option<String>,
 
+    /// Explicit client/Raft address advertised to trusted discovery clients.
+    #[arg(long = "advertise-addr", env = "RR_ADVERTISE_ADDR")]
+    pub advertise_addr: Option<String>,
+
+    /// Explicit AdminService address advertised to trusted discovery clients.
+    #[arg(long = "admin-advertise-addr", env = "RR_ADMIN_ADVERTISE_ADDR")]
+    pub admin_advertise_addr: Option<String>,
+
+    /// Explicit health/metrics address advertised to trusted discovery clients.
+    #[arg(
+        long = "observability-advertise-addr",
+        env = "RR_OBSERVABILITY_ADVERTISE_ADDR"
+    )]
+    pub observability_advertise_addr: Option<String>,
+
+    /// Application version reported separately from the Rr framework version.
+    #[arg(long = "app-version", env = "RR_APP_VERSION")]
+    pub app_version: Option<String>,
+
+    /// Deployment environment published in the node descriptor.
+    #[arg(long = "environment", env = "RR_ENVIRONMENT")]
+    pub environment: Option<String>,
+
+    #[arg(long = "region", env = "RR_REGION")]
+    pub region: Option<String>,
+
+    #[arg(long = "zone", env = "RR_ZONE")]
+    pub zone: Option<String>,
+
+    #[arg(long = "rack", env = "RR_RACK")]
+    pub rack: Option<String>,
+
     /// Data directory. Required when `--storage rocks` is selected.
     #[arg(long = "data-dir", env = "RR_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
+
+    /// Boot journal directory. RocksDB defaults to DATA_DIR/boot-journal;
+    /// mem nodes stay VOLATILE unless this is explicitly set.
+    #[arg(long = "boot-journal-dir", env = "RR_BOOT_JOURNAL_DIR")]
+    pub boot_journal_dir: Option<PathBuf>,
 
     /// Storage backend: `mem` (ephemeral) or `rocks` (persistent, feature-gated).
     #[arg(long = "storage", env = "RR_STORAGE")]
@@ -154,6 +191,39 @@ pub struct ServeArgs {
         value_delimiter = ','
     )]
     pub etcd_endpoints: Vec<String>,
+
+    /// Comma-separated etcd endpoints used only for leased node discovery.
+    /// Managed formation reuses its etcd endpoints when this is omitted.
+    #[arg(
+        long = "directory-etcd-endpoints",
+        env = "RR_DIRECTORY_ETCD_ENDPOINTS",
+        value_delimiter = ','
+    )]
+    pub directory_etcd_endpoints: Vec<String>,
+
+    /// CA bundle used to verify etcd server certificates.
+    #[arg(long = "etcd-ca", env = "RR_ETCD_CA")]
+    pub etcd_ca: Option<PathBuf>,
+
+    /// Client certificate presented to etcd for mTLS.
+    #[arg(long = "etcd-cert", env = "RR_ETCD_CERT")]
+    pub etcd_cert: Option<PathBuf>,
+
+    /// Private key for the etcd client certificate.
+    #[arg(long = "etcd-key", env = "RR_ETCD_KEY")]
+    pub etcd_key: Option<PathBuf>,
+
+    /// SNI/verification domain override for etcd TLS connections.
+    #[arg(long = "etcd-domain", env = "RR_ETCD_DOMAIN")]
+    pub etcd_domain: Option<String>,
+
+    /// Username for etcd authentication.
+    #[arg(long = "etcd-username", env = "RR_ETCD_USERNAME")]
+    pub etcd_username: Option<String>,
+
+    /// Name of the environment variable holding the etcd password.
+    #[arg(long = "etcd-password-env", env = "RR_ETCD_PASSWORD_ENV")]
+    pub etcd_password_env: Option<String>,
 
     /// Number of Raft groups (and partitions) the node hosts. The stock
     /// topology maps partition i → group i with all peers as replicas;
@@ -324,6 +394,42 @@ mod tests {
     #[test]
     fn clap_cli_definition_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn cli_parses_etcd_security_flags() {
+        let cli = Cli::try_parse_from([
+            "rr-server",
+            "serve",
+            "--etcd-ca",
+            "/etc/rr/etcd-ca.pem",
+            "--etcd-cert",
+            "/etc/rr/etcd-client.pem",
+            "--etcd-key",
+            "/etc/rr/etcd-client.key",
+            "--etcd-domain",
+            "etcd.internal",
+            "--etcd-username",
+            "rr-node",
+            "--etcd-password-env",
+            "RR_ETCD_PASSWORD",
+        ])
+        .expect("parse");
+        let Command::Serve(args) = cli.command else {
+            panic!("expected Serve");
+        };
+        assert_eq!(args.etcd_ca, Some(PathBuf::from("/etc/rr/etcd-ca.pem")));
+        assert_eq!(
+            args.etcd_cert,
+            Some(PathBuf::from("/etc/rr/etcd-client.pem"))
+        );
+        assert_eq!(
+            args.etcd_key,
+            Some(PathBuf::from("/etc/rr/etcd-client.key"))
+        );
+        assert_eq!(args.etcd_domain.as_deref(), Some("etcd.internal"));
+        assert_eq!(args.etcd_username.as_deref(), Some("rr-node"));
+        assert_eq!(args.etcd_password_env.as_deref(), Some("RR_ETCD_PASSWORD"));
     }
 
     struct FormationEnvGuard;

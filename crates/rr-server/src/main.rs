@@ -17,15 +17,16 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use etcd_client::{Certificate, ConnectOptions, Identity, TlsOptions};
 use openraft::error::{InitializeError, RaftError};
 use openraft::BasicNode;
 use rr_config::mem::MemConfigProvider;
-use rr_config_etcd::EtcdLifecycleStore;
+use rr_config_etcd::{EtcdLifecycleStore, EtcdNodeDirectory};
 use rr_core::config::ConfigProvider;
 use rr_core::state_machine::StateMachine;
 use rr_core::storage::StorageEngine;
 use rr_core::types::{NodeAddr, NodeId, PartitionConfig};
-use rr_core::LifecycleStore;
+use rr_core::{LifecycleStore, NodeDirectory};
 use rr_network::auth::AuthConfig;
 use rr_network::rate_limit::RateLimitConfig;
 use rr_network::tcp_raft_server::TcpRaftServer;
@@ -40,10 +41,13 @@ use rr_server::cli::{Cli, Command, ServeArgs};
 use rr_server::config::{NodeConfig, RaftTransport};
 #[cfg(feature = "rocks")]
 use rr_server::config_file::DurabilityChoice;
-use rr_server::config_file::{RaftTransportKind, ResolvedConfig, ResolvedTls, StorageBackend};
+use rr_server::config_file::{
+    RaftTransportKind, ResolvedConfig, ResolvedEtcd, ResolvedTls, StorageBackend,
+};
 use rr_server::dispatch::ClientDispatchImpl;
 use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::node::RrNode;
+use rr_server::runtime::{NodeDescriptorConfig, NodeRuntimeConfig};
 use rr_storage::mem::MemStorage;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
@@ -120,13 +124,26 @@ async fn start_node(
     cfg: &ResolvedConfig,
 ) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
     let lifecycle_store = match cfg.formation.as_ref() {
-        Some(formation) => Some(Arc::new(
-            EtcdLifecycleStore::new(
-                formation.etcd_endpoints.clone(),
-                formation.seed.cluster_name.clone(),
-            )
-            .await?,
-        ) as Arc<dyn LifecycleStore>),
+        Some(formation) => {
+            let store = match build_etcd_connect_options(cfg.etcd.as_ref())? {
+                Some(options) => {
+                    EtcdLifecycleStore::new_with_options(
+                        formation.etcd_endpoints.clone(),
+                        formation.seed.cluster_name.clone(),
+                        options,
+                    )
+                    .await?
+                }
+                None => {
+                    EtcdLifecycleStore::new(
+                        formation.etcd_endpoints.clone(),
+                        formation.seed.cluster_name.clone(),
+                    )
+                    .await?
+                }
+            };
+            Some(Arc::new(store) as Arc<dyn LifecycleStore>)
+        }
         None => None,
     };
     start_node_with_lifecycle_store(cfg, lifecycle_store).await
@@ -138,6 +155,28 @@ async fn start_node_with_lifecycle_store(
 ) -> Result<(Arc<RrNode>, Option<tokio::task::JoinHandle<()>>)> {
     let config_provider = build_config_provider(cfg).await?;
     let provider: Arc<dyn ConfigProvider> = Arc::clone(&config_provider) as _;
+    let node_directory = if cfg.directory_etcd_endpoints.is_empty() {
+        None
+    } else {
+        let directory = match build_etcd_connect_options(cfg.etcd.as_ref())? {
+            Some(options) => {
+                EtcdNodeDirectory::new_with_options(
+                    cfg.directory_etcd_endpoints.clone(),
+                    cfg.cluster_name.clone().unwrap_or_default(),
+                    options,
+                )
+                .await?
+            }
+            None => {
+                EtcdNodeDirectory::new(
+                    cfg.directory_etcd_endpoints.clone(),
+                    cfg.cluster_name.clone().unwrap_or_default(),
+                )
+                .await?
+            }
+        };
+        Some(Arc::new(directory) as Arc<dyn NodeDirectory>)
+    };
     let storage = build_storage(cfg)?;
 
     let tls_config = build_tls_config(cfg.tls.as_ref());
@@ -225,6 +264,24 @@ async fn start_node_with_lifecycle_store(
         Arc::new(RaftGroupLookupImpl::new(Arc::clone(&mgr)));
     let dispatch = Arc::new(ClientDispatchImpl::new(Arc::clone(&mgr), router));
 
+    let mut runtime_config = NodeRuntimeConfig::new(cfg.node_id, String::new());
+    runtime_config.app_version = cfg.app_version.clone();
+    runtime_config.journal_dir = cfg.boot_journal_dir.clone();
+    runtime_config.directory = node_directory;
+    runtime_config.descriptor = cfg
+        .descriptor
+        .as_ref()
+        .map(|descriptor| NodeDescriptorConfig {
+            client_addr: descriptor.client_addr.clone(),
+            admin_addr: descriptor.admin_addr.clone(),
+            observability_addr: descriptor.observability_addr.clone(),
+            advertise_addr: descriptor.advertise_addr.clone(),
+            environment: descriptor.environment.clone(),
+            region: descriptor.region.clone(),
+            zone: descriptor.zone.clone(),
+            rack: descriptor.rack.clone(),
+        });
+
     let mut node_config = NodeConfig::new(
         cfg.node_id,
         cfg.listen_addr.clone(),
@@ -287,21 +344,30 @@ async fn start_node_with_lifecycle_store(
     let node = if let Some(formation) = cfg.formation.as_ref() {
         let store = lifecycle_store
             .ok_or_else(|| anyhow!("managed formation requires a lifecycle store"))?;
-        Arc::new(RrNode::new_with_formation(
+        Arc::new(RrNode::new_with_formation_and_runtime(
             node_config,
             rr_server::formation::FormationConfig {
                 seed: formation.seed.clone(),
                 store,
                 mode: formation.mode,
             },
+            runtime_config,
         )?)
     } else {
-        Arc::new(RrNode::new(node_config)?)
+        Arc::new(RrNode::new_with_runtime(node_config, runtime_config)?)
     };
     if cfg.formation.is_some() {
         return Box::pin(start_managed_node(node, cfg, tcp_bind_addr, lookup)).await;
     }
-    node.start().await?;
+    if let Err(error) = node.start().await {
+        if let Err(shutdown_error) = node.shutdown().await {
+            tracing::error!(
+                error = %shutdown_error,
+                "graceful shutdown after startup failure also failed"
+            );
+        }
+        return Err(error.into());
+    }
 
     // From here on the node owns running raft groups: any startup failure
     // must exit through node.shutdown() so the log-close contract
@@ -417,6 +483,62 @@ async fn wait_for_managed_start(
         node.start().await?;
     }
     Ok(())
+}
+
+fn build_etcd_connect_options(resolved: Option<&ResolvedEtcd>) -> Result<Option<ConnectOptions>> {
+    let Some(resolved) = resolved else {
+        return Ok(None);
+    };
+    let mut options = ConnectOptions::new();
+    match (&resolved.username, &resolved.password) {
+        (Some(username), Some(password)) => {
+            options = options.with_user(username.clone(), password.clone());
+        }
+        (None, None) => {}
+        _ => {
+            return Err(anyhow!(
+                "etcd username and password must both be configured"
+            ))
+        }
+    }
+
+    if resolved.ca_path.is_some()
+        || resolved.cert_path.is_some()
+        || resolved.key_path.is_some()
+        || resolved.domain_name.is_some()
+    {
+        let mut tls = TlsOptions::new();
+        if let Some(path) = &resolved.ca_path {
+            let pem = std::fs::read(path)
+                .with_context(|| format!("failed to read etcd CA bundle at {}", path.display()))?;
+            tls = tls.ca_certificate(Certificate::from_pem(pem));
+        }
+        if let Some(domain_name) = &resolved.domain_name {
+            tls = tls.domain_name(domain_name.clone());
+        }
+        match (&resolved.cert_path, &resolved.key_path) {
+            (Some(cert_path), Some(key_path)) => {
+                let cert = std::fs::read(cert_path).with_context(|| {
+                    format!(
+                        "failed to read etcd client certificate at {}",
+                        cert_path.display()
+                    )
+                })?;
+                let key = std::fs::read(key_path).with_context(|| {
+                    format!("failed to read etcd client key at {}", key_path.display())
+                })?;
+                tls = tls.identity(Identity::from_pem(cert, key));
+            }
+            (None, None) => {}
+            _ => {
+                return Err(anyhow!(
+                    "etcd client certificate and key must both be configured"
+                ))
+            }
+        }
+        options = options.with_tls(tls);
+    }
+    Ok(Some(options))
 }
 
 fn build_tls_config(resolved: Option<&ResolvedTls>) -> Option<TlsConfig> {
@@ -668,6 +790,47 @@ mod tests {
             "0.0.0.0:61001"
         );
         assert!(replace_port("no-port", 61001).is_err());
+    }
+
+    #[test]
+    fn absent_etcd_security_preserves_default_connection_behavior() {
+        assert!(build_etcd_connect_options(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn etcd_connect_options_attach_tls_identity_and_auth() {
+        let directory = tempfile::tempdir().unwrap();
+        let ca_path = directory.path().join("ca.pem");
+        let cert_path = directory.path().join("client.pem");
+        let key_path = directory.path().join("client.key");
+        std::fs::write(&ca_path, "test-ca").unwrap();
+        std::fs::write(&cert_path, "test-cert").unwrap();
+        std::fs::write(&key_path, "test-key").unwrap();
+        let resolved = rr_server::config_file::ResolvedEtcd {
+            ca_path: Some(ca_path),
+            cert_path: Some(cert_path),
+            key_path: Some(key_path),
+            domain_name: Some("etcd.internal".into()),
+            username: Some("rr-node".into()),
+            password: Some("etcd-secret".into()),
+        };
+
+        let options = build_etcd_connect_options(Some(&resolved))
+            .unwrap()
+            .expect("security settings must produce ConnectOptions");
+        let representation = format!("{options:?}");
+        assert!(
+            representation.contains("user: Some"),
+            "etcd username/password authentication was not attached"
+        );
+        assert!(
+            representation.contains("tls: Some"),
+            "etcd TLS was not attached"
+        );
+        assert!(
+            representation.contains("etcd.internal"),
+            "etcd TLS domain override was not attached"
+        );
     }
 
     #[test]

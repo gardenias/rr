@@ -24,6 +24,16 @@ A distributed counter example built on the Rr multi-Raft consensus framework. De
 cargo run -p counter
 ```
 
+无参数 demo 会自行初始化单副本组，不需要 `--bootstrap`。常驻的手动单节点服务只在全新建组时引导一次。
+手动多节点启动使用相同的完整花名册，并且只在一个全新节点上引导；其他节点不使用该旗标。
+正常重启或组已初始化后不要重复引导；重复初始化即使成为 no-op，也不是重启或成员变更策略。
+
+The no-argument demo initializes its own single-replica group without `--bootstrap`. A persistent manual
+single-node service bootstraps once when its fresh group is created. Manual multi-node startup uses the
+same full roster everywhere and bootstraps exactly one fresh node; all other nodes omit the flag. Do not
+bootstrap again for normal restarts or after initialization. Even if repeated initialization is a no-op,
+it is not a restart or membership-change strategy.
+
 ---
 
 ### 多节点集群 / Multi-Node Cluster

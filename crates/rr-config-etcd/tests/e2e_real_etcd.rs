@@ -10,9 +10,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use etcd_client::Client;
-use rr_config_etcd::{ConfigProvider, EtcdConfigProvider, EtcdLifecycleStore, RoutingTableChange};
+use rr_config_etcd::{
+    ConfigProvider, EtcdConfigProvider, EtcdLifecycleStore, EtcdNodeDirectory, RoutingTableChange,
+};
 use rr_core::{
-    CasOutcome, ClusterLifecycle, ClusterOrigin, FormationState, GroupFormation, LifecycleStore,
+    CasOutcome, ClusterLifecycle, ClusterOrigin, DirectoryError, FormationState, GroupFormation,
+    LifecycleStore, NodeDescriptor, NodeDirectory, NodeDirectoryChange,
 };
 use serde_json::json;
 use testcontainers::{
@@ -387,4 +390,175 @@ async fn lifecycle_store_enforces_cas_end_to_end() {
             .await
             .unwrap();
     assert!(malformed_store.load_linearizable().await.is_err());
+}
+
+fn directory_descriptor(node_id: u64) -> NodeDescriptor {
+    NodeDescriptor {
+        node_id,
+        client_addr: format!("10.0.0.{node_id}:5000"),
+        admin_addr: format!("10.0.0.{node_id}:5001"),
+        observability_addr: format!("10.0.0.{node_id}:5002"),
+        advertise_addr: format!("10.0.0.{node_id}:6000"),
+        environment: "e2e".into(),
+        region: None,
+        zone: None,
+        rack: None,
+        boot_id: format!("boot-{node_id}"),
+    }
+}
+
+async fn start_directory_etcd() -> (testcontainers::ContainerAsync<GenericImage>, String) {
+    let container = GenericImage::new("quay.io/coreos/etcd", "v3.5.13")
+        .with_exposed_port(2379.tcp())
+        .with_wait_for(WaitFor::message_on_stderr("ready to serve client requests"))
+        .with_cmd(vec![
+            "/usr/local/bin/etcd",
+            "--name=node1",
+            "--listen-client-urls=http://0.0.0.0:2379",
+            "--advertise-client-urls=http://0.0.0.0:2379",
+            "--listen-peer-urls=http://0.0.0.0:2380",
+            "--initial-advertise-peer-urls=http://0.0.0.0:2380",
+            "--initial-cluster=node1=http://0.0.0.0:2380",
+            "--initial-cluster-state=new",
+        ])
+        .start()
+        .await
+        .expect("etcd container should start from the existing local image");
+    let host = container.get_host().await.unwrap().to_string();
+    let port = container.get_host_port_ipv4(2379.tcp()).await.unwrap();
+    (container, format!("http://{host}:{port}"))
+}
+
+#[tokio::test]
+#[ignore = "requires Docker + RR_TEST_ETCD=1"]
+async fn node_directory_lease_heartbeat_revoke_and_expiry_end_to_end() {
+    if !live_etcd_enabled() {
+        eprintln!("RR_TEST_ETCD != 1; skipping live etcd directory test");
+        return;
+    }
+    let (_container, endpoint) = start_directory_etcd().await;
+    let directory = EtcdNodeDirectory::new(vec![endpoint.clone()], "directory-lease".into())
+        .await
+        .unwrap();
+
+    let registration = directory.register(directory_descriptor(1)).await.unwrap();
+    let before = directory.get(1).await.unwrap().unwrap();
+    assert_eq!(before, *registration.record());
+    registration.heartbeat().await.unwrap();
+    let after = directory.get(1).await.unwrap().unwrap();
+    assert_eq!(
+        after.revision, before.revision,
+        "heartbeat rewrote the value"
+    );
+
+    assert!(matches!(
+        directory.register(directory_descriptor(1)).await,
+        Err(DirectoryError::AlreadyExists { node_id: 1 })
+    ));
+    registration.revoke().await.unwrap();
+    assert!(directory.get(1).await.unwrap().is_none());
+
+    let replacement = directory.register(directory_descriptor(1)).await.unwrap();
+    assert!(replacement.record().revision > before.revision);
+    replacement.revoke().await.unwrap();
+
+    let expiring = EtcdNodeDirectory::new(vec![endpoint], "directory-expiry".into())
+        .await
+        .unwrap()
+        .with_lease_ttl(Duration::from_secs(1));
+    let _expired = expiring.register(directory_descriptor(2)).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(expiring.get(2).await.unwrap().is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker + RR_TEST_ETCD=1"]
+async fn node_directory_watch_observes_upsert_and_lease_deletion() {
+    if !live_etcd_enabled() {
+        eprintln!("RR_TEST_ETCD != 1; skipping live etcd directory watch test");
+        return;
+    }
+    let (_container, endpoint) = start_directory_etcd().await;
+    let directory = EtcdNodeDirectory::new(vec![endpoint], "directory-watch".into())
+        .await
+        .unwrap();
+    let mut changes = directory.watch().await.unwrap();
+    let registration = directory.register(directory_descriptor(7)).await.unwrap();
+
+    let upsert = tokio::time::timeout(Duration::from_secs(5), changes.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        upsert,
+        NodeDirectoryChange::Upsert(ref record) if record.descriptor.node_id == 7
+    ));
+
+    registration.heartbeat().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), changes.next())
+            .await
+            .is_err()
+    );
+
+    registration.revoke().await.unwrap();
+    let removal = tokio::time::timeout(Duration::from_secs(5), changes.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        removal,
+        NodeDirectoryChange::Remove { node_id: 7, .. }
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker + RR_TEST_ETCD=1"]
+async fn node_directory_cursor_pins_pages_to_one_revision() {
+    if !live_etcd_enabled() {
+        eprintln!("RR_TEST_ETCD != 1; skipping live etcd directory pagination test");
+        return;
+    }
+    let (_container, endpoint) = start_directory_etcd().await;
+    let directory = EtcdNodeDirectory::new(vec![endpoint], "directory-pages".into())
+        .await
+        .unwrap();
+    let mut registrations = Vec::new();
+    for node_id in [1, 10, 2] {
+        registrations.push(
+            directory
+                .register(directory_descriptor(node_id))
+                .await
+                .unwrap(),
+        );
+    }
+
+    let first = directory.list(None, Some(2)).await.unwrap();
+    let ids: Vec<_> = first
+        .records
+        .iter()
+        .map(|record| record.descriptor.node_id)
+        .collect();
+    assert_eq!(ids, vec![1, 10]);
+    let cursor = first.next_cursor.expect("second page should exist");
+
+    registrations.push(directory.register(directory_descriptor(3)).await.unwrap());
+    let second = directory.list(Some(&cursor), Some(2)).await.unwrap();
+    let ids: Vec<_> = second
+        .records
+        .iter()
+        .map(|record| record.descriptor.node_id)
+        .collect();
+    assert_eq!(ids, vec![2], "snapshot page included a newer record");
+    assert_eq!(second.revision, first.revision);
+    assert!(second.next_cursor.is_none());
+
+    let fresh = directory.list(None, Some(2)).await.unwrap();
+    let ids: Vec<_> = fresh
+        .records
+        .iter()
+        .map(|record| record.descriptor.node_id)
+        .collect();
+    assert_eq!(ids, vec![1, 10]);
+    assert!(fresh.revision > first.revision);
 }

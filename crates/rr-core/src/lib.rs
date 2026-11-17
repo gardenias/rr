@@ -16,6 +16,8 @@
 //! | `state_machine`| [`StateMachine`] — low-level Raft SM trait |
 //! | `storage` | [`StorageEngine`], [`BatchOp`] |
 //! | `config` | [`ConfigProvider`], [`RoutingTableChange`] |
+//! | `compatibility` | [`ProtocolVersion`], [`raft_pair_compatible`] |
+//! | `directory` | [`NodeDirectory`], [`NodeDescriptor`] |
 //! | `codec` | [`Codec`], [`BincodeCodec`] — **deprecated** (unbounded decode; use `bounded_decode` / frame codecs) |
 //! | `error` | [`RrError`] and domain-specific error enums |
 //! | `lifecycle` | [`SeedSpec`], [`ClusterLifecycle`], [`LifecycleStore`] |
@@ -48,8 +50,10 @@
 pub mod batch;
 pub mod bounded_decode;
 pub mod codec;
+pub mod compatibility;
 pub mod config;
 pub mod deferred;
+pub mod directory;
 pub mod error;
 pub mod framed_entry;
 pub mod framed_snapshot;
@@ -71,11 +75,16 @@ pub mod types;
 // or the frame codecs instead (see `codec` module docs).
 #[allow(deprecated)]
 pub use codec::{BincodeCodec, Codec};
+pub use compatibility::{raft_pair_compatible, ProtocolVersion};
 pub use config::{ConfigProvider, RoutingTableChange};
 pub use deferred::{CompletedResponse, CorrelationId, DeferredApply, DeferredHandleResult};
+pub use directory::{
+    NodeDescriptor, NodeDirectory, NodeDirectoryChange, NodeDirectoryPage, NodeDirectoryRecord,
+    NodeDirectoryRegistration,
+};
 pub use error::{
-    CodecError, ConfigError, LifecycleError, NetworkError, RaftError, RouterError, RrError,
-    StorageError,
+    CodecError, ConfigError, DirectoryError, LifecycleError, NetworkError, RaftError, RouterError,
+    RrError, StorageError,
 };
 pub use framed_entry::{FramedEntry, FRAMED_ENTRY_MAGIC};
 pub use framed_snapshot::{

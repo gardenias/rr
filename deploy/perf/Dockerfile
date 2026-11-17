@@ -7,8 +7,8 @@
 # come from the compose wiring), but it is built for benchmark shapes, not for
 # production reuse.
 #
-# Differences from deploy/lab/Dockerfile (which stays byte-identical): kv-store
-# is built with `rocks` (durable Raft log, ADR A-0016) in addition to
+# Differences from deploy/lab/Dockerfile: kv-store is built with `rocks`
+# (durable Raft log, ADR A-0016) in addition to
 # `rdkafka`, and the runtime adds libstdc++6 (RocksDB is C++-linked).
 ARG RUST_VERSION=1.98
 ARG DEBIAN_VERSION=bookworm
@@ -72,6 +72,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # /out always contains kv-store/rr-admin/rr-perf-bench, plus rr-lab-producer
 # when tools/rr-lab-producer exists in the workspace.
 COPY --from=builder /out/ /usr/local/bin/
+
+# Build the static export before the image (for example, `just console-build`).
+# rr-admin serves these files directly; Node.js is not needed in this image.
+COPY crates/rr-admin/console/out /usr/local/share/rr-admin/console
+RUN test -f /usr/local/share/rr-admin/console/index.html
 
 USER rr:rr
 WORKDIR /var/lib/rr

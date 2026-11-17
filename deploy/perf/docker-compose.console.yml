@@ -1,0 +1,63 @@
+# Opt-in Rr Console overlay for the local perf lab. The base perf stack is unchanged.
+# Build the static export before building the image: just console-build
+# Generate deploy/perf/certs and set RR_CONSOLE_TOKEN, then run:
+#   docker compose -f deploy/perf/docker-compose.yml -f deploy/perf/docker-compose.console.yml up -d --build
+# Open https://localhost:8443 using deploy/perf/certs/ca.pem.
+
+services:
+  console:
+    image: rr-perf:dev
+    container_name: rr-perf-console
+    networks: [rrperf]
+    entrypoint: ["/usr/local/bin/rr-admin"]
+    command:
+      - "--token-env"
+      - "RR_ADMIN_TOKEN"
+      - "--tls-ca"
+      - "/etc/rr/admin/ca.crt"
+      - "--tls-cert"
+      - "/etc/rr/admin/tls.crt"
+      - "--tls-key"
+      - "/etc/rr/admin/tls.key"
+      - "console"
+      - "--listen"
+      - "0.0.0.0:8080"
+      - "--peers"
+      - "1@kv-1:52001,2@kv-2:52001,3@kv-3:52001"
+      - "--static-dir"
+      - "/usr/local/share/rr-admin/console"
+      - "--tls-cert"
+      - "/etc/rr/console/tls.crt"
+      - "--tls-key"
+      - "/etc/rr/console/tls.key"
+    environment:
+      RUST_LOG: "info"
+      RR_ADMIN_TOKEN: ${RR_ADMIN_TOKEN:?set RR_ADMIN_TOKEN in deploy/perf/.env}
+      RR_CONSOLE_TOKEN: ${RR_CONSOLE_TOKEN:?set RR_CONSOLE_TOKEN before enabling the Console overlay}
+    volumes:
+      - ./certs/client.pem:/etc/rr/admin/tls.crt:ro
+      - ./certs/client.key:/etc/rr/admin/tls.key:ro
+      - ./certs/ca.pem:/etc/rr/admin/ca.crt:ro
+      - ./certs/node1.pem:/etc/rr/console/tls.crt:ro
+      - ./certs/node1.key:/etc/rr/console/tls.key:ro
+      - ./certs/ca.pem:/etc/rr/console/ca.crt:ro
+    ports:
+      - "127.0.0.1:8443:8080"
+    depends_on:
+      kv-1:
+        condition: service_started
+      kv-2:
+        condition: service_started
+      kv-3:
+        condition: service_started
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--cacert", "/etc/rr/console/ca.crt", "-o", "/dev/null", "https://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s

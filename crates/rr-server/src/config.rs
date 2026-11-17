@@ -13,6 +13,10 @@ use rr_network::rate_limit::RateLimitConfig;
 use rr_network::tls::TlsConfig;
 use rr_raft::group_manager::RaftGroupManager;
 use rr_raft::group_manager::StateMachineFactory;
+use serde_json::json;
+use sha2::{Digest, Sha256};
+
+use crate::runtime::NodeRuntimeConfig;
 
 /// Which transport carries inter-node Raft RPCs (AppendEntries / Vote).
 ///
@@ -416,5 +420,124 @@ impl NodeConfig {
         self.rate_limit_config.validate()?;
 
         Ok(())
+    }
+}
+
+pub(crate) fn config_fingerprint(config: &NodeConfig, runtime: &NodeRuntimeConfig) -> String {
+    let descriptor = runtime.descriptor.as_ref().map(|descriptor| {
+        json!({
+            "client_addr": descriptor.client_addr,
+            "admin_addr": descriptor.admin_addr,
+            "observability_addr": descriptor.observability_addr,
+            "advertise_addr": descriptor.advertise_addr,
+            "environment": descriptor.environment,
+            "region": descriptor.region,
+            "zone": descriptor.zone,
+            "rack": descriptor.rack,
+        })
+    });
+    let raft_transport = match &config.raft_transport {
+        RaftTransport::Grpc => json!({"kind": "grpc"}),
+        RaftTransport::Tcp { bind_addr } => json!({"kind": "tcp", "bind_addr": bind_addr}),
+    };
+    let safe = json!({
+        "schema": 1,
+        "node_id": config.node_id,
+        "listen_addr": config.listen_addr,
+        "admin_port": config.admin_port,
+        "admin_bind_host": config.admin_bind_host,
+        "metrics_port": config.metrics_port,
+        "metrics_bind_host": config.metrics_bind_host,
+        "grpc_max_concurrent_streams": config.grpc_max_concurrent_streams,
+        "grpc_max_frame_size": config.grpc_max_frame_size,
+        "raft_transport": raft_transport,
+        "snapshot_logs_since_last": config.snapshot_logs_since_last,
+        "auto_promote_learners": config.auto_promote_learners,
+        "allow_insecure": config.allow_insecure,
+        "tls": {
+            "enabled": config.tls_config.is_some(),
+            "require_client_cert": config.tls_config.as_ref().is_some_and(|tls| tls.require_client_cert),
+        },
+        "auth": {
+            "admin_required": config.auth_config.admin_required(),
+            "client_required": config.auth_config.client_required(),
+        },
+        "rate_limit": {
+            "admin_rps": config.rate_limit_config.admin_rps,
+            "client_rps": config.rate_limit_config.client_rps,
+            "burst": config.rate_limit_config.burst,
+            "per_caller_admin_rps": config.rate_limit_config.per_caller_admin_rps,
+            "per_caller_client_rps": config.rate_limit_config.per_caller_client_rps,
+            "per_caller_burst": config.rate_limit_config.per_caller_burst,
+        },
+        "runtime": {
+            "app_version": runtime.app_version,
+            "journal_dir": runtime.journal_dir,
+            "descriptor": descriptor,
+        },
+    });
+    let encoded = serde_json::to_vec(&safe).expect("secret-free config JSON is serializable");
+    format!("{:x}", Sha256::digest(encoded))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rr_config::mem::MemConfigProvider;
+    use rr_core::state_machine::StateMachine;
+    use rr_core::types::LogIndex;
+    use rr_storage::mem::MemStorage;
+
+    struct Noop;
+
+    #[async_trait::async_trait]
+    impl StateMachine for Noop {
+        async fn apply(&mut self, entry: &[u8]) -> Result<Vec<u8>, rr_core::RrError> {
+            Ok(entry.to_vec())
+        }
+
+        async fn snapshot(&self) -> Result<Vec<u8>, rr_core::RrError> {
+            Ok(Vec::new())
+        }
+
+        async fn restore(&mut self, _snapshot: &[u8]) -> Result<(), rr_core::RrError> {
+            Ok(())
+        }
+
+        async fn last_applied(&self) -> Option<LogIndex> {
+            None
+        }
+    }
+
+    fn config() -> NodeConfig {
+        NodeConfig::new(
+            1,
+            "127.0.0.1:5000".into(),
+            Arc::new(MemStorage::new()),
+            Arc::new(MemConfigProvider::new()),
+            Box::new(|_| Box::new(Noop)),
+        )
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_and_excludes_secret_material() {
+        let first = config().with_auth(AuthConfig {
+            admin_token: Some("admin-secret".into()),
+            client_token: Some("client-secret".into()),
+        });
+        let second = config().with_auth(AuthConfig {
+            admin_token: Some("different-admin-secret".into()),
+            client_token: Some("different-client-secret".into()),
+        });
+        let runtime = NodeRuntimeConfig::new(1, String::new());
+        let fingerprint = config_fingerprint(&first, &runtime);
+        assert_eq!(fingerprint.len(), 64);
+        assert_eq!(fingerprint, config_fingerprint(&first, &runtime));
+        assert!(!fingerprint.contains("secret"));
+        assert_eq!(fingerprint, config_fingerprint(&second, &runtime));
+        assert_ne!(
+            fingerprint,
+            config_fingerprint(&config().with_metrics_port(9000), &runtime)
+        );
     }
 }

@@ -8,6 +8,11 @@
 id = 2
 listen_addr = "0.0.0.0:51001"
 data_dir = "/var/lib/rr/data"
+boot_journal_dir = "/var/lib/rr/data/boot-journal"
+advertise_addr = "node-2.internal:51001"
+admin_advertise_addr = "node-2.internal:52001"
+observability_advertise_addr = "node-2.internal:9100"
+environment = "example"
 admin_port = 52001
 metrics_port = 9100
 

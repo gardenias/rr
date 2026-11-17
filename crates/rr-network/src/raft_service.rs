@@ -1,7 +1,7 @@
 //! gRPC `RaftService` implementation for inter-node Raft consensus RPCs.
 //!
-//! Handles `AppendEntries`, `Vote`, and `InstallSnapshot` RPCs, demultiplexing
-//! them to the correct Raft group by `group_id`.
+//! Handles `AppendEntries`, `Vote`, `PreVote`, and `InstallSnapshot` RPCs,
+//! demultiplexing them to the correct Raft group by `group_id`.
 //!
 //! The [`RaftGroupLookup`] trait uses a bytes-oriented interface so that
 //! `rr-network` does not need a dependency on `rr-raft` (which already depends
@@ -65,6 +65,17 @@ pub trait RaftGroupLookup: Send + Sync {
     ///
     /// Returns the bincode-serialized `VoteResponse`.
     async fn vote(&self, group_id: GroupId, payload: Vec<u8>) -> Result<Vec<u8>, tonic::Status>;
+
+    /// Forward a `PreVote` request payload to the given group.
+    ///
+    /// The default keeps old/custom lookups compatible by reporting `UNIMPLEMENTED`.
+    async fn pre_vote(
+        &self,
+        _group_id: GroupId,
+        _payload: Vec<u8>,
+    ) -> Result<Vec<u8>, tonic::Status> {
+        Err(tonic::Status::unimplemented("PreVote not implemented"))
+    }
 
     /// Install a snapshot on the given group.
     ///
@@ -130,6 +141,24 @@ impl raft_service_server::RaftService for RaftServiceImpl {
         );
 
         let payload = self.groups.vote(group_id, req.payload).await?;
+
+        Ok(tonic::Response::new(VoteResponse { group_id, payload }))
+    }
+
+    async fn pre_vote(
+        &self,
+        request: tonic::Request<VoteRequest>,
+    ) -> Result<tonic::Response<VoteResponse>, tonic::Status> {
+        let traceparent = debug_traceparent!(&request);
+        let req = request.into_inner();
+        let group_id = req.group_id;
+        tracing::debug!(
+            group_id,
+            traceparent = traceparent.as_deref().unwrap_or(""),
+            "pre_vote RPC received"
+        );
+
+        let payload = self.groups.pre_vote(group_id, req.payload).await?;
 
         Ok(tonic::Response::new(VoteResponse { group_id, payload }))
     }
@@ -298,6 +327,89 @@ mod tests {
                 "group {group_id} not found"
             )))
         }
+    }
+
+    struct RecordingPreVoteLookup {
+        seen: std::sync::Mutex<Vec<(GroupId, Vec<u8>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RaftGroupLookup for RecordingPreVoteLookup {
+        async fn append_entries(
+            &self,
+            _group_id: GroupId,
+            _payload: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            unreachable!()
+        }
+
+        async fn vote(
+            &self,
+            _group_id: GroupId,
+            _payload: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            unreachable!()
+        }
+
+        async fn pre_vote(
+            &self,
+            group_id: GroupId,
+            payload: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            self.seen.lock().unwrap().push((group_id, payload));
+            Ok(vec![7, 8, 9])
+        }
+
+        async fn install_snapshot(
+            &self,
+            _group_id: GroupId,
+            _metadata: Vec<u8>,
+            _data: Vec<u8>,
+        ) -> Result<Vec<u8>, tonic::Status> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_vote_forwards_group_and_payload() {
+        let lookup = Arc::new(RecordingPreVoteLookup {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let svc = RaftServiceImpl::new(lookup.clone());
+
+        let response = raft_service_server::RaftService::pre_vote(
+            &svc,
+            tonic::Request::new(VoteRequest {
+                group_id: 23,
+                payload: vec![3, 4, 5],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        assert_eq!(response.group_id, 23);
+        assert_eq!(response.payload, vec![7, 8, 9]);
+        assert_eq!(
+            *lookup.seen.lock().unwrap(),
+            vec![(23, vec![3, 4, 5])],
+            "the service must forward the original group and bytes exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_vote_default_lookup_returns_unimplemented() {
+        let svc = RaftServiceImpl::new(Arc::new(EmptyLookup));
+        let error = raft_service_server::RaftService::pre_vote(
+            &svc,
+            tonic::Request::new(VoteRequest {
+                group_id: 1,
+                payload: vec![],
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unimplemented);
     }
 
     #[test]

@@ -60,6 +60,15 @@ pub struct NodeSection {
     pub id: Option<u64>,
     pub listen_addr: Option<String>,
     pub data_dir: Option<PathBuf>,
+    pub boot_journal_dir: Option<PathBuf>,
+    pub advertise_addr: Option<String>,
+    pub admin_advertise_addr: Option<String>,
+    pub observability_advertise_addr: Option<String>,
+    pub app_version: Option<String>,
+    pub environment: Option<String>,
+    pub region: Option<String>,
+    pub zone: Option<String>,
+    pub rack: Option<String>,
     pub admin_port: Option<u16>,
     /// Admin gRPC bind host (IP literal). Default `127.0.0.1` (loopback);
     /// set `0.0.0.0` explicitly to expose the admin API cluster-wide.
@@ -98,6 +107,16 @@ pub struct ClusterSection {
     pub name: Option<String>,
     pub nodes: Option<Vec<String>>,
     pub formation: Option<FormationSection>,
+    /// Optional etcd namespace used for leased node discovery.
+    pub directory_etcd_endpoints: Option<Vec<String>>,
+    /// Shared TLS/auth settings for formation and directory etcd clients.
+    pub etcd_ca_path: Option<PathBuf>,
+    pub etcd_cert_path: Option<PathBuf>,
+    pub etcd_key_path: Option<PathBuf>,
+    pub etcd_domain_name: Option<String>,
+    pub etcd_username: Option<String>,
+    /// Name of the environment variable holding the etcd password.
+    pub etcd_password_env: Option<String>,
     /// Number of Raft groups/partitions the node hosts (stock topology:
     /// partition i → group i, replicas = all peers). Default 1.
     pub groups: Option<u64>,
@@ -177,6 +196,12 @@ pub struct ResolvedConfig {
     pub node_id: u64,
     pub listen_addr: String,
     pub data_dir: Option<PathBuf>,
+    pub boot_journal_dir: Option<PathBuf>,
+    pub app_version: String,
+    pub descriptor: Option<ResolvedNodeDescriptor>,
+    pub directory_etcd_endpoints: Vec<String>,
+    pub cluster_name: Option<String>,
+    pub etcd: Option<ResolvedEtcd>,
     pub admin_port: Option<u16>,
     /// Resolved admin gRPC bind host (defaults to loopback `127.0.0.1`).
     pub admin_bind_host: String,
@@ -210,10 +235,46 @@ pub struct ResolvedConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResolvedNodeDescriptor {
+    pub client_addr: String,
+    pub admin_addr: String,
+    pub observability_addr: String,
+    pub advertise_addr: String,
+    pub environment: String,
+    pub region: Option<String>,
+    pub zone: Option<String>,
+    pub rack: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedFormation {
     pub seed: SeedSpec,
     pub mode: FormationMode,
     pub etcd_endpoints: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct ResolvedEtcd {
+    pub ca_path: Option<PathBuf>,
+    pub cert_path: Option<PathBuf>,
+    pub key_path: Option<PathBuf>,
+    pub domain_name: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for ResolvedEtcd {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedEtcd")
+            .field("ca_path", &self.ca_path)
+            .field("cert_path", &self.cert_path)
+            .field("key_path", &self.key_path)
+            .field("domain_name", &self.domain_name)
+            .field("username", &self.username.as_ref().map(|_| "<redacted>"))
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Resolved rate-limit settings. All fields default to `None` = unlimited.
@@ -349,6 +410,20 @@ impl ResolvedConfig {
                 "storage = rocks requires data_dir: set via --data-dir, RR_DATA_DIR, or [node].data_dir",
             ));
         }
+        let boot_journal_dir = args
+            .boot_journal_dir
+            .clone()
+            .or(file.node.boot_journal_dir.clone())
+            .or_else(|| {
+                matches!(storage_backend, StorageBackend::Rocks)
+                    .then(|| data_dir.as_ref().unwrap().join("boot-journal"))
+            });
+        let app_version = args
+            .app_version
+            .clone()
+            .or(file.node.app_version.clone())
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        let descriptor = resolve_node_descriptor(args, &file)?;
 
         let admin_port = args.admin_port.or(file.node.admin_port);
         let metrics_port = args.metrics_port.or(file.node.metrics_port);
@@ -432,6 +507,54 @@ impl ResolvedConfig {
             bootstrap,
             !peers.is_empty(),
         )?;
+        let cluster_name = args.cluster_name.clone().or(file.cluster.name.clone());
+        let mut directory_etcd_endpoints = if !args.directory_etcd_endpoints.is_empty() {
+            args.directory_etcd_endpoints.clone()
+        } else {
+            file.cluster
+                .directory_etcd_endpoints
+                .clone()
+                .unwrap_or_default()
+        };
+        if directory_etcd_endpoints.is_empty() && descriptor.is_some() {
+            directory_etcd_endpoints = formation
+                .as_ref()
+                .map(|formation| formation.etcd_endpoints.clone())
+                .unwrap_or_default();
+        }
+        if !directory_etcd_endpoints.is_empty() {
+            if descriptor.is_none() {
+                return Err(invalid(
+                    "directory discovery requires a complete explicit node descriptor",
+                ));
+            }
+            if cluster_name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+            {
+                return Err(invalid(
+                    "directory discovery requires a non-empty cluster name",
+                ));
+            }
+        }
+        let etcd = resolve_etcd(
+            args,
+            &file.cluster,
+            formation.is_some() || !directory_etcd_endpoints.is_empty(),
+        )?;
+        if etcd.is_some() {
+            let insecure_endpoint = formation
+                .as_ref()
+                .into_iter()
+                .flat_map(|formation| formation.etcd_endpoints.iter())
+                .chain(directory_etcd_endpoints.iter())
+                .find(|endpoint| !endpoint.starts_with("https://"));
+            if let Some(endpoint) = insecure_endpoint {
+                return Err(invalid(format!(
+                    "etcd TLS/auth requires https endpoints; insecure endpoint '{endpoint}'"
+                )));
+            }
+        }
 
         let tls = resolve_tls(args, &file.tls)?;
         let auth = resolve_auth(&file.auth)?;
@@ -494,6 +617,12 @@ impl ResolvedConfig {
             node_id,
             listen_addr,
             data_dir,
+            boot_journal_dir,
+            app_version,
+            descriptor,
+            directory_etcd_endpoints,
+            cluster_name,
+            etcd,
             admin_port,
             admin_bind_host,
             metrics_port,
@@ -533,6 +662,74 @@ impl ResolvedConfig {
         })?;
         Ok(parsed)
     }
+}
+
+fn resolve_node_descriptor(
+    args: &ServeArgs,
+    file: &ConfigFile,
+) -> Result<Option<ResolvedNodeDescriptor>> {
+    let client_addr = args
+        .advertise_addr
+        .clone()
+        .or(file.node.advertise_addr.clone());
+    let admin_addr = args
+        .admin_advertise_addr
+        .clone()
+        .or(file.node.admin_advertise_addr.clone());
+    let observability_addr = args
+        .observability_advertise_addr
+        .clone()
+        .or(file.node.observability_advertise_addr.clone());
+    let environment = args.environment.clone().or(file.node.environment.clone());
+    let region = args.region.clone().or(file.node.region.clone());
+    let zone = args.zone.clone().or(file.node.zone.clone());
+    let rack = args.rack.clone().or(file.node.rack.clone());
+    if [
+        &client_addr,
+        &admin_addr,
+        &observability_addr,
+        &environment,
+        &region,
+        &zone,
+        &rack,
+    ]
+    .iter()
+    .all(|value| value.is_none())
+    {
+        return Ok(None);
+    }
+    let required = |value: Option<String>, name: &str| {
+        value.ok_or_else(|| {
+            invalid(format!(
+                "incomplete node descriptor: {name} is required when any descriptor field is set"
+            ))
+        })
+    };
+    let descriptor = ResolvedNodeDescriptor {
+        advertise_addr: required(client_addr.clone(), "advertise_addr")?,
+        client_addr: required(client_addr, "advertise_addr")?,
+        admin_addr: required(admin_addr, "admin_advertise_addr")?,
+        observability_addr: required(observability_addr, "observability_advertise_addr")?,
+        environment: required(environment, "environment")?,
+        region,
+        zone,
+        rack,
+    };
+    rr_core::NodeDescriptor {
+        node_id: 1,
+        client_addr: descriptor.client_addr.clone(),
+        admin_addr: descriptor.admin_addr.clone(),
+        observability_addr: descriptor.observability_addr.clone(),
+        advertise_addr: descriptor.advertise_addr.clone(),
+        environment: descriptor.environment.clone(),
+        region: descriptor.region.clone(),
+        zone: descriptor.zone.clone(),
+        rack: descriptor.rack.clone(),
+        boot_id: "configuration-validation".into(),
+    }
+    .validate()
+    .map_err(|error| invalid(error.to_string()))?;
+    Ok(Some(descriptor))
 }
 
 fn resolve_formation(
@@ -641,6 +838,78 @@ fn resolve_formation(
         mode,
         etcd_endpoints,
     }))
+}
+
+fn resolve_etcd(
+    args: &ServeArgs,
+    cluster: &ClusterSection,
+    enabled: bool,
+) -> Result<Option<ResolvedEtcd>> {
+    let ca_path = args.etcd_ca.clone().or(cluster.etcd_ca_path.clone());
+    let cert_path = args.etcd_cert.clone().or(cluster.etcd_cert_path.clone());
+    let key_path = args.etcd_key.clone().or(cluster.etcd_key_path.clone());
+    let domain_name = args
+        .etcd_domain
+        .clone()
+        .or(cluster.etcd_domain_name.clone());
+    let username = args.etcd_username.clone().or(cluster.etcd_username.clone());
+    let password_env = args
+        .etcd_password_env
+        .clone()
+        .or(cluster.etcd_password_env.clone());
+    let tls_requested =
+        ca_path.is_some() || cert_path.is_some() || key_path.is_some() || domain_name.is_some();
+    let auth_requested = username.is_some() || password_env.is_some();
+    if !tls_requested && !auth_requested {
+        return Ok(None);
+    }
+    if !enabled {
+        return Err(invalid(
+            "etcd TLS/auth settings require managed formation or directory discovery",
+        ));
+    }
+    if cert_path.is_some() != key_path.is_some() {
+        return Err(invalid(
+            "etcd_cert_path and etcd_key_path must both be set for etcd mTLS",
+        ));
+    }
+    if username
+        .as_deref()
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(invalid("etcd_username must not be empty"));
+    }
+    let password = match (username.as_ref(), password_env.as_deref()) {
+        (Some(_), Some(var_name)) => Some(read_etcd_password_env(var_name)?),
+        (None, None) => None,
+        _ => {
+            return Err(invalid(
+                "etcd_username and etcd_password_env must both be set for etcd authentication",
+            ))
+        }
+    };
+    Ok(Some(ResolvedEtcd {
+        ca_path,
+        cert_path,
+        key_path,
+        domain_name,
+        username,
+        password,
+    }))
+}
+
+fn read_etcd_password_env(var_name: &str) -> Result<String> {
+    match std::env::var(var_name) {
+        Ok(password) if !password.is_empty() => Ok(password),
+        Ok(_) => Err(invalid(format!(
+            "etcd_password_env points to environment variable '{var_name}' which is set but EMPTY; \
+             refusing to start without etcd authentication"
+        ))),
+        Err(_) => Err(invalid(format!(
+            "etcd_password_env references environment variable '{var_name}' which is NOT SET; \
+             refusing to start without etcd authentication"
+        ))),
+    }
 }
 
 fn resolve_auth(file: &AuthSection) -> Result<ResolvedAuth> {
@@ -1943,5 +2212,172 @@ mod tests {
         args.tls_require_client_cert = true;
         let tls = ResolvedConfig::resolve(&args).unwrap().tls.expect("tls");
         assert!(tls.require_client_cert);
+    }
+
+    #[test]
+    fn boot_journal_defaults_to_volatile_for_mem_and_data_dir_for_rocks() {
+        let mem = ResolvedConfig::resolve(&ServeArgs {
+            node_id: Some(1),
+            listen_addr: Some("127.0.0.1:51001".into()),
+            log_level: "info".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(mem.boot_journal_dir.is_none());
+
+        let rocks = ResolvedConfig::resolve(&ServeArgs {
+            node_id: Some(1),
+            listen_addr: Some("127.0.0.1:51001".into()),
+            storage: Some("rocks".into()),
+            data_dir: Some(PathBuf::from("/var/lib/rr")),
+            log_level: "info".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            rocks.boot_journal_dir,
+            Some(PathBuf::from("/var/lib/rr/boot-journal"))
+        );
+    }
+
+    #[test]
+    fn explicit_descriptor_rejects_wildcards_and_incomplete_endpoints() {
+        let incomplete = ResolvedConfig::resolve(&ServeArgs {
+            node_id: Some(1),
+            listen_addr: Some("0.0.0.0:51001".into()),
+            advertise_addr: Some("node-1:51001".into()),
+            log_level: "info".into(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(incomplete
+            .to_string()
+            .contains("incomplete node descriptor"));
+
+        let wildcard = ResolvedConfig::resolve(&ServeArgs {
+            node_id: Some(1),
+            listen_addr: Some("0.0.0.0:51001".into()),
+            advertise_addr: Some("0.0.0.0:51001".into()),
+            admin_advertise_addr: Some("node-1:52001".into()),
+            observability_advertise_addr: Some("node-1:9100".into()),
+            environment: Some("test".into()),
+            log_level: "info".into(),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(wildcard.to_string().contains("wildcard"));
+    }
+
+    #[test]
+    fn etcd_tls_and_auth_resolve_without_exposing_the_password_in_debug() {
+        let unique_var = format!("RR_TEST_ETCD_PASSWORD_{}", std::process::id());
+        std::env::set_var(&unique_var, "etcd-secret");
+        let f = write_toml(&format!(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            advertise_addr = "node-1:51001"
+            admin_advertise_addr = "node-1:52001"
+            observability_advertise_addr = "node-1:9100"
+            environment = "test"
+
+            [cluster]
+            name = "stock"
+            directory_etcd_endpoints = ["https://etcd:2379"]
+            etcd_ca_path = "/etc/rr/etcd-ca.pem"
+            etcd_cert_path = "/etc/rr/etcd-client.pem"
+            etcd_key_path = "/etc/rr/etcd-client.key"
+            etcd_domain_name = "etcd.internal"
+            etcd_username = "rr-node"
+            etcd_password_env = "{unique_var}"
+            "#
+        ));
+        let args = args_with_config(f.path().to_path_buf());
+        let resolved = ResolvedConfig::resolve(&args).unwrap();
+        std::env::remove_var(&unique_var);
+
+        let etcd = resolved.etcd.as_ref().unwrap();
+        assert_eq!(etcd.ca_path, Some(PathBuf::from("/etc/rr/etcd-ca.pem")));
+        assert_eq!(
+            etcd.cert_path,
+            Some(PathBuf::from("/etc/rr/etcd-client.pem"))
+        );
+        assert_eq!(
+            etcd.key_path,
+            Some(PathBuf::from("/etc/rr/etcd-client.key"))
+        );
+        assert_eq!(etcd.domain_name.as_deref(), Some("etcd.internal"));
+        assert_eq!(etcd.username.as_deref(), Some("rr-node"));
+        assert_eq!(etcd.password.as_deref(), Some("etcd-secret"));
+        assert!(!format!("{resolved:?}").contains("etcd-secret"));
+    }
+
+    #[test]
+    fn etcd_auth_requires_complete_credentials_and_https() {
+        let incomplete = write_toml(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            advertise_addr = "node-1:51001"
+            admin_advertise_addr = "node-1:52001"
+            observability_advertise_addr = "node-1:9100"
+            environment = "test"
+
+            [cluster]
+            name = "stock"
+            directory_etcd_endpoints = ["https://etcd:2379"]
+            etcd_username = "rr-node"
+            "#,
+        );
+        let error = ResolvedConfig::resolve(&args_with_config(incomplete.path().to_path_buf()))
+            .unwrap_err();
+        assert!(error.to_string().contains("etcd_password_env"));
+
+        let unique_var = format!("RR_TEST_ETCD_HTTP_PASSWORD_{}", std::process::id());
+        std::env::set_var(&unique_var, "etcd-secret");
+        let plaintext = write_toml(&format!(
+            r#"
+            [node]
+            id = 1
+            listen_addr = "0.0.0.0:51001"
+            advertise_addr = "node-1:51001"
+            admin_advertise_addr = "node-1:52001"
+            observability_advertise_addr = "node-1:9100"
+            environment = "test"
+
+            [cluster]
+            name = "stock"
+            directory_etcd_endpoints = ["http://etcd:2379"]
+            etcd_username = "rr-node"
+            etcd_password_env = "{unique_var}"
+            "#
+        ));
+        let error =
+            ResolvedConfig::resolve(&args_with_config(plaintext.path().to_path_buf())).unwrap_err();
+        std::env::remove_var(&unique_var);
+        assert!(error.to_string().contains("https"), "got: {error}");
+    }
+
+    #[test]
+    fn managed_formation_reuses_etcd_for_explicit_directory_descriptor() {
+        let resolved = ResolvedConfig::resolve(&ServeArgs {
+            node_id: Some(1),
+            listen_addr: Some("0.0.0.0:51001".into()),
+            advertise_addr: Some("node-1:51001".into()),
+            admin_advertise_addr: Some("node-1:52001".into()),
+            observability_advertise_addr: Some("node-1:9100".into()),
+            environment: Some("test".into()),
+            cluster_name: Some("stock".into()),
+            cluster_nodes: vec!["1@node-1:51001".into()],
+            formation: Some("genesis".into()),
+            etcd_endpoints: vec!["http://etcd:2379".into()],
+            log_level: "info".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resolved.directory_etcd_endpoints, vec!["http://etcd:2379"]);
+        assert!(resolved.descriptor.is_some());
     }
 }

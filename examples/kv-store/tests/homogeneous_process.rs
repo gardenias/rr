@@ -7,7 +7,7 @@ use kv_store::{KvRequest, KvResponse};
 use rr_client::{RetryConfig, RrClient, RrClientBuilder};
 use rr_config_etcd::EtcdLifecycleStore;
 use rr_core::{ClusterOrigin, FormationState, LifecycleStore, NodeAddr, SeedSpec};
-use rr_network::proto::admin::{admin_service_client::AdminServiceClient, GroupId};
+use rr_network::proto::admin::{admin_service_client::AdminServiceClient, GroupId, GroupStatus};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
@@ -66,8 +66,9 @@ impl NodeProcess {
         Self { child, logs }
     }
 
-    fn spawn_legacy(spec: &NodeSpec, peers: &str) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_kv-store"))
+    fn spawn_legacy(spec: &NodeSpec, peers: &str, bootstrap: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_kv-store"));
+        command
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -76,10 +77,11 @@ impl NodeProcess {
             .arg("--port")
             .arg(spec.port.to_string())
             .arg("--peers")
-            .arg(peers)
-            .arg("--bootstrap")
-            .spawn()
-            .expect("legacy kv-store process must spawn");
+            .arg(peers);
+        if bootstrap {
+            command.arg("--bootstrap");
+        }
+        let mut child = command.spawn().expect("legacy kv-store process must spawn");
         let logs = Arc::new(Mutex::new(String::new()));
         capture_output(child.stdout.take().unwrap(), logs.clone());
         capture_output(child.stderr.take().unwrap(), logs.clone());
@@ -263,6 +265,17 @@ async fn wait_for_existing_value(
     }
 }
 
+async fn group_status(spec: &NodeSpec) -> Result<GroupStatus, String> {
+    let mut client = AdminServiceClient::connect(format!("http://127.0.0.1:{}", spec.port + 1000))
+        .await
+        .map_err(|error| error.to_string())?;
+    client
+        .get_group_status(GroupId { group_id: GROUP_ID })
+        .await
+        .map(|response| response.into_inner())
+        .map_err(|error| error.to_string())
+}
+
 async fn voters(spec: &NodeSpec) -> Result<BTreeSet<u64>, String> {
     let mut client = AdminServiceClient::connect(format!("http://127.0.0.1:{}", spec.port + 1000))
         .await
@@ -348,7 +361,7 @@ async fn legacy_manual_bootstrap_remains_available_without_etcd() {
         data_dir: None,
     };
     let peers = format!("1@{}", spec.addr());
-    let mut process = NodeProcess::spawn_legacy(&spec, &peers);
+    let mut process = NodeProcess::spawn_legacy(&spec, &peers, true);
     let client = client(std::slice::from_ref(&spec)).await;
     wait_for_kv(
         &client,
@@ -359,6 +372,84 @@ async fn legacy_manual_bootstrap_remains_available_without_etcd() {
     .await;
     assert!(process.logs().contains("Cluster bootstrapped"));
     process.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn isolated_legacy_survivor_does_not_inflate_term_or_become_leader() {
+    let specs = specs(None);
+    let peers = peers(&specs);
+    let mut processes: Vec<NodeProcess> = specs
+        .iter()
+        .map(|spec| NodeProcess::spawn_legacy(spec, &peers, spec.node_id == 1))
+        .collect();
+    let client = client(&specs).await;
+    wait_for_kv(&client, "pre-vote-isolation", b"ack", &processes).await;
+    wait_for_complete_voters(&specs).await;
+
+    let readiness_deadline = Instant::now() + PROCESS_TIMEOUT;
+    let (leader, statuses) = loop {
+        let statuses = all_group_statuses(&specs).await;
+        let leaders: Vec<usize> = statuses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, status)| status.is_leader.then_some(index))
+            .collect();
+        if let [leader] = leaders.as_slice() {
+            if statuses
+                .iter()
+                .all(|status| status.leader_node_id == specs[*leader].node_id)
+            {
+                break (*leader, statuses);
+            }
+        }
+        assert!(
+            Instant::now() < readiness_deadline,
+            "cluster did not converge on one consistent leader: {statuses:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let survivor = (0..specs.len())
+        .find(|index| *index != leader)
+        .expect("three nodes must leave a follower");
+    let other = (0..specs.len())
+        .find(|index| *index != leader && *index != survivor)
+        .expect("three nodes must leave a second follower");
+    let baseline = statuses[survivor].current_term;
+
+    processes[other].stop().await;
+    processes[leader].stop().await;
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < deadline {
+        let status = group_status(&specs[survivor])
+            .await
+            .expect("survivor admin status must remain available");
+        assert_eq!(
+            status.current_term,
+            baseline,
+            "isolated survivor inflated its term; survivor logs: {}",
+            processes[survivor].logs()
+        );
+        assert!(
+            !status.is_leader,
+            "isolated survivor must never become leader; survivor logs: {}",
+            processes[survivor].logs()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    processes[survivor].stop().await;
+}
+
+async fn all_group_statuses(specs: &[NodeSpec]) -> Vec<GroupStatus> {
+    let mut statuses = Vec::with_capacity(specs.len());
+    for spec in specs {
+        statuses.push(
+            group_status(spec)
+                .await
+                .expect("every running node must report group status"),
+        );
+    }
+    statuses
 }
 
 #[test]

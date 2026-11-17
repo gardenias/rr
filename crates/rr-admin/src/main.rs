@@ -30,6 +30,7 @@ use tonic::transport::Channel;
 use tonic::{Code, Response, Status};
 
 mod backup;
+mod console;
 mod decommission;
 mod node_reset;
 
@@ -275,6 +276,8 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Launch the read-only cluster Console with same-origin JSON/SSE and static hosting.
+    Console(console::ConsoleArgs),
     /// Node-level operations.
     Node {
         #[command(subcommand)]
@@ -529,6 +532,10 @@ async fn main() -> Result<()> {
     let client_token = token_from_env(&cli.client_token_env, "--client-token-env")?;
 
     match &cli.command {
+        Commands::Console(args) => {
+            console::run(args.clone(), tls, admin_token).await?;
+            return Ok(());
+        }
         Commands::Repl {
             addr,
             admin_addr,
@@ -1231,6 +1238,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 Commands::Repl { .. }
+                | Commands::Console { .. }
                 | Commands::Backup { .. }
                 | Commands::Restore { .. }
                 | Commands::InspectBackup { .. }

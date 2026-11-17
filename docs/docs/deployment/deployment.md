@@ -63,6 +63,18 @@ This is the `kv-store` manual formation flow, not a generic online node-join flo
 `id@advertised_addr` roster, including themselves. Use `--bootstrap` once, on node 1 only; it initializes all three
 roster entries as voters. Do not bootstrap the other nodes or treat them as incremental joins.
 
+无参数 `kv-store` demo 会自行初始化单副本组；常驻的手动单节点服务只在全新建组时引导一次。
+Genesis、Adopt、正常重启以及已初始化或 durable 节点恢复都不使用 `--bootstrap`。
+重复初始化即使因组已存在而成为 no-op，也不是重启或成员变更策略。本次 gRPC Pre-Vote 故障并非
+`--bootstrap` 导致，不要用它处理选主、网络隔离或 Pre-Vote 问题。
+
+The no-argument `kv-store` demo initializes its own single-replica group. A persistent manual single-node
+service bootstraps once when its fresh group is created. Genesis, Adopt, normal restarts, and already
+initialized or durable-node recovery do not use `--bootstrap`. Repeating initialization may be a no-op
+when the group exists, but it is not a restart or membership-change strategy. The gRPC Pre-Vote failure
+addressed here was not caused by `--bootstrap`; do not use it to address election, network-isolation, or
+Pre-Vote failures.
+
 前提：三个节点已配置符合 SAN 的证书，且环境中均有非空的 `RR_ADMIN_TOKEN` 和 `RR_CLIENT_TOKEN`。`kv-store` 的 Admin 端口
 始终是 `--port + 1000`。
 
@@ -95,6 +107,13 @@ are present in its environment. The `kv-store` Admin port is always `--port + 10
 `--listen-addr` controls binding only; peers dial the advertised roster addresses. Do not carry this syntax over to
 `rr-server --peers`: the stock server uses that option only to size its local initial routing table and guesses IDs by
 list order. Use an explicit managed roster or an external ConfigProvider for real multi-node topologies.
+
+stock `rr-server --bootstrap` 只把本地托管的每个组初始化为仅含当前节点的单 voter 组，
+不同于 `kv-store` 的全花名册初始化；其 Echo 服务也不提供 KV 语义。
+
+Stock `rr-server --bootstrap` initializes each locally hosted group with only the current node as its
+single voter. This differs from `kv-store` full-roster initialization, and the stock Echo service does not
+provide KV semantics.
 
 托管 Genesis 改用相同的 `cluster.name`、`cluster.nodes` 和 `[cluster.formation]`，不设置 `bootstrap`，也不使用旧 `peers`
 列表。已有集群必须使用 `adopt`，不能用 Genesis 重建。完整流程见 [Kubernetes 部署](./kubernetes.md) 和

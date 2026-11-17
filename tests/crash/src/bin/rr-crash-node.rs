@@ -6,7 +6,7 @@
 //!   (`RocksLogStorage` → `IoBatcher` group commit → `RocksStorage` with
 //!   `DurabilityPolicy::Strict`, the INV-1 enforcement chain),
 //! - `GrpcNetworkFactory` over the production `ChannelPool` for inter-node
-//!   AppendEntries/Vote,
+//!   AppendEntries/Vote/PreVote,
 //! - production gRPC service impls (`RaftServiceImpl`, `ClientServiceImpl`)
 //!   from `rr-network`,
 //! - the production `ServiceStateMachineAdapter` (FramedEntry decode +
@@ -573,6 +573,25 @@ impl RaftGroupLookup for HarnessLookup {
         let resp = self
             .raft
             .vote(req)
+            .await
+            .map_err(|_| tonic::Status::internal("raft rpc failed"))?;
+        bincode::serde::encode_to_vec(&resp, bincode::config::standard())
+            .map_err(|_| tonic::Status::internal("internal encode error"))
+    }
+
+    async fn pre_vote(&self, group_id: u64, payload: Vec<u8>) -> Result<Vec<u8>, tonic::Status> {
+        if group_id != GROUP_ID {
+            return Err(tonic::Status::not_found(format!(
+                "group {group_id} not found"
+            )));
+        }
+        let req: openraft::raft::VoteRequest<RrTypeConfig> =
+            rr_core::bounded_decode::decode_entry_body(&payload)
+                .map(|(v, _)| v)
+                .map_err(|_| tonic::Status::invalid_argument("invalid request payload"))?;
+        let resp = self
+            .raft
+            .pre_vote(req)
             .await
             .map_err(|_| tonic::Status::internal("raft rpc failed"))?;
         bincode::serde::encode_to_vec(&resp, bincode::config::standard())

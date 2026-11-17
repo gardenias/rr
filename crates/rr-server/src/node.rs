@@ -30,6 +30,8 @@ use crate::admin::AdminServiceImpl;
 use crate::config::{NodeConfig, RaftTransport};
 use crate::formation::{FormationConfig, FormationSupervisor};
 use crate::health::{spawn_http_server, ReadinessFlag};
+use crate::resources::spawn_resource_sampler;
+use crate::runtime::{NodeRuntime, NodeRuntimeConfig};
 
 /// Validate the production security invariants. Returns `Err` describing
 /// every gate that is violated unless `config.allow_insecure` opts out.
@@ -275,6 +277,9 @@ pub struct RrNode {
     prom_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     /// Health reporter for gRPC health checking protocol.
     health_reporter: Mutex<Option<tonic_health::server::HealthReporter>>,
+    runtime: Arc<NodeRuntime>,
+    resource_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    resource_path: std::path::PathBuf,
 }
 
 impl RrNode {
@@ -283,9 +288,41 @@ impl RrNode {
     /// Validates config, assembles sub-components, but does **not** start any
     /// groups or the gRPC server. Call [`start()`](Self::start) for that.
     pub fn new(config: NodeConfig) -> Result<Self, RrError> {
+        let runtime = NodeRuntimeConfig::new(config.node_id, String::new());
+        Self::new_with_runtime(config, runtime)
+    }
+
+    pub fn new_with_runtime(
+        config: NodeConfig,
+        mut runtime: NodeRuntimeConfig,
+    ) -> Result<Self, RrError> {
+        if runtime.node_id != config.node_id {
+            return Err(ConfigError::InvalidConfig(format!(
+                "runtime node_id {} does not match node_id {}",
+                runtime.node_id, config.node_id
+            ))
+            .into());
+        }
+        if runtime
+            .journal_dir
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            return Err(ConfigError::InvalidConfig(
+                "boot journal directory cannot be empty".into(),
+            )
+            .into());
+        }
+        runtime.config_fingerprint = crate::config::config_fingerprint(&config, &runtime);
         config.validate()?;
 
         validate_security_invariants(&config)?;
+        let resource_path = runtime
+            .journal_dir
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let runtime = Arc::new(NodeRuntime::new(runtime)?);
 
         if config.allow_insecure {
             warn!(
@@ -390,12 +427,24 @@ impl RrNode {
             readiness: ReadinessFlag::new(),
             prom_handle,
             health_reporter: Mutex::new(None),
+            runtime,
+            resource_handle: Mutex::new(None),
+            resource_path,
         })
     }
 
     pub fn new_with_formation(
+        config: NodeConfig,
+        formation: FormationConfig,
+    ) -> Result<Self, RrError> {
+        let runtime = NodeRuntimeConfig::new(config.node_id, String::new());
+        Self::new_with_formation_and_runtime(config, formation, runtime)
+    }
+
+    pub fn new_with_formation_and_runtime(
         mut config: NodeConfig,
         formation: FormationConfig,
+        runtime: NodeRuntimeConfig,
     ) -> Result<Self, RrError> {
         formation.seed.validate()?;
         if !formation.seed.nodes.contains_key(&config.node_id) {
@@ -407,7 +456,7 @@ impl RrNode {
         }
         config.auto_promote_learners = false;
         let storage = Arc::clone(&config.storage_engine);
-        let mut node = Self::new(config)?;
+        let mut node = Self::new_with_runtime(config, runtime)?;
         let supervisor = FormationSupervisor::new(
             node.node_id,
             storage,
@@ -801,7 +850,8 @@ impl RrNode {
                 self.listen_addr.clone(),
                 Arc::clone(&self.group_manager),
                 Arc::clone(&self.config_provider),
-            );
+            )
+            .with_runtime(Arc::clone(&self.runtime));
             let admin = if let Some(formation) = &self.formation {
                 admin.with_lifecycle_store(formation.lifecycle_store())
             } else {
@@ -899,6 +949,19 @@ impl RrNode {
             );
         }
 
+        self.runtime
+            .start_directory(self.shutdown_tx.subscribe())
+            .await?;
+        if self.metrics_port.is_some() {
+            let mut handle = self.resource_handle.lock().await;
+            if handle.is_none() {
+                *handle = Some(spawn_resource_sampler(
+                    self.resource_path.clone(),
+                    self.shutdown_tx.subscribe(),
+                ));
+            }
+        }
+
         if self.formation.is_some() {
             self.start_managed_formation().await?;
         } else {
@@ -970,6 +1033,19 @@ impl RrNode {
             }
         }
 
+        self.runtime.stop_directory().await;
+        if let Some(mut handle) = self.resource_handle.lock().await.take() {
+            match tokio::time::timeout(std::time::Duration::from_secs(3), &mut handle).await {
+                Ok(Ok(())) => info!("resource sampler stopped"),
+                Ok(Err(e)) if e.is_cancelled() => info!("resource sampler aborted"),
+                Ok(Err(e)) => warn!("resource sampler panicked: {e}"),
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
+        }
+
         if let Some(handle) = self.server_handle.lock().await.take() {
             match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
                 Ok(Ok(())) => info!("gRPC server shutdown complete"),
@@ -1013,6 +1089,7 @@ impl RrNode {
             }
         }
 
+        self.runtime.graceful_shutdown()?;
         info!(node_id = self.node_id, "RrNode shutdown complete");
         counter!("node.shutdown").increment(1);
         Ok(())
@@ -1035,6 +1112,10 @@ impl RrNode {
 
     pub fn readiness(&self) -> ReadinessFlag {
         self.readiness.clone()
+    }
+
+    pub fn runtime(&self) -> Arc<NodeRuntime> {
+        Arc::clone(&self.runtime)
     }
 }
 
@@ -1168,6 +1249,11 @@ mod tests {
     fn test_node_new_valid_config() {
         let node = RrNode::new(make_config(1, "127.0.0.1:50051")).unwrap();
         assert_eq!(node.node_id(), 1);
+        assert_eq!(
+            node.runtime().persistence(),
+            crate::boot_journal::BootPersistence::Volatile
+        );
+        assert!(node.runtime().descriptor().is_none());
     }
 
     #[test]
@@ -1300,6 +1386,30 @@ mod tests {
         node.start().await.unwrap();
         assert_eq!(node.group_manager().group_count().await, 0);
         node.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_node_shutdown_marks_current_boot_graceful() {
+        let node = RrNode::new(make_config(1, "127.0.0.1:50054")).unwrap();
+        node.start().await.unwrap();
+        assert!(!node.runtime().build().config_fingerprint.is_empty());
+        node.shutdown().await.unwrap();
+        assert_eq!(
+            node.runtime().journal().current().shutdown_state,
+            crate::boot_journal::ShutdownState::Graceful
+        );
+    }
+
+    #[tokio::test]
+    async fn test_node_shutdown_with_resource_sampler_does_not_double_await() {
+        let config = make_config(1, "127.0.0.1:50054").with_metrics_port(0);
+        let node = RrNode::new(config).unwrap();
+        node.start().await.unwrap();
+        assert!(node.resource_handle.lock().await.is_some());
+
+        node.shutdown().await.unwrap();
+
+        assert!(node.resource_handle.lock().await.is_none());
     }
 
     // ── Watch loop tests ──────────────────────────────────────────────────────

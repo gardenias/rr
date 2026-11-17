@@ -89,12 +89,16 @@ These writes modify only the local in-memory table; they do not configure other 
 
 ## etcd 提供者 / EtcdConfigProvider
 
-`rr-config-etcd` 的构造函数会立即验证连通性。`cluster_id` 用于 key 前缀隔离。
-The `rr-config-etcd` constructor validates connectivity immediately. `cluster_id` isolates key prefixes.
+`rr-config-etcd` 的构造函数会立即验证连通性。`cluster_id` 用于 key 前缀隔离。以下 `localhost` 明文仅是
+显式本地开发配置；生产环境使用 `new_with_options`、HTTPS、CA/TLS 和认证，见下文 rr-server 配置。
+The `rr-config-etcd` constructor validates connectivity immediately. `cluster_id` isolates key prefixes. The following
+`localhost` plaintext is an explicit development-only configuration; production uses `new_with_options` with HTTPS,
+CA/TLS, and authentication as shown in the rr-server configuration below.
 
 ```rust
 use rr_config_etcd::EtcdConfigProvider;
 
+// LOCAL PLAINTEXT ONLY / 仅本地明文：不在生产中使用。
 let provider = EtcdConfigProvider::new(
     vec!["http://localhost:2379".to_string()],
     "default".to_string(),
@@ -115,6 +119,160 @@ The provider is read-only; Rr never writes routing state back to etcd. External 
 
 完整读取和 watch 示例见 `examples/etcd-config-quickstart`，运行前在 `localhost:2379` 启动 etcd v3。
 See `examples/etcd-config-quickstart` for reading and watching; start etcd v3 at `localhost:2379` first.
+
+## 节点目录 / NodeDirectory
+
+`NodeDirectory` 是独立、可写、带 lease 的节点端点目录，不是 `ConfigProvider` 的扩展，也不是 managed
+formation 的 `LifecycleStore`。路由/副本仍由 ConfigProvider 和 Raft 提供；目录只发布发现所需的显式地址和
+位置元数据。Console 的 discovery 接入状态见 [Cluster Admin Console](../operations/cluster-admin-console.md)。
+`NodeDirectory` is a separate writable, leased directory of node endpoints. It is neither a `ConfigProvider` extension
+nor the managed-formation `LifecycleStore`. Routing and replicas still come from ConfigProvider and Raft; the directory
+publishes only explicit discovery addresses and placement metadata. See [Cluster Admin
+Console](../operations/cluster-admin-console.md) for the Console's current discovery support.
+
+### 节点自注册 / Node Self-Registration
+
+`rr-server` 在完整配置描述符和目录后端后自注册。任一描述符字段出现时，`advertise_addr`、
+`admin_advertise_addr`、`observability_advertise_addr` 和 `environment` 都必须提供；`region`、`zone`、`rack`
+可选。地址必须是非 wildcard、非零端口的 `host:port`，不能从 client 地址推导 Admin/observability 端口。
+`rr-server` self-registers when given a complete descriptor and directory backend. Setting any descriptor field makes
+`advertise_addr`, `admin_advertise_addr`, `observability_advertise_addr`, and `environment` mandatory; `region`,
+`zone`, and `rack` are optional. Addresses must be non-wildcard `host:port` values with nonzero ports. Admin and
+observability ports are never derived from the client address.
+
+```toml
+[node]
+id = 1
+listen_addr = "0.0.0.0:51001"
+advertise_addr = "rr-1.internal:51001"
+admin_advertise_addr = "rr-1.internal:52001"
+observability_advertise_addr = "rr-1.internal:9100"
+app_version = "1.4.0"
+environment = "production"
+region = "us-east-1"
+zone = "us-east-1a"
+
+[cluster]
+name = "prod-rr"
+directory_etcd_endpoints = ["https://etcd-1.internal:2379", "https://etcd-2.internal:2379"]
+etcd_ca_path = "/etc/rr/etcd-ca.pem"
+etcd_cert_path = "/etc/rr/etcd-client.pem"
+etcd_key_path = "/etc/rr/etcd-client.key"
+etcd_domain_name = "etcd.internal"
+etcd_username = "rr-node"
+etcd_password_env = "RR_ETCD_PASSWORD"
+```
+
+对应 CLI 为 `--advertise-addr`、`--admin-advertise-addr`、`--observability-advertise-addr`、`--environment` 和
+`--directory-etcd-endpoints`；环境变量分别是 `RR_ADVERTISE_ADDR`、`RR_ADMIN_ADVERTISE_ADDR`、
+`RR_OBSERVABILITY_ADVERTISE_ADDR`、`RR_ENVIRONMENT` 和 `RR_DIRECTORY_ETCD_ENDPOINTS`。managed formation
+节点已有完整描述符且未单独配置目录端点时，复用 `[cluster.formation].etcd_endpoints`。
+The corresponding flags are `--advertise-addr`, `--admin-advertise-addr`, `--observability-advertise-addr`,
+`--environment`, and `--directory-etcd-endpoints`; their environment variables are `RR_ADVERTISE_ADDR`,
+`RR_ADMIN_ADVERTISE_ADDR`, `RR_OBSERVABILITY_ADVERTISE_ADDR`, `RR_ENVIRONMENT`, and
+`RR_DIRECTORY_ETCD_ENDPOINTS`. A managed-formation node with a complete descriptor reuses
+`[cluster.formation].etcd_endpoints` when no separate directory endpoints are configured.
+
+### rr-server etcd TLS 与认证 / rr-server etcd TLS and Authentication
+
+上例是推荐的安全配置。`[cluster]` 的 etcd TLS/auth 同时应用于 managed formation 和 NodeDirectory 客户端；
+启用任一 TLS/auth 字段后，formation 和 directory 的所有 endpoint 都必须使用 `https://`。
+The example above is the recommended secure configuration. `[cluster]` etcd TLS/auth settings apply to both managed
+formation and NodeDirectory clients. Enabling any TLS/auth field requires every formation and directory endpoint to use
+`https://`.
+
+CLI、TOML 与环境变量的对应关系如下；CLI 优先于 TOML：
+The CLI, TOML, and environment-variable equivalents are listed below; CLI values override TOML:
+
+- `--etcd-ca` ↔ `[cluster].etcd_ca_path` ↔ `RR_ETCD_CA`：CA bundle。/ CA bundle.
+- `--etcd-cert` ↔ `[cluster].etcd_cert_path` ↔ `RR_ETCD_CERT`：客户端证书。/ Client certificate.
+- `--etcd-key` ↔ `[cluster].etcd_key_path` ↔ `RR_ETCD_KEY`：客户端私钥。/ Client private key.
+- `--etcd-domain` ↔ `[cluster].etcd_domain_name` ↔ `RR_ETCD_DOMAIN`：SNI/证书名称覆盖。/ SNI/certificate
+  name override.
+- `--etcd-username` ↔ `[cluster].etcd_username` ↔ `RR_ETCD_USERNAME`：认证用户名。/ Authentication username.
+- `--etcd-password-env` ↔ `[cluster].etcd_password_env` ↔ `RR_ETCD_PASSWORD_ENV`：保存密码的环境变量名。/
+  Name of the environment variable containing the password.
+
+客户端 cert/key 必须成对；username/password-env 必须成对，且引用的环境变量必须已设置且非空。TOML 和 debug
+输出不保存明文密码，密码不能放入 argv。生产环境推荐同时配置 CA、mTLS 和用户名/密码，并按职责授予最小
+etcd 权限。
+The client certificate and key are a pair. Username and password-env are also a pair, and the referenced variable must
+be set and non-empty. TOML and debug output do not contain the plaintext password, and passwords never go in argv.
+Production should combine CA verification, mTLS, and username/password authentication with least-privilege etcd roles.
+
+本地明文是显式开发配置：使用 `http://127.0.0.1` 并完全省略上述 etcd TLS/auth 字段。rr-server 没有
+`--etcd-allow-insecure`；不要把 `[node].allow_insecure` 误认为 etcd 安全开关。
+Local plaintext is an explicit development configuration: use `http://127.0.0.1` and omit every etcd TLS/auth field
+above. rr-server has no `--etcd-allow-insecure`; `[node].allow_insecure` is not an etcd security setting.
+
+```toml
+# LOCAL PLAINTEXT ONLY / 仅本地明文：生产环境请使用上例 HTTPS + TLS/auth。
+[cluster]
+name = "rr-local"
+directory_etcd_endpoints = ["http://127.0.0.1:2379"]
+# Intentionally no etcd_* TLS/auth fields / 有意不配置任何 etcd_* 安全字段。
+```
+
+### 外部 provisioning / External Provisioning
+
+部署系统可以写入相同 schema，但应优先复用 `EtcdNodeDirectory::register` 和返回的 registration 来管理 lease。
+key 和 JSON value 如下；`revision` 与 `lease_id` 是 etcd 元数据，不属于 JSON value。
+A provisioner can write the same schema, but should prefer `EtcdNodeDirectory::register` and the returned registration
+for lease management. The key and JSON value are shown below; `revision` and `lease_id` are etcd metadata, not JSON
+fields.
+
+```text
+/rr/{cluster_name}/directory/nodes/{node_id}
+```
+
+```json
+{
+  "node_id": 1,
+  "client_addr": "rr-1.internal:51001",
+  "admin_addr": "rr-1.internal:52001",
+  "observability_addr": "rr-1.internal:9100",
+  "advertise_addr": "rr-1.internal:51001",
+  "environment": "production",
+  "region": "us-east-1",
+  "zone": "us-east-1a",
+  "rack": null,
+  "boot_id": "01JBOOT-ID-FROM-THE-NODE"
+}
+```
+
+- schema 拒绝未知字段、key/value node ID 不一致、空 environment/boot ID 和非法地址。/ The schema rejects
+  unknown fields, key/value node-ID mismatches, empty environment/boot IDs, and invalid addresses.
+- 默认 lease TTL 为 15 秒；节点每 5 秒 heartbeat，优雅关闭时 revoke。heartbeat 只续租，不重写 descriptor JSON，
+  因此不应推进 `mod_revision`。/ The default lease TTL is 15 seconds; nodes heartbeat every five seconds and revoke
+  on graceful shutdown. Heartbeats only extend the lease and do not rewrite descriptor JSON or advance `mod_revision`.
+- 注册使用 create-if-absent，已有同 node ID 记录会发生所有权冲突，不能无条件覆盖。过期 lease 必须由新
+  registration 替换。/ Registration is create-if-absent: an existing record for the same node ID is an ownership
+  conflict, not an overwrite opportunity. An expired lease requires a new registration.
+- 外部 provisioner 若直接写 etcd，必须自行创建并续租 lease、处理冲突/revoke，并保证记录来自受信写入路径；
+  不要写无 lease 的永久地址记录。/ A provisioner writing etcd directly must create and renew leases, handle
+  conflicts/revocation, and protect the write path. Do not create permanent directory records without leases.
+- `list` 默认每页 50、最大 200，cursor 固定目录 revision；watch compaction 会触发全量对账。/ `list` defaults to
+  50 records per page with a maximum of 200, cursors pin the directory revision, and watch compaction triggers a full
+  reconciliation.
+
+### 崩溃重启与租约重试 / Crash-Restart Lease Retry
+
+异常终止无法执行 revoke，旧 lease 可能仍在。重启遇到 `AlreadyExists` 时，节点每秒重试注册，等待旧 lease
+自然过期；单次注册 deadline 为 10 秒，整个启动等待上限为 30 秒。旧记录过期后，以新 boot ID 创建新 lease，
+不会覆盖仍属于其他存活 boot 的记录；持续冲突超过上限会使节点启动失败，而不是无限重试或静默跳过目录。
+An abnormal stop cannot revoke its lease, so the old record may remain. On `AlreadyExists` during restart, the node
+retries registration once per second while waiting for natural lease expiry. Each registration has a ten-second
+deadline and total startup waiting is capped at 30 seconds. After expiry, the node creates a new lease with its new boot
+ID instead of overwriting another live boot's record. A persistent conflict beyond the cap fails startup rather than
+retrying forever or silently skipping the directory.
+
+启动后的 heartbeat 失败会撤销/清理旧 registration、将目录 revision 归零，并在后续 5 秒周期尝试重新注册；
+优雅关闭会 revoke。Console 侧的信任到期与凭证暂停语义见
+[Cluster Admin Console](../operations/cluster-admin-console.md#发现与信任--discovery-and-trust)。
+After startup, heartbeat failure revokes/cleans the old registration, resets directory revision to zero, and retries
+registration on the five-second reconciliation cycle. Graceful shutdown revokes the lease. See [Cluster Admin
+Console](../operations/cluster-admin-console.md#发现与信任--discovery-and-trust) for Console trust expiry and credential
+pausing.
 
 ## 自定义提供者 / Custom Providers
 

@@ -21,6 +21,17 @@
 //!     --peers 1@127.0.0.1:51001,2@127.0.0.1:51002,3@127.0.0.1:51003
 //! ```
 //!
+//! # Bootstrap rules
+//!
+//! - The no-argument demo self-initializes; a persistent manual single-node service bootstraps once.
+//! - Manual multi-node startup uses one identical full roster everywhere and bootstraps exactly one
+//!   fresh node, which initializes every voter; all other nodes omit `--bootstrap`.
+//! - Genesis and Adopt omit `--bootstrap`. Normal restarts and restarts/recovery of already initialized
+//!   nodes, including durable ones, also omit it; fresh durable initial formation may bootstrap.
+//! - An already-initialized rejection treated as success is not a restart or membership-change strategy.
+//! - The gRPC Pre-Vote failure was not caused by `--bootstrap`; never use it to repair election or
+//!   network-isolation failures.
+//!
 //! ## Container-style run — bind all interfaces, advertise via the roster:
 //! ```text
 //! kv-store --node-id 1 --listen-addr 0.0.0.0 --port 51001 --metrics-port 9100 \

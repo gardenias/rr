@@ -18,6 +18,7 @@ rr-config-etcd = { path = "../rr-config-etcd" }
 rr-raft = { path = "../rr-raft" }
 rr-network = { path = "../rr-network" }
 rr-router = { path = "../rr-router" }
+etcd-client = { workspace = true, features = ["tls"] }
 dashmap.workspace = true
 mimalloc = { version = "0.1", optional = true }
 tokio.workspace = true
@@ -36,6 +37,8 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+sha2.workspace = true
+sysinfo = "0.37.2"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
@@ -45,6 +48,7 @@ http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "rr-server"

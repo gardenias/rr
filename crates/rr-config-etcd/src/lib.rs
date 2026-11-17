@@ -1,11 +1,15 @@
-//! etcd-backed [`ConfigProvider`] implementation.
+//! etcd-backed [`ConfigProvider`] and node directory implementations.
 //!
-//! This crate provides a read-only view of cluster routing state stored in
-//! etcd v3 under:
+//! Cluster routing state is read-only and stored in etcd v3 under:
 //! * `/rr/{cluster_id}/nodes/{node_id}`
 //! * `/rr/{cluster_id}/partitions/{partition_id}`
 //! * `/rr/{cluster_id}/groups/{group_id}/replicas`
+//!
+//! Leased node descriptors use the separate writable
+//! `/rr/{cluster_id}/directory/nodes/{node_id}` namespace.
 
+pub mod directory;
+pub use directory::EtcdNodeDirectory;
 pub mod lifecycle;
 pub use lifecycle::EtcdLifecycleStore;
 

@@ -78,6 +78,27 @@ KV commands use the client port; management commands use the separate Admin port
 cargo run -p rr-admin -- --addr 127.0.0.1:52001 group status --group 1
 ```
 
+## 何时使用 `--bootstrap` / When to Use `--bootstrap`
+
+无参数 demo 会自行初始化单副本组，不需要该旗标。常驻的手动单节点服务只在全新建组时引导一次。
+手动多节点集群必须在所有节点使用同一份完整花名册，并且只在一个全新节点上使用 `--bootstrap`，
+由它一次性初始化全部 voter；其他节点不使用该旗标。
+
+The no-argument demo initializes its own single-replica group and needs no flag. A persistent manual
+single-node service bootstraps once when its fresh group is created. For a manual multi-node cluster, every
+node uses the same full roster and exactly one fresh node uses `--bootstrap` to initialize all voters at
+once; the other nodes omit it.
+
+Genesis 和 Adopt 不使用 `--bootstrap`。正常重启、已初始化节点以及 durable 节点恢复时也必须省略它。
+重复初始化即使因组已存在而成为 no-op，也不能当作重启或成员变更策略。本次 gRPC Pre-Vote 故障并非
+`--bootstrap` 导致；不要用重复引导处理选主、网络隔离或 Pre-Vote 问题。
+
+Genesis and Adopt do not use `--bootstrap`. Omit it for normal restarts and when restarting or recovering
+an already initialized node, including a durable node. A fresh durable node may still bootstrap its
+initial group. Repeating initialization may be a no-op when the group exists, but that is not a restart or
+membership-change strategy. The gRPC Pre-Vote failure addressed here was not caused by `--bootstrap`;
+repeated bootstrapping is not a remedy for election, network-isolation, or Pre-Vote failures.
+
 ## 启动三节点 KV 集群 / Start a Three-Node KV Cluster
 
 三个节点必须使用同一份完整 `id@addr` 花名册，且花名册必须包含本节点。只在一个节点上设置 `--bootstrap`。
@@ -121,6 +142,15 @@ cargo run -p rr-server -- serve \
   --node-id 1 --listen-addr 127.0.0.1:51001 \
   --admin-port 52001 --bootstrap --allow-insecure
 ```
+
+这里的 stock `--bootstrap` 只把本地托管的每个组初始化为仅含当前节点的单 voter 组。
+它不同于 `kv-store --bootstrap --peers ...` 的全花名册初始化，也不会把 stock `--peers`
+变成完整 Raft 成员列表；stock 的 Echo 服务同样不提供 KV 语义。
+
+Here, stock `--bootstrap` initializes each locally hosted group with only the current node as its single
+voter. It differs from `kv-store --bootstrap --peers ...`, which initializes the full roster, and does not
+turn stock `--peers` into a complete Raft membership list. The stock Echo service does not provide KV
+semantics either.
 
 也可使用仓库配置；该文件已设置 `allow_insecure = true`，只需补上默认未启用的 Admin 端口：
 You can also use the bundled configuration. It already sets `allow_insecure = true`; only the otherwise-disabled Admin port needs to be added:
