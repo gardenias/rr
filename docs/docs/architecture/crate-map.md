@@ -78,6 +78,7 @@ package "Application" {
 [rr-client] --> [rr-network]
 [rr-admin] --> [rr-core]
 [rr-admin] --> [rr-network]
+[rr-admin] --> [rr-config-etcd]
 @enduml
 ```
 
@@ -87,14 +88,14 @@ package "Application" {
 | :--- | :--- | :--- |
 | `rr-core` | 基础<br />Foundation | 错误、核心 trait 和公共类型：`RrError`, `NodeId`, `GroupId`, `Service`, `StateMachine`, `StorageEngine`, `ConfigProvider`。<br />Errors, core traits, and shared types: `RrError`, `NodeId`, `GroupId`, `Service`, `StateMachine`, `StorageEngine`, `ConfigProvider`. |
 | `rr-config` | 基础设施<br />Infrastructure | 内存配置提供者：`MemConfigProvider`。<br />In-memory configuration provider: `MemConfigProvider`. |
-| `rr-config-etcd` | 基础设施<br />Infrastructure | 只读 etcd 配置、路由读取与 watch：`EtcdConfigProvider`。<br />Read-only etcd configuration, routing reads, and watches: `EtcdConfigProvider`. |
+| `rr-config-etcd` | 基础设施<br />Infrastructure | 只读 etcd 配置、路由读取与 watch、节点目录：`EtcdConfigProvider`、`EtcdNodeDirectory`。<br />Read-only etcd configuration, routing reads and watches, and node directory: `EtcdConfigProvider`, `EtcdNodeDirectory`. |
 | `rr-storage` | 基础设施<br />Infrastructure | 内存与 RocksDB 后端：`MemStorage`、`RocksStorage`（`rocks` feature）。<br />Memory and RocksDB backends: `MemStorage` and `RocksStorage` (`rocks` feature). |
 | `rr-raft` | 基础设施<br />Infrastructure | 基于 openraft 的共识引擎：`RaftGroupManager`, `RaftNode`, `RrTypeConfig`。<br />openraft-based consensus: `RaftGroupManager`, `RaftNode`, `RrTypeConfig`. |
 | `rr-network` | 基础设施<br />Infrastructure | gRPC 传输：`RaftServiceImpl`, `ClientServiceImpl`, `ChannelPool`, `BearerInterceptor`, `RateLimitInterceptor`。<br />gRPC transport: `RaftServiceImpl`, `ClientServiceImpl`, `ChannelPool`, `BearerInterceptor`, `RateLimitInterceptor`. |
 | `rr-router` | 基础设施<br />Infrastructure | 分片路由：`ShardRouter`。<br />Shard routing: `ShardRouter`. |
 | `rr-ingestor-kafka` | 基础设施<br />Infrastructure | Kafka `CommandIngestor` 后端；默认仅内存 mock，真实后端需 `rdkafka` feature：`KafkaIngestor`, `MockKafkaIngestor`, `KafkaIngestorConfig`。<br />Kafka `CommandIngestor` backend; memory mock by default, real backend requires the `rdkafka` feature: `KafkaIngestor`, `MockKafkaIngestor`, `KafkaIngestorConfig`. |
 | `rr-client` | 应用<br />Application | 客户端 SDK：`RrClient`, `RetryConfig`。<br />Client SDK: `RrClient`, `RetryConfig`. |
-| `rr-admin` | 应用<br />Application | `AdminService` 运维客户端，支持备份、下线与重置；二进制 crate，无库类型。<br />Operations client for `AdminService`, including backup, decommission, and reset; binary crate with no library types. |
+| `rr-admin` | 应用<br />Application | 运维 CLI/REPL（备份、下线、重置等受控操作）与同源只读 Console BFF（Axum，静态导出、版本化 JSON 与 SSE）；通过 `rr-config-etcd` 支持可选 etcd 发现。Next.js 前端导出由 BFF 托管，不是 Rust crate；二进制 crate，无库类型。<br />Operations CLI/REPL for controlled actions such as backup, decommission, and reset, plus a same-origin read-only Console BFF (Axum, static export, versioned JSON, and SSE); uses `rr-config-etcd` for optional etcd discovery. The BFF serves the Next.js frontend export, which is not a Rust crate; binary crate with no library types. |
 | `rr-server` | 编排<br />Orchestration | 节点生命周期管理：`RrNode`, `NodeConfig`。<br />Node lifecycle management: `RrNode`, `NodeConfig`. |
 
 ## 特性标志 / Feature Flags

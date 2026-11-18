@@ -132,6 +132,39 @@ After a write, query `group status` on each node and check that `last_log_index`
 停止 leader 后，多数幸存节点会选出新 leader。内存模式下，重启全部节点不会保留数据；持久化验证见 [运维手册](playbook.md)。
 After stopping the leader, the surviving majority elects a new one. In-memory mode does not preserve data if every node restarts; see the [operations playbook](playbook.md) for durability checks.
 
+## 可选：启动只读 Console / Optional: Start the Read-Only Console
+
+以下示例复用上面的三节点集群。另开终端，在仓库根目录先静态导出前端，再启动同源的 Rust/Axum BFF；
+Node.js 和 pnpm 只用于前端构建，运行时不需要独立 Node.js 服务。
+
+Reuse the three-node cluster above. In another terminal, export the static frontend from the repository root before
+starting the same-origin Rust/Axum BFF. Node.js and pnpm are build-time tools only; no standalone Node.js production
+server is required.
+
+```bash
+pnpm --dir crates/rr-admin/console install --frozen-lockfile
+pnpm --dir crates/rr-admin/console run build
+cargo run -p rr-admin -- console \
+  --listen 127.0.0.1:8080 \
+  --peers 1@127.0.0.1:52001,2@127.0.0.1:52002,3@127.0.0.1:52003
+```
+
+`console --peers` 的每项必须是 `node_id@AdminService_host:port`，不是 Client/bootstrap 地址；这里使用三个
+Admin 端口。打开 `http://127.0.0.1:8080`。当前 `kv-store` 未配置 Console 节点描述符，因此此例可查看
+Admin-backed 节点、组和拓扑数据，但健康探测与 `CONSOLE_MEMORY` 实时趋势会按能力降级；完整实时观测需要节点
+提供受信 `observability_addr`。Console 是可选只读 viewer，停止它不影响 Raft 节点，受控写操作仍由 Admin CLI
+执行。生产 HTTPS、认证、描述符、etcd 发现和可选 Prometheus 历史见
+[集群管理控制台](../operations/cluster-admin-console.md)。
+
+Each `console --peers` entry must be `node_id@AdminService_host:port`, not a Client/bootstrap address; this example
+uses the three Admin ports. Open `http://127.0.0.1:8080`. The current `kv-store` does not configure a Console node
+descriptor, so this example provides Admin-backed node, group, and topology views, while health probes and
+`CONSOLE_MEMORY` live trends degrade by capability. Full live observability requires a trusted node
+`observability_addr`. The Console is an optional read-only viewer: stopping it does not affect Raft nodes, and
+controlled writes remain with the Admin CLI. See the
+[Cluster Admin Console manual](../operations/cluster-admin-console.md) for production HTTPS, authentication,
+descriptors, etcd discovery, and optional Prometheus history.
+
 ## 启动 stock rr-server / Start the Stock rr-server
 
 stock 二进制内置 `EchoStateMachine`，仅用于协议和部署冒烟，不提供 KV 语义。以下命令启动单节点；不要再用 `--peers` 推断 Raft 成员关系。

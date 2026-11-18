@@ -28,8 +28,10 @@ The workspace contains 11 Rr crates, grouped here by responsibility:
   RPC networking, shard routing, and the client SDK.
 - `rr-config`、`rr-config-etcd`：配置管理，以及基于 etcd 的只读配置提供者。<br />
   Configuration management and a read-only etcd-backed config provider.
-- `rr-server`、`rr-admin`：服务器二进制，以及运维 CLI / REPL。<br />
-  The server binary and the operational CLI / REPL.
+- `rr-server`、`rr-admin`：服务器二进制，以及运维 CLI / REPL 与同源只读 Web Console（静态前端、版本化 JSON
+  和 SSE）。<br />
+  The server binary and operational CLI / REPL plus a same-origin, read-only Web Console (static frontend, versioned
+  JSON, and SSE).
 - `rr-ingestor-kafka`：Kafka 数据接入。<br />
   Kafka ingestion.
 
@@ -71,6 +73,12 @@ See the [FAQ](faq.md) and [Relationship with openraft](architecture/openraft-rel
 - 写请求由客户端根据 `leader_info` 重定向，服务端不转发；生产部署需要配置 TLS/mTLS 和认证。<br />
   Clients redirect writes using `leader_info` rather than server-side forwarding; production deployments require
   TLS/mTLS and authentication.
+- `rr-admin console` 通过 Admin gRPC 和受信 observability HTTP 端点展示节点、Raft 组、生命周期与性能，
+  是不影响节点服务的只读 viewer，不是 Raft 控制面；受控写操作仍由 Admin CLI 执行。详见
+  [Cluster Admin Console](operations/cluster-admin-console.md)。<br />
+  `rr-admin console` uses Admin gRPC and trusted observability HTTP endpoints to display nodes, Raft groups,
+  lifecycle, and performance. It is a read-only viewer whose failure does not affect node service, not a Raft control
+  plane; controlled writes remain in the Admin CLI. See [Cluster Admin Console](operations/cluster-admin-console.md).
 
 详见 [读一致性模型](guide/read-consistency.md)、[存储引擎](guide/storage-engines.md) 和
 [TLS 配置](deployment/tls.md)。<br />

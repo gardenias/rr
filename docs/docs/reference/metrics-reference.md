@@ -20,6 +20,19 @@ let config = NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_
 curl http://127.0.0.1:62001/metrics
 ```
 
+## Console 实时与历史 / Console Live and History
+
+Console BFF 抓取上述逐节点 `/metrics`，将实时序列保存在有界内存中；重启会清空数据，时间窗只筛选已留存数据，
+不会回填 Console 启动前的历史。Prometheus 不是实时功能的必需依赖；成对配置 `--prometheus-url` 与
+`--prometheus-cluster` 后，Console 才可查询固定 raw-family 历史模板，不开放任意 PromQL。详见
+[Cluster Admin Console › 留存、新鲜度与规模](../operations/cluster-admin-console.md#留存新鲜度与规模--retention-freshness-and-scale)
+中的留存语义。
+The Console BFF scrapes the per-node `/metrics` endpoints above and retains live series in bounded memory. Restarting
+clears this data; time windows only filter retained observations and never backfill history from before Console startup.
+Prometheus is not required for live data. Pairing `--prometheus-url` with `--prometheus-cluster` enables fixed raw-family
+history templates, not arbitrary PromQL. See [Cluster Admin Console › Retention, Freshness, and
+Scale](../operations/cluster-admin-console.md#留存新鲜度与规模--retention-freshness-and-scale).
+
 ## 命名惯例 / Naming Conventions
 
 Rr 当前混用两种命名风格，未来版本会统一 / Rr currently mixes two naming styles; future versions will

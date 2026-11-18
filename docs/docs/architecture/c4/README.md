@@ -14,8 +14,8 @@ deployment, and dynamic views.
 | 读者 / Audience | 推荐顺序 / Recommended Order |
 | :--- | :--- |
 | 应用开发者 / Application developers | Context → Containers → Dynamic: PUT Request → Dynamic: Shard Routing |
-| 框架贡献者 / Framework contributors | Containers → Components (all) → Dynamic (all) |
-| 运维 / SRE / Operators | Context → Containers → Deployment → Dynamic: Leader Election, Snapshot Transfer |
+| 框架贡献者 / Framework contributors | Containers → Components (all, including Console BFF) → Dynamic (all) |
+| 运维 / SRE / Operators | Context → Containers → Components: Console → Deployment → Dynamic: Leader Election, Snapshot Transfer |
 
 ## 图谱目录 / Diagram Index
 
@@ -33,6 +33,7 @@ deployment, and dynamic views.
 - [**components-raft.md**](./components-raft.md) — rr-raft 多组共识引擎。<br />Multi-Raft engine.
 - [**components-router.md**](./components-router.md) — 路由与配置。<br />Routing and configuration.
 - [**components-network.md**](./components-network.md) — gRPC 传输层。<br />gRPC transport.
+- [**components-console.md**](./components-console.md) — `rr-admin console` 只读 BFF：同源入口、共享采集、证据缓存与可选历史。<br />Read-only `rr-admin console` BFF: same-origin entry, shared collection, evidence cache, and optional history.
 
 ### 部署 / Deployment
 

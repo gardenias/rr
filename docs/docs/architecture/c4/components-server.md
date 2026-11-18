@@ -18,7 +18,8 @@ title Component Diagram - rr-server Node (single process)
 
 Container_Ext(user_app, "User Application", "Rust + rr-client", "Embeds rr-client SDK")
 Container_Ext(peer_node, "Peer rr-server Node", "Rust binary", "Other members of the same Raft groups")
-Container_Ext(admin_cli, "rr-admin CLI", "Rust binary", "Operator tool")
+Container_Ext(admin_cli, "rr-admin CLI / REPL", "rr-admin binary", "Controlled operator actions")
+Container_Ext(console_bff, "Cluster Admin Console BFF", "rr-admin console; Rust/Axum", "Read-only viewer with same-origin static UI, JSON /api/v1/console and SSE")
 ContainerDb_Ext(disk, "Local Disk", "Local filesystem", "Stock --storage rocks: per-group RocksDB + sm-snapshot.bin at {data_dir}/raft-log/{group_id}")
 Container_Ext(config_store, "ConfigProvider Source", "etcd / memory / file", "Routing table source of truth")
 
@@ -42,7 +43,9 @@ Container_Boundary(node, "rr-server Node (process)") {
 
 Rel(user_app, main_server, "ClientRequest / GetClusterInfo", "gRPC")
 Rel(peer_node, main_server, "AppendEntries / Vote / InstallSnapshot", "gRPC")
-Rel(admin_cli, admin_server, "Admin RPCs", "gRPC")
+Rel(admin_cli, admin_server, "Queries status and performs controlled admin operations", "gRPC AdminService (TLS/mTLS + Admin token in production)")
+Rel(console_bff, admin_server, "Reads node/group, topology, build and boot state", "gRPC AdminService (TLS/mTLS + Admin token in production)")
+Rel(console_bff, metrics_exp, "Scrapes /health, /ready and /metrics", "HTTP GET from trusted observability address")
 
 Rel(main_server, client_dispatch, "Dispatches client writes")
 Rel(main_server, raft_lookup, "Dispatches Raft RPCs")
@@ -136,6 +139,25 @@ Inbound Raft RPCs are dispatched to a local `RaftNode` by `group_id`; an unknown
 
 `crates/rr-server/src/admin.rs` implements `AdminService` by directly accessing `RaftGroupManager` and metrics;
 administrative queries do not go through Raft consensus.
+
+`rr-admin` 同一二进制还提供 `rr-admin console`：Axum BFF 同源托管 Next.js 静态导出、版本化
+`/api/v1/console` JSON 和 SSE，无需独立 Node.js 生产服务。静态导出需随二进制部署或用 `--static-dir`
+指向。Console 只调用只读 Admin RPC，节点 Admin token 仅由 BFF 持有；membership、主节点转移、
+TriggerSnapshot、DrainNode、offset reset 等受控写操作仍由 CLI/REPL 执行。Console 不是 Raft 控制面，
+其故障不影响节点服务。
+
+The same `rr-admin` binary also provides `rr-admin console`: an Axum BFF that serves the Next.js static export,
+versioned `/api/v1/console` JSON, and SSE from one origin, without a standalone Node.js production service. Deploy
+the static export with the binary or point `--static-dir` at it. The Console calls only read-only Admin RPCs, and
+only the BFF holds node Admin tokens. Controlled writes such as membership changes, leadership transfer,
+TriggerSnapshot, DrainNode, and offset reset remain CLI/REPL operations. The Console is not a Raft control plane,
+and its failure does not affect node service.
+
+完整安全、发现与可选 Prometheus 历史配置见
+[Cluster Admin Console](../../operations/cluster-admin-console.md)。Prometheus 不是实时采集或 AdminService
+的必需依赖。
+See [Cluster Admin Console](../../operations/cluster-admin-console.md) for security, discovery, and optional
+Prometheus history configuration. Prometheus is not required for live collection or AdminService.
 
 ## 相邻组件 / Adjacent Components
 

@@ -20,6 +20,17 @@ methods, and trait contracts.
 | `rr-router` | 分片路由 / Partition routing | `ShardRouter` | — |
 | `rr-client` | 客户端 SDK / Client SDK | `RrClient`, `RetryConfig` | — |
 | `rr-server` | 节点编排 / Node orchestration | `RrNode`, `NodeConfig` | — |
+| `rr-admin` | 管理 CLI/REPL 与只读 Console BFF / Admin CLI/REPL and read-only Console BFF | — | — |
+
+## 管理客户端与 Console / Admin Clients and Console
+
+`rr-admin` CLI/REPL 直接调用节点 `AdminService` gRPC；`rr-admin console` 则是该服务的只读 BFF 客户端。
+浏览器使用同源 `/api/v1/console` JSON/SSE，不直接连接节点 Admin gRPC。Admin 写 RPC 仍由 CLI 或其他受权客户端
+执行。详见 [Admin API Reference](admin-api.md) 和 [Cluster Admin Console](../operations/cluster-admin-console.md)。
+The `rr-admin` CLI/REPL calls node `AdminService` gRPC directly, while `rr-admin console` is a read-only BFF client of
+that service. Browsers use same-origin `/api/v1/console` JSON/SSE rather than connecting to node Admin gRPC directly.
+Admin write RPCs are still executed by the CLI or other authorized clients. See [Admin API Reference](admin-api.md) and
+[Cluster Admin Console](../operations/cluster-admin-console.md).
 
 ## 核心 Trait / Core Traits
 

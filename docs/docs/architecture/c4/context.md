@@ -17,19 +17,27 @@ This diagram defines Rr's system boundary, users, and external dependencies.
 title System Context - Rr-based Distributed Service
 
 Person(developer, "Application Developer", "Implements Service / StateMachine trait, configures & deploys the cluster")
-Person(operator, "Cluster Operator / SRE", "Monitors health, triggers snapshots, transfers leadership, scales cluster")
+Person(operator, "Cluster Operator / SRE", "Observes through the read-only Console; performs controlled administration through the CLI")
 Person_Ext(end_user, "End User", "Consumes the application (KV store, counter, etc.) — unaware of Rr")
+System_Ext(browser, "Operator Web Browser", "Renders the read-only Console UI")
 
 System(rr_service, "Rr-based Service", "Distributed service (e.g. KV store) running on a multi-Raft Rr cluster. Provides strong consistency + high availability.")
+System(admin_console, "Cluster Admin Console", "Read-only rr-admin console BFF with same-origin static UI, JSON and SSE; not a Raft control plane")
 
-System_Ext(prometheus, "Prometheus", "Time-series metrics DB. Scrapes per-node /metrics")
+System_Ext(prometheus, "Prometheus (optional)", "Scrapes per-node /metrics; optionally serves fixed-template Console history")
 System_Ext(config_store, "External ConfigProvider (optional)", "etcd / file / custom source for routing table in production")
+System_Ext(console_etcd, "etcd for Console discovery (optional)", "Trusted NodeDirectory + ConfigProvider in one namespace")
 SystemDb_Ext(disk, "Local Disk", "Per-group RocksDB instances for raft log + durable sm-snapshot.bin (stock rr-server --storage rocks, ADR A-0016/T1)")
 
 Rel(end_user, rr_service, "Uses (e.g. GET/PUT keys)", "gRPC via rr-client SDK")
 Rel(developer, rr_service, "Builds & deploys", "cargo, config, topology")
-Rel(operator, rr_service, "Administers", "rr-admin CLI / gRPC")
+Rel(operator, browser, "Opens Console and views cluster state", "HTTPS (HTTP on loopback)")
+Rel(browser, admin_console, "Loads UI, reads views and subscribes to updates", "HTTPS / JSON / SSE (HTTP on loopback)")
+Rel(admin_console, rr_service, "Reads admin state, health, readiness and live metrics", "Admin gRPC (TLS/mTLS + token as configured) + trusted HTTP /health, /ready, /metrics")
+Rel(operator, rr_service, "Performs controlled administration", "rr-admin CLI / Admin gRPC")
 Rel(rr_service, prometheus, "Exposes metrics", "HTTP /metrics")
+Rel(admin_console, prometheus, "Optionally queries fixed-template history", "Prometheus HTTP API")
+Rel(admin_console, console_etcd, "Optionally discovers trusted nodes and routing", "etcd gRPC (TLS/auth as configured)")
 Rel(rr_service, disk, "Persists Raft log (rocks feature)", "File I/O via per-group RocksDB")
 Rel(rr_service, config_store, "Loads routing table, watches changes", "ConfigProvider trait")
 
@@ -49,10 +57,12 @@ with `NodeConfig`. Their concerns are the programming model, failure modes, and 
 
 ### 集群运维 / Cluster Operator / SRE
 
-运维使用 `rr-admin` 查看状态、触发快照和转移领导权，并通过 Prometheus 监控集群。
+运维通过只读 Web Console 观察集群状态、健康和性能，通过 `rr-admin` CLI 执行触发快照、转移领导权和
+membership 变更等受控管理。Console 不提供写操作，也不是 Raft 控制面；停止 Console 不影响 Raft 节点。
 
-Operators use `rr-admin` to inspect status, trigger snapshots, and transfer leadership, and use Prometheus to
-monitor the cluster.
+Operators observe cluster state, health, and performance through the read-only Web Console, and use the `rr-admin`
+CLI for controlled administration such as triggering snapshots, transferring leadership, and changing membership. The
+Console exposes no write operations and is not a Raft control plane; stopping it does not affect Raft nodes.
 
 ### 最终用户 / End User
 
@@ -64,9 +74,12 @@ End users interact with the application API and need not be aware of Rr.
 
 ### Prometheus（可选）/ Prometheus (Optional)
 
-节点通过 `metrics-exporter-prometheus` 暴露 HTTP `/metrics`，Prometheus 定期抓取。
+节点通过 `metrics-exporter-prometheus` 暴露 HTTP `/metrics`，Prometheus 定期抓取。Console 还可通过 Prometheus
+HTTP API 查询固定模板历史，但 Prometheus 不是 Console 的必需依赖。
 
-Nodes expose HTTP `/metrics` through `metrics-exporter-prometheus`; Prometheus scrapes the endpoint periodically.
+Nodes expose HTTP `/metrics` through `metrics-exporter-prometheus`; Prometheus scrapes the endpoint periodically. The
+Console can also query fixed-template history through the Prometheus HTTP API, but Prometheus is not required by the
+Console.
 
 ### 外部 ConfigProvider（可选）/ External ConfigProvider (Optional)
 
@@ -75,6 +88,12 @@ Nodes expose HTTP `/metrics` through `metrics-exporter-prometheus`; Prometheus s
 
 The default `MemConfigProvider` keeps the routing table in process memory. Production deployments can use the
 read-only `rr-config-etcd` (`EtcdConfigProvider`) or a custom `ConfigProvider`; Rr never writes back to etcd.
+
+Console 的 etcd discovery 是另一条可选路径，只读取同一 namespace 的 `NodeDirectory` 和 `ConfigProvider`；
+file/custom provider 并不因此成为 Console discovery 后端。
+
+Console etcd discovery is a separate optional path that reads only the `NodeDirectory` and `ConfigProvider` in one
+namespace; file/custom providers do not thereby become Console discovery backends.
 
 ### 本地磁盘 / Local Disk
 

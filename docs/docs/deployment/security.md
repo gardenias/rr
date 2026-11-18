@@ -17,6 +17,9 @@ The security layer consists of startup gates, TLS/mTLS, bearer tokens, rate limi
 | 启动安全门 G1–G7 / Startup gates | 全部通过，不使用 `--allow-insecure` / All pass; no `--allow-insecure` | `RrNode::new` → `validate_security_invariants` |
 | 节点间 Raft RPC / Inter-node Raft | TLS + `require_client_cert = true` / TLS + mTLS | G1 / G2 |
 | Admin / Client 服务 / services | TLS；Admin 必须独立 token，Client token 按需配置 / TLS; Admin token required, Client token optional | G3 / G4 / G5 |
+| Browser → Console | 非 loopback 必须 HTTPS + viewer token；节点 Admin token 只留在 BFF，从不下发浏览器 / Non-loopback requires HTTPS + viewer token; node Admin tokens stay in the BFF and are never sent to browsers | `ConsoleArgs::validate`；BFF 凭证隔离 / BFF credential isolation |
+| Console viewer session | 15 分钟内存 session；HttpOnly、SameSite=Strict，HTTPS 时 Secure；重启即失效 / 15-minute in-memory session; HttpOnly, SameSite=Strict, Secure under HTTPS; restart revokes it | `AuthState` |
+| Console reconcile POST | 仅只读刷新；必须同源 Origin，启用 viewer 认证时还须有效 `X-Console-CSRF` / Read-only refresh only; same-origin Origin required, plus valid `X-Console-CSRF` when viewer auth is enabled | `http::reconcile` |
 | 速率限制 / Rate limiting | Admin 可从 10–100 rps 起步，按调用方隔离 / Start Admin around 10–100 rps and isolate callers as needed | 默认不限流，需显式配置 / Unlimited by default |
 | 审计日志 / Audit log | `RUST_LOG="warn,rr::audit=info"`，路由到独立 append-only sink / Route to a separate append-only sink | 运维配置 / Operator configuration |
 | TCP Raft transport | 不用于生产 / Not for production | G6 / G7 |
@@ -83,6 +86,36 @@ client_token_env = "RR_CLIENT_TOKEN"
 
 `rr-admin` reads the Admin token through `--token-env RR_ADMIN_TOKEN`; the REPL uses
 `--client-token-env RR_CLIENT_TOKEN` separately. See the [TLS guide](./tls.md) for certificate fields and rotation.
+
+### Cluster Admin Console 的两条边界 / Two Cluster Admin Console Boundaries
+
+Browser→Console 与 Console BFF→AdminService 是两条独立的 TLS 和认证边界。前者加密浏览器到同源 Console 的
+HTTP/JSON/SSE，并用 viewer token 登录；后者加密 BFF 到节点 AdminService 的 gRPC，并使用节点 Admin token。
+一条边界已启用 TLS 不代表另一条也已安全。
+
+Browser→Console and Console BFF→AdminService are independent TLS and authentication boundaries. The first protects
+same-origin Console HTTP/JSON/SSE with HTTPS and viewer-token login; the second protects BFF-to-node AdminService gRPC
+with TLS and the node Admin token. TLS on one boundary does not secure the other.
+
+| 连接 / Connection | 传输 / Transport | 认证与凭证位置 / Authentication and Credential Location |
+| :--- | :--- | :--- |
+| Browser → Console BFF | Console 自身 HTTPS；非 loopback 必须启用 / Console HTTPS; required for non-loopback | viewer token 只用于登录，换取 15 分钟内存 session；不是节点 Admin token / Viewer token login issues a 15-minute in-memory session; it is not the node Admin token |
+| Console BFF → AdminService | gRPC TLS，按节点要求使用 mTLS / gRPC TLS, with mTLS as required by nodes | 节点 Admin bearer token 只由 BFF 持有并附加到上游 RPC，不下发浏览器 / The BFF alone holds the node Admin bearer token and attaches it to upstream RPCs; browsers never receive it |
+
+session 不持久化，Console 重启会撤销全部 session。cookie 为 HttpOnly、SameSite=Strict，HTTPS 时增加 Secure。
+`POST /api/v1/console/sources/reconcile` 虽只触发只读刷新，仍要求 `Origin` 与当前 scheme/host 完全一致；启用
+viewer 认证时还要求与 session 匹配的 `X-Console-CSRF`。这些检查不增加任何集群写能力。
+
+Sessions are not persisted, and a Console restart revokes all of them. Cookies are HttpOnly and SameSite=Strict, with
+Secure under HTTPS. Although `POST /api/v1/console/sources/reconcile` only triggers a read-only refresh, it requires an
+`Origin` exactly matching the current scheme/host; with viewer authentication enabled, it also requires an
+`X-Console-CSRF` matching the session. These checks add no cluster write capability.
+
+完整启动参数见 [TLS 指南](./tls.md#cluster-admin-console-的两条-tls-边界--two-cluster-admin-console-tls-boundaries)，
+Console 行为见 [集群管理控制台](../operations/cluster-admin-console.md)。
+
+See the [TLS guide](./tls.md#cluster-admin-console-的两条-tls-边界--two-cluster-admin-console-tls-boundaries) for
+startup flags and the [Cluster Admin Console guide](../operations/cluster-admin-console.md) for Console behavior.
 
 ## 速率限制 / Rate Limiting
 

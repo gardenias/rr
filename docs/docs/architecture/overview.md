@@ -52,17 +52,27 @@ Each node can run multiple independent Raft groups. Write throughput scales by s
 title Component Diagram - Rr System Architecture
 
 Component(client, "Client App", "Rust + rr-client", "Application using the cluster")
+Person(operator, "Cluster Operator", "Uses controlled CLI operations or the read-only Console")
+Container(browser, "Browser", "React 19 + Next.js 16 static export", "Read-only cluster viewer")
+
+Container_Boundary(admin_tool, "rr-admin binary") {
+  Component(admin_cli, "Admin CLI / REPL", "Rust + clap + tonic", "Controlled cluster administration")
+  Component(console_bff, "Console BFF", "Rust + Axum", "Read-only static UI, versioned JSON + SSE; bounded live trends")
+}
 
 Container_Boundary(server, "rr-server / RrNode") {
   Component(router, "ShardRouter", "rr-router", "Partition → group resolver")
   Component(raft_mgr, "RaftGroupManager", "rr-raft", "Manages multiple Raft groups")
   Component(network, "gRPC Services", "rr-network", "RaftService + ClientService + AdminService")
+  Component(observability, "Observability HTTP", "rr-server", "/health + /ready + /metrics")
   Component(raft1, "Raft Group 1", "openraft", "Independent consensus group")
   Component(raftN, "Raft Group N", "openraft", "Independent consensus group")
 }
 
 ComponentDb(storage, "StorageEngine", "rr-storage", "Mem or RocksDB backend")
 Component(config, "ConfigProvider", "rr-config", "Routing table source")
+System_Ext(etcd, "etcd", "Optional trusted NodeDirectory + ConfigProvider discovery")
+System_Ext(prometheus, "Prometheus", "Optional fixed-template metric history")
 
 Rel(client, network, "Client RPCs", "gRPC")
 Rel(network, router, "Routes requests via")
@@ -73,8 +83,28 @@ Rel(raft1, storage, "Log + SM persistence")
 Rel(raftN, storage, "Log + SM persistence")
 Rel(router, config, "Loads routing table")
 
+Rel(operator, admin_cli, "Runs controlled administration", "CLI / REPL")
+Rel(operator, browser, "Views cluster evidence")
+Rel(browser, console_bff, "Loads static UI; reads JSON + SSE", "Same-origin HTTP/HTTPS; HTTPS + viewer token off-loopback")
+Rel(admin_cli, network, "Runs controlled Admin RPCs", "gRPC; TLS/mTLS + Admin token in production")
+Rel(console_bff, network, "Reads node, group, and lifecycle state", "Admin gRPC; TLS/mTLS + Admin token in production")
+Rel(console_bff, observability, "Scrapes liveness, readiness, and live metrics", "HTTP /health, /ready, /metrics")
+Rel(console_bff, etcd, "Discovers nodes and reads routing (optional)", "etcd gRPC + TLS/auth")
+Rel(console_bff, prometheus, "Queries fixed history templates (optional)", "Prometheus HTTP API")
+
 @enduml
 ```
+
+`rr-admin` 的 CLI/REPL 与 Console BFF 同属一个二进制，但承担不同路径：Admin CLI 执行受控管理写操作，Console
+是只读 viewer，不是 Raft 控制面。浏览器使用 BFF 同源托管的 Next.js 静态导出，无需独立 Node.js 生产服务；
+Console 故障不影响 Raft 节点。etcd 发现和 Prometheus 固定模板历史均为可选，实时趋势保存在有界内存中。详见
+[集群管理控制台](../operations/cluster-admin-console.md)。
+
+The `rr-admin` CLI/REPL and Console BFF share one binary but serve different paths: the Admin CLI performs controlled
+administrative writes, while the Console is a read-only viewer, not a Raft control plane. The browser uses the Next.js
+static export served by the BFF on the same origin, with no standalone Node.js production service; Console failure does
+not affect Raft nodes. Both etcd discovery and Prometheus fixed-template history are optional, and live trends remain in
+bounded memory. See [Cluster Admin Console](../operations/cluster-admin-console.md).
 
 ## 设计原则 / Design Principles
 

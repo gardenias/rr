@@ -270,3 +270,81 @@ Use `RUST_LOG` for structured logs and inspect leader, log, and snapshot state t
 Peers must reach the configured Client/Raft gRPC addresses; Admin and metrics use separate ports. Keep latency low and
 topology stable, and monitor `rr_channel_reconnects_total`. The current heartbeat is 50ms and election timeout is 150–
 300ms; high-latency links can cause repeated elections.
+
+## 可选只读 Console / Optional Read-Only Console
+
+`rr-admin console` 是可选的只读观察组件，与 Admin CLI/REPL 同属一个 Rust 二进制，不是必须随集群启动的 Raft
+控制面。停止 Console 不影响 Raft 节点；membership、选主、快照、drain 等受控写操作仍使用 Admin CLI。
+
+`rr-admin console` is an optional read-only observer in the same Rust binary as the Admin CLI/REPL, not a Raft control
+plane that every cluster must run. Stopping it does not affect Raft nodes; controlled writes such as membership,
+leadership, snapshot, and drain operations remain with the Admin CLI.
+
+完整浏览器 UI 需要先静态导出前端。Node.js 和 pnpm 只参与构建，生产环境不需要独立 Node.js 服务：
+
+Build the full browser UI as a static export first. Node.js and pnpm are build-time-only dependencies; production needs
+no standalone Node.js service:
+
+```bash
+pnpm --dir crates/rr-admin/console install --frozen-lockfile
+pnpm --dir crates/rr-admin/console run build
+```
+
+将 `target/release/rr-admin` 和 `crates/rr-admin/console/out/` 一起部署，例如把导出内容复制到
+`/opt/rr/console`，再用 `--static-dir /opt/rr/console` 指向它。默认静态目录面向源码树，不能只复制二进制后
+就假定部署机上存在前端产物。
+
+Ship `target/release/rr-admin` together with `crates/rr-admin/console/out/`; for example, copy the export to
+`/opt/rr/console` and pass `--static-dir /opt/rr/console`. The default static directory is source-tree-oriented, so
+copying only the binary does not deploy the frontend.
+
+非 loopback 生产监听必须同时启用 Console HTTPS 和 viewer token。下面的全局 Admin TLS/token 参数位于
+`console` 之前，供 BFF 连接 AdminService；子命令后的 TLS 参数用于 Browser→Console HTTPS：
+
+A non-loopback production listener requires both Console HTTPS and a viewer token. Global Admin TLS/token flags appear
+before `console` for BFF-to-AdminService connections; TLS flags after the subcommand configure browser-to-Console HTTPS:
+
+```bash
+export RR_ADMIN_TOKEN='<admin-token-from-your-secret-store>'
+export RR_CONSOLE_TOKEN='<viewer-token-from-your-secret-store>'
+
+./target/release/rr-admin \
+  --token-env RR_ADMIN_TOKEN \
+  --tls-ca /etc/rr/tls/ca.pem \
+  --tls-cert /etc/rr/tls/client.pem \
+  --tls-key /etc/rr/tls/client.key \
+  console \
+  --listen 0.0.0.0:8443 \
+  --peers 1@192.168.1.1:52001,2@192.168.1.2:52001,3@192.168.1.3:52001 \
+  --console-token-env RR_CONSOLE_TOKEN \
+  --tls-cert /etc/rr/tls/console.pem \
+  --tls-key /etc/rr/tls/console.key \
+  --static-dir /opt/rr/console
+```
+
+节点 Admin token 只保留在 BFF。Console 经 Admin gRPC 取得受信描述符，再从描述符的 `observability_addr`
+通过 HTTP 抓取 `/health`、`/ready` 和 `/metrics`；BFF 必须能访问这些观测端口。仅启用 Admin/metrics 端口并不
+足够：stock `rr-server` 必须在 `[node]` 中完整配置 `advertise_addr`、`admin_advertise_addr`、
+`observability_advertise_addr` 和 `environment`，字段语义见
+[NodeDirectory 自注册](../guide/config-provider.md#节点自注册--node-self-registration)。缺少描述符时仍可使用
+Admin-backed 视图，但健康探测和实时指标按能力降级。当前节点指标端点可能未认证，只向受信运维网络开放，不要
+暴露到公网。
+
+The node Admin token remains inside the BFF. The Console obtains a trusted descriptor over Admin gRPC, then scrapes
+`/health`, `/ready`, and `/metrics` over HTTP from its `observability_addr`; the BFF needs network access to this
+observability endpoint. Enabling Admin and metrics ports alone is insufficient: stock `rr-server` must configure all of
+`advertise_addr`, `admin_advertise_addr`, `observability_advertise_addr`, and `environment` in `[node]`. See
+[NodeDirectory self-registration](../guide/config-provider.md#节点自注册--node-self-registration) for their semantics.
+Without a descriptor, Admin-backed views remain available but health probes and live metrics degrade by capability.
+Node metrics endpoints may be unauthenticated, so expose them only to the trusted operations network, never publicly.
+
+实时趋势默认只保存在 BFF 的有界内存中，重启即清空。需要历史时可成对添加
+`--prometheus-url http://prometheus.internal:9090` 和 `--prometheus-cluster cluster_id=prod-rr`；Prometheus 是
+可选历史后端，只提供固定 raw-family 模板，不是 Raft 集群或 Console 的必需依赖，也不开放任意 PromQL。
+etcd 发现、session 语义和完整故障排查见 [集群管理控制台手册](../operations/cluster-admin-console.md)。
+
+Live trends are retained only in bounded BFF memory and are cleared on restart. For history, optionally add both
+`--prometheus-url http://prometheus.internal:9090` and `--prometheus-cluster cluster_id=prod-rr`. Prometheus is an
+optional history backend with fixed raw-family templates, not a requirement for the Raft cluster or Console, and it
+does not expose arbitrary PromQL. See the [Cluster Admin Console manual](../operations/cluster-admin-console.md) for
+etcd discovery, session semantics, and complete troubleshooting.

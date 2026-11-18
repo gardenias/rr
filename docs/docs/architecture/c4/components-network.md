@@ -19,7 +19,8 @@ sidebar_position: 6
 title Component Diagram - rr-network (gRPC Transport)
 
 Container_Ext(rr_client, "rr-client SDK", "Rust library", "User application")
-Container_Ext(rr_admin, "rr-admin CLI", "Rust binary", "Operator tool")
+Container_Ext(rr_admin, "rr-admin CLI / REPL", "rr-admin binary", "Controlled operator actions")
+Container_Ext(console_bff, "Cluster Admin Console BFF", "rr-admin console; Rust/Axum", "Read-only viewer with same-origin static UI, JSON /api/v1/console and SSE")
 Container_Ext(peer_node, "Peer rr-server Node", "Rust binary", "Other Raft members")
 Container_Ext(raft_mgr, "RaftGroupManager (local)", "rr-raft", "Holds all local groups")
 Container_Ext(dispatch, "ClientDispatchImpl (local)", "rr-server", "ClientDispatch trait impl")
@@ -28,7 +29,7 @@ Container_Ext(admin_hdl, "Admin Handlers (local)", "rr-server", "AdminService tr
 Container_Boundary(rr_network, "rr-network") {
   Component(proto_raft, "raft.proto → RaftService", "tonic-generated", "AppendEntries, Vote, InstallSnapshot (streaming). Bytes field carries bincode-encoded openraft types")
   Component(proto_client, "client.proto → ClientService", "tonic-generated", "Request, ReadLocal, ReadLinearizable, GetClusterInfo")
-  Component(proto_admin, "admin.proto → AdminService", "tonic-generated", "16 RPCs: GetNodeStatus, GetGroupStatus, ListGroups, GetSnapshotStatus, TriggerSnapshot, TransferLeader, DrainNode, AddLearner, ChangeMembership, RemoveGroupMember, ResetIngestorOffset, GetGroupMembership, OnlineBackup (streaming), GetRoutingTable, GetMetricsSummary, GetFormationStatus")
+  Component(proto_admin, "admin.proto → AdminService", "tonic-generated", "22 RPCs: GetNodeStatus, GetGroupStatus, ListGroups, GetSnapshotStatus, TriggerSnapshot, TransferLeader, DrainNode, AddLearner, ChangeMembership, RemoveGroupMember, ResetIngestorOffset, GetGroupMembership, OnlineBackup (streaming), GetRoutingTable, GetMetricsSummary, GetFormationStatus, GetBuildInfo, GetNodeDescriptor, GetClusterTopology, GetGroupReplicaStatus, GetBootStatus, ListBootRecords")
 
   Component(raft_svc_impl, "RaftServiceImpl", "rr-network::raft_service", "gRPC handler. Delegates to injected RaftGroupLookup trait")
   Component(client_svc_impl, "ClientServiceImpl", "rr-network::client_service", "gRPC handler. Delegates to injected ClientDispatch trait")
@@ -39,7 +40,8 @@ Container_Boundary(rr_network, "rr-network") {
 }
 
 Rel(rr_client, client_svc_impl, "Client RPCs", "gRPC")
-Rel(rr_admin, proto_admin, "Admin RPCs", "gRPC")
+Rel(rr_admin, proto_admin, "Queries status and performs controlled admin operations", "gRPC AdminService (TLS/mTLS + Admin token in production)")
+Rel(console_bff, proto_admin, "Reads node/group, topology, build and boot state", "gRPC AdminService (TLS/mTLS + Admin token in production)")
 Rel(peer_node, raft_svc_impl, "Raft RPCs", "gRPC")
 
 Rel(raft_svc_impl, raft_mgr, "Via RaftGroupLookup trait")
@@ -105,9 +107,12 @@ the SDK discovers leaders through redirects rather than polling this RPC.
 
 ### Admin 服务：`admin.proto` / Admin Service: `admin.proto`
 
-运维 CLI 使用的管理接口。
+运维 CLI/REPL 和只读 Cluster Admin Console BFF 使用的管理接口。两者同属 `rr-admin` 二进制；
+CLI/REPL 可执行受控写操作，Console 只调用读取接口，节点 Admin token 仅由 BFF 持有。
 
-The administration interface used by the operator CLI.
+The administration interface used by the operator CLI/REPL and the read-only Cluster Admin Console BFF. Both are
+part of the `rr-admin` binary. The CLI/REPL can perform controlled writes; the Console calls only read APIs, and
+only its BFF holds node Admin tokens.
 
 ```proto
 service AdminService {
@@ -127,8 +132,22 @@ service AdminService {
   rpc GetRoutingTable(Empty) returns (RoutingTableSnapshot);
   rpc GetMetricsSummary(Empty) returns (MetricsSummary);
   rpc GetFormationStatus(Empty) returns (FormationStatus);
+  rpc GetBuildInfo(Empty) returns (BuildInfo);
+  rpc GetNodeDescriptor(Empty) returns (NodeDescriptorResponse);
+  rpc GetClusterTopology(ClusterTopologyRequest) returns (ClusterTopology);
+  rpc GetGroupReplicaStatus(GroupId) returns (GroupReplicaStatus);
+  rpc GetBootStatus(Empty) returns (BootStatus);
+  rpc ListBootRecords(BootRecordsRequest) returns (BootRecordPage);
 }
 ```
+
+`GetBuildInfo`、`GetNodeDescriptor`、`GetClusterTopology`、`GetGroupReplicaStatus`、`GetBootStatus` 和
+`ListBootRecords` 为 Console 提供构建、节点描述符、拓扑、副本与启动历史证据；旧节点未实现这些 RPC 时，
+Console 按能力降级，不伪造数据。
+
+`GetBuildInfo`, `GetNodeDescriptor`, `GetClusterTopology`, `GetGroupReplicaStatus`, `GetBootStatus`, and
+`ListBootRecords` provide build, node-descriptor, topology, replica, and boot-history evidence to the Console.
+When an older node does not implement these RPCs, the Console degrades by capability instead of fabricating data.
 
 按 group 操作的请求类型名为 `GroupId`，不是 `GroupIdRequest`。
 

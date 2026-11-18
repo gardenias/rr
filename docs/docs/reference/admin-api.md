@@ -23,6 +23,25 @@ let config = NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_
 完整服务与消息定义见 `crates/rr-network/proto/admin.proto`。
 The complete service and message definitions live in `crates/rr-network/proto/admin.proto`.
 
+## Cluster Admin Console 访问 / Cluster Admin Console Access
+
+`rr-admin console` 是同一 `rr-admin` 二进制中的只读 BFF，也是 `AdminService` 的 gRPC 客户端。BFF 使用
+TLS/mTLS 和 Admin token（生产环境按节点配置）读取节点状态与拓扑，节点 Admin token 只保留在 BFF 内。本地明文
+无认证模式仍受支持。浏览器不直接访问节点 Admin gRPC，而是通过同源的版本化 `/api/v1/console` JSON 端点和
+`/api/v1/console/stream` SSE 获取数据。
+`rr-admin console` is a read-only BFF in the same `rr-admin` binary and a gRPC client of `AdminService`. In production,
+the BFF uses TLS/mTLS and an Admin token as required by the nodes to read node state and topology; node Admin tokens
+remain inside the BFF. Local plaintext, unauthenticated mode is still supported. Browsers do not access node Admin gRPC
+directly. They use the same-origin, versioned `/api/v1/console` JSON endpoints and `/api/v1/console/stream` SSE instead.
+
+Console 不调用 `TriggerSnapshot`、`TransferLeader`、membership 或 `DrainNode` 等写 RPC；
+`POST /api/v1/console/sources/reconcile` 也只刷新只读采集。Admin 写 RPC 仍由 `rr-admin` CLI 或其他受权客户端
+执行。启动、安全和能力降级详见 [Cluster Admin Console](../operations/cluster-admin-console.md)。
+The Console does not call write RPCs such as `TriggerSnapshot`, `TransferLeader`, membership changes, or `DrainNode`;
+`POST /api/v1/console/sources/reconcile` only refreshes read-only collection. Admin write RPCs remain the responsibility
+of the `rr-admin` CLI or other authorized clients. See [Cluster Admin Console](../operations/cluster-admin-console.md)
+for startup, security, and capability degradation.
+
 ## RPC 方法 / RPC Methods
 
 ### `GetNodeStatus(Empty) → NodeStatus`

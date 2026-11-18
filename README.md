@@ -19,6 +19,10 @@ Rr is a distributed multi-Raft consensus framework written in Rust, designed for
 - **gRPC Networking with Connection Pooling** — 高效的 gRPC 网络层和连接池管理 / Efficient gRPC networking with connection pooling
 - **TLS/mTLS + Bearer Auth + Rate Limiting** — 生产安全默认（G1–G7 启动安全门）/ Production-grade security by default (G1–G7 startup gates)
 - **Dynamic Configuration Management** — 通过 ConfigProvider 动态管理分布式配置和分区（内存与 etcd 后端）/ Dynamic distributed configuration via ConfigProvider (in-memory and etcd backends)
+- **Read-Only Cluster Admin Console** — `rr-admin console` 同源托管 Next.js 静态界面、版本化 JSON 与 SSE，
+  展示集群、Raft 组、生命周期与性能；受控写操作仍由 Admin CLI 执行 / `rr-admin console` serves a same-origin
+  Next.js static UI, versioned JSON, and SSE for cluster, Raft group, lifecycle, and performance visibility;
+  controlled writes remain in the Admin CLI
 - **Client SDK with Auto Leader-Redirect** — 智能客户端 SDK 自动处理领导者重定向和重试（Rust + Java）/ Smart client SDK with auto leader-redirect and retry (Rust + Java)
 - **Snapshot Transfer Between Nodes** — 节点间的快照传输支持快速同步 / Snapshot transfer between nodes for fast synchronization
 - **Linearizable Reads** — 协议层强一致读（ReadIndex + leader 重定向）/ Protocol-level linearizable reads (ReadIndex + leader redirect)
@@ -38,7 +42,12 @@ C4Container
 
   System_Boundary(client_side, "Client Side") {
     Container(user_app, "User Application", "Rust + rr-client SDK", "Auto leader-redirect & retry")
-    Container(admin_cli, "rr-admin CLI", "Rust binary", "Cluster administration")
+    Container(operator_browser, "Operator Browser", "Web browser", "Views the read-only Console")
+  }
+
+  System_Boundary(admin_tools, "Admin Tools") {
+    Container(admin_cli, "rr-admin CLI / REPL", "Rust binary", "Controlled cluster administration")
+    Container(admin_console, "Cluster Admin Console", "rr-admin console: Rust/Axum BFF + Next.js static export", "Same-origin read-only UI, versioned JSON & SSE; no Node.js production service")
   }
 
   System_Boundary(cluster, "Rr Cluster (N nodes)") {
@@ -46,15 +55,23 @@ C4Container
     ContainerDb(rocks, "RocksDB Data Dir", "Local SSD", "Raft log + state (optional rocks feature)")
   }
 
-  System_Ext(prometheus, "Prometheus", "Metrics scraping")
+  System_Ext(etcd, "etcd", "Optional trusted discovery + config")
+  System_Ext(prometheus, "Prometheus", "Optional metrics scraping + history")
 
   Rel(developer, user_app, "Builds & deploys")
-  Rel(operator, admin_cli, "Runs commands")
+  Rel(operator, operator_browser, "Views cluster evidence")
+  Rel(operator, admin_cli, "Runs controlled commands")
+  Rel(operator, admin_console, "Starts the read-only BFF")
   Rel(user_app, rr_node, "ClientRequest / GetClusterInfo", "gRPC")
-  Rel(admin_cli, rr_node, "Admin RPCs", "gRPC")
+  Rel(operator_browser, admin_console, "Loads static UI; reads /api/v1/console JSON + SSE", "HTTPS (HTTP on loopback)")
+  Rel(admin_cli, rr_node, "Runs controlled Admin RPCs", "gRPC; TLS/mTLS + Admin token in production")
+  Rel(admin_console, rr_node, "Reads status, topology & lifecycle via Admin RPCs", "gRPC; TLS/mTLS + Admin token in production")
+  Rel(admin_console, rr_node, "Fetches /health, /ready & /metrics", "HTTP to trusted observability addresses")
+  Rel(admin_console, etcd, "Watches NodeDirectory; reads ConfigProvider (optional)", "etcd gRPC (TLS + auth)")
+  Rel(admin_console, prometheus, "Queries fixed history templates (optional)", "Prometheus HTTP API")
   Rel(rr_node, rr_node, "Raft RPCs (AppendEntries / Vote / InstallSnapshot)", "gRPC")
   Rel(rr_node, rocks, "Reads/writes log", "File I/O")
-  Rel(rr_node, prometheus, "Exposes /metrics", "HTTP")
+  Rel(prometheus, rr_node, "Scrapes /metrics (optional)", "HTTP")
 
   UpdateRelStyle(rr_node, rr_node, $offsetX="40", $offsetY="-40")
 ```
@@ -265,6 +282,62 @@ cargo build --features rocks
 cargo run -p kv-store
 ```
 
+### 只读 Cluster Admin Console / Read-Only Cluster Admin Console
+
+`rr-admin console` 在同一个 Rust/Axum BFF 中托管 Next.js 静态导出、版本化 `/api/v1/console` JSON 和 SSE，
+无需独立 Node.js 生产服务。Console 只读；membership、强制选主、TriggerSnapshot、drain 和 offset reset 等受控写操作仍由
+Admin CLI 执行，停止 Console 不影响 Raft 节点。
+
+`rr-admin console` serves the Next.js static export, versioned `/api/v1/console` JSON, and SSE from one Rust/Axum
+BFF, with no standalone Node.js production service. The Console is read-only; controlled writes such as membership
+changes, forced leadership, snapshot triggering, drains, and offset resets remain in the Admin CLI. Stopping the
+Console does not affect Raft nodes.
+
+完整浏览器 UI 需要先构建静态导出。部署时随二进制携带 `crates/rr-admin/console/out`，或用 `--static-dir`
+指向其部署位置。
+
+Build the static export for the full browser UI. Ship `crates/rr-admin/console/out` with the binary, or point
+`--static-dir` at its deployed location.
+
+```bash
+pnpm --dir crates/rr-admin/console install --frozen-lockfile
+pnpm --dir crates/rr-admin/console run build
+cargo build --release -p rr-admin
+```
+
+以下是使用显式 Admin seed 的本地启动示例；`--peers` 的每项是 `node_id@AdminService_host:port`，不是
+client/bootstrap 地址。仅为不需要认证的明文本地 AdminService 省略 `--token-env`。
+
+The following local example uses explicit Admin seeds. Each `--peers` entry is
+`node_id@AdminService_host:port`, not a client/bootstrap address. Omit `--token-env` only for a plaintext local
+AdminService that does not require authentication.
+
+```bash
+export RR_ADMIN_TOKEN='<admin-token-from-your-secret-store>'
+
+./target/release/rr-admin \
+  --token-env RR_ADMIN_TOKEN \
+  console \
+  --listen 127.0.0.1:8080 \
+  --peers 1@127.0.0.1:52001,2@127.0.0.1:52002,3@127.0.0.1:52003
+```
+
+打开 `http://127.0.0.1:8080`。只有 Admin seed 时可查看 Admin-backed 数据；健康探测和实时指标还要求节点提供
+带受信 `observability_addr` 的完整描述符，否则相应模块按能力降级。全局 `--token-env` 和 BFF→AdminService 的
+`--tls-ca`/`--tls-cert`/`--tls-key`/`--tls-domain` 位于 `console` **之前**；`--listen`、`--peers`、
+`--static-dir`，以及 Browser→Console 的 `--console-token-env`/`--tls-cert`/`--tls-key` 位于 `console`
+**之后**。非 loopback 监听必须同时启用 Console HTTPS 和 viewer token。安全启动、可选 etcd 发现和可选
+Prometheus 历史配置见 [Cluster Admin Console 运维手册](docs/docs/operations/cluster-admin-console.md)。
+
+Open `http://127.0.0.1:8080`. Admin seeds alone provide Admin-backed data; health probes and live metrics additionally
+require a complete node descriptor with a trusted `observability_addr`, otherwise those modules degrade by capability.
+The global `--token-env` and BFF-to-AdminService
+`--tls-ca`/`--tls-cert`/`--tls-key`/`--tls-domain` flags appear **before** `console`; `--listen`, `--peers`,
+`--static-dir`, and the browser-to-Console `--console-token-env`/`--tls-cert`/`--tls-key` flags appear **after**
+it. A non-loopback listener requires both Console HTTPS and a viewer token. See the
+[Cluster Admin Console operations guide](docs/docs/operations/cluster-admin-console.md) for secure startup, optional
+etcd discovery, and optional Prometheus history.
+
 ### Multi-Node Consensus Cluster
 
 以下是本机实测通过的三节点真实共识集群（`kv-store` 示例，真实 KV 语义）：
@@ -434,10 +507,16 @@ Failover (verified): Ctrl-C the leader node — within seconds the survivors ele
 
 ## Developer Workflow with just
 
-日常命令已封装在根目录的 [justfile](./justfile)（需安装 [just](https://github.com/casey/just)）。深度操作手册（集群探玩、Genesis/Adoption、故障转移、真实验收）见
-[Operations Playbook](docs/docs/guide/playbook.md)；Java SDK 用法见 [sdks/java/README.md](sdks/java/README.md)。
+日常命令已封装在根目录的 [justfile](./justfile)（需安装 [just](https://github.com/casey/just)）。深度操作手册
+（集群探玩、Genesis/Adoption、故障转移、真实验收）见 [Operations Playbook](docs/docs/guide/playbook.md)；
+只读 Web Console 的构建与安全运行见 [Cluster Admin Console](docs/docs/operations/cluster-admin-console.md)；
+Java SDK 用法见 [sdks/java/README.md](sdks/java/README.md)。
 
-Common commands are wrapped in the root [justfile](./justfile) (requires [just](https://github.com/casey/just)). For the deep operations walkthrough — cluster exploration, Genesis/adoption, failover, real acceptance suites — see the [Operations Playbook](docs/docs/guide/playbook.md); for the Java SDK see [sdks/java/README.md](sdks/java/README.md).
+Common commands are wrapped in the root [justfile](./justfile) (requires [just](https://github.com/casey/just)).
+For the deep operations walkthrough — cluster exploration, Genesis/adoption, failover, real acceptance suites — see the
+[Operations Playbook](docs/docs/guide/playbook.md); for building and securely running the read-only Web Console see
+[Cluster Admin Console](docs/docs/operations/cluster-admin-console.md); for the Java SDK see
+[sdks/java/README.md](sdks/java/README.md).
 
 ```bash
 just --list          # 列出全部命令 / list every recipe

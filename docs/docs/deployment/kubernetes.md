@@ -240,6 +240,54 @@ spec:
 
 ## 操作 / Operations
 
+### Cluster Admin Console（自管） / Cluster Admin Console (Self-Managed)
+
+当前 raw manifests 和 Helm chart 不会自动部署 Console：其中没有 Console `Deployment`、`Service` 或对应 Helm
+values。需要浏览器 UI 时，应自行将 `rr-admin console` 作为独立工作负载和 Service 部署，不要把它加入 Raft
+`StatefulSet` 或当作 formation/控制面组件。Console 故障不影响 Raft 节点，受控写操作仍由 Admin CLI 执行。
+
+The current raw manifests and Helm chart do not deploy the Console automatically: they contain no Console `Deployment`,
+`Service`, or corresponding Helm values. To use the browser UI, operate `rr-admin console` as a separate workload and
+Service yourself. Do not add it to the Raft `StatefulSet` or treat it as a formation/control-plane component. A Console
+outage does not affect Raft nodes, and controlled write operations remain the responsibility of the Admin CLI.
+
+自管部署至少需要满足以下要求：
+
+A self-managed deployment must account for the following:
+
+- 同时携带 `rr-admin` 二进制和前端静态导出 `console/out`，并用 `--static-dir` 指向实际部署目录；静态文件由
+  Console BFF 同源托管，不需要独立 Node.js 生产服务。/ Ship both the `rr-admin` binary and the `console/out`
+  static export, and point `--static-dir` at the deployed directory. The Console BFF serves these files from the same
+  origin; no standalone Node.js production service is required.
+- 打通 Console Pod 到各节点 Admin gRPC（仓库 manifests 使用 52001，生产使用 TLS/mTLS 和 Admin token）以及
+  observability HTTP（仓库 manifests 使用 9100，抓取 `/health`、`/ready` 和 `/metrics`）的网络路径，并用
+  NetworkPolicy 限制访问来源。完整健康与实时指标还要求每节点在 `[node]` 中配置完整的
+  `advertise_addr`、`admin_advertise_addr`、`observability_advertise_addr` 和 `environment`；当前 raw/Helm
+  配置未提供这些描述符字段，需要自管部署自行补充，否则相关视图按能力降级。字段语义见
+  [NodeDirectory 自注册](../guide/config-provider.md#节点自注册--node-self-registration)。Prometheus 仅用于可选
+  历史查询，不是 Console 的必需依赖。/ Allow network paths from the Console Pod to each node's Admin gRPC endpoint
+  (port 52001 in the repository manifests, with TLS/mTLS and the Admin token in production) and observability HTTP
+  endpoint (port 9100 in the repository manifests, for `/health`, `/ready`, and `/metrics`), restricting clients with
+  NetworkPolicy. Full health and live metrics also require every node to configure `advertise_addr`,
+  `admin_advertise_addr`, `observability_advertise_addr`, and `environment` in `[node]`. The current raw/Helm
+  configuration omits these descriptor fields; a self-managed deployment must supply them or accept capability
+  degradation. See [NodeDirectory self-registration](../guide/config-provider.md#节点自注册--node-self-registration).
+  Prometheus is optional for historical queries and is not required by the Console.
+- 使用专用 Secret 提供 Console HTTPS 服务证书/私钥和 viewer token（通过 `RR_CONSOLE_TOKEN` 注入），并与节点
+  `rr-tls`、`rr-admin-token` 分开管理；BFF→Admin 的客户端 TLS 凭证按手册单独配置。非 loopback 监听必须同时
+  启用 Console HTTPS 和 viewer token。/ Use dedicated Secrets for the Console HTTPS serving certificate/private key
+  and viewer token (injected through `RR_CONSOLE_TOKEN`), managed separately from the node `rr-tls` and
+  `rr-admin-token` Secrets. Configure BFF-to-Admin client TLS credentials separately as described in the manual.
+  Non-loopback listeners require both Console HTTPS and a viewer token.
+- 只通过受控 Service/Ingress 暴露 Console HTTPS；不要为了 Console 把节点 Admin 或 metrics 端点暴露到公网。/
+  Expose only Console HTTPS through a controlled Service/Ingress; never expose node Admin or metrics endpoints publicly
+  to support the Console.
+
+完整启动参数、静态构建顺序、发现模式和安全边界见
+[Cluster Admin Console 手册](../operations/cluster-admin-console.md)。
+See the [Cluster Admin Console manual](../operations/cluster-admin-console.md) for complete startup flags, the static
+build sequence, discovery modes, and security boundaries.
+
 ### 查看集群状态 / View Cluster Status
 
 默认安全配置下，Pod 内的 `rr-admin` 也要显式加载 TLS 文件和 Admin token：

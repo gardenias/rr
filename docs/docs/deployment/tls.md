@@ -2,12 +2,14 @@
 sidebar_position: 2
 ---
 
-# TLS：加密 gRPC 流量 / TLS: Encrypting gRPC Traffic
+# TLS：加密 gRPC 与 Console HTTPS / TLS: Encrypting gRPC and Console HTTPS
 
 Rr 通过 rustls 在 Client、Raft、Admin gRPC 端点支持 TLS 和可选 mTLS。默认不启用 TLS；生产 Raft 必须启用 TLS + mTLS。
+`rr-admin console` 另用 rustls 提供 Browser→Console HTTPS；它与 BFF→AdminService 的上游 TLS 是独立边界。
 
 Rr supports TLS and optional mTLS on Client, Raft, and Admin gRPC endpoints through rustls. TLS is off by default;
-production Raft requires TLS + mTLS.
+production Raft requires TLS + mTLS. `rr-admin console` separately uses rustls for browser-to-Console HTTPS, which is
+independent of the BFF-to-AdminService upstream TLS boundary.
 
 ## 本地开发证书 / Local Development Certificates
 
@@ -98,6 +100,57 @@ TLS 参数必须同时提供。
 
 Use a deployment-specific CA and distinct node certificates in production, with the CA private key offline. Client/Admin
 applications also need certificates and appropriate tokens; all three `rr-admin` TLS flags must be supplied together.
+
+## Cluster Admin Console 的两条 TLS 边界 / Two Cluster Admin Console TLS Boundaries
+
+`rr-admin console` 中同名 TLS 参数的位置决定其作用对象。`console` **之前**的全局参数配置 BFF→AdminService
+上游 gRPC；`console` **之后**的子命令参数配置 Browser→Console HTTPS。两组证书互不替代，必须分别按两条边界
+规划签发、SAN 和轮换。
+
+For `rr-admin console`, flag position determines which boundary same-named TLS flags configure. Global flags **before**
+`console` configure upstream BFF-to-AdminService gRPC. Subcommand flags **after** `console` configure
+browser-to-Console HTTPS. The certificate sets are not interchangeable; plan issuance, SANs, and rotation separately.
+
+| 参数位置 / Flag Position | 参数 / Flags | 作用 / Purpose |
+| :--- | :--- | :--- |
+| `console` 之前 / Before `console` | `--tls-ca` + `--tls-cert` + `--tls-key`，可选 `--tls-domain` | BFF 作为客户端连接 AdminService 的 gRPC TLS/mTLS；三项必须同时提供 / Client-side gRPC TLS/mTLS to AdminService; the trio is all-or-nothing |
+| `console` 之前 / Before `console` | `--token-env RR_ADMIN_TOKEN` | BFF 从环境变量读取节点 Admin bearer token；只用于上游 RPC / BFF reads the node Admin bearer token for upstream RPCs only |
+| `console` 之后 / After `console` | `--tls-cert` + `--tls-key` | Console 自身 HTTPS 服务端证书和私钥；必须成对提供 / Console's own HTTPS server certificate and private key; required as a pair |
+| `console` 之后 / After `console` | `--console-token-env RR_CONSOLE_TOKEN` | Browser→Console viewer 登录凭证的环境变量名 / Environment-variable name for the browser-to-Console viewer credential |
+
+```bash
+export RR_ADMIN_TOKEN='<admin-token-from-your-secret-store>'
+export RR_CONSOLE_TOKEN='<viewer-token-from-your-secret-store>'
+
+./target/release/rr-admin \
+  --token-env RR_ADMIN_TOKEN \
+  --tls-ca /etc/rr/admin-ca.pem \
+  --tls-cert /etc/rr/admin-client.pem \
+  --tls-key /etc/rr/admin-client.key \
+  console \
+  --listen 0.0.0.0:8443 \
+  --peers 1@rr-1.internal:52001,2@rr-2.internal:52001 \
+  --console-token-env RR_CONSOLE_TOKEN \
+  --tls-cert /etc/rr/console.pem \
+  --tls-key /etc/rr/console.key
+```
+
+此例中 `admin-client.pem` 是 BFF 连接节点时出示的客户端证书，`console.pem` 是浏览器访问 Console 时验证的
+服务端证书，其 SAN 必须匹配浏览器使用的主机名。Admin token 只在 BFF 内，不下发浏览器；viewer token 是独立
+凭证，不能替代节点 Admin token。
+
+Here `admin-client.pem` is the client certificate presented by the BFF to nodes, while `console.pem` is the server
+certificate browsers verify; its SANs must match the hostname used by browsers. The Admin token remains inside the BFF
+and is never sent to browsers. The viewer token is a separate credential and cannot replace the node Admin token.
+
+非 loopback 监听必须同时配置 Console HTTPS 和非空 viewer token；`--allow-insecure` 仅接受 loopback，不能绕过
+远程监听要求。loopback 的 HTTPS 与 viewer 认证可选。两条边界的认证、session 和只读 reconcile 约束见
+[安全模型](./security.md#cluster-admin-console-的两条边界--two-cluster-admin-console-boundaries)。
+
+A non-loopback listener requires both Console HTTPS and a non-empty viewer token. `--allow-insecure` is loopback-only
+and cannot bypass remote-listener requirements; HTTPS and viewer authentication are optional on loopback. See the
+[security model](./security.md#cluster-admin-console-的两条边界--two-cluster-admin-console-boundaries) for
+authentication, sessions, and read-only reconcile constraints on both boundaries.
 
 ## 节点间对称 TLS / Symmetric TLS Between Peers
 
