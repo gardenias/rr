@@ -31,8 +31,9 @@ Deployment_Node(ops_zone, "Operations Zone", "Isolated operator network") {
     Container(console_ui, "Console Web UI", "React 19 + Next.js static export in browser", "Read-only viewer")
   }
   Deployment_Node(console_host, "Console Host", "Linux") {
-    Container(console_bff, "rr-admin Console BFF", "Rust + Axum; rr-admin console", "Same-origin static files, versioned JSON /api/v1/console and SSE; read-only; holds node Admin token")
+    Container(console_bff, "rr-admin Multi-cluster Console BFF", "Rust + Axum; rr-admin console", "No-source startup; same-origin static files, connection CRUD, scoped JSON /api/v1/console/connections/{id} and SSE; per-runtime Admin credentials")
     Container(console_assets, "Console Static Export", "Next.js static files: console/out", "Shipped with rr-admin or selected with --static-dir; no Node.js production service")
+    ContainerDb(console_profiles, "Console Profile Store", "Versioned local 0600 JSON", "Persistent non-sensitive profiles in --state-dir; memory/keychain secrets; no auto-connect on restart")
   }
 }
 
@@ -67,6 +68,7 @@ Rel(admin_cli, rr1, "Runs controlled read/write administration", "Admin gRPC :52
 
 Rel(console_ui, console_bff, "Loads static UI; reads JSON and subscribes to SSE", "HTTPS :8443 (example) + viewer session")
 Rel(console_bff, console_assets, "Reads and serves static UI files", "Local file I/O")
+Rel(console_bff, console_profiles, "Loads and atomically saves non-sensitive profiles; restart leaves runtimes disconnected", "Local file I/O; --state-dir")
 Rel(console_bff, rr1, "Reads node, group and lifecycle state", "Admin gRPC :52001 (TLS/mTLS + Admin token)")
 Rel(console_bff, rr2, "Reads node, group and lifecycle state", "Admin gRPC :52001 (TLS/mTLS + Admin token)")
 Rel(console_bff, rr3, "Reads node, group and lifecycle state", "Admin gRPC :52001 (TLS/mTLS + Admin token)")
@@ -96,27 +98,32 @@ LAYOUT_WITH_LEGEND()
 @enduml
 ```
 
-图中的 `Container` 是 C4 可部署单元，不表示 Docker 容器。Console BFF 与 `console/out` 静态导出随同一
-`rr-admin` 部署单元携带，或由 `--static-dir` 指向导出位置；Axum 同源提供静态文件、版本化
-`/api/v1/console` JSON 和 SSE，不需要独立 Node.js 生产服务。
+图中的 `Container` 是 C4 可部署单元，不表示 Docker 容器。图中只画出一套三节点集群以控制图面复杂度；
+一个 Console BFF 可通过独立 runtime 连接多套这样的集群，各连接的 Admin/observability 网络访问需分别放通。
+Console BFF、`console/out` 和 versioned profile store 随同一 `rr-admin` 部署单元配置；静态导出由
+`--static-dir` 指向，profile 由 `--state-dir` 指向持久独占目录。Axum 同源提供静态文件、连接控制、
+connection-scoped JSON 和 SSE，不需要独立 Node.js 生产服务。
 
-Here `Container` is a C4 deployable unit, not a Docker container. Ship the Console BFF and `console/out` static
-export with the same `rr-admin` deployment, or point `--static-dir` at the export. Axum serves static files,
-versioned `/api/v1/console` JSON, and SSE from one origin; no standalone Node.js production service is required.
+Here `Container` is a C4 deployable unit, not a Docker container. The diagram shows one three-node cluster for
+readability; one Console BFF can connect to multiple such clusters through isolated runtimes, with Admin/observability
+network access allowed for each target. Deploy the Console BFF, `console/out`, and versioned profile store as one
+`rr-admin` configuration: select assets with `--static-dir` and a persistent exclusive profile directory with
+`--state-dir`. Axum serves static files, connection control, scoped JSON, and SSE from one origin without a Node.js server.
 
-Console 是只读 viewer，不是 Raft 控制面；`POST /sources/reconcile` 也只刷新采集，受控写操作仍由 Admin CLI
-执行。实时趋势保留在 BFF 的有界内存中；Prometheus 仅提供可选的固定模板历史查询，不是 Console 或集群的
-必需依赖。
+Console 是只读 viewer，不是 Raft 控制面；`POST /connections/{id}/sources/reconcile` 也只刷新该 runtime 的采集，
+受控写操作仍由 Admin CLI 执行。实时趋势按连接保留在 BFF 的有界内存中；Prometheus 仅提供可选的固定模板历史查询，
+不是 Console 或集群的必需依赖。重启保留 profile 但清空 runtime/session/内存趋势，所有 profile 从 Disconnected 开始。
 
-The Console is a read-only viewer, not a Raft control plane; `POST /sources/reconcile` only refreshes collection,
-and controlled writes remain with the Admin CLI. Live trends stay in bounded BFF memory. Prometheus only provides
-optional fixed-template history queries and is not required by the Console or the cluster.
+The Console is a read-only viewer, not a Raft control plane; `POST /connections/{id}/sources/reconcile` only refreshes
+that runtime's collection, and controlled writes remain with the Admin CLI. Live trends stay in bounded per-connection BFF
+memory. Prometheus provides only optional fixed-template history and is not required by Console or the cluster. Restart
+retains profiles but clears runtimes, sessions, and in-memory trends; every profile starts Disconnected.
 
 ## 端口与网络安全 / Ports and Network Security
 
 | 端口 / Port | 协议 / Protocol | 服务 / Service | 暴露范围 / Exposed To |
 | :--- | :--- | :--- | :--- |
-| **8080 / 8443（示例 / examples）** | HTTP / HTTPS | Console 静态文件 + `/api/v1/console` JSON + SSE / Console static files + JSON + SSE | 仅运维网络；非 loopback 必须 HTTPS + viewer token / Operations network only; non-loopback requires HTTPS + viewer token |
+| 8080 / 8443（示例，examples） | HTTP / HTTPS | Console 静态文件 + `/api/v1/console` JSON + SSE / Console static files + JSON + SSE | 仅运维网络；非 loopback 必须 HTTPS + viewer token / Operations network only; non-loopback requires HTTPS + viewer token |
 | **51001** | gRPC / HTTP2 | `ClientService` + `RaftService` | 应用子网与集群节点 / App subnet and peer nodes |
 | **52001** | gRPC / HTTP2 | `AdminService` | 仅 Admin CLI 与 Console BFF 所在运维区 / Admin CLI and Console BFF in operations zone only |
 | **9100** | HTTP | `/health`, `/ready`, `/metrics` | 监控、探针与 Console BFF 网络 / Monitoring, probe, and Console BFF networks |
@@ -232,7 +239,7 @@ rr-admin --addr host-1:52001 group change-membership --group 1 --voters 1,2
 | 3 节点中 2 个宕机 / 2 of 3 down | 写入阻塞 / Writes blocked | 恢复至少 2 个成员 / Restore at least two members |
 | leader 磁盘满 / Leader disk full | 写入或快照失败 / Writes or snapshots fail | 释放或扩容磁盘并检查错误 / Free or expand disk and inspect errors |
 | leader 位于少数分区 / Leader in minority | 多数侧选出新 leader / Majority elects a leader | 修复分区，旧 leader 作为 follower 追赶 / Heal partition; old leader catches up |
-| Console BFF 停止 / Console BFF down | 节点与 Raft 服务不受影响；仅 Console 查看和采集中断 / Nodes and Raft continue; only Console viewing and collection stop | 重启 Console；内存趋势和 session 被清空 / Restart Console; in-memory trends and sessions are cleared |
+| Console BFF 停止 / Console BFF down | 所有目标节点与 Raft 服务不受影响；全部连接查看和采集中断 / All target nodes and Raft services continue; viewing and collection stop for every connection | 重启 Console；profile 保留但 runtime 不自动恢复，session/内存趋势清空，内存凭证需重新输入 / Restart Console; profiles remain disconnected, sessions/trends clear, and memory credentials must be re-entered |
 
 故障流程见 [leader 选举](./dynamic-leader-election.md) 和 [快照传输](./dynamic-snapshot-transfer.md)。
 
@@ -255,10 +262,10 @@ Thresholds are starting points and should be calibrated to the workload.
 | `rr_client_retries_total{group_id}` | 客户端重试 / Client retries | 持续增长 / Sustained increase |
 | `up{job="rr"}` | 节点存活 / Node liveness | 节点掉线 / Node down |
 
-`rr_client_*` 指标由使用 rr-client 的应用进程暴露，不是 rr-server。<br />`rr_client_*` metrics are exposed by the application process using rr-client, not rr-server.<br />[完整指标清单 / Full metrics catalog](../../reference/metrics-reference.md)
+`rr_client_*` 指标由使用 rr-client 的应用进程暴露，不是 rr-server。<br />`rr_client_*` metrics are exposed by the application process using rr-client, not rr-server.<br />[完整指标清单](../../reference/metrics-reference.md) / [Full metrics catalog](../../reference/metrics-reference.md)
 
 ## 相关 / Related
 
-- [容器结构 / Containers](./containers.md)
-- [集群管理控制台 / Cluster Admin Console](../../operations/cluster-admin-console.md)
-- [部署指南 / Deployment guide](../../deployment/deployment.md)
+- [容器结构](./containers.md)<br />[Containers](./containers.md)
+- [集群管理控制台](../../operations/cluster-admin-console.md)<br />[Cluster Admin Console](../../operations/cluster-admin-console.md)
+- [部署指南](../../deployment/deployment.md)<br />[Deployment guide](../../deployment/deployment.md)

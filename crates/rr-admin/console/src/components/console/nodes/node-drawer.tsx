@@ -16,6 +16,7 @@ import type { BootRecord, ConsoleEnvelope, ConsoleMeta, CursorPage } from "@/lib
 import { formatBytes, formatDuration, formatNumber, formatTimestamp } from "@/lib/format";
 import { useConsoleResource } from "@/lib/use-console-resource";
 import { useRouteQueryState } from "@/lib/use-route-query-state";
+import { useRefresh } from "@/lib/refresh-context";
 import { shutdownLabel } from "@/components/console/lifecycle/boot-timeline";
 import { NodeResources } from "./node-resources";
 import { safeConfigValue, type FeatureNode, type NodeDetailData } from "./model";
@@ -38,14 +39,17 @@ interface DetailState {
 }
 
 function useNodeDetail(nodeId: number) {
+  const { connectionId } = useRefresh();
   const [reload, setReload] = useState(0);
   const [state, setState] = useState<DetailState>({ data: null, meta: null, error: null, loading: true });
   useEffect(() => {
+    if (!connectionId) return;
+    const owner = connectionId;
     const controller = new AbortController();
     const load = async () => {
       setState((current) => ({ ...current, loading: true, error: null }));
       try {
-        const result: ConsoleEnvelope<NodeDetailData> = await getConsoleResource<NodeDetailData>(`/nodes/${nodeId}`, {}, controller.signal);
+        const result: ConsoleEnvelope<NodeDetailData> = await getConsoleResource<NodeDetailData>(owner, `/nodes/${nodeId}`, {}, controller.signal);
         if (!controller.signal.aborted) setState({ data: result.data, meta: result.meta, error: null, loading: false });
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -58,7 +62,7 @@ function useNodeDetail(nodeId: number) {
     };
     void load();
     return () => controller.abort();
-  }, [nodeId, reload]);
+  }, [connectionId, nodeId, reload]);
   return { ...state, refresh: () => setReload((value) => value + 1) };
 }
 
@@ -135,14 +139,17 @@ function NodeConfiguration({ node }: { node: FeatureNode }) {
 }
 
 function NodeHistory({ node }: { node: FeatureNode }) {
+  const { connectionId } = useRefresh();
   const [cursor, setCursor] = useState<string | undefined>();
   const [state, setState] = useState<{ data: CursorPage<BootRecord> | null; meta: ConsoleMeta | null; error: ConsoleApiError | null; loading: boolean }>({ data: null, meta: null, error: null, loading: true });
   useEffect(() => {
+    if (!connectionId) return;
+    const owner = connectionId;
     const controller = new AbortController();
     const load = async () => {
       setState((current) => ({ ...current, loading: true, error: null }));
       try {
-        const result = await getConsoleResource<CursorPage<BootRecord>>(`/nodes/${node.node_id}/boots`, { cursor, page_size: 50 }, controller.signal);
+        const result = await getConsoleResource<CursorPage<BootRecord>>(owner, `/nodes/${node.node_id}/boots`, { cursor, page_size: 50 }, controller.signal);
         if (!controller.signal.aborted) setState({ data: result.data, meta: result.meta, error: null, loading: false });
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -151,7 +158,7 @@ function NodeHistory({ node }: { node: FeatureNode }) {
     };
     void load();
     return () => controller.abort();
-  }, [node.node_id, cursor]);
+  }, [connectionId, node.node_id, cursor]);
   return (
     <div className="grid gap-4">
       {state.error ? <ErrorState title="Boot history unavailable" message={state.error.message} correlationId={state.error.correlationId} /> : null}
@@ -210,6 +217,7 @@ export function NodeDrawer({
   onOpenChange: (open: boolean) => void;
   onTabChange: (tab: NodeTab) => void;
 }) {
+  const { connectionId } = useRefresh();
   return (
     <Drawer
       trigger={<button type="button" data-node-trigger={node.node_id} className="cursor-pointer font-medium text-(--acc)" aria-label={`Open node ${node.node_id} details`}>Node {node.node_id}</button>}
@@ -219,7 +227,7 @@ export function NodeDrawer({
       onOpenChange={onOpenChange}
       width={560}
     >
-      <NodeDetailContent nodeId={node.node_id} activeTab={activeTab} onTabChange={onTabChange} />
+      <NodeDetailContent key={`${connectionId ?? "none"}:${node.node_id}`} nodeId={node.node_id} activeTab={activeTab} onTabChange={onTabChange} />
     </Drawer>
   );
 }

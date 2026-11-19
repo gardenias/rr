@@ -2,6 +2,7 @@ use super::config::SeedPeer;
 use super::discovery::validate_records;
 use super::model::{BoundedLru, Capability, GroupObservation};
 use crate::{connect, make_admin_client, AdminClient};
+use anyhow::Context;
 use async_trait::async_trait;
 use rr_core::{NodeDescriptor, NodeDirectoryRecord};
 use rr_network::proto::admin::{
@@ -149,14 +150,64 @@ struct SlowNodeCacheKey {
 }
 
 #[derive(Clone)]
+enum UpstreamTls {
+    Legacy(TlsConfig),
+    Profile(tonic::transport::ClientTlsConfig),
+}
+
+#[derive(Clone)]
 pub(crate) struct TonicUpstream {
-    tls: Option<TlsConfig>,
+    tls: Option<UpstreamTls>,
     token: Option<Arc<str>>,
     slow_nodes: Arc<tokio::sync::Mutex<BoundedLru<SlowNodeCacheKey, CachedSlowNode>>>,
 }
 
 impl TonicUpstream {
     pub fn new(tls: Option<TlsConfig>, token: Option<Arc<str>>) -> Self {
+        Self::with_tls(tls.map(UpstreamTls::Legacy), token)
+    }
+
+    pub fn from_profile(
+        profile: &super::model::TlsProfile,
+        token: Option<String>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            profile.cert.is_some() == profile.key.is_some(),
+            "Admin client certificate and key must be provided together"
+        );
+        anyhow::ensure!(
+            profile.cert.is_none() || profile.ca.is_some(),
+            "Admin client certificate and key require a CA"
+        );
+        anyhow::ensure!(
+            profile.domain.is_none() || profile.ca.is_some(),
+            "Admin TLS domain requires a CA"
+        );
+        let tls = profile
+            .ca
+            .as_ref()
+            .map(|ca| {
+                let ca = std::fs::read(ca).context("read AdminService CA")?;
+                let mut tls = tonic::transport::ClientTlsConfig::new()
+                    .ca_certificate(tonic::transport::Certificate::from_pem(ca));
+                if let Some(domain) = &profile.domain {
+                    tls = tls.domain_name(domain.clone());
+                }
+                if let (Some(cert), Some(key)) = (&profile.cert, &profile.key) {
+                    let cert = std::fs::read(cert).context("read AdminService certificate")?;
+                    let key = std::fs::read(key).context("read AdminService private key")?;
+                    tls = tls.identity(tonic::transport::Identity::from_pem(cert, key));
+                }
+                anyhow::Ok(tls)
+            })
+            .transpose()?;
+        Ok(Self::with_tls(
+            tls.map(UpstreamTls::Profile),
+            token.map(Arc::from),
+        ))
+    }
+
+    fn with_tls(tls: Option<UpstreamTls>, token: Option<Arc<str>>) -> Self {
         Self {
             tls,
             token,
@@ -168,13 +219,22 @@ impl TonicUpstream {
     }
 
     async fn client(&self, peer: &SeedPeer) -> std::result::Result<AdminClient, UpstreamError> {
-        connect(&peer.admin_addr, self.tls.as_ref())
-            .await
-            .map(|channel| make_admin_client(channel, &self.token))
-            .map_err(|_| UpstreamError {
-                code: "ADMIN_UNAVAILABLE",
-                message: "AdminService connection failed".to_string(),
-            })
+        let channel = match &self.tls {
+            Some(UpstreamTls::Profile(tls)) => connect_profile(&peer.admin_addr, tls.clone()).await,
+            tls => {
+                let legacy = match tls {
+                    Some(UpstreamTls::Legacy(tls)) => Some(tls),
+                    _ => None,
+                };
+                connect(&peer.admin_addr, legacy)
+                    .await
+                    .map_err(|_| UpstreamError {
+                        code: "ADMIN_UNAVAILABLE",
+                        message: "AdminService connection failed".to_string(),
+                    })
+            }
+        }?;
+        Ok(make_admin_client(channel, &self.token))
     }
 
     async fn cached_slow_data(&self, key: &SlowNodeCacheKey) -> Option<SlowNodeData> {
@@ -310,6 +370,34 @@ impl TonicUpstream {
         );
         Ok(data)
     }
+}
+
+async fn connect_profile(
+    address: &str,
+    tls: tonic::transport::ClientTlsConfig,
+) -> std::result::Result<tonic::transport::Channel, UpstreamError> {
+    let endpoint = format!("https://{address}");
+    let endpoint = tonic::transport::Channel::from_shared(endpoint)
+        .map_err(|_| UpstreamError {
+            code: "ADMIN_UNAVAILABLE",
+            message: "AdminService connection failed".to_string(),
+        })?
+        .connect_timeout(Duration::from_secs(5))
+        .tls_config(tls)
+        .map_err(|_| UpstreamError {
+            code: "ADMIN_UNAVAILABLE",
+            message: "AdminService connection failed".to_string(),
+        })?;
+    tokio::time::timeout(Duration::from_secs(5), endpoint.connect())
+        .await
+        .map_err(|_| UpstreamError {
+            code: "UPSTREAM_TIMEOUT",
+            message: "AdminService connection exceeded its total deadline".to_string(),
+        })?
+        .map_err(|_| UpstreamError {
+            code: "ADMIN_UNAVAILABLE",
+            message: "AdminService connection failed".to_string(),
+        })
 }
 
 #[async_trait]
@@ -852,5 +940,37 @@ mod tests {
             snapshot.validate_for(&peer).unwrap_err().code,
             "NODE_ID_CONFLICT"
         );
+    }
+
+    #[test]
+    fn ca_only_and_optional_identity_tls_profiles_are_supported() {
+        let certificates =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dev-certs");
+        let ca_only = super::super::model::TlsProfile {
+            ca: Some(certificates.join("ca.pem")),
+            cert: None,
+            key: None,
+            domain: Some("localhost".to_string()),
+        };
+        assert!(TonicUpstream::from_profile(&ca_only, None).is_ok());
+        let with_identity = super::super::model::TlsProfile {
+            cert: Some(certificates.join("node1.pem")),
+            key: Some(certificates.join("node1.key")),
+            ..ca_only.clone()
+        };
+        assert!(TonicUpstream::from_profile(&with_identity, None).is_ok());
+        for invalid in [
+            super::super::model::TlsProfile {
+                cert: Some(certificates.join("node1.pem")),
+                ..ca_only.clone()
+            },
+            super::super::model::TlsProfile {
+                ca: None,
+                domain: Some("localhost".to_string()),
+                ..Default::default()
+            },
+        ] {
+            assert!(TonicUpstream::from_profile(&invalid, None).is_err());
+        }
     }
 }

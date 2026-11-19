@@ -105,7 +105,32 @@ CHANGELOG 的 `Changed` / `Deprecated` / `Removed`。
 CLI flags and `RR_*` environment variables are additive within one MAJOR; renaming or removal requires a
 MAJOR bump. Changes appear under `Changed` / `Deprecated` / `Removed` in the CHANGELOG.
 
-### 6. Metrics
+### 6. Console HTTP API 与启动兼容 / Console HTTP API and Startup Compatibility
+
+`rr-admin console` 现在允许无 peers/discovery 的独立启动；旧启动参数创建一个进程内临时连接并保留原有无作用域
+资源路由。该固定映射不会切换到其他连接，无临时连接时旧数据面返回 `400 CONNECTION_REQUIRED`。新客户端应使用
+`/api/v1/console/connections` 控制面和 `/api/v1/console/connections/{id}/...` 数据面。连接 mutation 与 reconcile
+都使用同源 Origin 和 session CSRF；控制面 meta 的 `cluster_id` 为 null。
+
+`rr-admin console` now starts independently without peers/discovery. Existing startup arguments create one in-memory
+ephemeral connection and retain the legacy unscoped resources. This fixed mapping never switches to another connection;
+without it, legacy data routes return `400 CONNECTION_REQUIRED`. New clients use `/api/v1/console/connections` for control
+and `/api/v1/console/connections/{id}/...` for data. Connection mutations and reconcile require same-origin Origin and
+session CSRF; control-plane meta has a null `cluster_id`.
+
+完整机器契约是 `crates/rr-admin/openapi/console-v1.json`。`console.v1` 响应 schema 保留既有能力降级和分页语义；
+连接控制错误使用明确 4xx/5xx code，秘密字段 write-only。浏览器当前连接由 URL query 决定，不是后端全局状态。
+本地 `connections.json` 另有显式格式版本和原子 `0600` 写入，损坏/未来版本不会按空 store 打开。升级时无需迁移
+Raft 数据，但部署需为 `--state-dir` 或默认平台配置目录提供持久、独占且可写的存储。
+
+The machine contract is `crates/rr-admin/openapi/console-v1.json`. The `console.v1` response schema retains capability
+degradation and pagination semantics; connection control errors have explicit 4xx/5xx codes and secrets are write-only.
+The browser's selected connection is URL state, not a backend global. Local `connections.json` has a separate explicit
+format version with atomic mode-`0600` writes; corrupt or future versions never open as an empty store. Upgrading requires
+no Raft data migration, but deployments must provide persistent, exclusive, writable storage for `--state-dir` or the
+platform configuration default.
+
+### 7. Metrics
 
 同一 MAJOR 内，已发布 metric 名称和标签稳定；删除或重命名需要 MAJOR，新增 metric 或 label 属于 MINOR。
 Published metric names and labels are stable within one MAJOR. Deleting or renaming one requires a MAJOR
@@ -165,14 +190,12 @@ The current MSRV is Rust `1.98`, set by `rust-version` in the workspace `Cargo.t
 
 ## 弃用流程 / Deprecation Process
 
-1. **宣布 / Announce**：添加 `#[deprecated(since="x.y.z", note="use Foo instead")]`，并记录在
-   CHANGELOG `Deprecated`。
-
-   Add the attribute and record it under CHANGELOG `Deprecated`.
-2. **宽限期 / Grace period**：至少保留一个完整 MINOR 周期，期间功能仍可用并可能发出警告。
-   Keep the API functional for at least one full MINOR cycle, possibly with warnings.
-3. **删除 / Remove**：在下一个 MAJOR 删除，并记录在 CHANGELOG `Removed`。
-   Remove it in the next MAJOR and record it under CHANGELOG `Removed`.
+1. **宣布**：添加 `#[deprecated(since="x.y.z", note="use Foo instead")]`，并记录在 CHANGELOG `Deprecated`。<br />
+   **Announce**: Add the attribute and record it under CHANGELOG `Deprecated`.
+2. **宽限期**：至少保留一个完整 MINOR 周期，期间功能仍可用并可能发出警告。<br />
+   **Grace period**: Keep the API functional for at least one full MINOR cycle, possibly with warnings.
+3. **删除**：在下一个 MAJOR 删除，并记录在 CHANGELOG `Removed`。<br />
+   **Remove**: Remove it in the next MAJOR and record it under CHANGELOG `Removed`.
 
 pre-1.0 下“下一个 MAJOR”指下一个破坏性 MINOR。例如 v0.2.0 弃用的 API 可在 v0.3.0 删除，
 `DurabilityPolicy::Balanced`/`Fast` 即为例。
@@ -191,7 +214,7 @@ v0.2.0 may be removed in v0.3.0, as happened with `DurabilityPolicy::Balanced`/`
 
 按顺序检查 / Check in this order:
 
-1. **CHANGELOG.md**：破坏性变更列在 `## [x.y.z]` 下的 `### Changed` / `### Removed` / `### Breaking`。
+1. **CHANGELOG.md**：破坏性变更列在 `## [x.y.z]` 下的 `### Changed`、`### Removed` 或 `### Breaking`。
    Breaking changes appear under `### Changed`, `### Removed`, or `### Breaking` below `## [x.y.z]`.
 2. **所用 crate 的 docs.rs diff**：检查消失的公共 API。
    The docs.rs diff for your crate shows removed public APIs.
@@ -204,9 +227,10 @@ PATCH 升级后 `cargo check` 失败或 wire mix 失败，请提交 bug，附最
 If `cargo check` or wire interoperability fails after a PATCH upgrade, report a bug with a minimal
 reproducer, before/after versions, and actual versus expected behavior.
 
-**邮件 / Email**：[gardenia.wu@outlook.com](mailto:gardenia.wu@outlook.com)（或提交 GitHub issue / or open a GitHub issue）。
+**邮件**：[gardenia.wu@outlook.com](mailto:gardenia.wu@outlook.com)（或提交 GitHub issue）。<br />
+**Email**: [gardenia.wu@outlook.com](mailto:gardenia.wu@outlook.com) (or open a GitHub issue).
 
 ## 相关文档 / Related Documents
 
 - [CHANGELOG.md](https://github.com/gardenias/rr/blob/main/CHANGELOG.md)
-- 开发流程 / Development workflow：[CONTRIBUTING.md](https://github.com/gardenias/rr/blob/main/CONTRIBUTING.md)
+- 开发流程<br />Development workflow：[CONTRIBUTING.md](https://github.com/gardenias/rr/blob/main/CONTRIBUTING.md)

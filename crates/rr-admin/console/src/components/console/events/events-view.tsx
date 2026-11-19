@@ -20,6 +20,7 @@ import { useRouteQueryState } from "@/lib/use-route-query-state";
 const PREFERENCES_KEY = "rr.console.event-preferences.v1";
 type EventPreference = { acknowledged_at?: string; silenced_until?: string };
 type EventPreferences = Record<string, EventPreference>;
+type ConnectionEventPreferences = Record<string, EventPreferences>;
 type EventRow = EventItem & { kind?: string; message?: string };
 type LegacyEvent = EventItem & {
   id?: string;
@@ -41,17 +42,21 @@ function normalizeEvent(event: EventItem): EventRow {
   };
 }
 
-function readPreferences(): EventPreferences {
+function readPreferences(): ConnectionEventPreferences {
   try {
     const parsed: unknown = JSON.parse(window.localStorage.getItem(PREFERENCES_KEY) ?? "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(Object.entries(parsed).flatMap(([eventId, value]) => {
-      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
-      const preference = value as Record<string, unknown>;
-      return [[eventId, {
-        acknowledged_at: typeof preference.acknowledged_at === "string" ? preference.acknowledged_at : undefined,
-        silenced_until: typeof preference.silenced_until === "string" ? preference.silenced_until : undefined,
-      }]];
+    return Object.fromEntries(Object.entries(parsed).flatMap(([connectionId, connectionValue]) => {
+      if (!connectionValue || typeof connectionValue !== "object" || Array.isArray(connectionValue)) return [];
+      const preferences = Object.fromEntries(Object.entries(connectionValue).flatMap(([eventId, value]) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+        const preference = value as Record<string, unknown>;
+        return [[eventId, {
+          acknowledged_at: typeof preference.acknowledged_at === "string" ? preference.acknowledged_at : undefined,
+          silenced_until: typeof preference.silenced_until === "string" ? preference.silenced_until : undefined,
+        }]];
+      }));
+      return [[connectionId, preferences]];
     }));
   } catch {
     return {};
@@ -66,8 +71,14 @@ function observedDuration(event: EventItem) {
 
 export function EventsView() {
   const { state, setFilter } = useRouteQueryState();
-  const [cursor, setCursor] = useState<string | undefined>();
-  const [preferences, setPreferences] = useState<EventPreferences>(readPreferences);
+  const [cursorState, setCursorState] = useState<{
+    connectionId: string | null;
+    value: string | undefined;
+  }>({ connectionId: state.connection, value: undefined });
+  const cursor = cursorState.connectionId === state.connection ? cursorState.value : undefined;
+  const setCursor = (value: string | undefined) => setCursorState({ connectionId: state.connection, value });
+  const [allPreferences, setAllPreferences] = useState<ConnectionEventPreferences>(readPreferences);
+  const preferences = state.connection ? allPreferences[state.connection] ?? {} : {};
   const [showSilenced, setShowSilenced] = useState(false);
   const [preferenceError, setPreferenceError] = useState<string | null>(null);
   const { data, meta, error, loading, refresh } = useConsoleResource("/events", {
@@ -88,9 +99,18 @@ export function EventsView() {
   const silencedCount = observedEvents.filter((event) => silencedUntil(event) != null).length;
   const visibleEvents = observedEvents.filter((event) => showSilenced || silencedUntil(event) == null);
 
-  const updatePreference = (eventId: string, nextPreference: EventPreference) => {
-    const next = { ...preferences, [eventId]: nextPreference };
-    setPreferences(next);
+  const updatePreference = (eventId: string, update: EventPreference) => {
+    if (!state.connection) return;
+    const latest = readPreferences();
+    const latestConnection = latest[state.connection] ?? {};
+    const next = {
+      ...latest,
+      [state.connection]: {
+        ...latestConnection,
+        [eventId]: { ...latestConnection[eventId], ...update },
+      },
+    };
+    setAllPreferences(next);
     try {
       window.localStorage.setItem(PREFERENCES_KEY, JSON.stringify(next));
       setPreferenceError(null);
@@ -144,12 +164,12 @@ export function EventsView() {
               size="small"
               disabled={Boolean(acknowledged)}
               aria-label={`Acknowledge ${event.event_id}`}
-              onClick={() => updatePreference(event.event_id, { ...preferences[event.event_id], acknowledged_at: new Date().toISOString() })}
+              onClick={() => updatePreference(event.event_id, { acknowledged_at: new Date().toISOString() })}
             >Acknowledge</Button>
             {silenced ? (
-              <Button variant="ghost" size="small" aria-label={`Unsilence ${event.event_id}`} onClick={() => updatePreference(event.event_id, { ...preferences[event.event_id], silenced_until: undefined })}>Unsilence</Button>
+              <Button variant="ghost" size="small" aria-label={`Unsilence ${event.event_id}`} onClick={() => updatePreference(event.event_id, { silenced_until: undefined })}>Unsilence</Button>
             ) : (
-              <Button variant="ghost" size="small" aria-label={`Silence 1h: ${event.event_id}`} onClick={() => updatePreference(event.event_id, { ...preferences[event.event_id], silenced_until: new Date(Date.now() + 3_600_000).toISOString() })}>Silence 1h</Button>
+              <Button variant="ghost" size="small" aria-label={`Silence 1h: ${event.event_id}`} onClick={() => updatePreference(event.event_id, { silenced_until: new Date(Date.now() + 3_600_000).toISOString() })}>Silence 1h</Button>
             )}
           </div>
         );

@@ -27,13 +27,14 @@ System_Boundary(client_side, "Client Side") {
 
 System_Boundary(admin_tools, "Rr Administration") {
   Container(admin_cli, "rr-admin CLI / REPL", "Rust binary, clap + tonic", "Controlled cluster administration, including supported write operations")
-  Container(console_bff, "Cluster Admin Console BFF", "rr-admin console: Rust + Axum", "Same-origin static hosting, versioned JSON /api/v1/console and SSE; read-only viewer with in-memory sessions and live trends")
-  Container(console_ui, "Console Static Frontend", "React 19 + Next.js 16 static export", "Runs in the operator browser; built to console/out and served by the BFF, with no standalone Node.js production service")
+  Container(console_bff, "Multi-cluster Admin Console BFF", "rr-admin console: Rust + Axum", "No-source startup, connection CRUD, same-origin static hosting, scoped JSON /api/v1/console/connections/{id} and SSE; one lazy read-only runtime per connected cluster")
+  Container(console_ui, "Console Static Frontend", "React 19 + Next.js 16 static export", "Runs in the operator browser; /connections/ manager and URL-selected cluster views; no standalone Node.js production service")
+  ContainerDb(console_profiles, "Console Connection Profiles", "Versioned local 0600 JSON", "Non-sensitive profiles in --state-dir or platform config; secrets stay in memory or optional OS keychain")
 }
 
 Container_Ext(browser, "Operator Browser", "Web browser", "Loads the static frontend and uses a viewer session")
 
-System_Boundary(cluster, "Rr Cluster (N nodes)") {
+System_Boundary(cluster, "Rr Clusters (N nodes per cluster)") {
   Container(rr_node, "rr-server Node", "Rust binary built from examples/* or custom server", "Hosts multiple Raft groups; serves Client + Raft gRPC on listen_addr (51001 by convention), Admin gRPC on a separate admin_port, and /health, /ready, /metrics on metrics_port")
   ContainerDb(rocks, "RocksDB Data Dir", "Local SSD filesystem", "Per-group independent RocksDB at {data_dir}/raft-log/{group_id} plus durable sm-snapshot.bin (stock rr-server --storage rocks, ADR A-0016/T1)")
 }
@@ -45,7 +46,8 @@ System_Ext(etcd, "etcd (optional)", "Trusted Console NodeDirectory + ConfigProvi
 Rel(end_user, user_app, "Sends domain requests", "Any protocol")
 Rel(user_app, rr_node, "Submits ClientRequest, receives leader_info redirect / ClusterInfo (live leader & membership from raft metrics)", "gRPC / HTTP2")
 Rel(admin_cli, rr_node, "Reads status and performs controlled writes: snapshots, membership, leadership and node administration", "gRPC (AdminService); TLS/mTLS + Admin token as configured")
-Rel(console_bff, rr_node, "Reads node, group, topology, boot and snapshot status; performs no administrative writes", "gRPC (AdminService); TLS/mTLS + Admin token as configured")
+Rel(console_bff, console_profiles, "Loads and atomically saves redacted connection profiles", "Local file I/O; --state-dir override")
+Rel(console_bff, rr_node, "Reads node, group, topology, boot and snapshot status for each explicitly connected runtime; performs no administrative writes", "gRPC (AdminService); per-connection TLS/mTLS + Admin token as configured")
 Rel(console_bff, rr_node, "Fetches liveness, readiness and live metrics from the trusted observability address", "HTTP GET /health, /ready, /metrics")
 
 Rel_U(rr_node, rr_node, "Raft RPCs (AppendEntries, Vote, InstallSnapshot)", "gRPC / HTTP2")
@@ -56,7 +58,7 @@ Rel(console_bff, etcd, "Discovers trusted node roster and watches routing config
 Rel(console_bff, prometheus, "Queries fixed-template historical series; no arbitrary PromQL", "HTTP(S) GET /api/v1/query_range")
 Rel(browser, console_bff, "Downloads the Console static frontend", "Same-origin HTTPS (HTTP permitted on loopback)")
 Rel(browser, console_ui, "Loads and executes the static export", "HTML/CSS/JavaScript from console/out")
-Rel(console_ui, console_bff, "Authenticates viewer, reads JSON, subscribes to events and requests read-only source reconcile", "Same-origin HTTP(S); /api/v1/console JSON + SSE")
+Rel(console_ui, console_bff, "Authenticates viewer, manages profiles, reads scoped JSON, subscribes to the selected runtime and requests read-only source reconcile", "Same-origin HTTP(S); /api/v1/console/connections and /connections/{id} JSON + SSE")
 
 Rel(developer, user_app, "Builds & deploys")
 Rel(operator, admin_cli, "Runs controlled administration commands", "CLI / REPL")
@@ -73,8 +75,9 @@ LAYOUT_WITH_LEGEND()
 | 容器 / Container | 技术 / Technology | 部署形态 / Deployable Form | 运行位置 / Runs Where |
 | :--- | :--- | :--- | :--- |
 | **rr-server Node** | Rust binary | Linux binary, Docker image, systemd unit | 每节点一个进程 / One process per node |
-| **rr-admin CLI / REPL** | `crates/rr-admin` | CLI tool | 运维主机或 bastion / Operator workstation or bastion |
-| **Cluster Admin Console BFF** | `rr-admin console`，Rust + Axum | 与 CLI/REPL 同属 `rr-admin` 二进制的可选进程 / Optional process in the same `rr-admin` binary as CLI/REPL | 运维主机或 bastion / Operator workstation or bastion |
+| **rr-admin CLI and REPL** | `crates/rr-admin` | CLI tool | 运维主机或 bastion / Operator workstation or bastion |
+| **Cluster Admin Console BFF** | `rr-admin console`，Rust + Axum | 与 CLI/REPL 同属 `rr-admin` 二进制的可选多连接进程 / Optional multi-connection process in the same `rr-admin` binary as CLI/REPL | 运维主机或 bastion；无集群来源可启动 / Operator workstation or bastion; starts without a cluster source |
+| **Console Connection Profiles** | versioned JSON + memory/keychain secret references | `--state-dir/connections.json` 或平台配置目录，原子 `0600` / Atomic mode-`0600` JSON in `--state-dir` or the platform config directory | Console 主机本地；不是 Raft 数据 / Local to the Console host; not Raft data |
 | **Console Static Frontend** | React 19 + Next.js 16 静态导出 / static export | `console/out` 随 BFF 携带或由 `--static-dir` 指向；无独立 Node.js 生产服务 / Shipped with the BFF or selected by `--static-dir`; no standalone Node.js production service | 由 BFF 同源托管，在 Operator Browser 中运行 / Served same-origin by the BFF and run in the Operator Browser |
 | **User Application** | Rust + rr-client | 应用自定义 / Application-defined | 可通过 gRPC 访问集群的进程 / Any process with gRPC access |
 
@@ -113,7 +116,7 @@ See the [component diagrams](./components-server.md) for internal structure.
 | :--- | :--- | :--- | :--- |
 | User App → rr-server | gRPC | `ClientService` @ 51001 | `Request`, `ReadLocal`, `ReadLinearizable`, `GetClusterInfo` |
 | rr-admin CLI/REPL → rr-server | gRPC (+ TLS/mTLS) | `AdminService` @ `admin_port` | 状态读取与受控写操作：快照、成员、选主和节点管理；按配置使用 Admin token / Status reads and controlled writes: snapshots, membership, leadership and node administration; uses Admin token as configured |
-| Console Static Frontend → Console BFF | 同源 HTTP(S) / Same-origin HTTP(S) | `/api/v1/console` JSON + SSE | viewer 登录、只读数据与事件订阅、只读 sources reconcile；非 loopback 必须 HTTPS / Viewer login, read-only data/events and read-only source reconcile; HTTPS required for non-loopback |
+| Console Static Frontend → Console BFF | 同源 HTTP(S) / Same-origin HTTP(S) | `/api/v1/console/connections` control + `/connections/{id}` JSON/SSE | viewer 登录、连接管理、按 ID 只读数据/SSE 与 reconcile；非 loopback 必须 HTTPS / Viewer login, connection management, ID-scoped read-only data/SSE and reconcile; HTTPS required for non-loopback |
 | Console BFF → rr-server | gRPC (+ TLS/mTLS) | `AdminService` @ `admin_port` | 只读节点、组、拓扑、boot 和快照状态；Console 的 Admin token 仅留在 BFF / Read-only node, group, topology, boot and snapshot status; the Console's Admin token stays in the BFF |
 | Console BFF → rr-server | HTTP | `/health`, `/ready`, `/metrics` @ trusted `observability_addr` (`metrics_port`) | 读取 liveness、readiness 和实时指标 / Reads liveness, readiness and live metrics |
 | Console BFF → etcd（可选 / optional） | etcd gRPC + TLS/mTLS as configured | `NodeDirectory` + `ConfigProvider` | 受信节点发现、路由配置读取与 watch / Trusted node discovery, routing configuration reads and watches |
@@ -140,26 +143,29 @@ See the [component diagrams](./components-server.md) for internal structure.
    The Console static frontend and BFF are separate logical C4 containers, not separate production services: the
    CLI/REPL and Axum BFF share the `rr-admin` binary, and the BFF serves the Next.js export same-origin. Deploy
    `console/out` with the binary or select it with `--static-dir`; no standalone Node.js service is needed.
-5. Admin CLI/REPL 负责受控写操作；Console 只有 viewer 能力，`POST /sources/reconcile` 也只是只读刷新，不执行
-   membership、强制选主、TriggerSnapshot、DrainNode、offset reset 或进程重启。Console 不在 Raft/Client 数据
-   路径上，其故障不影响节点服务。
-   The Admin CLI/REPL owns controlled writes; the Console is viewer-only. `POST /sources/reconcile` only refreshes
-   read-only evidence and does not change membership, force leadership, trigger snapshots, drain nodes, reset offsets,
-   or restart processes. The Console is outside the Raft/Client data path, and its failure does not affect node service.
-6. 非 loopback Console 必须同时使用 HTTPS 和 viewer token；viewer session 仅保存在内存且 15 分钟过期，Console
-   使用的节点 Admin token 只留在 BFF。当前 Console 面向单集群只读 viewer，不提供 OIDC/RBAC 或多集群管理。
+5. Admin CLI/REPL 负责受控写操作；Console 只有 viewer 能力，连接 CRUD 只管理本地客户端配置，
+   `POST /connections/{id}/sources/reconcile` 也只是该 runtime 的只读刷新，不执行 membership、强制选主、
+   TriggerSnapshot、DrainNode、offset reset 或进程重启。Console 不在 Raft/Client 数据路径上，其故障不影响节点服务。
+   The Admin CLI/REPL owns controlled writes; the Console is viewer-only. Connection CRUD manages local client
+   configuration, and `POST /connections/{id}/sources/reconcile` only refreshes that runtime's read-only evidence. Neither
+   changes membership, forces leadership, triggers snapshots, drains nodes, resets offsets, or restarts processes. The
+   Console is outside the Raft/Client data path, and its failure does not affect node service.
+6. 非 loopback Console 必须同时使用 HTTPS 和 viewer token；viewer session 仅保存在内存且 15 分钟过期。
+   一个 BFF 可保存多个 profile，但仅显式 Connect 的 runtime 采集，最多 8 个活跃；每连接的 Admin token 只留在
+   对应 BFF runtime。URL connection ID 隔离刷新、bookmark、多 Page、SSE 与晚到响应，不提供 OIDC/RBAC 或多用户权限。
    A non-loopback Console requires both HTTPS and a viewer token; viewer sessions are memory-only and expire after
-   15 minutes, while node Admin tokens used by the Console remain only in the BFF. The Console is currently scoped to
-   one cluster with read-only viewers and provides neither OIDC/RBAC nor multi-cluster management.
+   15 minutes. One BFF can save multiple profiles, but only explicitly connected runtimes collect, with at most eight
+   active. Each connection's Admin token remains inside its BFF runtime. URL connection IDs isolate refresh, bookmarks,
+   Pages, SSE, and late responses; OIDC/RBAC and multi-user authorization are not provided.
 7. etcd discovery 与 Prometheus 历史均为可选；实时趋势来自 BFF 逐节点抓取并保存在有界内存中，重启即清空。
    Both etcd discovery and Prometheus history are optional. Live trends come from per-node BFF scrapes retained in
    bounded memory and are cleared on restart.
 
 ## 下钻 / Drill-down
 
-- [节点内部 / Node internals](./components-server.md)
-- [Console 内部 / Console internals](./components-console.md)
-- [多 Raft 组 / Multi-Raft groups](./components-raft.md)
-- [分片路由 / Shard routing](./components-router.md)
-- [gRPC 层 / gRPC transport](./components-network.md)
-- [物理部署 / Physical deployment](./deployment.md)
+- [节点内部](./components-server.md)<br />[Node internals](./components-server.md)
+- [Console 内部](./components-console.md)<br />[Console internals](./components-console.md)
+- [多 Raft 组](./components-raft.md)<br />[Multi-Raft groups](./components-raft.md)
+- [分片路由](./components-router.md)<br />[Shard routing](./components-router.md)
+- [gRPC 层](./components-network.md)<br />[gRPC transport](./components-network.md)
+- [物理部署](./deployment.md)<br />[Physical deployment](./deployment.md)

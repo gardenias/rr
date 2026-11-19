@@ -7,6 +7,7 @@ use super::upstream::{topology_records, GroupDetail, NodeSnapshot, Upstream, Ups
 use rr_core::NodeDirectoryRecord;
 use rr_network::proto::admin::{BootRecordPage, ClusterTopology};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Mutex as AsyncMutex, Semaphore};
@@ -68,6 +69,8 @@ pub(crate) struct Scheduler {
     prober: Option<HttpProber>,
     last_summary_notification: Mutex<Instant>,
     breakers: Mutex<HashMap<u64, CircuitBreaker>>,
+    derived_tasks: AsyncMutex<JoinSet<()>>,
+    shutting_down: AtomicBool,
 }
 
 impl Scheduler {
@@ -113,6 +116,8 @@ impl Scheduler {
             prober: HttpProber::new(request_timeout).ok(),
             last_summary_notification: Mutex::new(Instant::now() - SUMMARY_NOTIFICATION_INTERVAL),
             breakers: Mutex::new(HashMap::new()),
+            derived_tasks: AsyncMutex::new(JoinSet::new()),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -120,6 +125,11 @@ impl Scheduler {
         self.cache.set_source_mode("TRUSTED_DIRECTORY_AND_CONFIG");
         self.discovery = Some(discovery);
         self
+    }
+
+    pub async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        self.derived_tasks.lock().await.shutdown().await;
     }
 
     pub fn configure_history(&self, config: PrometheusConfig) -> MetricsResult<()> {
@@ -463,9 +473,15 @@ impl Scheduler {
     }
 
     pub async fn reconcile(self: &Arc<Self>) {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
         let generation = self.cache.generation();
         let _flight = self.reconcile_flight.lock().await;
-        if self.cache.generation() != generation || self.cache.is_quarantined() {
+        if self.shutting_down.load(Ordering::Acquire)
+            || self.cache.generation() != generation
+            || self.cache.is_quarantined()
+        {
             return;
         }
         if let Some(discovery) = &self.discovery {
@@ -791,6 +807,12 @@ impl Scheduler {
         cursor: Option<String>,
         page_size: usize,
     ) -> Result<BootRecordPage, UpstreamError> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(UpstreamError {
+                code: "CONNECTION_CLOSED",
+                message: "the connection runtime is shutting down".to_string(),
+            });
+        }
         if !(1..=200).contains(&page_size) {
             return Err(UpstreamError {
                 code: "INVALID_ARGUMENT",
@@ -836,46 +858,61 @@ impl Scheduler {
             return result;
         }
         let scheduler = self.clone();
-        tokio::spawn(async move {
-            let _flight = flight;
-            let result = {
-                let _permit = scheduler
-                    .concurrency
-                    .acquire()
-                    .await
-                    .expect("scheduler semaphore");
-                match scheduler.peer(node_id).filter(|current| current == &peer) {
-                    Some(peer) => match tokio::time::timeout(
-                        scheduler.request_timeout,
-                        scheduler
-                            .upstream
-                            .list_boot_records(&peer, cursor, page_size),
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(UpstreamError {
-                            code: "UPSTREAM_TIMEOUT",
-                            message: "AdminService boot history exceeded its total deadline"
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut tasks = self.derived_tasks.lock().await;
+            while tasks.try_join_next().is_some() {}
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Err(UpstreamError {
+                    code: "CONNECTION_CLOSED",
+                    message: "the connection runtime is shutting down".to_string(),
+                });
+            }
+            tasks.spawn(async move {
+                let _flight = flight;
+                let result = {
+                    let _permit = scheduler
+                        .concurrency
+                        .acquire()
+                        .await
+                        .expect("scheduler semaphore");
+                    match scheduler.peer(node_id).filter(|current| current == &peer) {
+                        Some(peer) => match tokio::time::timeout(
+                            scheduler.request_timeout,
+                            scheduler
+                                .upstream
+                                .list_boot_records(&peer, cursor, page_size),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(UpstreamError {
+                                code: "UPSTREAM_TIMEOUT",
+                                message: "AdminService boot history exceeded its total deadline"
+                                    .to_string(),
+                            }),
+                        },
+                        None => Err(UpstreamError {
+                            code: "NODE_NOT_FOUND",
+                            message: "the requested node trust expired before boot collection"
                                 .to_string(),
                         }),
-                    },
-                    None => Err(UpstreamError {
-                        code: "NODE_NOT_FOUND",
-                        message: "the requested node trust expired before boot collection"
-                            .to_string(),
-                    }),
-                }
-            };
-            scheduler.boot_pages.lock().expect("boot page lock").insert(
-                key,
-                result.clone(),
-                Instant::now(),
-            );
-            result
+                    }
+                };
+                scheduler.boot_pages.lock().expect("boot page lock").insert(
+                    key,
+                    result.clone(),
+                    Instant::now(),
+                );
+                let _ = result_tx.send(result);
+            });
+        }
+        result_rx.await.unwrap_or_else(|_| {
+            Err(UpstreamError {
+                code: "CONNECTION_CLOSED",
+                message: "the connection runtime is shutting down".to_string(),
+            })
         })
-        .await
-        .expect("boot history task")
     }
 
     pub async fn latest_boot_record(
@@ -900,11 +937,33 @@ impl Scheduler {
     }
 
     pub async fn run(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
-        let mut changes = self.discovery_watch().await;
+        if self.shutting_down.load(Ordering::Acquire) || *shutdown.borrow() {
+            return;
+        }
+        let mut changes = tokio::select! {
+            changes = self.discovery_watch() => changes,
+            result = shutdown.changed() => {
+                let _ = result;
+                return;
+            }
+        };
         loop {
-            self.reconcile().await;
+            tokio::select! {
+                _ = self.reconcile() => {}
+                result = shutdown.changed() => {
+                    if result.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+            }
             if changes.is_none() && self.discovery.is_some() {
-                changes = self.discovery_watch().await;
+                changes = tokio::select! {
+                    changes = self.discovery_watch() => changes,
+                    result = shutdown.changed() => {
+                        let _ = result;
+                        break;
+                    }
+                };
             }
             tokio::select! {
                 _ = tokio::time::sleep(self.poll_interval) => {}
@@ -2026,5 +2085,46 @@ mod tests {
         assert!(breaker.allow(now + Duration::from_secs(31)));
         breaker.record_success();
         assert!(breaker.allow(now));
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_tracked_boot_tasks_and_rejects_new_background_work() {
+        let mut blocked = upstream();
+        Arc::get_mut(&mut blocked).unwrap().block_boots = true;
+        let scheduler = scheduler(blocked.clone());
+        let request = tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move { scheduler.list_boot_records(1, None, 5).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while blocked.boot_requests.lock().unwrap().len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        scheduler.shutdown().await;
+        assert!(scheduler.derived_tasks.lock().await.is_empty());
+        let error = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, "CONNECTION_CLOSED");
+        assert_eq!(
+            scheduler
+                .list_boot_records(1, None, 5)
+                .await
+                .unwrap_err()
+                .code,
+            "CONNECTION_CLOSED"
+        );
+        assert_eq!(blocked.boot_requests.lock().unwrap().len(), 1);
+        let calls = blocked.calls.load(Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_millis(20), scheduler.reconcile())
+            .await
+            .expect("reconcile must return immediately after shutdown");
+        assert_eq!(blocked.calls.load(Ordering::SeqCst), calls);
     }
 }

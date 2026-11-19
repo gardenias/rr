@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { makeMeta } from "@/test/fixtures";
 import type { EventItem } from "@/lib/contract";
@@ -6,9 +6,10 @@ import { EventsView } from "@/components/console/events/events-view";
 
 const resourceMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/use-console-resource", () => ({ useConsoleResource: resourceMock }));
+const routeState = vi.hoisted(() => ({ connection: "cluster-a" }));
 vi.mock("@/lib/use-route-query-state", () => ({
   useRouteQueryState: () => ({
-    state: { window: "15m", filters: {} },
+    state: { window: "15m", connection: routeState.connection, filters: {} },
     setWindow: vi.fn(),
     setFilter: vi.fn(),
   }),
@@ -43,7 +44,10 @@ function renderEvents() {
 }
 
 describe("EventsView", () => {
-  beforeEach(() => window.localStorage.clear());
+  beforeEach(() => {
+    window.localStorage.clear();
+    routeState.connection = "cluster-a";
+  });
 
   it("persists acknowledgement as a local preference, not a cluster mutation", async () => {
     const user = userEvent.setup();
@@ -115,5 +119,63 @@ describe("EventsView", () => {
 
     expect(screen.getByText("No matching observed events")).toBeVisible();
     expect(screen.getByText(/Observation is partial; this does not prove the cluster is healthy/)).toBeVisible();
+  });
+
+  it("partitions identical event IDs by connection", async () => {
+    const user = userEvent.setup();
+    const first = renderEvents();
+    await user.click(screen.getByRole("button", { name: "Acknowledge event-node-1-unreachable" }));
+    first.unmount();
+
+    routeState.connection = "cluster-b";
+    const second = renderEvents();
+    expect(screen.queryByText("Acknowledged locally")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Acknowledge event-node-1-unreachable" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Acknowledge event-node-1-unreachable" }));
+    second.unmount();
+
+    routeState.connection = "cluster-a";
+    renderEvents();
+    expect(screen.getByText("Acknowledged locally")).toBeVisible();
+    const stored = JSON.parse(window.localStorage.getItem("rr.console.event-preferences.v1") ?? "{}");
+    expect(stored["cluster-a"][event.event_id].acknowledged_at).toEqual(expect.any(String));
+    expect(stored["cluster-b"][event.event_id].acknowledged_at).toEqual(expect.any(String));
+  });
+
+  it("merges a preference write with changes stored after this view mounted", async () => {
+    const user = userEvent.setup();
+    renderEvents();
+    window.localStorage.setItem("rr.console.event-preferences.v1", JSON.stringify({
+      "cluster-a": {
+        "external-event": { acknowledged_at: "2026-11-19T08:00:00Z" },
+      },
+      "cluster-b": {
+        [event.event_id]: { silenced_until: "2026-11-19T10:00:00Z" },
+      },
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Acknowledge event-node-1-unreachable" }));
+    const stored = JSON.parse(window.localStorage.getItem("rr.console.event-preferences.v1") ?? "{}");
+    expect(stored["cluster-a"]["external-event"].acknowledged_at).toBe("2026-11-19T08:00:00Z");
+    expect(stored["cluster-a"][event.event_id].acknowledged_at).toEqual(expect.any(String));
+    expect(stored["cluster-b"][event.event_id].silenced_until).toBe("2026-11-19T10:00:00Z");
+  });
+
+  it("resets an events cursor when the connection changes", async () => {
+    const user = userEvent.setup();
+    resourceMock.mockReturnValue({
+      data: { items: [event], next_cursor: "events-page-2" },
+      meta: makeMeta(),
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+    });
+    const view = render(<EventsView />);
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(resourceMock).toHaveBeenLastCalledWith("/events", expect.objectContaining({ cursor: "events-page-2" }));
+
+    routeState.connection = "cluster-b";
+    view.rerender(<EventsView />);
+    await waitFor(() => expect(resourceMock).toHaveBeenLastCalledWith("/events", expect.objectContaining({ cursor: undefined })));
   });
 });

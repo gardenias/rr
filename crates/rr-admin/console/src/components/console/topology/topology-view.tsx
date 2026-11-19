@@ -10,6 +10,7 @@ import { ErrorState } from "@/components/console/states";
 import { Button } from "@/components/ui/button";
 import { useConsoleResource } from "@/lib/use-console-resource";
 import { useRouteQueryState } from "@/lib/use-route-query-state";
+import { hrefWithConnection, serializeQueryState } from "@/lib/query-state";
 import { NodesTopology } from "@/components/console/topology/nodes-topology";
 import { RaftTopology } from "@/components/console/topology/raft-topology";
 import { RoutesTopology } from "@/components/console/topology/routes-topology";
@@ -78,14 +79,14 @@ export function TopologyView() {
             <div className="evidence-panel-meta">
               <FreshnessBadge meta={meta} />
               <SourceEvidence meta={meta} />
-              <Link href="/sources" className="evidence-link">Inspect sources <ArrowUpRight aria-hidden="true" size={12} /></Link>
+              <Link href={hrefWithConnection("/sources", serializeQueryState(state))} className="evidence-link">Inspect sources <ArrowUpRight aria-hidden="true" size={12} /></Link>
             </div>
           </section>
           {meta.capabilities.map((capability) => <CapabilityNotice key={`${capability.feature}-${capability.status}`} capability={capability} />)}
           <div id="topology-view-panel" role="tabpanel" aria-labelledby={`topology-${view}-tab`}>
-            {view === "nodes" ? <NodesTopology data={data} timeWindow={state.window} /> : null}
-            {view === "raft" ? <RaftTopology data={data} selectedGroupId={Number.isSafeInteger(selectedGroupId) && selectedGroupId > 0 ? selectedGroupId : undefined} onSelectGroup={(groupId) => setFilter("group_id", String(groupId))} timeWindow={state.window} /> : null}
-            {view === "routes" ? <RoutesTopology data={data} timeWindow={state.window} filter={state.filters.filter} /> : null}
+            {view === "nodes" ? <NodesTopology data={data} timeWindow={state.window} connectionId={state.connection ?? undefined} /> : null}
+            {view === "raft" ? <RaftTopology data={data} selectedGroupId={Number.isSafeInteger(selectedGroupId) && selectedGroupId > 0 ? selectedGroupId : undefined} onSelectGroup={(groupId) => setFilter("group_id", String(groupId))} timeWindow={state.window} connectionId={state.connection ?? undefined} /> : null}
+            {view === "routes" ? <RoutesTopology data={data} timeWindow={state.window} filter={state.filters.filter} connectionId={state.connection ?? undefined} /> : null}
           </div>
         </>
       ) : null}

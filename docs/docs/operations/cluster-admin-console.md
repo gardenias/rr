@@ -41,7 +41,101 @@ cargo build --release -p rr-admin
 Ship the static export with the binary, or point `--static-dir` at its deployed location. The default is
 `crates/rr-admin/console/out` in the source tree; no standalone Node.js production server is used.
 
-### 本地 seed 模式 / Local Seed Mode
+### 独立多连接模式 / Standalone Multi-Connection Mode
+
+默认启动不需要 peers、discovery、Admin TLS/token 或 Prometheus 参数；无来源启动只初始化监听器、viewer 认证、
+静态页面、profile store 和空 `ConnectionManager`，不会连接或轮询任何集群。进程级 `--poll-interval-secs` 仍属于
+legacy 启动连接；保存连接的轮询间隔在表单 Advanced settings 中按连接设置。
+
+The default startup needs no peers, discovery, Admin TLS/token, or Prometheus options. It initializes only the listener,
+viewer authentication, static assets, profile store, and an empty `ConnectionManager`; no cluster is contacted or polled.
+Process-level `--poll-interval-secs` remains a legacy-startup option. Saved connections use their own Advanced-settings
+polling interval.
+
+```bash
+export RR_CONSOLE_TOKEN='<viewer-token-from-your-secret-store>'
+
+./target/release/rr-admin console \
+  --listen 127.0.0.1:8080 \
+  --console-token-env RR_CONSOLE_TOKEN \
+  --state-dir /var/lib/rr-console \
+  --static-dir /opt/rr/console
+```
+
+打开 `/connections/`。每个 profile 可配置名称、环境、一个或多个 Admin seeds、可选 etcd discovery、各自的
+Admin/discovery TLS 和凭证，以及可选 Prometheus 精确 matcher。Test candidate 有 10 秒总 deadline、最多 4 个并发，
+不保存配置且不创建 scheduler/watch/history 长任务；Save 不自动采集；Connect 才懒创建独立 runtime。Save & Connect
+失败时保留已保存 profile。Edit 要求先 Disconnect；Disconnect 保留 profile 并终止该 runtime 的任务和 SSE；Delete
+先 Disconnect 再删除 profile 与 keychain entry。重复 Connect/Disconnect 幂等，同时活跃 runtime（含 Connecting）
+最多 8 个，不做空闲自动回收。
+
+Open `/connections/`. Each profile has a name, environment, one or more Admin seeds, optional etcd discovery, its own
+Admin/discovery TLS and credentials, and optional Prometheus exact matcher. Candidate tests have a ten-second overall
+deadline and four-way concurrency bound; they neither save the candidate nor create scheduler/watch/history tasks. Save
+starts no collection, while Connect lazily creates an isolated runtime. Save & Connect retains the profile if connecting
+fails. Edit requires Disconnect. Disconnect retains the profile but stops runtime tasks and SSE; Delete disconnects before
+removing the profile and keychain entries. Connect/Disconnect are idempotent, at most eight runtimes including CONNECTING
+may be active, and idle runtimes are not automatically reclaimed.
+
+CONNECTED、DEGRADED 和 UNREACHABLE 的 PROFILE/STARTUP 项都显示明显的 Open，可直接进入对应 Overview。状态由
+runtime cache 投影：全部 Admin seeds 失效时为 UNREACHABLE；部分或陈旧证据为 DEGRADED；恢复且证据完整时回到
+CONNECTED。这些状态都保留有效 runtime 的 scoped API/SSE，不会因 UNREACHABLE 返回 CONNECTION_NOT_CONNECTED。
+
+CONNECTED, DEGRADED, and UNREACHABLE PROFILE/STARTUP entries expose a clear Open action into that connection's
+Overview. Runtime cache evidence projects the public state: all failed Admin seeds produce UNREACHABLE, partial or stale
+evidence produces DEGRADED, and complete recovery returns to CONNECTED. Every state retains the live runtime for scoped
+API/SSE access; UNREACHABLE does not turn into CONNECTION_NOT_CONNECTED.
+
+每个 runtime 独占 upstream、discovery、scheduler、cache、Prometheus history 配置和生命周期。所有集群数据与 SSE 都位于
+`/api/v1/console/connections/{id}/...`，不存在、未连接和连接失败不会回退到默认集群。浏览器 URL 中的
+`?connection=<id>` 是当前页面唯一权威；`/` 或缺失/未知/已断开的 ID 进入管理页。切换只保留主页面和 `window`，
+取消旧请求/SSE 并清空选择、tab、搜索、cursor；刷新、bookmark 和同一 browser context 的多个 Page 可分别保持
+不同连接。recent ID 的 localStorage 不覆盖 URL，也不会自动 Connect。
+
+Each runtime owns its upstream, discovery, scheduler, cache, Prometheus history configuration, and lifecycle. All cluster
+data and SSE live under `/api/v1/console/connections/{id}/...`; unknown, disconnected, or failed IDs never fall back to a
+default cluster. The URL's `?connection=<id>` is authoritative for each page. `/` and missing, unknown, or disconnected IDs
+lead to the manager. Switching retains only the main route and `window`, aborts old requests/SSE, and clears selection,
+tabs, search, and cursors. Refresh, bookmarks, and Pages in one browser context can retain different connections. A recent
+ID in localStorage neither overrides the URL nor auto-connects.
+
+### Profile 与秘密持久化 / Profile and Secret Persistence
+
+非敏感 profile 默认写入平台配置目录的 `rr/console/connections.json`；`--state-dir PATH` 改为
+`PATH/connections.json`。文件带格式版本，使用同目录临时文件、flush、`0600` 和原子替换；损坏、未知版本或读取失败
+会报错，不会按空列表覆盖。部署需让 Console 运行用户独占该目录并纳入配置备份；内存 runtime、缓存和趋势不持久化。
+
+Non-sensitive profiles default to `rr/console/connections.json` under the platform configuration directory;
+`--state-dir PATH` selects `PATH/connections.json`. The versioned file uses a sibling temporary file, flush, mode `0600`,
+and atomic replacement. Corruption, unknown versions, and read failures are reported rather than overwritten as an empty
+store. Give the Console user exclusive access and back up this configuration as appropriate; runtimes, caches, and trends
+are not persisted.
+
+Admin token 和 discovery password 是 write-only，省略=保留、null=清除、非空值=替换。默认仅保存于进程内存，断开仍可
+重连，edit/delete/退出时清除；只有勾选 Remember 才使用 OS keychain，profile 只保存 secret reference。API 仅返回
+`credentials_configured`、`credential_source` 和 `keychain_available`，不会返回秘密或私钥内容。TLS CA/cert/key 是
+Console 主机文件路径，浏览器不上传文件内容。Console 重启后所有 profile 均为 Disconnected；keychain 凭证可重连，
+内存凭证必须重新输入。Prometheus URL 拒绝 userinfo/query/fragment，公开连接错误使用固定脱敏 message 和 correlation ID。
+
+Admin tokens and discovery passwords are write-only: omitted keeps, null clears, and a non-empty value replaces. They
+remain in process memory by default, survive disconnect for reconnection, and are cleared on edit/delete/exit. Only the
+explicit Remember option uses the OS keychain; profiles contain secret references, not secret values. APIs expose only
+`credentials_configured`, `credential_source`, and `keychain_available`. TLS CA/certificate/key fields are host paths;
+the browser does not upload their contents. After a restart every profile is Disconnected; keychain credentials can be
+reused, while memory credentials must be re-entered. Prometheus URLs reject userinfo, query, and fragments. Public
+connection failures use fixed sanitized messages and correlation IDs.
+
+隔离测试或 headless 部署可显式使用进程级 `--keychain-disable`，完全禁止该进程的 OS keychain get/set/delete，
+凭证仅保留在内存且 API 返回 `keychain_available=false`。已有 profile 若只有 keychain 凭证，需要重新输入；
+重启后内存凭证仍需重新输入。未传参数时生产行为不变，默认启用 keychain 能力探测。
+
+Isolated tests and headless deployments can explicitly set the process-level `--keychain-disable` flag. It disables all
+OS keychain get/set/delete operations for that process, keeps credentials memory-only, and makes the API report
+`keychain_available=false`. Re-enter credentials for an existing profile whose secrets exist only in the keychain;
+memory credentials also need re-entry after restart. Omitting the flag preserves the production default of probing and
+using the OS keychain.
+
+### 兼容：临时启动连接 / Compatibility: Ephemeral Startup Connection
 
 `--peers` 的每项是 `node_id@AdminService_host:port`，不是 client/bootstrap 地址。不要套用 `rr-server serve
 --peers` 的语义，也不要推导端口。
@@ -95,16 +189,17 @@ The global `--token-env`, `--tls-ca`, `--tls-cert`, `--tls-key`, and optional `-
 `console` and configure BFF-to-AdminService connections. The subcommand's `--tls-cert` and `--tls-key` appear **after**
 `console` and configure browser-to-Console HTTPS.
 
-- loopback 的 viewer 认证和 HTTPS 可选；设置 `RR_CONSOLE_TOKEN` 即启用登录。/ Viewer authentication and HTTPS
+- loopback 的 viewer 认证和 HTTPS 可选；设置 `RR_CONSOLE_TOKEN` 即启用登录。<br />Viewer authentication and HTTPS
   are optional on loopback; setting `RR_CONSOLE_TOKEN` enables login.
-- viewer 登录换取 15 分钟内存 session；cookie 为 HttpOnly、SameSite=Strict，HTTPS 时增加 Secure。/ Viewer
+- viewer 登录换取 15 分钟内存 session；cookie 为 HttpOnly、SameSite=Strict，HTTPS 时增加 Secure。<br />Viewer
   login issues a 15-minute in-memory session; cookies are HttpOnly and SameSite=Strict, with Secure under HTTPS.
-- session 不持久化，Console 重启会撤销现有 session；reconcile POST 还检查 CSRF token 和同源 Origin。/ Sessions
-  are not persisted, so a Console restart revokes them. Reconcile POST also checks the CSRF token and same-origin
+- session 不持久化，Console 重启会撤销现有 session；连接 CRUD、test/connect/disconnect 和 reconcile 等
+  POST/PATCH/DELETE 都检查 CSRF token 和同源 Origin。<br />Sessions are not persisted, so a Console restart revokes them.
+  Connection CRUD, test/connect/disconnect, reconcile, and other POST/PATCH/DELETE mutations check CSRF and same-origin
   Origin.
-- 节点 Admin token 只在 BFF 内；不要写入 URL、HTML、localStorage 或日志。/ Node Admin tokens remain inside the
+- 节点 Admin token 只在 BFF 内；不要写入 URL、HTML、localStorage 或日志。<br />Node Admin tokens remain inside the
   BFF and must never appear in URLs, HTML, localStorage, or logs.
-- 节点 `/metrics` 当前可能未认证；用网络策略、TLS 或可信内网保护它，不由 Console 暴露原始指标代理。/ Node
+- 节点 `/metrics` 当前可能未认证；用网络策略、TLS 或可信内网保护它，不由 Console 暴露原始指标代理。<br />Node
   `/metrics` may be unauthenticated; protect it with network policy, TLS, or a trusted network boundary. The Console
   does not proxy raw metrics.
 
@@ -150,13 +245,13 @@ a directory record does not override an explicit seed with the same node ID.
 安全参数规则如下；错误组合或未设置/为空的密码环境变量会在启动时失败：
 Discovery security is validated at startup, including invalid combinations and missing or empty password variables:
 
-- 必须提供 `--discovery-tls-ca`，或显式选择 `--discovery-allow-insecure`；二者互斥。/ Require either
+- 必须提供 `--discovery-tls-ca`，或显式选择 `--discovery-allow-insecure`；二者互斥。<br />Require either
   `--discovery-tls-ca` or explicit `--discovery-allow-insecure`; they are mutually exclusive.
-- `--discovery-tls-cert` 与 `--discovery-tls-key` 必须成对，并同时提供 CA；`--discovery-tls-domain` 也要求 CA。/
+- `--discovery-tls-cert` 与 `--discovery-tls-key` 必须成对，并同时提供 CA；`--discovery-tls-domain` 也要求 CA。<br />
   `--discovery-tls-cert` and `--discovery-tls-key` are a pair and require the CA; `--discovery-tls-domain` also
   requires the CA.
 - `--discovery-username` 与 `--discovery-password-env` 必须成对且非空，并且认证必须基于 CA TLS。密码只从指定
-  环境变量读取，不能放入 argv。/ `--discovery-username` and `--discovery-password-env` are a non-empty pair and
+  环境变量读取，不能放入 argv。<br />`--discovery-username` and `--discovery-password-env` are a non-empty pair and
   authentication requires CA-backed TLS. The password is read only from the named environment variable, never argv.
 
 本地无认证明文必须显式 opt-in，不能省略安全配置而隐式使用：
@@ -190,23 +285,75 @@ and conflict semantics.
 实现遵循以下信任边界：
 The implementation enforces these trust boundaries:
 
-- discovery 是 roster 权威；若同时提供 peers，peers 仅作连通性种子，且 `--cluster-name` 必填。/ Discovery is
+- discovery 是 roster 权威；若同时提供 peers，peers 仅作连通性种子，且 `--cluster-name` 必填。<br />Discovery is
   the roster authority. When peers are also present, they are connectivity seeds only, and `--cluster-name` is required.
 - 只信任显式 seed、受信目录记录，或经认证本机描述符返回的地址；普通 metrics 标签和未认证 HTTP 响应不能提升
-  地址信任。/ Trust only explicit seeds, authenticated directory records, or addresses returned by an authenticated
+  地址信任。<br />Trust only explicit seeds, authenticated directory records, or addresses returned by an authenticated
   local descriptor. Metrics labels and unauthenticated HTTP responses cannot promote address trust.
-- 校验 node ID、cluster UUID、目录 revision 和 TLS 身份后才可转发 Admin token；冲突的非空 UUID 以及空/非空
-  UUID 混合必须隔离，不得合并。/ Verify node ID, cluster UUID, directory revision, and TLS identity before forwarding
+- 校验 node ID、cluster UUID、目录 revision 和 TLS 身份后才可转发 Admin token；冲突的非空 UUID 以及空与非空
+  UUID 混合必须隔离，不得合并。<br />Verify node ID, cluster UUID, directory revision, and TLS identity before forwarding
   an Admin token. Conflicting non-empty UUIDs and mixed empty/non-empty UUIDs must be quarantined, never merged.
-- 非 seed 节点只使用显式 admin/observability 地址；缺失时标记 `ENDPOINTS_UNAVAILABLE`，不做端口加减。/
+- 非 seed 节点只使用显式 admin/observability 地址；缺失时标记 `ENDPOINTS_UNAVAILABLE`，不做端口加减。<br />
   Non-seed nodes use only explicit Admin/observability addresses. Missing endpoints produce `ENDPOINTS_UNAVAILABLE`;
   port arithmetic is forbidden.
-- lease 过期、watch 断开或 compaction 需要全量对账。非 seed 若 15 秒未通过权威对账/认证拓扑刷新信任，
+- lease 过期、watch 断开或 compaction 需要全量对账。非 seed 若 15 秒未通过权威对账或认证拓扑刷新信任，
   立即从可连接 roster 移除并暂停 Admin token 转发；显式 seed 不过期。不可达节点保留最后快照并标 stale，
-  不直接从拓扑删除。/ Lease expiry, watch interruption, and compaction require full reconciliation. A non-seed
+  不直接从拓扑删除。<br />Lease expiry, watch interruption, and compaction require full reconciliation. A non-seed
   that has not refreshed trust through authoritative reconciliation or authenticated topology for 15 seconds is removed
   from the dialable roster and Admin-token forwarding stops; explicit seeds do not expire. Unreachable nodes retain
   their last snapshot with stale evidence instead of disappearing from topology.
+
+## Console HTTP API 与兼容路由 / Console HTTP API and Compatibility Routes
+
+机器可读契约以 `crates/rr-admin/openapi/console-v1.json` 为准，server base 为 `/api/v1/console`。连接控制面如下；
+POST/PATCH/DELETE 都要求同源 `Origin`，启用 viewer 认证时还要求 `X-Console-CSRF`。登录是既有公开例外，成功后
+再获取 session CSRF。连接响应使用 neutral meta：`cluster_id: null`、`retention_source: NONE`、空 sources/capabilities。
+
+The machine-readable contract is `crates/rr-admin/openapi/console-v1.json`, with server base `/api/v1/console`.
+Connection control routes are listed below. Every POST/PATCH/DELETE requires a same-origin `Origin` and, when viewer
+authentication is enabled, `X-Console-CSRF`; the established public login flow is the exception. Control responses use
+neutral meta: null `cluster_id`, `NONE` retention, and empty sources/capabilities.
+
+| 方法与路径 / Method and Path | 行为 / Behavior |
+| :--- | :--- |
+| `GET /connections` | 脱敏 profile/runtime 列表和 keychain 能力；不逐连接请求 summary / Redacted list and keychain capability; no per-connection summary fan-out |
+| `POST /connections` | 保存 DISCONNECTED profile，返回 201 / Save a DISCONNECTED profile; 201 |
+| `POST /connections/test` | 测试未保存 candidate；可选 existing ID 仅在 BFF 内解析 Keep 秘密 / Test an unsaved candidate; optional existing ID resolves Keep secrets only inside the BFF |
+| `GET/PATCH/DELETE /connections/{id}` | 读取、断开状态编辑、断开并删除 / Read, edit while disconnected, or disconnect and delete |
+| `POST /connections/{id}/test` | 测试已保存配置 / Test a saved profile |
+| `POST /connections/{id}/connect` | 幂等懒启动 runtime / Idempotently start the runtime lazily |
+| `POST /connections/{id}/disconnect` | 幂等停止 runtime，保留 profile / Idempotently stop the runtime and retain the profile |
+
+新 UI 的全部数据面必须带 connection ID：`/connections/{id}/summary`、`nodes`、`nodes/{node}`、
+`nodes/{node}/boots`、`groups`、`groups/{group}`、`groups/{group}/replicas`、`topology`、
+`metrics/performance`、`snapshots`、`lifecycle`、`events`、`sources`、`sources/reconcile` 和 `stream`。
+资源错误使用该 runtime 的 cache meta；普通已捕获的在途读取可完成，但断开后新请求返回
+`CONNECTION_NOT_CONNECTED`，SSE 关闭，不启动新采集。
+
+Every data-plane route used by the new UI is connection-scoped: `/connections/{id}/summary`, `nodes`, `nodes/{node}`,
+`nodes/{node}/boots`, `groups`, `groups/{group}`, `groups/{group}/replicas`, `topology`, `metrics/performance`,
+`snapshots`, `lifecycle`, `events`, `sources`, `sources/reconcile`, and `stream`. Resource errors retain that runtime's
+cache meta. Already-captured ordinary reads may finish, but after disconnect new requests return
+`CONNECTION_NOT_CONNECTED`, SSE closes, and no new collection starts.
+
+旧无作用域资源路由和 `/stream` 别名只映射到本次进程由 `--peers`/`--discovery` 创建的固定临时启动连接；它们绝不
+选择其他 profile。无启动连接时返回 `400 CONNECTION_REQUIRED`；启动连接被断开或删除后仍返回明确错误，bookmark
+不承诺跨重启保留。新 UI 不使用这些兼容路由。
+
+Legacy unscoped resources and the `/stream` alias map only to the fixed ephemeral startup connection created by
+`--peers`/`--discovery`; they never select another profile. Without a startup connection they return
+`400 CONNECTION_REQUIRED`. Disconnecting or deleting that connection leaves an explicit error rather than retargeting
+the route, and its bookmark is not promised across restarts. The new UI never uses these compatibility routes.
+
+常见控制错误包括 `404 CONNECTION_NOT_FOUND`、`409 CONNECTION_NOT_CONNECTED/CONNECTION_ACTIVE`、
+`400 CONNECTION_REQUIRED/INVALID_CONNECTION_PROFILE`、`409 CREDENTIALS_REQUIRED`、
+`429 ACTIVE_CONNECTION_LIMIT` 和 `502 CONNECTION_TEST_FAILED/CONNECTION_INITIALIZATION_FAILED`。错误响应不含秘密，
+用 correlation ID 关联内部详细日志。
+
+Common control errors include `404 CONNECTION_NOT_FOUND`, `409 CONNECTION_NOT_CONNECTED/CONNECTION_ACTIVE`,
+`400 CONNECTION_REQUIRED/INVALID_CONNECTION_PROFILE`, `409 CREDENTIALS_REQUIRED`, `429 ACTIVE_CONNECTION_LIMIT`, and
+`502 CONNECTION_TEST_FAILED/CONNECTION_INITIALIZATION_FAILED`. Error bodies contain no secrets; use the correlation ID
+to find detailed internal logs.
 
 ## 健康、Readiness 与 Quorum / Health, Readiness, and Quorum
 
@@ -271,18 +418,18 @@ retain only the current boot as `VOLATILE` unless `[node].boot_journal_dir` or `
 boot_journal_dir = "/var/lib/rr-boot-history/node-1"
 ```
 
-- 每次启动追加 boot ID、启动时间和 App/Rr/git/build 信息；优雅关闭补写结束时间和 `GRACEFUL`。/ Every start
+- 每次启动追加 boot ID、启动时间和 App/Rr/git/build 信息；优雅关闭补写结束时间和 `GRACEFUL`。<br />Every start
   appends a boot ID, start time, and App/Rr/git/build information. Graceful shutdown adds an end time and `GRACEFUL`.
 - 下次启动发现仍为 `RUNNING` 的旧记录时，将其改为 `ABNORMAL_OR_UNCERTAIN`，结束时间保持未知；不能据此断言
-  crash 原因。/ A previous record still `RUNNING` at the next startup becomes `ABNORMAL_OR_UNCERTAIN` with no invented
+  crash 原因。<br />A previous record still `RUNNING` at the next startup becomes `ABNORMAL_OR_UNCERTAIN` with no invented
   end time; this does not prove a crash reason.
-- 持久 journal 每节点最多 100 个 boot，按新到旧分页；默认每页 50，最大 200。/ A persistent journal retains at
+- 持久 journal 每节点最多 100 个 boot，按新到旧分页；默认每页 50，最大 200。<br />A persistent journal retains at
   most 100 boots per node, newest first. Pages default to 50 and are capped at 200.
 - 复用同一目录会延续历史。换成空目录、删除 journal，或重置包含默认 journal 的整个 data dir，都会重置可见
-  历史；需要跨数据重置保留历史时使用独立 journal dir。/ Reusing the same directory continues history. An empty
+  历史；需要跨数据重置保留历史时使用独立 journal dir。<br />Reusing the same directory continues history. An empty
   replacement directory, journal deletion, or resetting a data dir that contains the default journal resets visible
   history. Use an independent journal dir when history must survive a data reset.
-- journal 损坏、版本不支持或持久化失败会响亮报错；不要以伪造空历史替代恢复。/ Corrupt, unsupported-version,
+- journal 损坏、版本不支持或持久化失败会响亮报错；不要以伪造空历史替代恢复。<br />Corrupt, unsupported-version,
   or unwritable journals fail loudly; do not replace recovery with fabricated empty history.
 
 ### 有界按需历史 / Bounded On-Demand History
@@ -313,14 +460,16 @@ Live performance comes from the trusted descriptor's `observability_addr`. The B
 response cannot replace that identity. Node scraping currently uses HTTP and descriptors do not accept a URL scheme, so
 protect this endpoint with a trusted network or network policy in production.
 
-成功的实时序列以 `retention_source=CONSOLE_MEMORY` 返回。事件环形缓冲最多 512 条，观测点最多 20,000 个；
-没有固定时长保证，容量耗尽时淘汰最旧记录，重启全部清空。15m/1h/6h/24h 窗口只筛选已留存数据，不会回填
-Console 启动前的平线。没有可用实时序列时，该响应为 `UNSUPPORTED` + `NONE`，不等于整个性能功能不存在。
-Successful live series return `retention_source=CONSOLE_MEMORY`. At most 512 events and 20,000 observation points are
-retained in bounded rings. There is no fixed duration guarantee; oldest records are evicted at capacity and all data is
-lost on restart. The 15m/1h/6h/24h windows filter existing retention and never backfill a flat line from before Console
-startup. If no live series is available, that response is `UNSUPPORTED` with `NONE`; it does not mean the entire
-performance feature is absent.
+成功的实时序列以 `retention_source=CONSOLE_MEMORY` 返回。每个活跃连接拥有独立有界缓存：事件环形缓冲最多
+512 条，观测点最多 20,000 个；最多 8 个活跃 runtime 时，容量按 runtime 分别计算。已保存但断开的 profile 不占
+采集缓存。没有固定时长保证，容量耗尽时淘汰最旧记录，重启全部清空。15m/1h/6h/24h 窗口只筛选已留存数据，
+不会回填 Console 启动前的平线。没有可用实时序列时，该响应为 `UNSUPPORTED` + `NONE`，不等于整个性能功能不存在。
+Successful live series return `retention_source=CONSOLE_MEMORY`. Every active connection has an isolated bounded cache
+of at most 512 events and 20,000 observation points; with at most eight active runtimes, these limits apply per runtime.
+Saved but disconnected profiles use no collection cache. There is no fixed duration guarantee; oldest records are evicted
+at capacity and all data is lost on restart. The 15m/1h/6h/24h windows filter existing retention and never backfill a
+flat line from before Console startup. If no live series is available, that response is `UNSUPPORTED` with `NONE`; it does
+not mean the entire performance feature is absent.
 
 未配置历史时默认读取实时缓存；显式 `source=CONSOLE_MEMORY` 始终选择实时缓存。配置历史后，省略 `source`
 默认选择 Prometheus，需要实时数据时必须明确选择 `CONSOLE_MEMORY`。
@@ -336,8 +485,11 @@ data retains source, observation time, error, and correlation ID. Unreachable do
 
 ### Prometheus 历史 / Prometheus History
 
-以下两个参数必须成对提供，否则启动失败：
-These two flags are mandatory together; providing only one fails startup:
+保存连接在 Advanced settings 中分别配置 Prometheus URL 与精确 matcher；不同连接可使用不同历史后端。以下两个
+CLI 参数是 legacy 临时启动连接的等价配置，必须成对提供，否则启动失败：
+Saved connections configure their Prometheus URL and exact matcher independently in Advanced settings, so different
+connections may use different history backends. These two CLI flags are the equivalent legacy-startup configuration and
+are mandatory together; providing only one fails startup:
 
 ```bash
 ./target/release/rr-admin \
@@ -349,13 +501,13 @@ These two flags are mandatory together; providing only one fails startup:
   --prometheus-cluster cluster_id=prod-rr
 ```
 
-- `--prometheus-url` 必须是带 host 的绝对 HTTP 或 HTTPS URL。/ `--prometheus-url` must be an absolute HTTP or
+- `--prometheus-url` 必须是带 host 的绝对 HTTP 或 HTTPS URL。<br />`--prometheus-url` must be an absolute HTTP or
   HTTPS URL with a host.
 - `--prometheus-cluster` 必须恰好是一个非空 `label=value` 精确 matcher；label 使用 Prometheus 标识符规则，
-  value 不能为空且不能再含 `=`。/ `--prometheus-cluster` must be exactly one non-empty `label=value` matcher.
+  value 不能为空且不能再含 `=`。<br />`--prometheus-cluster` must be exactly one non-empty `label=value` matcher.
   The label follows Prometheus identifier rules; the value is non-empty and cannot contain another `=`.
 - 显式 `source=PROMETHEUS` 但未配置历史时返回 `UNSUPPORTED` + `NONE`；实时缓存仍可通过
-  `source=CONSOLE_MEMORY` 使用。/ Explicit `source=PROMETHEUS` without history configuration returns `UNSUPPORTED`
+  `source=CONSOLE_MEMORY` 使用。<br />Explicit `source=PROMETHEUS` without history configuration returns `UNSUPPORTED`
   with `NONE`; live data remains available through `source=CONSOLE_MEMORY`.
 
 ### Raw-family 隔离与错误 / Raw-Family Isolation and Errors
@@ -395,30 +547,31 @@ templates; use live retention or query Prometheus/Grafana directly for them.
 
 ## 指标解释与 P0 不支持项 / Metric Interpretation and P0 Unsupported Behavior
 
-- 未知、旧节点未实现或平台不支持的值显示 `—`/`UNSUPPORTED`，绝不替换为 0。/ Unknown, old-node-unimplemented,
+- 未知、旧节点未实现或平台不支持的值显示 `—`/`UNSUPPORTED`，绝不替换为 0。<br />Unknown, old-node-unimplemented,
   or platform-unsupported values are `—`/`UNSUPPORTED`, never zero.
-- follower 缺失 leader-only matched/lag 不是 lag=0；legacy `leader_node_id=0` 归一化为无 leader/未知。/ Missing
+- follower 缺失 leader-only matched/lag 不是 lag=0；legacy `leader_node_id=0` 归一化为无 leader/未知。<br />Missing
   leader-only matched/lag on followers is not zero lag; legacy `leader_node_id=0` normalizes to no leader/unknown.
 - P99 从聚合 histogram bucket 计算，禁止平均节点 P99。server、proposal、apply 的 outcome/cohort 当前未对齐，
   均值和分位数都不得相减或堆叠，状态为 `UNALIGNED_COHORTS`。详见
-  [写链路延迟证据](../reference/metrics-reference.md#写链路延迟证据--write-path-latency-evidence)。/ P99 comes
+  [写链路延迟证据](../reference/metrics-reference.md#写链路延迟证据--write-path-latency-evidence)。<br />P99 comes
   from aggregated histogram buckets, never averaged node quantiles. Server, proposal, and apply cohorts are not aligned;
   neither means nor quantiles may be subtracted or stacked. The state is `UNALIGNED_COHORTS`; see [Write-Path Latency
   Evidence](../reference/metrics-reference.md#写链路延迟证据--write-path-latency-evidence).
 - 快照构建失败没有 group 标签，只能归到节点；Group × Node 失败单元格为 `UNSUPPORTED`。废弃的
-  `snapshot_in_progress=false` 不表示进度，无快照也不显示 0%。/ Snapshot build failures have no group label and
+  `snapshot_in_progress=false` 不表示进度，无快照也不显示 0%。<br />Snapshot build failures have no group label and
   remain node-level. Group × Node failure cells are `UNSUPPORTED`; the deprecated `snapshot_in_progress=false` is not
   progress, and no snapshot does not mean 0%.
-- 节点资源指标按 `process`/`host`/`cgroup` 分 scope，网络 counter reset 安全处理，缺席不补零。/ Node resource
+- 节点资源指标按 `process`/`host`/`cgroup` 分 scope，网络 counter reset 安全处理，缺席不补零。<br />Node resource
   metrics keep `process`/`host`/`cgroup` scopes distinct, handle network counter resets safely, and omit unsupported
   values.
 - P0 不提供 membership 修改、强制选主、TriggerSnapshot、DrainNode、offset reset 或进程重启按钮；唯一的集群
-  reconcile POST 也是只读刷新，不执行这些控制操作。/ P0 exposes no membership changes, forced leadership,
+  reconcile POST 也是只读刷新，不执行这些控制操作。<br />P0 exposes no membership changes, forced leadership,
   TriggerSnapshot, DrainNode, offset reset, or process-restart actions. The cluster reconcile POST is a read-only
   refresh and performs none of those control operations.
-- P0 不含任意 PromQL 代理、通知投递、多集群、本地用户体系或 OIDC/SSO。所有 Console 用户只有 viewer 能力。/
-  P0 includes no arbitrary PromQL proxy, notification delivery, multi-cluster management, local user database, or
-  OIDC/SSO. Every Console user has viewer-only capability.
+- P0 不含任意 PromQL 代理、通知投递、多用户权限体系或 OIDC/SSO。多集群仅表示单 operator 的多个只读连接，
+  所有 Console 用户仍只有 viewer 能力。<br />P0 includes no arbitrary PromQL proxy, notification delivery, multi-user
+  authorization system, or OIDC/SSO. Multi-cluster means multiple read-only connections for one operator; every Console
+  user remains viewer-only.
 
 排查页面数据时先打开 **Sources**：检查启动模式、逐节点 Admin/observability 地址、最后成功/失败、能力矩阵、
 留存来源和 correlation ID，再进入节点、组或生命周期证据。不要把采集缺失误判为 Raft 故障。

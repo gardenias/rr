@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { RefreshProvider } from "@/lib/refresh-context";
 import { makeMeta } from "@/test/fixtures";
 import type { GroupDetailItem, GroupListItem } from "@/components/console/groups/model";
@@ -13,9 +13,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/use-console-resource", () => ({
   useConsoleResource: mocks.resource,
 }));
+const routeState = vi.hoisted(() => ({ connection: "cluster-a", groupId: "1" }));
 vi.mock("@/lib/use-route-query-state", () => ({
   useRouteQueryState: () => ({
-    state: { window: "15m", filters: { filter: "1", group_id: "1" } },
+    state: { window: "15m", connection: routeState.connection, filters: { filter: "1", group_id: routeState.groupId } },
     setFilter: mocks.setFilter,
   }),
 }));
@@ -47,6 +48,8 @@ const detail: GroupDetailItem = {
 
 describe("GroupsView", () => {
   beforeEach(() => {
+    routeState.connection = "cluster-a";
+    routeState.groupId = "1";
     mocks.resource.mockReturnValue({
       data: { items: [item], next_cursor: null },
       meta: makeMeta({ partial: true }),
@@ -72,7 +75,7 @@ describe("GroupsView", () => {
   });
 
   it("loads a deep-linked group and normalizes the actual legacy replica payload", async () => {
-    render(<RefreshProvider><GroupsView /></RefreshProvider>);
+    render(<RefreshProvider connectionId="cluster-a"><GroupsView /></RefreshProvider>);
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -83,7 +86,26 @@ describe("GroupsView", () => {
     expect(screen.getByRole("dialog", { name: "Group 1 evidence" })).toBeVisible();
     expect(screen.getByRole("table", { name: "Group replica evidence" })).toBeVisible();
     expect(screen.getByText("Membership revision 7")).toBeVisible();
-    expect(mocks.group).toHaveBeenCalledWith(1, expect.any(AbortSignal));
-    expect(mocks.replicas).toHaveBeenCalledWith(1, expect.any(AbortSignal));
+    expect(mocks.group).toHaveBeenCalledWith("cluster-a", 1, expect.any(AbortSignal));
+    expect(mocks.replicas).toHaveBeenCalledWith("cluster-a", 1, expect.any(AbortSignal));
+  });
+
+  it("resets group cursor history when the connection changes", () => {
+    routeState.groupId = "";
+    mocks.resource.mockReturnValue({
+      data: { items: [item], next_cursor: "groups-page-2" },
+      meta: makeMeta(),
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+    });
+    const view = render(<RefreshProvider connectionId="cluster-a"><GroupsView /></RefreshProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    expect(mocks.resource).toHaveBeenLastCalledWith("/groups", expect.objectContaining({ cursor: "groups-page-2" }));
+
+    routeState.connection = "cluster-b";
+    view.rerender(<RefreshProvider connectionId="cluster-b"><GroupsView /></RefreshProvider>);
+    expect(mocks.resource).toHaveBeenLastCalledWith("/groups", expect.objectContaining({ cursor: null }));
+    expect(screen.getByRole("button", { name: "Previous page" })).toBeDisabled();
   });
 });

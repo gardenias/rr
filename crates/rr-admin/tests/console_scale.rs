@@ -655,11 +655,13 @@ impl UpstreamProcess {
 struct ConsoleProcess {
     addr: SocketAddr,
     process: ChildProcess,
+    _state_dir: tempfile::TempDir,
 }
 
 impl ConsoleProcess {
     fn spawn(upstreams: &[UpstreamProcess], poll_interval_secs: u64) -> Self {
         let addr = unused_addr();
+        let state_dir = tempfile::tempdir().expect("temporary scale Console state directory");
         let peers = upstreams
             .iter()
             .map(|upstream| format!("{}@{}", upstream.node_id, upstream.admin_addr))
@@ -674,6 +676,8 @@ impl ConsoleProcess {
                 &peers,
                 "--poll-interval-secs",
                 &poll_interval_secs.to_string(),
+                "--state-dir",
+                &state_dir.path().to_string_lossy(),
             ])
             .env_remove("RR_CONSOLE_TOKEN")
             .stdout(Stdio::null())
@@ -692,7 +696,11 @@ impl ConsoleProcess {
             assert!(Instant::now() < deadline, "Console BFF listen timeout");
             thread::sleep(Duration::from_millis(25));
         }
-        Self { addr, process }
+        Self {
+            addr,
+            process,
+            _state_dir: state_dir,
+        }
     }
 
     fn get(&self, path: &str) -> HttpResponse {

@@ -1,7 +1,23 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+import { CLUSTER_A, clusterUrl, seedConnection } from "./connection";
 
 const viewerToken = "mock-viewer-token";
 const routes = ["overview", "nodes", "topology", "groups", "performance", "snapshots", "lifecycle", "events", "sources"];
+const reconcilePath = "/api/v1/console/connections/cluster-a/sources/reconcile";
+
+async function apiLogin(page: Page) {
+  const response = await page.request.post("/api/v1/console/auth/login", { data: { token: viewerToken } });
+  expect(response.ok()).toBe(true);
+  await seedConnection(page, CLUSTER_A);
+}
+
+async function uiLogin(page: Page) {
+  await page.goto("/login/");
+  await page.getByLabel("Viewer credential").fill(viewerToken);
+  await page.getByRole("button", { name: "Sign in to Console" }).click();
+  await expect(page).toHaveURL(/\/connections\/$/);
+  await seedConnection(page, CLUSTER_A);
+}
 
 test("viewer credentials never reach route URLs, HTML, persistent storage, cookies, or frontend logs", async ({ page, context }) => {
   const requestedUrls: string[] = [];
@@ -10,13 +26,9 @@ test("viewer credentials never reach route URLs, HTML, persistent storage, cooki
   page.on("console", (message) => frontendLogs.push(message.text()));
   page.on("pageerror", (error) => frontendLogs.push(error.message));
 
-  await page.goto("/login/");
-  await page.getByLabel("Viewer credential").fill(viewerToken);
-  await page.getByRole("button", { name: "Sign in to Console" }).click();
-  await expect(page).toHaveURL(/\/overview\//);
-
+  await uiLogin(page);
   for (const route of routes) {
-    await page.goto(`/${route}/`);
+    await page.goto(clusterUrl(`/${route}/`, CLUSTER_A));
     await expect(page.locator("h1")).toHaveCount(1);
     expect(await page.content(), `${route} HTML contains the viewer credential`).not.toContain(viewerToken);
     const storage = await page.evaluate(() => ({
@@ -36,9 +48,8 @@ test("viewer credentials never reach route URLs, HTML, persistent storage, cooki
 });
 
 test("logout revokes the mock session and protected API access without retaining the credential", async ({ page, context }) => {
-  const response = await page.request.post("/api/v1/console/auth/login", { data: { token: viewerToken } });
-  expect(response.ok()).toBe(true);
-  await page.goto("/overview/");
+  await apiLogin(page);
+  await page.goto(clusterUrl("/overview/", CLUSTER_A));
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page).toHaveURL(/\/login\//);
 
@@ -50,25 +61,21 @@ test("logout revokes the mock session and protected API access without retaining
   expect(await page.content()).not.toContain(viewerToken);
 });
 
-
-test("restores CSRF after a full page reload and sends one authenticated reconcile", async ({ page }) => {
+test("restores CSRF after a full page reload and sends one authenticated scoped reconcile", async ({ page }) => {
   const csrfRequests: string[] = [];
   const reconcileRequests: string[] = [];
   let reconcileCsrf: string | undefined;
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (url.pathname === "/api/v1/console/auth/csrf") csrfRequests.push(request.method());
-    if (url.pathname === "/api/v1/console/sources/reconcile") {
+    if (url.pathname === reconcilePath) {
       reconcileRequests.push(request.method());
       reconcileCsrf = request.headers()["x-console-csrf"];
     }
   });
 
-  await page.goto("/login/");
-  await page.getByLabel("Viewer credential").fill(viewerToken);
-  await page.getByRole("button", { name: "Sign in to Console" }).click();
-  await expect(page).toHaveURL(/\/overview\//);
-  await page.goto("/sources/");
+  await uiLogin(page);
+  await page.goto(clusterUrl("/sources/", CLUSTER_A));
   await expect(page.getByRole("button", { name: "Reconcile now" })).toBeVisible();
   await page.reload();
   await page.getByRole("button", { name: "Reconcile now" }).click();
@@ -84,8 +91,7 @@ test("restores CSRF after a full page reload and sends one authenticated reconci
   expect(stored).not.toContain(reconcileCsrf);
 });
 
-
-test("caches the auth-disabled CSRF capability and omits the header on later reconciles", async ({ page }) => {
+test("caches the auth-disabled CSRF capability and omits the header on later scoped reconciles", async ({ page }) => {
   const csrfRequests: string[] = [];
   const reconcileHeaders: Array<string | undefined> = [];
   await page.route("**/api/v1/console/auth/csrf", (route) => route.fulfill({
@@ -94,14 +100,11 @@ test("caches the auth-disabled CSRF capability and omits the header on later rec
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (url.pathname === "/api/v1/console/auth/csrf") csrfRequests.push(request.method());
-    if (url.pathname === "/api/v1/console/sources/reconcile") reconcileHeaders.push(request.headers()["x-console-csrf"]);
+    if (url.pathname === reconcilePath) reconcileHeaders.push(request.headers()["x-console-csrf"]);
   });
 
-  await page.goto("/login/");
-  await page.getByLabel("Viewer credential").fill(viewerToken);
-  await page.getByRole("button", { name: "Sign in to Console" }).click();
-  await expect(page).toHaveURL(/\/overview\//);
-  await page.goto("/sources/");
+  await uiLogin(page);
+  await page.goto(clusterUrl("/sources/", CLUSTER_A));
   await page.reload();
   await page.getByRole("button", { name: "Reconcile now" }).click();
   await expect(page.getByText(/Reconciliation completed/)).toBeVisible();

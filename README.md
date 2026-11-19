@@ -19,10 +19,7 @@ Rr is a distributed multi-Raft consensus framework written in Rust, designed for
 - **gRPC Networking with Connection Pooling** — 高效的 gRPC 网络层和连接池管理 / Efficient gRPC networking with connection pooling
 - **TLS/mTLS + Bearer Auth + Rate Limiting** — 生产安全默认（G1–G7 启动安全门）/ Production-grade security by default (G1–G7 startup gates)
 - **Dynamic Configuration Management** — 通过 ConfigProvider 动态管理分布式配置和分区（内存与 etcd 后端）/ Dynamic distributed configuration via ConfigProvider (in-memory and etcd backends)
-- **Read-Only Cluster Admin Console** — `rr-admin console` 同源托管 Next.js 静态界面、版本化 JSON 与 SSE，
-  展示集群、Raft 组、生命周期与性能；受控写操作仍由 Admin CLI 执行 / `rr-admin console` serves a same-origin
-  Next.js static UI, versioned JSON, and SSE for cluster, Raft group, lifecycle, and performance visibility;
-  controlled writes remain in the Admin CLI
+- **Multi-Cluster Read-Only Cluster Admin Console** — `rr-admin console` 无需 peers/discovery 即可独立启动，通过 UI 保存、连接和切换多个集群；每个连接拥有隔离的采集 runtime，同源提供 Next.js 静态界面、connection-scoped JSON 与 SSE / starts without peers or discovery, saves and switches among multiple cluster connections through the UI, isolates collection per connection, and serves a same-origin Next.js static UI with connection-scoped JSON and SSE
 - **Client SDK with Auto Leader-Redirect** — 智能客户端 SDK 自动处理领导者重定向和重试（Rust + Java）/ Smart client SDK with auto leader-redirect and retry (Rust + Java)
 - **Snapshot Transfer Between Nodes** — 节点间的快照传输支持快速同步 / Snapshot transfer between nodes for fast synchronization
 - **Linearizable Reads** — 协议层强一致读（ReadIndex + leader 重定向）/ Protocol-level linearizable reads (ReadIndex + leader redirect)
@@ -42,15 +39,16 @@ C4Container
 
   System_Boundary(client_side, "Client Side") {
     Container(user_app, "User Application", "Rust + rr-client SDK", "Auto leader-redirect & retry")
-    Container(operator_browser, "Operator Browser", "Web browser", "Views the read-only Console")
+    Container(operator_browser, "Operator Browser", "Web browser", "Views and switches among read-only cluster connections")
   }
 
   System_Boundary(admin_tools, "Admin Tools") {
     Container(admin_cli, "rr-admin CLI / REPL", "Rust binary", "Controlled cluster administration")
-    Container(admin_console, "Cluster Admin Console", "rr-admin console: Rust/Axum BFF + Next.js static export", "Same-origin read-only UI, versioned JSON & SSE; no Node.js production service")
+    Container(admin_console, "Multi-cluster Admin Console", "rr-admin console: Rust/Axum BFF + Next.js static export", "Same-origin read-only UI, connection-scoped JSON & SSE; one lazy runtime per connected cluster; no Node.js production service")
+    ContainerDb(console_profiles, "Console Connection Profiles", "Local versioned 0600 JSON", "Non-sensitive profiles; secrets stay in memory or optional OS keychain")
   }
 
-  System_Boundary(cluster, "Rr Cluster (N nodes)") {
+  System_Boundary(cluster, "Rr Clusters (N nodes per cluster)") {
     Container(rr_node, "rr-server Node", "Rust binary", "Hosts multiple Raft groups; serves Client + Raft + Admin gRPC")
     ContainerDb(rocks, "RocksDB Data Dir", "Local SSD", "Raft log + state (optional rocks feature)")
   }
@@ -61,9 +59,10 @@ C4Container
   Rel(developer, user_app, "Builds & deploys")
   Rel(operator, operator_browser, "Views cluster evidence")
   Rel(operator, admin_cli, "Runs controlled commands")
-  Rel(operator, admin_console, "Starts the read-only BFF")
+  Rel(operator, admin_console, "Starts the read-only BFF without a required cluster source")
+  Rel(admin_console, console_profiles, "Loads and atomically saves non-sensitive profiles", "Local file I/O; 0600; --state-dir override")
   Rel(user_app, rr_node, "ClientRequest / GetClusterInfo", "gRPC")
-  Rel(operator_browser, admin_console, "Loads static UI; reads /api/v1/console JSON + SSE", "HTTPS (HTTP on loopback)")
+  Rel(operator_browser, admin_console, "Loads static UI; reads /api/v1/console/connections/{id} JSON + SSE", "HTTPS (HTTP on loopback)")
   Rel(admin_cli, rr_node, "Runs controlled Admin RPCs", "gRPC; TLS/mTLS + Admin token in production")
   Rel(admin_console, rr_node, "Reads status, topology & lifecycle via Admin RPCs", "gRPC; TLS/mTLS + Admin token in production")
   Rel(admin_console, rr_node, "Fetches /health, /ready & /metrics", "HTTP to trusted observability addresses")
@@ -285,13 +284,15 @@ cargo run -p kv-store
 ### 只读 Cluster Admin Console / Read-Only Cluster Admin Console
 
 `rr-admin console` 在同一个 Rust/Axum BFF 中托管 Next.js 静态导出、版本化 `/api/v1/console` JSON 和 SSE，
-无需独立 Node.js 生产服务。Console 只读；membership、强制选主、TriggerSnapshot、drain 和 offset reset 等受控写操作仍由
-Admin CLI 执行，停止 Console 不影响 Raft 节点。
+无需独立 Node.js 生产服务。Console 可无集群来源启动，通过 `/connections/` 保存并显式连接多个集群；每个已连接
+集群有独立调度、缓存、SSE 和凭证。Console 不执行 Raft 管理写操作；membership、强制选主、TriggerSnapshot、drain
+和 offset reset 等仍由 Admin CLI 执行，停止 Console 不影响 Raft 节点。
 
 `rr-admin console` serves the Next.js static export, versioned `/api/v1/console` JSON, and SSE from one Rust/Axum
-BFF, with no standalone Node.js production service. The Console is read-only; controlled writes such as membership
-changes, forced leadership, snapshot triggering, drains, and offset resets remain in the Admin CLI. Stopping the
-Console does not affect Raft nodes.
+BFF, with no standalone Node.js production service. It can start without a cluster source, then save and explicitly
+connect to multiple clusters through `/connections/`; every connected cluster has isolated scheduling, caching, SSE,
+and credentials. The Console performs no Raft administration writes: membership changes, forced leadership, snapshot
+triggering, drains, and offset resets remain in the Admin CLI. Stopping the Console does not affect Raft nodes.
 
 完整浏览器 UI 需要先构建静态导出。部署时随二进制携带 `crates/rr-admin/console/out`，或用 `--static-dir`
 指向其部署位置。
@@ -305,12 +306,44 @@ pnpm --dir crates/rr-admin/console run build
 cargo build --release -p rr-admin
 ```
 
-以下是使用显式 Admin seed 的本地启动示例；`--peers` 的每项是 `node_id@AdminService_host:port`，不是
-client/bootstrap 地址。仅为不需要认证的明文本地 AdminService 省略 `--token-env`。
+默认模式不需要 peers、discovery 或 Admin token 启动参数。Console 启动后不会自动连接或轮询任何集群；
+在 `/connections/` 通过 UI 测试、保存并连接每个集群。`--state-dir` 可省略，默认使用运行用户的平台配置目录。
 
-The following local example uses explicit Admin seeds. Each `--peers` entry is
-`node_id@AdminService_host:port`, not a client/bootstrap address. Omit `--token-env` only for a plaintext local
-AdminService that does not require authentication.
+The default mode needs neither peers/discovery nor Admin-token startup arguments. Startup creates no cluster connection or
+polling loop. Use `/connections/` to test, save, and connect each cluster. `--state-dir` is optional; the default is the
+running user's platform configuration directory.
+
+```bash
+export RR_CONSOLE_TOKEN='<viewer-token-from-your-secret-store>'
+
+./target/release/rr-admin console \
+  --listen 127.0.0.1:8080 \
+  --console-token-env RR_CONSOLE_TOKEN \
+  --state-dir /var/lib/rr-console
+```
+
+打开 `http://127.0.0.1:8080/connections/`，分别保存并连接目标集群。非敏感 profile 以 versioned JSON 原子写入
+`STATE_DIR/connections.json`（权限 `0600`）；Admin token 和 discovery 密码默认仅在进程内，只有显式选择
+Remember 时才写 OS keychain。最多 8 个连接可同时活跃，进程重启后所有 profile 均为 Disconnected，内存凭证需重新输入。
+
+Open `http://127.0.0.1:8080/connections/` and save/connect each target. Non-sensitive profiles are atomically written
+as versioned JSON to `STATE_DIR/connections.json` with mode `0600`. Admin tokens and discovery passwords remain in
+process memory unless Remember explicitly selects the OS keychain. At most eight runtimes may be active; after a restart
+all profiles are Disconnected and in-memory credentials must be re-entered.
+
+隔离测试或没有 OS keychain 的 headless 环境可显式传入 `--keychain-disable`；此进程完全不访问 keychain，
+所有凭证只留在内存，连接列表返回 `keychain_available=false`。生产默认不传该参数，保持 keychain-enabled。
+
+For isolated tests or headless environments without an OS keychain, explicitly pass `--keychain-disable`. The process
+then performs no keychain operations, keeps all credentials in memory, and reports `keychain_available=false`.
+Production remains keychain-enabled by default when the flag is omitted.
+
+以下是兼容模式的显式 Admin seed 启动示例；它创建一个进程内临时启动连接，不写 profile store。`--peers` 的每项是
+`node_id@AdminService_host:port`，不是 client/bootstrap 地址。仅为不需要认证的明文本地 AdminService 省略 `--token-env`。
+
+For compatibility, the following startup form creates one in-memory ephemeral connection and does not write the profile
+store. Each `--peers` entry is `node_id@AdminService_host:port`, not a client/bootstrap address. Omit `--token-env` only
+for a plaintext local AdminService that does not require authentication.
 
 ```bash
 export RR_ADMIN_TOKEN='<admin-token-from-your-secret-store>'
@@ -322,15 +355,17 @@ export RR_ADMIN_TOKEN='<admin-token-from-your-secret-store>'
   --peers 1@127.0.0.1:52001,2@127.0.0.1:52002,3@127.0.0.1:52003
 ```
 
-打开 `http://127.0.0.1:8080`。只有 Admin seed 时可查看 Admin-backed 数据；健康探测和实时指标还要求节点提供
-带受信 `observability_addr` 的完整描述符，否则相应模块按能力降级。全局 `--token-env` 和 BFF→AdminService 的
+兼容模式打开 `http://127.0.0.1:8080` 会进入该临时连接；无来源模式则进入 `/connections/`。只有 Admin seed
+时可查看 Admin-backed 数据；健康探测和实时指标还要求节点提供带受信 `observability_addr` 的完整描述符，否则相应模块
+按能力降级。全局 `--token-env` 和 BFF→AdminService 的
 `--tls-ca`/`--tls-cert`/`--tls-key`/`--tls-domain` 位于 `console` **之前**；`--listen`、`--peers`、
 `--static-dir`，以及 Browser→Console 的 `--console-token-env`/`--tls-cert`/`--tls-key` 位于 `console`
 **之后**。非 loopback 监听必须同时启用 Console HTTPS 和 viewer token。安全启动、可选 etcd 发现和可选
 Prometheus 历史配置见 [Cluster Admin Console 运维手册](docs/docs/operations/cluster-admin-console.md)。
 
-Open `http://127.0.0.1:8080`. Admin seeds alone provide Admin-backed data; health probes and live metrics additionally
-require a complete node descriptor with a trusted `observability_addr`, otherwise those modules degrade by capability.
+Open `http://127.0.0.1:8080` for the ephemeral legacy connection; no-source mode instead opens `/connections/`. Admin
+seeds alone provide Admin-backed data; health probes and live metrics additionally require a complete node descriptor with
+a trusted `observability_addr`, otherwise those modules degrade by capability.
 The global `--token-env` and BFF-to-AdminService
 `--tls-ca`/`--tls-cert`/`--tls-key`/`--tls-domain` flags appear **before** `console`; `--listen`, `--peers`,
 `--static-dir`, and the browser-to-Console `--console-token-env`/`--tls-cert`/`--tls-key` flags appear **after**

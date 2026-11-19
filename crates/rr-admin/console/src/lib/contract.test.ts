@@ -6,6 +6,17 @@ import type {
 } from "@/lib/contract";
 
 describe("BFF-compatible topology and replica contracts", () => {
+  it("accepts neutral control-plane metadata without a cluster ID", () => {
+    const meta = makeMeta({
+      cluster_id: null,
+      retention_source: "NONE",
+      sources: [],
+      capabilities: [],
+    });
+
+    expect(meta.cluster_id).toBeNull();
+  });
+
   it("accepts named topology arrays and both replica response shapes", () => {
     const meta = makeMeta();
     const responses = [

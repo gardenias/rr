@@ -3,15 +3,16 @@ use super::auth::{
     Session,
 };
 use super::cache::{CacheView, CachedNode, ConsoleCache};
+use super::connection_manager::{ConnectionManager, ConnectionRuntime, PublicConnectionError};
 use super::metrics::{HistoryFamily, HistoryQuery};
 use super::model::{
-    rfc3339, Capability, Envelope, ErrorBody, ErrorEnvelope, GroupObservation, ResponseMeta,
-    SourceMeta, TimeSeriesPoint,
+    rfc3339, Capability, ConnectionProfile, ConnectionSecrets, Envelope, ErrorBody, ErrorEnvelope,
+    GroupObservation, ResponseMeta, SecretInput, SourceMeta, TimeSeriesPoint, TlsProfile,
 };
 use super::pagination::{paginate, PageQuery};
 use super::scheduler::Scheduler;
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Query, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE,
 };
@@ -24,7 +25,7 @@ use axum::{Json, Router};
 use futures::{stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
@@ -125,7 +126,7 @@ fn group_views(view: &CacheView) -> Vec<Value> {
 }
 
 #[derive(Clone)]
-struct SummaryProjection {
+pub(crate) struct SummaryProjection {
     generation: u64,
     serialized: Bytes,
     groups: Arc<Vec<GroupProjection>>,
@@ -145,32 +146,136 @@ impl SummaryProjection {
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    scheduler: Arc<Scheduler>,
+    manager: Arc<ConnectionManager>,
+    legacy_connection: Option<String>,
     auth: Arc<AuthState>,
     static_dir: PathBuf,
     using_tls: bool,
-    summary_projection: Arc<tokio::sync::Mutex<Option<SummaryProjection>>>,
 }
 
 impl AppState {
     pub fn new(
-        scheduler: Arc<Scheduler>,
+        manager: Arc<ConnectionManager>,
         auth: Arc<AuthState>,
         static_dir: PathBuf,
         using_tls: bool,
+        legacy_connection: Option<String>,
     ) -> Self {
         Self {
-            scheduler,
+            manager,
+            legacy_connection,
             auth,
             static_dir,
             using_tls,
-            summary_projection: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    fn runtime_state(&self, id: &str) -> Result<RuntimeState, PublicConnectionError> {
+        let runtime = self.manager.resolve(id)?;
+        Ok(RuntimeState {
+            scheduler: runtime.scheduler.clone(),
+            runtime,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeState {
+    scheduler: Arc<Scheduler>,
+    runtime: Arc<ConnectionRuntime>,
+}
+
+impl FromRequestParts<AppState> for RuntimeState {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let Path(parameters) = Path::<HashMap<String, String>>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| {
+                neutral_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_ARGUMENT",
+                    "the request path could not be decoded",
+                )
+            })?;
+        let id = match parameters.get("id") {
+            Some(id) => id,
+            None => state.legacy_connection.as_ref().ok_or_else(|| {
+                neutral_error(
+                    StatusCode::BAD_REQUEST,
+                    "CONNECTION_REQUIRED",
+                    "Legacy routes require an ephemeral startup connection",
+                )
+            })?,
+        };
+        state.runtime_state(id).map_err(public_connection_error)
     }
 }
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
+        .route(
+            "/api/v1/console/connections",
+            get(list_connections).post(create_connection),
+        )
+        .route(
+            "/api/v1/console/connections/test",
+            post(test_connection_candidate),
+        )
+        .route(
+            "/api/v1/console/connections/{id}",
+            get(get_connection)
+                .patch(update_connection)
+                .delete(delete_connection),
+        )
+        .route(
+            "/api/v1/console/connections/{id}/test",
+            post(test_connection),
+        )
+        .route(
+            "/api/v1/console/connections/{id}/connect",
+            post(connect_connection),
+        )
+        .route(
+            "/api/v1/console/connections/{id}/disconnect",
+            post(disconnect_connection),
+        )
+        .route("/api/v1/console/connections/{id}/summary", get(summary))
+        .route("/api/v1/console/connections/{id}/nodes", get(nodes))
+        .route(
+            "/api/v1/console/connections/{id}/nodes/{node_id}",
+            get(node),
+        )
+        .route(
+            "/api/v1/console/connections/{id}/nodes/{node_id}/boots",
+            get(node_boots),
+        )
+        .route("/api/v1/console/connections/{id}/topology", get(topology))
+        .route("/api/v1/console/connections/{id}/groups", get(groups))
+        .route(
+            "/api/v1/console/connections/{id}/groups/{group_id}",
+            get(group),
+        )
+        .route(
+            "/api/v1/console/connections/{id}/groups/{group_id}/replicas",
+            get(group_replicas),
+        )
+        .route(
+            "/api/v1/console/connections/{id}/metrics/performance",
+            get(performance),
+        )
+        .route("/api/v1/console/connections/{id}/snapshots", get(snapshots))
+        .route("/api/v1/console/connections/{id}/lifecycle", get(lifecycle))
+        .route("/api/v1/console/connections/{id}/events", get(events))
+        .route("/api/v1/console/connections/{id}/sources", get(sources))
+        .route(
+            "/api/v1/console/connections/{id}/sources/reconcile",
+            post(reconcile),
+        )
+        .route("/api/v1/console/connections/{id}/stream", get(stream))
         .route("/api/v1/console/summary", get(summary))
         .route("/api/v1/console/nodes", get(nodes))
         .route("/api/v1/console/nodes/{node_id}", get(node))
@@ -227,7 +332,7 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
 }
 
 async fn uniform_api_errors(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -259,7 +364,7 @@ async fn uniform_api_errors(
         status if status.is_server_error() => ("INTERNAL_ERROR", "the Console request failed"),
         _ => ("REQUEST_REJECTED", "the Console request was rejected"),
     };
-    error_response(&state.scheduler.cache, status, code, message)
+    neutral_error(status, code, message)
 }
 
 async fn authenticate(
@@ -267,7 +372,16 @@ async fn authenticate(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !state.auth.enabled() || is_public_path(request.uri().path()) {
+    let path = request.uri().path();
+    let protected_mutation = is_protected_mutation(path, request.method());
+    if !state.auth.enabled() || is_public_path(path) {
+        if protected_mutation && !valid_origin(&state, request.headers()) {
+            return neutral_error(
+                StatusCode::FORBIDDEN,
+                "ORIGIN_REJECTED",
+                "same-origin mutation is required",
+            );
+        }
         return next.run(request).await;
     }
     let cookie = request
@@ -276,18 +390,63 @@ async fn authenticate(
         .and_then(|value| value.to_str().ok());
     let session =
         session_token(cookie).and_then(|token| state.auth.validate(token, SystemTime::now()));
-    match session {
-        Some(session) => {
-            request.extensions_mut().insert(session);
-            next.run(request).await
-        }
-        None => error_response(
-            &state.scheduler.cache,
+    let Some(session) = session else {
+        return neutral_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHENTICATED",
             "a valid viewer session is required",
-        ),
+        );
+    };
+    if protected_mutation {
+        if !valid_origin(&state, request.headers()) {
+            return neutral_error(
+                StatusCode::FORBIDDEN,
+                "ORIGIN_REJECTED",
+                "same-origin mutation is required",
+            );
+        }
+        let csrf = request
+            .headers()
+            .get("x-console-csrf")
+            .and_then(|value| value.to_str().ok());
+        if !state.auth.csrf_matches(&session, csrf) {
+            return neutral_error(
+                StatusCode::FORBIDDEN,
+                "CSRF_REJECTED",
+                "a valid X-Console-CSRF header is required",
+            );
+        }
     }
+    request.extensions_mut().insert(session);
+    next.run(request).await
+}
+
+fn is_protected_mutation(path: &str, method: &Method) -> bool {
+    let segments = path.split('/').collect::<Vec<_>>();
+    match (method, segments.as_slice()) {
+        (&Method::POST, ["", "api", "v1", "console", "connections"])
+        | (&Method::POST, ["", "api", "v1", "console", "connections", "test"])
+        | (&Method::POST, ["", "api", "v1", "console", "sources", "reconcile"])
+        | (&Method::POST, ["", "api", "v1", "console", "auth", "logout"])
+        | (&Method::PATCH, ["", "api", "v1", "console", "connections", _])
+        | (&Method::DELETE, ["", "api", "v1", "console", "connections", _])
+        | (&Method::POST, ["", "api", "v1", "console", "connections", _, "test"])
+        | (&Method::POST, ["", "api", "v1", "console", "connections", _, "connect"])
+        | (&Method::POST, ["", "api", "v1", "console", "connections", _, "disconnect"])
+        | (&Method::POST, ["", "api", "v1", "console", "connections", _, "sources", "reconcile"]) => {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn valid_origin(state: &AppState, headers: &HeaderMap) -> bool {
+    let host = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let origin = headers.get(ORIGIN).and_then(|value| value.to_str().ok());
+    origin_matches(origin, host, state.using_tls)
 }
 
 fn is_public_path(path: &str) -> bool {
@@ -304,8 +463,7 @@ struct LoginRequest {
 
 async fn login(State(state): State<AppState>, Json(request): Json<LoginRequest>) -> Response {
     let Some(session) = state.auth.login(&request.token, SystemTime::now()) else {
-        return error_response(
-            &state.scheduler.cache,
+        return neutral_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHENTICATED",
             "viewer authentication failed",
@@ -316,7 +474,7 @@ async fn login(State(state): State<AppState>, Json(request): Json<LoginRequest>)
     let mut response = Json(json!({
         "csrf_token": login.csrf_token,
         "expires_at": login.expires_at,
-        "meta": state.scheduler.cache.view().meta(),
+        "meta": neutral_meta(),
     }))
     .into_response();
     response.headers_mut().insert(
@@ -331,13 +489,12 @@ async fn csrf(State(state): State<AppState>, request: Request<Body>) -> Response
         return Json(json!({
             "csrf_token": Value::Null,
             "expires_at": Value::Null,
-            "meta": state.scheduler.cache.view().meta(),
+            "meta": neutral_meta(),
         }))
         .into_response();
     }
     let Some(session) = request.extensions().get::<Session>() else {
-        return error_response(
-            &state.scheduler.cache,
+        return neutral_error(
             StatusCode::UNAUTHORIZED,
             "UNAUTHENTICATED",
             "a valid viewer session is required",
@@ -347,7 +504,7 @@ async fn csrf(State(state): State<AppState>, request: Request<Body>) -> Response
     Json(json!({
         "csrf_token": current.csrf_token,
         "expires_at": current.expires_at,
-        "meta": state.scheduler.cache.view().meta(),
+        "meta": neutral_meta(),
     }))
     .into_response()
 }
@@ -360,7 +517,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     {
         state.auth.revoke(token);
     }
-    let mut response = ok(&state.scheduler.cache.view(), json!({"revoked": true}));
+    let mut response = neutral_ok(json!({"revoked": true}));
     response.headers_mut().insert(
         SET_COOKIE,
         HeaderValue::from_str(&clear_session_cookie(state.auth.secure_cookie()))
@@ -369,39 +526,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     response
 }
 
-async fn reconcile(State(state): State<AppState>, request: Request<Body>) -> Response {
-    let host = request
-        .headers()
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    let origin = request
-        .headers()
-        .get(ORIGIN)
-        .and_then(|value| value.to_str().ok());
-    if !origin_matches(origin, host, state.using_tls) {
-        return error_response(
-            &state.scheduler.cache,
-            StatusCode::FORBIDDEN,
-            "ORIGIN_REJECTED",
-            "same-origin reconciliation is required",
-        );
-    }
-    if state.auth.enabled() {
-        let session = request.extensions().get::<Session>();
-        let csrf = request
-            .headers()
-            .get("x-console-csrf")
-            .and_then(|value| value.to_str().ok());
-        if !session.is_some_and(|session| state.auth.csrf_matches(session, csrf)) {
-            return error_response(
-                &state.scheduler.cache,
-                StatusCode::FORBIDDEN,
-                "CSRF_REJECTED",
-                "a valid X-Console-CSRF header is required",
-            );
-        }
-    }
+async fn reconcile(state: RuntimeState) -> Response {
     state.scheduler.reconcile().await;
     let view = state.scheduler.cache.view();
     ok(
@@ -410,14 +535,194 @@ async fn reconcile(State(state): State<AppState>, request: Request<Body>) -> Res
     )
 }
 
-async fn summary(State(state): State<AppState>, Query(query): Query<WindowQuery>) -> Response {
+#[derive(Deserialize)]
+struct ConnectionInput {
+    name: String,
+    #[serde(default)]
+    environment: Option<String>,
+    #[serde(default)]
+    admin_seeds: Vec<super::config::SeedPeer>,
+    #[serde(default)]
+    discovery: Option<String>,
+    #[serde(default)]
+    cluster_name: Option<String>,
+    #[serde(default)]
+    admin_tls: TlsProfile,
+    #[serde(default)]
+    discovery_tls: TlsProfile,
+    #[serde(default)]
+    discovery_username: Option<String>,
+    #[serde(default)]
+    discovery_allow_insecure: bool,
+    #[serde(default)]
+    prometheus: Option<super::model::PrometheusProfile>,
+    #[serde(default = "default_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default)]
+    admin_token: SecretInput,
+    #[serde(default)]
+    discovery_password: SecretInput,
+    #[serde(default)]
+    remember: bool,
+}
+
+fn default_poll_interval_secs() -> u64 {
+    5
+}
+
+impl ConnectionInput {
+    fn profile(&self) -> ConnectionProfile {
+        ConnectionProfile {
+            id: String::new(),
+            name: self.name.clone(),
+            environment: self.environment.clone(),
+            admin_seeds: self.admin_seeds.clone(),
+            discovery: self.discovery.clone(),
+            cluster_name: self.cluster_name.clone(),
+            admin_tls: self.admin_tls.clone(),
+            discovery_tls: self.discovery_tls.clone(),
+            discovery_username: self.discovery_username.clone(),
+            discovery_allow_insecure: self.discovery_allow_insecure,
+            prometheus: self.prometheus.clone(),
+            poll_interval_secs: self.poll_interval_secs,
+            created_at: String::new(),
+            updated_at: String::new(),
+            observed_cluster_id: None,
+            last_connected_at: None,
+        }
+    }
+
+    fn secrets(&self) -> ConnectionSecrets {
+        ConnectionSecrets {
+            admin_token: self.admin_token.clone(),
+            discovery_password: self.discovery_password.clone(),
+        }
+    }
+}
+
+async fn list_connections(State(state): State<AppState>) -> Response {
+    connection_result(state.manager.list().map(|items| {
+        json!({
+            "items": items,
+            "keychain_available": state.manager.keychain_available(),
+        })
+    }))
+}
+
+async fn create_connection(
+    State(state): State<AppState>,
+    Json(input): Json<ConnectionInput>,
+) -> Response {
+    match state
+        .manager
+        .create(input.profile(), input.secrets(), input.remember)
+        .await
+    {
+        Ok(summary) => (StatusCode::CREATED, neutral_ok(summary)).into_response(),
+        Err(error) => public_connection_error(error),
+    }
+}
+
+async fn get_connection(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    connection_result(state.manager.get(&id))
+}
+
+async fn update_connection(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ConnectionInput>,
+) -> Response {
+    connection_result(
+        state
+            .manager
+            .update(&id, input.profile(), input.secrets(), input.remember)
+            .await,
+    )
+}
+
+async fn delete_connection(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    if let Err(error) = state.manager.get(&id) {
+        return public_connection_error(error);
+    }
+    match state.manager.remove(&id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => public_connection_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConnectionCandidateInput {
+    #[serde(flatten)]
+    input: ConnectionInput,
+    #[serde(default)]
+    existing_connection_id: Option<String>,
+}
+
+async fn test_connection_candidate(
+    State(state): State<AppState>,
+    Json(candidate): Json<ConnectionCandidateInput>,
+) -> Response {
+    connection_result(
+        state
+            .manager
+            .test_candidate_with_existing(
+                candidate.input.profile(),
+                candidate.input.secrets(),
+                candidate.existing_connection_id.as_deref(),
+            )
+            .await
+            .map(|()| json!({"tested": true})),
+    )
+}
+
+async fn test_connection(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    connection_result(
+        state
+            .manager
+            .test(&id)
+            .await
+            .map(|()| json!({"tested": true})),
+    )
+}
+
+async fn connect_connection(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    connection_result(state.manager.connect(&id).await)
+}
+
+async fn disconnect_connection(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    connection_result(state.manager.disconnect(&id).await)
+}
+
+fn connection_result<T: serde::Serialize>(result: Result<T, PublicConnectionError>) -> Response {
+    match result {
+        Ok(data) => neutral_ok(data),
+        Err(error) => public_connection_error(error),
+    }
+}
+
+fn public_connection_error(error: PublicConnectionError) -> Response {
+    let status = match error.code {
+        "CONNECTION_REQUIRED" | "INVALID_CONNECTION_PROFILE" => StatusCode::BAD_REQUEST,
+        "CONNECTION_NOT_FOUND" => StatusCode::NOT_FOUND,
+        "CONNECTION_NOT_CONNECTED" | "CONNECTION_ACTIVE" | "CREDENTIALS_REQUIRED" => {
+            StatusCode::CONFLICT
+        }
+        "ACTIVE_CONNECTION_LIMIT" => StatusCode::TOO_MANY_REQUESTS,
+        "CONNECTION_INITIALIZATION_FAILED" | "CONNECTION_TEST_FAILED" => StatusCode::BAD_GATEWAY,
+        "CONNECTION_SHUTTING_DOWN" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    neutral_error(status, error.code, error.message)
+}
+
+async fn summary(state: RuntimeState, Query(query): Query<WindowQuery>) -> Response {
     let projection = summary_projection(&state).await;
     summary_response(&projection, query.window)
 }
 
-async fn summary_projection(state: &AppState) -> SummaryProjection {
+async fn summary_projection(state: &RuntimeState) -> SummaryProjection {
     let generation = state.scheduler.cache.generation();
-    let mut cached = state.summary_projection.lock().await;
+    let mut cached = state.runtime.summary_projection.lock().await;
     if let Some(projection) = cached
         .as_ref()
         .filter(|projection| projection.generation == generation)
@@ -571,7 +876,7 @@ struct NodesQuery {
     filter: Option<String>,
 }
 
-async fn nodes(State(state): State<AppState>, Query(query): Query<NodesQuery>) -> Response {
+async fn nodes(state: RuntimeState, Query(query): Query<NodesQuery>) -> Response {
     let view = state.scheduler.cache.view();
     let filter = query.filter.unwrap_or_default().to_ascii_lowercase();
     let items = view
@@ -591,7 +896,15 @@ async fn nodes(State(state): State<AppState>, Query(query): Query<NodesQuery>) -
     page_response(&view, &items, query.page)
 }
 
-async fn node(State(state): State<AppState>, Path(node_id): Path<u64>) -> Response {
+#[derive(Deserialize)]
+struct NodePath {
+    node_id: u64,
+    #[serde(rename = "id", default)]
+    _connection_id: Option<String>,
+}
+
+async fn node(state: RuntimeState, Path(path): Path<NodePath>) -> Response {
+    let node_id = path.node_id;
     let view = state.scheduler.cache.view();
     let Some(node) = view.nodes.iter().find(|node| node.peer.node_id == node_id) else {
         return error_response(
@@ -617,15 +930,16 @@ async fn node(State(state): State<AppState>, Path(node_id): Path<u64>) -> Respon
 }
 
 async fn node_boots(
-    State(state): State<AppState>,
-    Path(node_id): Path<u64>,
+    state: RuntimeState,
+    Path(path): Path<NodePath>,
     Query(page): Query<PageQuery>,
 ) -> Response {
+    let node_id = path.node_id;
     let cache = state.scheduler.cache.clone();
     with_handler_deadline(&cache, node_boots_inner(state, node_id, page)).await
 }
 
-async fn node_boots_inner(state: AppState, node_id: u64, page: PageQuery) -> Response {
+async fn node_boots_inner(state: RuntimeState, node_id: u64, page: PageQuery) -> Response {
     let view = state.scheduler.cache.view();
     if !view.nodes.iter().any(|node| node.peer.node_id == node_id) {
         return error_response(
@@ -745,7 +1059,7 @@ struct TopologyQuery {
     group_id: Option<u64>,
 }
 
-async fn node_topology(state: AppState, group_id: Option<u64>) -> Response {
+async fn node_topology(state: RuntimeState, group_id: Option<u64>) -> Response {
     let initial = state.scheduler.cache.view();
     let mut requests = BTreeMap::<u64, u64>::new();
     for node in initial.nodes.iter().filter(|node| node.error.is_none()) {
@@ -806,7 +1120,7 @@ async fn node_topology(state: AppState, group_id: Option<u64>) -> Response {
     )
 }
 
-async fn topology(State(state): State<AppState>, Query(query): Query<TopologyQuery>) -> Response {
+async fn topology(state: RuntimeState, Query(query): Query<TopologyQuery>) -> Response {
     let kind = query.view.as_deref().unwrap_or("nodes");
     if kind == "raft" {
         let projection = summary_projection(&state).await;
@@ -860,7 +1174,7 @@ async fn topology(State(state): State<AppState>, Query(query): Query<TopologyQue
     ok(&view, data)
 }
 
-async fn groups(State(state): State<AppState>, Query(query): Query<NodesQuery>) -> Response {
+async fn groups(state: RuntimeState, Query(query): Query<NodesQuery>) -> Response {
     let projection = summary_projection(&state).await;
     let filter = query.filter.unwrap_or_default();
     let items = projection
@@ -871,7 +1185,15 @@ async fn groups(State(state): State<AppState>, Query(query): Query<NodesQuery>) 
     page_response_with_meta(projection.meta(None), &items, query.page)
 }
 
-async fn group(State(state): State<AppState>, Path(group_id): Path<u64>) -> Response {
+#[derive(Deserialize)]
+struct GroupPath {
+    group_id: u64,
+    #[serde(rename = "id", default)]
+    _connection_id: Option<String>,
+}
+
+async fn group(state: RuntimeState, Path(path): Path<GroupPath>) -> Response {
+    let group_id = path.group_id;
     let view = state.scheduler.cache.view();
     let Some(group) = group_views(&view)
         .into_iter()
@@ -893,10 +1215,11 @@ struct ReplicaQuery {
 }
 
 async fn group_replicas(
-    State(state): State<AppState>,
-    Path(group_id): Path<u64>,
+    state: RuntimeState,
+    Path(path): Path<GroupPath>,
     Query(query): Query<ReplicaQuery>,
 ) -> Response {
+    let group_id = path.group_id;
     let cache = state.scheduler.cache.clone();
     with_handler_deadline(&cache, async move {
         let initial = state.scheduler.cache.view();
@@ -968,10 +1291,7 @@ struct PerformanceQuery {
     source: Option<String>,
 }
 
-async fn performance(
-    State(state): State<AppState>,
-    Query(query): Query<PerformanceQuery>,
-) -> Response {
+async fn performance(state: RuntimeState, Query(query): Query<PerformanceQuery>) -> Response {
     let window = query.window.clone().unwrap_or_else(|| "15m".to_string());
     let Some(window_duration) = parse_window(&window) else {
         return error_response(
@@ -1163,7 +1483,7 @@ fn metric_series_json(
 }
 
 async fn performance_history(
-    state: AppState,
+    state: RuntimeState,
     query: PerformanceQuery,
     window: String,
     window_duration: Duration,
@@ -1424,12 +1744,12 @@ struct SnapshotQuery {
     node_id: Option<u64>,
 }
 
-async fn snapshots(State(state): State<AppState>, Query(query): Query<SnapshotQuery>) -> Response {
+async fn snapshots(state: RuntimeState, Query(query): Query<SnapshotQuery>) -> Response {
     let cache = state.scheduler.cache.clone();
     with_handler_deadline(&cache, snapshots_inner(state, query)).await
 }
 
-async fn snapshots_inner(state: AppState, query: SnapshotQuery) -> Response {
+async fn snapshots_inner(state: RuntimeState, query: SnapshotQuery) -> Response {
     let initial = state.scheduler.cache.view();
     let mut requests = Vec::new();
     for node in initial.nodes.iter() {
@@ -1618,12 +1938,12 @@ struct LifecycleQuery {
     view: Option<String>,
 }
 
-async fn lifecycle(State(state): State<AppState>, Query(query): Query<LifecycleQuery>) -> Response {
+async fn lifecycle(state: RuntimeState, Query(query): Query<LifecycleQuery>) -> Response {
     let cache = state.scheduler.cache.clone();
     with_handler_deadline(&cache, lifecycle_inner(state, query)).await
 }
 
-async fn lifecycle_inner(state: AppState, query: LifecycleQuery) -> Response {
+async fn lifecycle_inner(state: RuntimeState, query: LifecycleQuery) -> Response {
     let cache_view = state.scheduler.cache.view();
     match query.view.as_deref().unwrap_or("current") {
         "current" => {
@@ -1941,7 +2261,7 @@ struct EventsQuery {
     state: Option<String>,
 }
 
-async fn events(State(state): State<AppState>, Query(query): Query<EventsQuery>) -> Response {
+async fn events(state: RuntimeState, Query(query): Query<EventsQuery>) -> Response {
     let view = state.scheduler.cache.view();
     let items = view
         .events
@@ -1963,7 +2283,7 @@ async fn events(State(state): State<AppState>, Query(query): Query<EventsQuery>)
     page_response(&view, &items, query.page)
 }
 
-async fn sources(State(state): State<AppState>) -> Response {
+async fn sources(state: RuntimeState) -> Response {
     let view = state.scheduler.cache.view();
     let prometheus = state.scheduler.history_config().map(|config| {
         json!({
@@ -2004,7 +2324,8 @@ async fn sources(State(state): State<AppState>) -> Response {
     )
 }
 
-async fn stream(State(state): State<AppState>) -> Response {
+async fn stream(state: RuntimeState) -> Response {
+    let mut shutdown = state.runtime.shutdown.subscribe();
     let initial = futures::stream::once({
         let state = state.clone();
         async move { Ok::<Event, Infallible>(summary_event(&state).await) }
@@ -2022,7 +2343,14 @@ async fn stream(State(state): State<AppState>) -> Response {
                 }
             }
         });
-    Sse::new(initial.chain(updates))
+    let closed = async move {
+        while !*shutdown.borrow() {
+            if shutdown.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    Sse::new(initial.chain(updates).take_until(closed))
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(15))
@@ -2031,15 +2359,14 @@ async fn stream(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
-async fn summary_event(state: &AppState) -> Event {
+async fn summary_event(state: &RuntimeState) -> Event {
     Event::default()
         .event("summary")
         .data(summary_stream_envelope(&summary_projection(state).await))
 }
 
-async fn api_not_found(State(state): State<AppState>) -> Response {
-    error_response(
-        &state.scheduler.cache,
+async fn api_not_found() -> Response {
+    neutral_error(
         StatusCode::NOT_FOUND,
         "NOT_FOUND",
         "Console API route not found",
@@ -2627,6 +2954,18 @@ fn ok_with_meta<T: serde::Serialize>(meta: ResponseMeta, data: T) -> Response {
     Json(Envelope { data, meta }).into_response()
 }
 
+fn neutral_meta() -> ResponseMeta {
+    ResponseMeta::neutral(uuid::Uuid::new_v4().to_string())
+}
+
+fn neutral_ok<T: serde::Serialize>(data: T) -> Response {
+    ok_with_meta(neutral_meta(), data)
+}
+
+fn neutral_error(status: StatusCode, code: &str, message: &str) -> Response {
+    error_response_with_meta(neutral_meta(), status, code, message)
+}
+
 async fn with_handler_deadline(
     cache: &Arc<ConsoleCache>,
     future: impl std::future::Future<Output = Response>,
@@ -2674,10 +3013,16 @@ fn error_response_with_meta(
 mod tests {
     use super::*;
     use crate::console::config::SeedPeer;
+    use crate::console::connection_manager::{ConnectionManager, RuntimeFactory};
+    use crate::console::connection_store::{ConnectionStore, SecretStore};
+    use crate::console::model::{
+        ConnectionProfile, ConnectionSecrets, ConnectionStatus, PrometheusProfile, TlsProfile,
+    };
     use crate::console::upstream::{GroupDetail, NodeSnapshot, Upstream, UpstreamError};
     use axum::body::Body;
     use http_body_util::BodyExt;
     use rr_network::proto::admin::{GroupMembership, GroupStatus, SnapshotStatus};
+    use std::sync::Mutex;
     use std::time::Instant;
     use tower::ServiceExt;
 
@@ -2780,6 +3125,53 @@ mod tests {
         }
     }
 
+    struct FixedRuntimeFactory {
+        scheduler: Arc<Scheduler>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeFactory for FixedRuntimeFactory {
+        async fn build(
+            &self,
+            _profile: &ConnectionProfile,
+            _secrets: &SecretStore,
+        ) -> anyhow::Result<Arc<Scheduler>> {
+            Ok(self.scheduler.clone())
+        }
+
+        async fn test(
+            &self,
+            _profile: &ConnectionProfile,
+            _admin_token: Option<String>,
+            _discovery_password: Option<String>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn app_state_for_scheduler(scheduler: Arc<Scheduler>, static_dir: PathBuf) -> AppState {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(ConnectionStore::load(directory.path().join("connections.json")).unwrap());
+        let manager = Arc::new(ConnectionManager::with_factory(
+            store,
+            Arc::new(SecretStore::without_keychain()),
+            Arc::new(FixedRuntimeFactory { scheduler }),
+        ));
+        manager
+            .create_startup(http_profile("legacy"), ConnectionSecrets::default())
+            .await
+            .unwrap();
+        manager.connect("legacy").await.unwrap();
+        AppState::new(
+            manager,
+            AuthState::new(None, Duration::from_secs(60), false),
+            static_dir,
+            false,
+            Some("legacy".to_string()),
+        )
+    }
+
     async fn test_app(static_dir: PathBuf) -> (Router, Arc<Scheduler>) {
         let peer = SeedPeer {
             node_id: 1,
@@ -2795,12 +3187,7 @@ mod tests {
             4,
         ));
         scheduler.reconcile().await;
-        let state = AppState::new(
-            scheduler.clone(),
-            AuthState::new(None, Duration::from_secs(60), false),
-            static_dir,
-            false,
-        );
+        let state = app_state_for_scheduler(scheduler.clone(), static_dir).await;
         (router(state), scheduler)
     }
 
@@ -2893,13 +3280,31 @@ mod tests {
             group_count: Some(500),
             ..ManyGroupsUpstream::default()
         });
-        let (_app, scheduler) = app_with_upstream(upstream, 50, Duration::from_secs(30)).await;
-        let state = AppState::new(
+        let peers = (1..=50)
+            .map(|node_id| SeedPeer {
+                node_id,
+                admin_addr: format!("127.0.0.1:5200{node_id}"),
+            })
+            .collect::<Vec<_>>();
+        let cache = ConsoleCache::new("test", Duration::from_secs(30), 32, 32);
+        cache.register_peers(&peers);
+        let scheduler = Arc::new(Scheduler::new(
+            upstream,
+            cache,
+            peers,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            4,
+        ));
+        scheduler.reconcile().await;
+        scheduler.reconcile().await;
+        let state = app_state_for_scheduler(
             scheduler.clone(),
-            AuthState::new(None, Duration::from_secs(60), false),
             PathBuf::from("definitely-absent-console-export"),
-            false,
-        );
+        )
+        .await;
+        let state = state.runtime_state("legacy").unwrap();
+        scheduler.reconcile().await;
         let initial_started = Instant::now();
         let initial = summary_projection(&state).await;
         let initial_elapsed = initial_started.elapsed();
@@ -2998,6 +3403,7 @@ mod tests {
         assert_eq!(status, 404);
         assert_eq!(body["error"]["code"], "NOT_FOUND");
         assert!(body["meta"]["correlation_id"].as_str().is_some());
+        assert_neutral_meta(&body);
 
         let response = app
             .oneshot(
@@ -3030,6 +3436,7 @@ mod tests {
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "INVALID_ARGUMENT");
         assert!(body["meta"]["correlation_id"].as_str().is_some());
+        assert_neutral_meta(&body);
 
         let response = app
             .oneshot(
@@ -3045,6 +3452,7 @@ mod tests {
         assert_eq!(status, 405);
         assert_eq!(body["error"]["code"], "METHOD_NOT_ALLOWED");
         assert!(body["meta"]["correlation_id"].as_str().is_some());
+        assert_neutral_meta(&body);
     }
 
     #[tokio::test]
@@ -3429,12 +3837,13 @@ mod tests {
         scheduler.reconcile().await;
         scheduler.reconcile().await;
         (
-            router(AppState::new(
-                scheduler,
-                AuthState::new(None, Duration::from_secs(60), false),
-                PathBuf::from("definitely-absent-console-export"),
-                false,
-            )),
+            router(
+                app_state_for_scheduler(
+                    scheduler,
+                    PathBuf::from("definitely-absent-console-export"),
+                )
+                .await,
+            ),
             collect_group_calls,
         )
     }
@@ -3605,12 +4014,13 @@ mod tests {
         scheduler.reconcile().await;
         scheduler.reconcile().await;
         (
-            router(AppState::new(
-                scheduler.clone(),
-                AuthState::new(None, Duration::from_secs(60), false),
-                PathBuf::from("definitely-absent-console-export"),
-                false,
-            )),
+            router(
+                app_state_for_scheduler(
+                    scheduler.clone(),
+                    PathBuf::from("definitely-absent-console-export"),
+                )
+                .await,
+            ),
             scheduler,
         )
     }
@@ -3631,12 +4041,11 @@ mod tests {
         ));
         scheduler.reconcile().await;
         scheduler.reconcile().await;
-        let state = AppState::new(
+        let state = app_state_for_scheduler(
             scheduler.clone(),
-            AuthState::new(None, Duration::from_secs(60), false),
             PathBuf::from("definitely-absent-console-export"),
-            false,
-        );
+        )
+        .await;
         (router(state), scheduler)
     }
 
@@ -4490,5 +4899,1301 @@ rr_server_request_duration_seconds_count{{group_id="7",op="write"}} 8
             .any(|capability| {
                 capability["feature"] == "boot_history" && capability["status"] == "UNSUPPORTED"
             }));
+    }
+
+    struct HttpRuntimeFactory;
+
+    #[async_trait::async_trait]
+    impl RuntimeFactory for HttpRuntimeFactory {
+        async fn build(
+            &self,
+            profile: &ConnectionProfile,
+            _secrets: &SecretStore,
+        ) -> anyhow::Result<Arc<Scheduler>> {
+            if profile.name == "connect-failure" {
+                anyhow::bail!("private-connect-secret must not escape");
+            }
+            let cache = ConsoleCache::new(
+                profile
+                    .cluster_name
+                    .clone()
+                    .unwrap_or_else(|| profile.id.clone()),
+                Duration::from_secs(30),
+                32,
+                32,
+            );
+            cache.register_peers(&profile.admin_seeds);
+            let scheduler = Arc::new(Scheduler::new(
+                Arc::new(LegacyUpstream),
+                cache,
+                profile.admin_seeds.clone(),
+                Duration::from_secs(5),
+                Duration::from_secs(1),
+                4,
+            ));
+            scheduler.reconcile().await;
+            if let Some(prometheus) = &profile.prometheus {
+                scheduler.configure_history(crate::console::config::PrometheusConfig {
+                    url: prometheus.url.clone(),
+                    cluster: crate::console::config::parse_cluster_matcher(&prometheus.cluster)?,
+                })?;
+            }
+            Ok(scheduler)
+        }
+
+        async fn test(
+            &self,
+            profile: &ConnectionProfile,
+            _admin_token: Option<String>,
+            _discovery_password: Option<String>,
+        ) -> anyhow::Result<()> {
+            if profile.name == "test-failure" {
+                anyhow::bail!("private-test-secret must not escape");
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRuntimeFactory {
+        tested_secrets: Mutex<Vec<(Option<String>, Option<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeFactory for RecordingRuntimeFactory {
+        async fn build(
+            &self,
+            profile: &ConnectionProfile,
+            secrets: &SecretStore,
+        ) -> anyhow::Result<Arc<Scheduler>> {
+            HttpRuntimeFactory.build(profile, secrets).await
+        }
+
+        async fn test(
+            &self,
+            profile: &ConnectionProfile,
+            admin_token: Option<String>,
+            discovery_password: Option<String>,
+        ) -> anyhow::Result<()> {
+            self.tested_secrets
+                .lock()
+                .unwrap()
+                .push((admin_token.clone(), discovery_password.clone()));
+            HttpRuntimeFactory
+                .test(profile, admin_token, discovery_password)
+                .await
+        }
+    }
+
+    fn http_profile(id: &str) -> ConnectionProfile {
+        ConnectionProfile {
+            id: id.to_string(),
+            name: id.to_string(),
+            environment: None,
+            admin_seeds: vec![SeedPeer {
+                node_id: 1,
+                admin_addr: "127.0.0.1:52001".to_string(),
+            }],
+            discovery: None,
+            cluster_name: Some(id.to_string()),
+            admin_tls: TlsProfile::default(),
+            discovery_tls: TlsProfile::default(),
+            discovery_username: None,
+            discovery_allow_insecure: false,
+            prometheus: None,
+            poll_interval_secs: 5,
+            created_at: String::new(),
+            updated_at: String::new(),
+            observed_cluster_id: None,
+            last_connected_at: None,
+        }
+    }
+
+    fn http_connection_body(name: &str) -> String {
+        json!({
+            "name": name,
+            "environment": Value::Null,
+            "admin_seeds": [{"node_id": 1, "admin_addr": "127.0.0.1:52001"}],
+            "discovery": Value::Null,
+            "cluster_name": name,
+            "admin_tls": {"ca": Value::Null, "cert": Value::Null, "key": Value::Null, "domain": Value::Null},
+            "discovery_tls": {"ca": Value::Null, "cert": Value::Null, "key": Value::Null, "domain": Value::Null},
+            "discovery_username": Value::Null,
+            "discovery_allow_insecure": false,
+            "prometheus": Value::Null,
+            "poll_interval_secs": 5,
+            "admin_token": "private-http-secret",
+            "remember": false
+        })
+        .to_string()
+    }
+
+    fn http_manager() -> (tempfile::TempDir, Arc<ConnectionManager>) {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(ConnectionStore::load(directory.path().join("connections.json")).unwrap());
+        let manager = Arc::new(ConnectionManager::with_factory(
+            store,
+            Arc::new(SecretStore::without_keychain()),
+            Arc::new(HttpRuntimeFactory),
+        ));
+        (directory, manager)
+    }
+
+    fn http_manager_app(
+        manager: Arc<ConnectionManager>,
+        legacy_connection: Option<&str>,
+        viewer_token: Option<Arc<str>>,
+    ) -> Router {
+        router(AppState::new(
+            manager,
+            AuthState::new(viewer_token, Duration::from_secs(60), false),
+            PathBuf::from("definitely-absent-console-export"),
+            false,
+            legacy_connection.map(str::to_string),
+        ))
+    }
+
+    async fn request_json(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> (u16, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(HOST, "localhost")
+            .header(CONTENT_TYPE, "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
+    fn assert_neutral_meta(body: &Value) {
+        assert!(body["meta"]["cluster_id"].is_null(), "{body}");
+        assert_eq!(body["meta"]["retention_source"], "NONE", "{body}");
+        assert_eq!(body["meta"]["sources"], json!([]), "{body}");
+        assert_eq!(body["meta"]["capabilities"], json!([]), "{body}");
+        assert!(body["meta"]["correlation_id"].is_string(), "{body}");
+    }
+
+    async fn create_http_connection(app: &Router, name: &str) -> Value {
+        let (status, body) = request_json(
+            app,
+            "POST",
+            "/api/v1/console/connections",
+            &[("Origin", "http://localhost")],
+            &http_connection_body(name),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+        assert_neutral_meta(&body);
+        body["data"].clone()
+    }
+
+    #[tokio::test]
+    async fn candidate_keep_resolves_saved_secrets_only_inside_the_bff() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(ConnectionStore::load(directory.path().join("connections.json")).unwrap());
+        let factory = Arc::new(RecordingRuntimeFactory::default());
+        let manager = Arc::new(ConnectionManager::with_factory(
+            store,
+            Arc::new(SecretStore::without_keychain()),
+            factory.clone(),
+        ));
+        manager
+            .create(
+                http_profile("saved"),
+                ConnectionSecrets {
+                    admin_token: SecretInput::Replace("saved-admin-secret".to_string()),
+                    discovery_password: SecretInput::Replace("saved-discovery-secret".to_string()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let app = http_manager_app(manager, None, None);
+        let mut candidate: Value =
+            serde_json::from_str(&http_connection_body("candidate")).unwrap();
+        candidate.as_object_mut().unwrap().remove("admin_token");
+        candidate["existing_connection_id"] = json!("saved");
+
+        let (status, response) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/connections/test",
+            &[("Origin", "http://localhost")],
+            &candidate.to_string(),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(
+            factory.tested_secrets.lock().unwrap().as_slice(),
+            &[(
+                Some("saved-admin-secret".to_string()),
+                Some("saved-discovery-secret".to_string()),
+            )]
+        );
+        assert!(!response.to_string().contains("saved-admin-secret"));
+        assert!(!response.to_string().contains("saved-discovery-secret"));
+
+        candidate["admin_token"] = Value::Null;
+        candidate["discovery_password"] = json!("replacement-discovery-secret");
+        let (status, response) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/connections/test",
+            &[("Origin", "http://localhost")],
+            &candidate.to_string(),
+        )
+        .await;
+        assert_eq!(status, 200, "{response}");
+        assert_eq!(
+            factory.tested_secrets.lock().unwrap().as_slice()[1],
+            (None, Some("replacement-discovery-secret".to_string()))
+        );
+        assert!(!response
+            .to_string()
+            .contains("replacement-discovery-secret"));
+
+        candidate["existing_connection_id"] = json!("missing");
+        let (status, response) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/connections/test",
+            &[("Origin", "http://localhost")],
+            &candidate.to_string(),
+        )
+        .await;
+        assert_eq!(status, 404, "{response}");
+        assert!(!response
+            .to_string()
+            .contains("replacement-discovery-secret"));
+    }
+
+    #[tokio::test]
+    async fn connection_http_contract_rejects_unsafe_and_inconsistent_profiles() {
+        let (_directory, manager) = http_manager();
+        let app = http_manager_app(manager, None, None);
+        let mut bodies = Vec::new();
+
+        let mut admin_userinfo: Value =
+            serde_json::from_str(&http_connection_body("admin-userinfo")).unwrap();
+        admin_userinfo["admin_seeds"][0]["admin_addr"] =
+            json!("user:endpoint-secret@127.0.0.1:52001");
+        bodies.push(admin_userinfo);
+
+        let mut discovery_userinfo: Value =
+            serde_json::from_str(&http_connection_body("discovery-userinfo")).unwrap();
+        discovery_userinfo["admin_seeds"] = json!([]);
+        discovery_userinfo["discovery"] = json!("etcd://user:endpoint-secret@127.0.0.1:2379");
+        discovery_userinfo["discovery_allow_insecure"] = json!(true);
+        bodies.push(discovery_userinfo);
+
+        for (name, discovery, insecure, username, admin_tls, discovery_tls, port, prometheus) in [
+            (
+                "discovery-without-transport",
+                true,
+                false,
+                false,
+                false,
+                false,
+                52001,
+                None,
+            ),
+            (
+                "discovery-ca-and-insecure",
+                true,
+                true,
+                false,
+                false,
+                true,
+                52001,
+                None,
+            ),
+            (
+                "plaintext-username",
+                true,
+                true,
+                true,
+                false,
+                false,
+                52001,
+                None,
+            ),
+            (
+                "admin-cert-without-ca",
+                false,
+                false,
+                false,
+                true,
+                false,
+                52001,
+                None,
+            ),
+            (
+                "discovery-domain-without-ca",
+                true,
+                true,
+                false,
+                false,
+                false,
+                52001,
+                None,
+            ),
+            ("zero-port", false, false, false, false, false, 0, None),
+            (
+                "overflow-port",
+                false,
+                false,
+                false,
+                false,
+                false,
+                65536,
+                None,
+            ),
+            (
+                "prometheus-scheme",
+                false,
+                false,
+                false,
+                false,
+                false,
+                52001,
+                Some("ftp://prometheus.internal"),
+            ),
+        ] {
+            let mut body: Value = serde_json::from_str(&http_connection_body(name)).unwrap();
+            if discovery {
+                body["admin_seeds"] = json!([]);
+                body["discovery"] = json!("etcd://127.0.0.1:2379");
+                body["discovery_allow_insecure"] = json!(insecure);
+            }
+            if username {
+                body["discovery_username"] = json!("operator");
+            }
+            if admin_tls {
+                body["admin_tls"]["cert"] = json!("/etc/rr/client.pem");
+                body["admin_tls"]["key"] = json!("/etc/rr/client.key");
+            }
+            if discovery_tls {
+                body["discovery_tls"]["ca"] = json!("/etc/rr/ca.pem");
+            }
+            if name == "discovery-domain-without-ca" {
+                body["discovery_tls"]["domain"] = json!("etcd.internal");
+            }
+            if !discovery {
+                body["admin_seeds"][0]["admin_addr"] = json!(format!("127.0.0.1:{port}"));
+            }
+            if let Some(url) = prometheus {
+                body["prometheus"] = json!({"url": url, "cluster": "cluster_id=test"});
+            }
+            bodies.push(body);
+        }
+
+        for body in bodies {
+            let (status, response) = request_json(
+                &app,
+                "POST",
+                "/api/v1/console/connections",
+                &[("Origin", "http://localhost")],
+                &body.to_string(),
+            )
+            .await;
+            assert_eq!(status, 400, "{}: {response}", body["name"]);
+            assert_eq!(response["error"]["code"], "INVALID_CONNECTION_PROFILE");
+            assert!(!response.to_string().contains("endpoint-secret"));
+        }
+        let (status, list) =
+            request_json(&app, "GET", "/api/v1/console/connections", &[], "").await;
+        assert_eq!(status, 200, "{list}");
+        assert_eq!(list["data"]["items"], json!([]));
+        assert!(!list.to_string().contains("endpoint-secret"));
+    }
+
+    #[tokio::test]
+    async fn connection_crud_test_and_lifecycle_routes_are_neutral_and_redacted() {
+        let (_directory, manager) = http_manager();
+        let app = http_manager_app(manager.clone(), None, None);
+        let created = create_http_connection(&app, "alpha").await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["source"], "PROFILE");
+        assert_eq!(created["status"], "DISCONNECTED");
+        assert!(created["node_count"].is_null());
+        assert!(!created.to_string().contains("private-http-secret"));
+        assert!(created.get("admin_token").is_none());
+
+        let (status, list) =
+            request_json(&app, "GET", "/api/v1/console/connections", &[], "").await;
+        assert_eq!(status, 200, "{list}");
+        assert_eq!(list["data"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(list["data"]["keychain_available"], false);
+        assert_neutral_meta(&list);
+
+        let (status, candidate) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/connections/test",
+            &[("Origin", "http://localhost")],
+            &http_connection_body("candidate"),
+        )
+        .await;
+        assert_eq!(status, 200, "{candidate}");
+        assert_eq!(candidate["data"]["tested"], true);
+        assert_neutral_meta(&candidate);
+        assert!(!candidate.to_string().contains("private-http-secret"));
+
+        let (status, fetched) = request_json(
+            &app,
+            "GET",
+            &format!("/api/v1/console/connections/{id}"),
+            &[],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{fetched}");
+        assert_eq!(fetched["data"]["id"], id);
+        assert_neutral_meta(&fetched);
+
+        for action in ["test", "connect"] {
+            let (status, body) = request_json(
+                &app,
+                "POST",
+                &format!("/api/v1/console/connections/{id}/{action}"),
+                &[("Origin", "http://localhost")],
+                "",
+            )
+            .await;
+            assert_eq!(status, 200, "{action}: {body}");
+            assert_neutral_meta(&body);
+        }
+        let connected = manager.get(&id).unwrap();
+        assert_eq!(connected.status, ConnectionStatus::Degraded);
+        assert_eq!(connected.node_count, Some(1));
+
+        let (status, active) = request_json(
+            &app,
+            "PATCH",
+            &format!("/api/v1/console/connections/{id}"),
+            &[("Origin", "http://localhost")],
+            &http_connection_body("blocked"),
+        )
+        .await;
+        assert_eq!(status, 409, "{active}");
+        assert_eq!(active["error"]["code"], "CONNECTION_ACTIVE");
+        assert_neutral_meta(&active);
+
+        let (status, disconnected) = request_json(
+            &app,
+            "POST",
+            &format!("/api/v1/console/connections/{id}/disconnect"),
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{disconnected}");
+        assert_eq!(disconnected["data"]["status"], "DISCONNECTED");
+        assert!(disconnected["data"]["node_count"].is_null());
+
+        let (status, updated) = request_json(
+            &app,
+            "PATCH",
+            &format!("/api/v1/console/connections/{id}"),
+            &[("Origin", "http://localhost")],
+            &http_connection_body("renamed"),
+        )
+        .await;
+        assert_eq!(status, 200, "{updated}");
+        assert_eq!(updated["data"]["name"], "renamed");
+        assert!(!updated.to_string().contains("private-http-secret"));
+
+        let (status, deleted) = request_json(
+            &app,
+            "DELETE",
+            &format!("/api/v1/console/connections/{id}"),
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 204, "{deleted}");
+        let (status, missing) = request_json(
+            &app,
+            "GET",
+            &format!("/api/v1/console/connections/{id}"),
+            &[],
+            "",
+        )
+        .await;
+        assert_eq!(status, 404, "{missing}");
+        assert_eq!(missing["error"]["code"], "CONNECTION_NOT_FOUND");
+        assert_neutral_meta(&missing);
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn connection_errors_cover_credentials_limits_and_sanitized_failures() {
+        let (_directory, manager) = http_manager();
+        let app = http_manager_app(manager.clone(), None, None);
+        let mut credentials = http_profile("credentials");
+        credentials.discovery = Some("etcd://127.0.0.1:2379".to_string());
+        credentials.discovery_tls.ca = Some(PathBuf::from("unused-ca.pem"));
+        credentials.discovery_username = Some("operator".to_string());
+        manager
+            .create(credentials, ConnectionSecrets::default(), false)
+            .await
+            .unwrap();
+        for action in ["test", "connect"] {
+            let (status, body) = request_json(
+                &app,
+                "POST",
+                &format!("/api/v1/console/connections/credentials/{action}"),
+                &[("Origin", "http://localhost")],
+                "",
+            )
+            .await;
+            assert_eq!(status, 409, "{body}");
+            assert_eq!(body["error"]["code"], "CREDENTIALS_REQUIRED");
+            assert_neutral_meta(&body);
+        }
+
+        let failed_test = create_http_connection(&app, "test-failure").await;
+        let (status, failure) = request_json(
+            &app,
+            "POST",
+            &format!(
+                "/api/v1/console/connections/{}/test",
+                failed_test["id"].as_str().unwrap()
+            ),
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 502, "{failure}");
+        assert_eq!(failure["error"]["code"], "CONNECTION_TEST_FAILED");
+        assert!(!failure.to_string().contains("private-test-secret"));
+        assert_neutral_meta(&failure);
+
+        let failed_connect = create_http_connection(&app, "connect-failure").await;
+        let (status, failure) = request_json(
+            &app,
+            "POST",
+            &format!(
+                "/api/v1/console/connections/{}/connect",
+                failed_connect["id"].as_str().unwrap()
+            ),
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 502, "{failure}");
+        assert_eq!(failure["error"]["code"], "CONNECTION_INITIALIZATION_FAILED");
+        assert!(!failure.to_string().contains("private-connect-secret"));
+
+        for index in 0..9 {
+            manager
+                .create(
+                    http_profile(&format!("limited-{index}")),
+                    ConnectionSecrets::default(),
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        for index in 0..8 {
+            manager.connect(&format!("limited-{index}")).await.unwrap();
+        }
+        let (status, limited) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/connections/limited-8/connect",
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 429, "{limited}");
+        assert_eq!(limited["error"]["code"], "ACTIVE_CONNECTION_LIMIT");
+        assert_neutral_meta(&limited);
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn every_connection_mutation_requires_origin_csrf_and_a_session() {
+        let (_directory, manager) = http_manager();
+        let app = http_manager_app(manager.clone(), None, Some(Arc::from("viewer-secret")));
+        let (status, unauthenticated) =
+            request_json(&app, "GET", "/api/v1/console/connections", &[], "").await;
+        assert_eq!(status, 401);
+        assert_eq!(unauthenticated["error"]["code"], "UNAUTHENTICATED");
+        assert_neutral_meta(&unauthenticated);
+
+        let (status, rejected_login) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/auth/login",
+            &[],
+            r#"{"token":"wrong"}"#,
+        )
+        .await;
+        assert_eq!(status, 401);
+        assert_neutral_meta(&rejected_login);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/v1/console/auth/login")
+                    .header(HOST, "localhost")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"token":"viewer-secret"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let (_, login) = json_response(response).await;
+        assert_neutral_meta(&login);
+        let csrf = login["csrf_token"].as_str().unwrap().to_string();
+        let (status, csrf_response) = request_json(
+            &app,
+            "GET",
+            "/api/v1/console/auth/csrf",
+            &[("Cookie", &cookie)],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_neutral_meta(&csrf_response);
+
+        let (status, created) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/connections",
+            &[
+                ("Cookie", &cookie),
+                ("Origin", "http://localhost"),
+                ("X-Console-CSRF", &csrf),
+            ],
+            &http_connection_body("secured"),
+        )
+        .await;
+        assert_eq!(status, 201, "{created}");
+        let id = created["data"]["id"].as_str().unwrap().to_string();
+        let mutations = vec![
+            ("POST", "/api/v1/console/connections".to_string()),
+            ("POST", "/api/v1/console/connections/test".to_string()),
+            ("PATCH", format!("/api/v1/console/connections/{id}")),
+            ("DELETE", format!("/api/v1/console/connections/{id}")),
+            ("POST", format!("/api/v1/console/connections/{id}/test")),
+            ("POST", format!("/api/v1/console/connections/{id}/connect")),
+            (
+                "POST",
+                format!("/api/v1/console/connections/{id}/disconnect"),
+            ),
+            (
+                "POST",
+                format!("/api/v1/console/connections/{id}/sources/reconcile"),
+            ),
+            ("POST", "/api/v1/console/sources/reconcile".to_string()),
+            ("POST", "/api/v1/console/auth/logout".to_string()),
+        ];
+        for (method, uri) in &mutations {
+            let body = if matches!(*method, "POST" | "PATCH") && !uri.ends_with("reconcile") {
+                http_connection_body("mutation")
+            } else {
+                String::new()
+            };
+            let (status, rejected) =
+                request_json(&app, *method, uri, &[("Cookie", &cookie)], &body).await;
+            assert_eq!(status, 403, "{method} {uri}: {rejected}");
+            assert_eq!(rejected["error"]["code"], "ORIGIN_REJECTED");
+            assert_neutral_meta(&rejected);
+
+            let (status, rejected) = request_json(
+                &app,
+                *method,
+                uri,
+                &[("Cookie", &cookie), ("Origin", "http://localhost")],
+                &body,
+            )
+            .await;
+            assert_eq!(status, 403, "{method} {uri}: {rejected}");
+            assert_eq!(rejected["error"]["code"], "CSRF_REJECTED");
+            assert_neutral_meta(&rejected);
+
+            let (status, rejected) = request_json(
+                &app,
+                *method,
+                uri,
+                &[
+                    ("Cookie", &cookie),
+                    ("Origin", "https://attacker.invalid"),
+                    ("X-Console-CSRF", &csrf),
+                ],
+                &body,
+            )
+            .await;
+            assert_eq!(status, 403, "{method} {uri}: {rejected}");
+            assert_eq!(rejected["error"]["code"], "ORIGIN_REJECTED");
+            assert_neutral_meta(&rejected);
+
+            let (status, rejected) = request_json(
+                &app,
+                *method,
+                uri,
+                &[
+                    ("Cookie", &cookie),
+                    ("Origin", "http://localhost"),
+                    ("X-Console-CSRF", "wrong"),
+                ],
+                &body,
+            )
+            .await;
+            assert_eq!(status, 403, "{method} {uri}: {rejected}");
+            assert_eq!(rejected["error"]["code"], "CSRF_REJECTED");
+            assert_neutral_meta(&rejected);
+
+            let (status, rejected) = request_json(
+                &app,
+                *method,
+                uri,
+                &[("Origin", "http://localhost"), ("X-Console-CSRF", &csrf)],
+                &body,
+            )
+            .await;
+            assert_eq!(status, 401, "{method} {uri}: {rejected}");
+            assert_neutral_meta(&rejected);
+        }
+
+        let no_auth = http_manager_app(manager.clone(), None, None);
+        for (method, uri) in &mutations {
+            let body = if matches!(*method, "POST" | "PATCH") && !uri.ends_with("reconcile") {
+                http_connection_body("mutation")
+            } else {
+                String::new()
+            };
+            for origin in [None, Some("https://attacker.invalid")] {
+                let headers = origin
+                    .map(|origin| vec![("Origin", origin)])
+                    .unwrap_or_default();
+                let (status, rejected) =
+                    request_json(&no_auth, *method, uri, &headers, &body).await;
+                assert_eq!(status, 403, "{method} {uri}: {rejected}");
+                assert_eq!(rejected["error"]["code"], "ORIGIN_REJECTED");
+                assert_neutral_meta(&rejected);
+            }
+        }
+        manager.shutdown_all().await;
+    }
+
+    fn resource_suffixes() -> Vec<&'static str> {
+        vec![
+            "/summary",
+            "/nodes",
+            "/nodes/1",
+            "/nodes/1/boots",
+            "/groups",
+            "/groups/7",
+            "/groups/7/replicas",
+            "/topology?view=nodes",
+            "/topology?view=raft",
+            "/topology?view=routes",
+            "/metrics/performance",
+            "/snapshots",
+            "/lifecycle",
+            "/lifecycle?view=restarts",
+            "/lifecycle?view=versions",
+            "/events",
+            "/sources",
+        ]
+    }
+
+    async fn first_sse_event(response: Response) -> (String, axum::body::BodyDataStream) {
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/event-stream");
+        let mut body = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(Duration::from_secs(1), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        (String::from_utf8_lossy(&first).to_string(), body)
+    }
+
+    #[tokio::test]
+    async fn scoped_resources_and_legacy_aliases_stay_on_their_fixed_runtimes() {
+        let (_directory, manager) = http_manager();
+        manager
+            .create_startup(http_profile("a"), ConnectionSecrets::default())
+            .await
+            .unwrap();
+        manager
+            .create(http_profile("b"), ConnectionSecrets::default(), false)
+            .await
+            .unwrap();
+        manager.connect("a").await.unwrap();
+        manager.connect("b").await.unwrap();
+        let app = http_manager_app(manager.clone(), Some("a"), None);
+
+        for (id, cluster) in [("a", "a"), ("b", "b")] {
+            for suffix in resource_suffixes() {
+                let uri = format!("/api/v1/console/connections/{id}{suffix}");
+                let (status, body) = request_json(&app, "GET", &uri, &[], "").await;
+                assert_eq!(status, 200, "{uri}: {body}");
+                assert_eq!(body["meta"]["cluster_id"], cluster, "{uri}: {body}");
+                if suffix == "/summary" {
+                    assert_eq!(body["data"]["cluster_id"], cluster, "{uri}: {body}");
+                }
+            }
+            let (status, reconciled) = request_json(
+                &app,
+                "POST",
+                &format!("/api/v1/console/connections/{id}/sources/reconcile"),
+                &[("Origin", "http://localhost")],
+                "",
+            )
+            .await;
+            assert_eq!(status, 200, "{reconciled}");
+            assert_eq!(reconciled["meta"]["cluster_id"], cluster);
+        }
+
+        for suffix in resource_suffixes() {
+            let uri = format!("/api/v1/console{suffix}");
+            let (status, body) = request_json(&app, "GET", &uri, &[], "").await;
+            assert_eq!(status, 200, "{uri}: {body}");
+            assert_eq!(body["meta"]["cluster_id"], "a", "{uri}: {body}");
+        }
+        let (status, reconciled) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/sources/reconcile",
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{reconciled}");
+        assert_eq!(reconciled["meta"]["cluster_id"], "a");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/console/connections/a/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (first, mut stream_a) = first_sse_event(response).await;
+        assert!(first.contains("\"cluster_id\":\"a\""), "{first}");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/console/connections/b/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (first, mut stream_b) = first_sse_event(response).await;
+        assert!(first.contains("\"cluster_id\":\"b\""), "{first}");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/console/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (first, mut legacy_api_stream) = first_sse_event(response).await;
+        assert!(first.contains("\"cluster_id\":\"a\""), "{first}");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (first, mut legacy_stream) = first_sse_event(response).await;
+        assert!(first.contains("\"cluster_id\":\"a\""), "{first}");
+
+        manager.disconnect("a").await.unwrap();
+        for stream in [&mut stream_a, &mut legacy_api_stream, &mut legacy_stream] {
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(1), stream.next())
+                    .await
+                    .expect("disconnect must end SSE");
+                if next.is_none() {
+                    break;
+                }
+            }
+        }
+        manager
+            .resolve("b")
+            .unwrap()
+            .scheduler
+            .cache
+            .notify("summary");
+        let update = tokio::time::timeout(Duration::from_secs(1), stream_b.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&update).contains("\"cluster_id\":\"b\""));
+
+        for uri in [
+            "/api/v1/console/connections/a/summary",
+            "/api/v1/console/summary",
+        ] {
+            let (status, body) = request_json(&app, "GET", uri, &[], "").await;
+            assert_eq!(status, 409, "{body}");
+            assert_eq!(body["error"]["code"], "CONNECTION_NOT_CONNECTED");
+            assert_neutral_meta(&body);
+        }
+        let (status, b) = request_json(
+            &app,
+            "GET",
+            "/api/v1/console/connections/b/summary",
+            &[],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{b}");
+        assert_eq!(b["meta"]["cluster_id"], "b");
+
+        manager.remove("a").await.unwrap();
+        let (status, removed) = request_json(&app, "GET", "/api/v1/console/summary", &[], "").await;
+        assert_eq!(status, 404, "{removed}");
+        assert_eq!(removed["error"]["code"], "CONNECTION_NOT_FOUND");
+        assert_neutral_meta(&removed);
+        manager.shutdown_all().await;
+        loop {
+            let next = tokio::time::timeout(Duration::from_secs(1), stream_b.next())
+                .await
+                .expect("shutdown must end the remaining runtime SSE");
+            if next.is_none() {
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_routes_require_the_startup_connection_even_when_profiles_are_connected() {
+        let (_directory, manager) = http_manager();
+        manager
+            .create(http_profile("b"), ConnectionSecrets::default(), false)
+            .await
+            .unwrap();
+        manager.connect("b").await.unwrap();
+        let app = http_manager_app(manager.clone(), None, None);
+        for suffix in resource_suffixes() {
+            let uri = format!("/api/v1/console{suffix}");
+            let (status, body) = request_json(&app, "GET", &uri, &[], "").await;
+            assert_eq!(status, 400, "{uri}: {body}");
+            assert_eq!(body["error"]["code"], "CONNECTION_REQUIRED");
+            assert_neutral_meta(&body);
+        }
+        for uri in ["/api/v1/console/stream", "/stream"] {
+            let (status, body) = request_json(&app, "GET", uri, &[], "").await;
+            assert_eq!(status, 400, "{uri}: {body}");
+            assert_eq!(body["error"]["code"], "CONNECTION_REQUIRED");
+            assert_neutral_meta(&body);
+        }
+        let (status, body) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/sources/reconcile",
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(body["error"]["code"], "CONNECTION_REQUIRED");
+        let (status, missing) = request_json(
+            &app,
+            "GET",
+            "/api/v1/console/connections/missing/summary",
+            &[],
+            "",
+        )
+        .await;
+        assert_eq!(status, 404, "{missing}");
+        assert_eq!(missing["error"]["code"], "CONNECTION_NOT_FOUND");
+        assert_neutral_meta(&missing);
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn control_rejections_and_auth_disabled_endpoints_use_neutral_meta() {
+        let (_directory, manager) = http_manager();
+        let app = http_manager_app(manager, None, None);
+        for (body, expected_status) in [("{\"name\":", 400), ("{\"name\":42}", 422)] {
+            let (status, rejected) = request_json(
+                &app,
+                "POST",
+                "/api/v1/console/connections",
+                &[("Origin", "http://localhost")],
+                body,
+            )
+            .await;
+            assert_eq!(status, expected_status, "{rejected}");
+            assert_eq!(rejected["error"]["code"], "INVALID_ARGUMENT");
+            assert_neutral_meta(&rejected);
+        }
+        let oversized = format!("{{\"name\":\"{}\"}}", "x".repeat(2 * 1024 * 1024));
+        let (status, rejected) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/connections",
+            &[("Origin", "http://localhost")],
+            &oversized,
+        )
+        .await;
+        assert_eq!(status, 413, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "PAYLOAD_TOO_LARGE");
+        assert_neutral_meta(&rejected);
+
+        let (status, csrf) = request_json(&app, "GET", "/api/v1/console/auth/csrf", &[], "").await;
+        assert_eq!(status, 200);
+        assert!(csrf["csrf_token"].is_null());
+        assert_neutral_meta(&csrf);
+        let (status, logout) = request_json(
+            &app,
+            "POST",
+            "/api/v1/console/auth/logout",
+            &[("Origin", "http://localhost")],
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{logout}");
+        assert_eq!(logout["data"]["revoked"], true);
+        assert_neutral_meta(&logout);
+    }
+
+    #[tokio::test]
+    async fn prometheus_history_and_sources_are_isolated_by_connection() {
+        let (url_a, mut queries_a) = history_server(json!({
+            "cluster_id": "a",
+            "node_id": "1",
+            "op": "write",
+            "instance": "127.0.0.1:9091"
+        }))
+        .await;
+        let (url_b, mut queries_b) = history_server(json!({
+            "cluster_id": "b",
+            "node_id": "1",
+            "op": "write",
+            "instance": "127.0.0.1:9092"
+        }))
+        .await;
+        let (_directory, manager) = http_manager();
+        for (id, url) in [("a", url_a.clone()), ("b", url_b.clone())] {
+            let mut profile = http_profile(id);
+            profile.prometheus = Some(PrometheusProfile {
+                url,
+                cluster: format!("cluster_id={id}"),
+            });
+            manager
+                .create(profile, ConnectionSecrets::default(), false)
+                .await
+                .unwrap();
+            manager.connect(id).await.unwrap();
+        }
+        let app = http_manager_app(manager.clone(), None, None);
+        for (id, url) in [("a", url_a), ("b", url_b)] {
+            let (status, performance) = request_json(
+                &app,
+                "GET",
+                &format!("/api/v1/console/connections/{id}/metrics/performance?source=PROMETHEUS"),
+                &[],
+                "",
+            )
+            .await;
+            assert_eq!(status, 200, "{performance}");
+            assert_eq!(performance["meta"]["cluster_id"], id);
+            assert_eq!(performance["data"]["retention_source"], "PROMETHEUS");
+            let (status, sources) = request_json(
+                &app,
+                "GET",
+                &format!("/api/v1/console/connections/{id}/sources"),
+                &[],
+                "",
+            )
+            .await;
+            assert_eq!(status, 200, "{sources}");
+            assert_eq!(sources["data"]["prometheus"]["url"], url);
+        }
+        let queries_a = queries_a.try_recv().expect("connection A history query");
+        let queries_b = queries_b.try_recv().expect("connection B history query");
+        assert!(queries_a["query"].contains("cluster_id=\"a\""));
+        assert!(!queries_a["query"].contains("cluster_id=\"b\""));
+        assert!(queries_b["query"].contains("cluster_id=\"b\""));
+        assert!(!queries_b["query"].contains("cluster_id=\"a\""));
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn captured_reads_finish_after_disconnect_but_new_reads_cannot_resolve() {
+        let upstream = Arc::new(SlowFullUpstream::new(
+            Duration::from_millis(100),
+            Duration::ZERO,
+        ));
+        let active_groups = upstream.active_groups.clone();
+        let peers = [1, 2]
+            .into_iter()
+            .map(|node_id| SeedPeer {
+                node_id,
+                admin_addr: format!("127.0.0.1:5200{node_id}"),
+            })
+            .collect::<Vec<_>>();
+        let cache = ConsoleCache::new("captured", Duration::from_secs(30), 32, 32);
+        cache.register_peers(&peers);
+        let scheduler = Arc::new(Scheduler::new(
+            upstream,
+            cache,
+            peers,
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            4,
+        ));
+        scheduler.reconcile().await;
+        scheduler.reconcile().await;
+        let state =
+            app_state_for_scheduler(scheduler, PathBuf::from("definitely-absent-console-export"))
+                .await;
+        let manager = state.manager.clone();
+        let app = router(state);
+        let request = tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .uri("/api/v1/console/connections/legacy/groups/7/replicas")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active_groups.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        manager.disconnect("legacy").await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .expect("captured read was cancelled")
+            .unwrap();
+        let (status, body) = json_response(response).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["meta"]["cluster_id"], "captured");
+        assert!(!body["data"]["replicas"].as_array().unwrap().is_empty());
+
+        let (status, rejected) = request_json(
+            &http_manager_app(manager.clone(), None, None),
+            "GET",
+            "/api/v1/console/connections/legacy/summary",
+            &[],
+            "",
+        )
+        .await;
+        assert_eq!(status, 409, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "CONNECTION_NOT_CONNECTED");
+        assert_neutral_meta(&rejected);
+        manager.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn legacy_and_scoped_errors_preserve_runtime_or_neutral_metadata() {
+        let (_directory, manager) = http_manager();
+        manager
+            .create_startup(http_profile("a"), ConnectionSecrets::default())
+            .await
+            .unwrap();
+        manager.connect("a").await.unwrap();
+        let app = http_manager_app(manager.clone(), Some("a"), None);
+
+        let (status, invalid) =
+            request_json(&app, "GET", "/api/v1/console/topology?view=bad", &[], "").await;
+        assert_eq!(status, 400, "{invalid}");
+        assert_eq!(invalid["error"]["code"], "INVALID_ARGUMENT");
+        assert_eq!(invalid["meta"]["cluster_id"], "a");
+        assert_eq!(invalid["meta"]["retention_source"], "CONSOLE_MEMORY");
+
+        for uri in ["/api/v1/console/nodes/999", "/api/v1/console/groups/999"] {
+            let (status, missing) = request_json(&app, "GET", uri, &[], "").await;
+            assert_eq!(status, 404, "{missing}");
+            assert_eq!(missing["error"]["code"], "NOT_FOUND");
+            assert_eq!(missing["meta"]["cluster_id"], "a");
+            assert_eq!(missing["meta"]["retention_source"], "CONSOLE_MEMORY");
+        }
+
+        for suffix in [
+            "/nodes/1",
+            "/nodes/1/boots",
+            "/groups/7",
+            "/groups/7/replicas",
+        ] {
+            let (status, unknown) = request_json(
+                &app,
+                "GET",
+                &format!("/api/v1/console/connections/missing{suffix}"),
+                &[],
+                "",
+            )
+            .await;
+            assert_eq!(status, 404, "{unknown}");
+            assert_eq!(unknown["error"]["code"], "CONNECTION_NOT_FOUND");
+            assert_neutral_meta(&unknown);
+        }
+
+        manager.remove("a").await.unwrap();
+        for suffix in [
+            "/nodes/1",
+            "/nodes/1/boots",
+            "/groups/7",
+            "/groups/7/replicas",
+        ] {
+            let (status, deleted) =
+                request_json(&app, "GET", &format!("/api/v1/console{suffix}"), &[], "").await;
+            assert_eq!(status, 404, "{deleted}");
+            assert_eq!(deleted["error"]["code"], "CONNECTION_NOT_FOUND");
+            assert_neutral_meta(&deleted);
+        }
+        manager.shutdown_all().await;
     }
 }

@@ -24,12 +24,14 @@ methods, and trait contracts.
 
 ## 管理客户端与 Console / Admin Clients and Console
 
-`rr-admin` CLI/REPL 直接调用节点 `AdminService` gRPC；`rr-admin console` 则是该服务的只读 BFF 客户端。
-浏览器使用同源 `/api/v1/console` JSON/SSE，不直接连接节点 Admin gRPC。Admin 写 RPC 仍由 CLI 或其他受权客户端
-执行。详见 [Admin API Reference](admin-api.md) 和 [Cluster Admin Console](../operations/cluster-admin-console.md)。
-The `rr-admin` CLI/REPL calls node `AdminService` gRPC directly, while `rr-admin console` is a read-only BFF client of
-that service. Browsers use same-origin `/api/v1/console` JSON/SSE rather than connecting to node Admin gRPC directly.
-Admin write RPCs are still executed by the CLI or other authorized clients. See [Admin API Reference](admin-api.md) and
+`rr-admin` CLI/REPL 直接调用节点 `AdminService` gRPC；`rr-admin console` 则是该服务的只读多连接 BFF 客户端。
+浏览器使用同源 `/api/v1/console/connections` 管理 profile，并用 `/api/v1/console/connections/{id}/...` 读取
+目标集群 JSON/SSE，不直接连接节点 Admin gRPC。Admin 写 RPC 仍由 CLI 或其他受权客户端执行。详见
+[Admin API Reference](admin-api.md) 和 [Cluster Admin Console](../operations/cluster-admin-console.md)。
+The `rr-admin` CLI/REPL calls node `AdminService` gRPC directly, while `rr-admin console` is a read-only multi-connection
+BFF client. Browsers manage profiles through same-origin `/api/v1/console/connections` and read a target's JSON/SSE under
+`/api/v1/console/connections/{id}/...`, never connecting to node Admin gRPC directly. Admin write RPCs remain with the CLI
+or other authorized clients. See [Admin API Reference](admin-api.md) and
 [Cluster Admin Console](../operations/cluster-admin-console.md).
 
 ## 核心 Trait / Core Traits
@@ -148,7 +150,7 @@ Consumers that cannot miss changes should periodically reconcile the full table.
 - `GroupId = u64`
 - `PartitionId = u64`
 - `LogIndex = u64`
-- `NodeAddr`：包含 `addr: String` 的结构体 / `NodeAddr`: struct containing `addr: String`
+- `NodeAddr`：包含 `addr: String` 的结构体<br />`NodeAddr`: struct containing `addr: String`
 
 ## 生成本地文档 / Generating Local Docs
 

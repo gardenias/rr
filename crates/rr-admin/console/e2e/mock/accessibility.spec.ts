@@ -1,16 +1,17 @@
 import { expect, test, type Page } from "@playwright/test";
 import { createRequire } from "node:module";
+import { CLUSTER_A, clusterUrl, seedConnection } from "./connection";
 
 const routes = [
-  ["overview", "Overview", "/api/v1/console/summary"],
-  ["nodes", "Nodes", "/api/v1/console/nodes"],
-  ["topology", "Topology", "/api/v1/console/topology"],
-  ["groups", "Raft groups", "/api/v1/console/groups"],
-  ["performance", "Performance", "/api/v1/console/metrics/performance"],
-  ["snapshots", "Snapshots & storage", "/api/v1/console/snapshots"],
-  ["lifecycle", "Lifecycle", "/api/v1/console/lifecycle"],
-  ["events", "Events & alerts", "/api/v1/console/events"],
-  ["sources", "Sources", "/api/v1/console/sources"],
+  ["overview", "Overview", "/api/v1/console/connections/cluster-a/summary"],
+  ["nodes", "Nodes", "/api/v1/console/connections/cluster-a/nodes"],
+  ["topology", "Topology", "/api/v1/console/connections/cluster-a/topology"],
+  ["groups", "Raft groups", "/api/v1/console/connections/cluster-a/groups"],
+  ["performance", "Performance", "/api/v1/console/connections/cluster-a/metrics/performance"],
+  ["snapshots", "Snapshots & storage", "/api/v1/console/connections/cluster-a/snapshots"],
+  ["lifecycle", "Lifecycle", "/api/v1/console/connections/cluster-a/lifecycle"],
+  ["events", "Events & alerts", "/api/v1/console/connections/cluster-a/events"],
+  ["sources", "Sources", "/api/v1/console/connections/cluster-a/sources"],
 ] as const;
 
 interface AxeViolation {
@@ -44,6 +45,7 @@ test.beforeEach(async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   const response = await page.request.post("/api/v1/console/auth/login", { data: { token: "mock-viewer-token" } });
   expect(response.ok()).toBe(true);
+  await seedConnection(page, CLUSTER_A);
 });
 
 for (const [route, title, resource] of routes) {
@@ -51,7 +53,7 @@ for (const [route, title, resource] of routes) {
     for (const viewport of [{ width: 1440, height: 900 }, { width: 1280, height: 800 }]) {
       await page.setViewportSize(viewport);
       const ready = page.waitForResponse((response) => new URL(response.url()).pathname === resource && response.ok());
-      await page.goto(`/${route}/`);
+      await page.goto(clusterUrl(`/${route}/`, CLUSTER_A));
       await ready;
       await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
       await expect(page.locator(".route-skeleton")).toHaveCount(0);
@@ -63,7 +65,7 @@ for (const [route, title, resource] of routes) {
 }
 
 test("node drawer traps keyboard focus, closes with Escape, and restores the trigger", async ({ page }) => {
-  await page.goto("/nodes/");
+  await page.goto(clusterUrl("/nodes/", CLUSTER_A));
   const trigger = page.getByRole("button", { name: "Open node 1 details" });
   await trigger.focus();
   await page.keyboard.press("Enter");
@@ -78,7 +80,7 @@ test("node drawer traps keyboard focus, closes with Escape, and restores the tri
 });
 
 test("reduced motion removes shell transitions and preserves keyboard skip navigation", async ({ page }) => {
-  await page.goto("/overview/");
+  await page.goto(clusterUrl("/overview/", CLUSTER_A));
   const duration = await page.locator(".nav-link").first().evaluate((element) => Number.parseFloat(getComputedStyle(element).transitionDuration));
   expect(duration).toBeLessThanOrEqual(0.00001);
   await page.keyboard.press("Tab");

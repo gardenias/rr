@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — 2026-11-19 multi-cluster Console client
+
+- **Independent multi-connection Console.** `rr-admin console --listen ...` starts without peers, discovery,
+  Admin credentials, or Prometheus and opens a `/connections/` manager. Operators can test, save, edit,
+  connect, disconnect, and delete multiple profiles through the UI. Each explicitly connected cluster owns an
+  isolated upstream, discovery, scheduler, cache, Prometheus configuration, event/cursor state, and SSE stream;
+  at most eight runtimes (including CONNECTING) may be active. Disconnect/delete/shutdown stop the corresponding
+  background tasks, and process restart leaves saved profiles disconnected.
+- **Connection-scoped browser and HTTP contracts.** Cluster resources now live under
+  `/api/v1/console/connections/{id}/...`, with typed connection CRUD/test/connect/disconnect control routes,
+  neutral control metadata, and explicit `CONNECTION_REQUIRED`, `CONNECTION_NOT_FOUND`,
+  `CONNECTION_NOT_CONNECTED`, `CONNECTION_ACTIVE`, `CREDENTIALS_REQUIRED`, and `ACTIVE_CONNECTION_LIMIT`
+  errors. The browser URL's `?connection=<id>` is authoritative for refresh, bookmarks, navigation, and
+  multiple Pages. Switching aborts stale HTTP/SSE work and ignores late responses; event preferences and
+  pagination state are connection-local. Legacy startup flags and unscoped resources remain available only
+  through one fixed ephemeral startup connection and never select an arbitrary saved profile.
+- **Persistent non-sensitive profiles with a strict secret boundary.** Versioned `connections.json` uses
+  atomic mode-`0600` replacement in `--state-dir` or the platform configuration directory and fails loudly on
+  corruption or unknown versions. Admin tokens and discovery passwords are write-only and process-memory-only
+  by default; explicit Remember uses the OS keychain. TLS fields are Console-host paths, and APIs expose only
+  credential capability/source metadata. Connection mutations and scoped reconcile use same-origin Origin and
+  session CSRF checks. Explicit `--keychain-disable` supports isolated/headless processes by disabling every OS
+  keychain operation and reporting `keychain_available=false`; production remains keychain-enabled by default.
+- **Real dual-cluster acceptance.** The Playwright real harness starts two independent three-node RocksDB
+  clusters and one no-source Console with an isolated state directory, creates both profiles through the UI,
+  and verifies every resource family, nine views, SSE, switching, refresh/bookmarks, two Pages, delayed real
+  responses, disconnect/delete, leader failover/restart, and Console restart behavior. The harness uses local
+  processes and local browser binaries only; it does not download images or write real OS keychain entries.
+
 ### Fixed — 2026-11-14 IoBatcher serial-write window elimination
 
 - **The group-commit batcher no longer waits a timed window by default**

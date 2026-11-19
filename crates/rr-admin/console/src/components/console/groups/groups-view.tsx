@@ -9,7 +9,7 @@ import { SourceEvidence } from "@/components/console/source-evidence";
 import { EmptyState, ErrorState } from "@/components/console/states";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
-import { ConsoleApiError, consoleApi } from "@/lib/api";
+import { ConsoleApiError, consoleApi, isTerminalConnectionError } from "@/lib/api";
 import type { ConsoleMeta } from "@/lib/contract";
 import { useConsoleResource } from "@/lib/use-console-resource";
 import { useRefresh } from "@/lib/refresh-context";
@@ -19,7 +19,7 @@ import { GroupEvidenceSummary } from "@/components/console/groups/group-detail";
 import { GroupTable } from "@/components/console/groups/group-table";
 import { normalizeReplicaRows, type GroupDetailItem, type GroupListItem, type ReplicaRow } from "@/components/console/groups/model";
 import { ReplicaMatrix } from "@/components/console/groups/replica-matrix";
-import type { TimeWindow } from "@/lib/query-state";
+import { hrefWithConnection, serializeQueryState, type TimeWindow } from "@/lib/query-state";
 
 interface DetailState {
   group: GroupDetailItem | null;
@@ -37,7 +37,7 @@ function apiError(error: unknown): ConsoleApiError {
 }
 
 function GroupDetailLoader({ groupId, timeWindow }: { groupId: number; timeWindow: TimeWindow }) {
-  const { intervalMs, paused, recordRefresh } = useRefresh();
+  const { connectionId, intervalMs, paused, recordRefresh } = useRefresh();
   const [reload, setReload] = useState(0);
   const [state, setState] = useState<DetailState>({
     group: null,
@@ -49,48 +49,68 @@ function GroupDetailLoader({ groupId, timeWindow }: { groupId: number; timeWindo
   });
 
   useEffect(() => {
-    if (paused) return;
+    if (!connectionId || paused) return;
+    const owner = connectionId;
     const controller = new AbortController();
     let timer: ReturnType<typeof setInterval> | undefined;
+    let stopped = false;
+    let latestRequest = 0;
     const load = async (initial: boolean) => {
+      if (stopped) return;
+      const request = ++latestRequest;
       if (initial) setState((current) => ({ ...current, loading: true, error: null, replicaError: null }));
       const [groupResult, replicaResult] = await Promise.allSettled([
-        consoleApi.group(groupId, controller.signal),
-        consoleApi.replicas(groupId, controller.signal),
+        consoleApi.group(owner, groupId, controller.signal),
+        consoleApi.replicas(owner, groupId, controller.signal),
       ]);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || stopped || request !== latestRequest) return;
       const group = groupResult.status === "fulfilled" ? groupResult.value.data as GroupDetailItem : null;
       const meta = groupResult.status === "fulfilled"
         ? groupResult.value.meta
         : replicaResult.status === "fulfilled" ? replicaResult.value.meta : null;
-      if (meta) recordRefresh(meta.generated_at);
+      if (meta) recordRefresh(owner, meta.generated_at);
+      const groupError = groupResult.status === "rejected" ? apiError(groupResult.reason) : null;
+      const replicaError = replicaResult.status === "rejected" ? apiError(replicaResult.reason) : null;
+      if (isTerminalConnectionError(groupError) || isTerminalConnectionError(replicaError)) {
+        stopped = true;
+        if (timer) clearInterval(timer);
+      }
       setState({
         group,
         replicas: replicaResult.status === "fulfilled" ? normalizeReplicaRows(replicaResult.value.data) : [],
         meta,
-        error: groupResult.status === "rejected" ? apiError(groupResult.reason) : null,
-        replicaError: replicaResult.status === "rejected" ? apiError(replicaResult.reason) : null,
+        error: groupError,
+        replicaError,
         loading: false,
       });
     };
     const schedule = () => {
       if (timer) clearInterval(timer);
+      if (stopped) return;
       const delay = refreshDelay(intervalMs, document.hidden, false);
       if (delay) timer = setInterval(() => void load(false), delay);
     };
     void load(true);
     schedule();
     const onVisibilityChange = () => {
+      if (stopped) return;
       if (!document.hidden) void load(false);
       schedule();
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
+      latestRequest += 1;
       controller.abort();
       if (timer) clearInterval(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [groupId, intervalMs, paused, recordRefresh, reload]);
+  }, [connectionId, groupId, intervalMs, paused, recordRefresh, reload]);
+
+  const relatedHref = (path: string, updates: Record<string, string>) => {
+    const params = new URLSearchParams({ window: timeWindow, ...updates });
+    if (connectionId) params.set("connection", connectionId);
+    return hrefWithConnection(path, params);
+  };
 
   if (state.loading && !state.group) {
     return <div className="route-skeleton" role="status" aria-label={`Loading group ${groupId} evidence`}><span /><span /><span /></div>;
@@ -130,16 +150,16 @@ function GroupDetailLoader({ groupId, timeWindow }: { groupId: number; timeWindo
             <h3>Replica evidence matrix</h3>
             <p className="mt-1 text-xs text-zinc-400">Matched index and lag are shown only with their leader source predicate. Heartbeat and append RTT remain separate.</p>
           </div>
-          <ReplicaMatrix replicas={state.replicas} leaderNodeId={state.group?.leader_node_id ?? null} timeWindow={timeWindow} />
+          <ReplicaMatrix replicas={state.replicas} leaderNodeId={state.group?.leader_node_id ?? null} timeWindow={timeWindow} connectionId={connectionId ?? undefined} />
         </section>
       ) : !state.replicaError && !state.loading ? (
         <EmptyState title="No replica observations" description="The group may be unsupported or no detailed source has responded. Missing replicas are not proof of membership loss." />
       ) : null}
       <nav className="flex flex-wrap gap-3 border-t border-white/10 pt-4 text-xs text-orange-300" aria-label="Related group views">
-        <Link href={`/topology/?window=${timeWindow}&view=routes&filter=group-${groupId}`}>Related partitions</Link>
-        <Link href={`/nodes/?window=${timeWindow}&filter=group-${groupId}`}>Related nodes</Link>
-        <Link href={`/snapshots/?window=${timeWindow}&group_id=${groupId}`}>Group snapshots</Link>
-        <Link href={`/performance/?window=${timeWindow}&group_id=${groupId}`}>Group performance</Link>
+        <Link href={relatedHref("/topology/", { view: "routes", filter: `group-${groupId}` })}>Related partitions</Link>
+        <Link href={relatedHref("/nodes/", { filter: `group-${groupId}` })}>Related nodes</Link>
+        <Link href={relatedHref("/snapshots/", { group_id: String(groupId) })}>Group snapshots</Link>
+        <Link href={relatedHref("/performance/", { group_id: String(groupId) })}>Group performance</Link>
       </nav>
     </div>
   );
@@ -147,8 +167,16 @@ function GroupDetailLoader({ groupId, timeWindow }: { groupId: number; timeWindo
 
 export function GroupsView() {
   const { state: queryState, setFilter } = useRouteQueryState();
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([]);
+  const [pagination, setPagination] = useState<{
+    connectionId: string | null;
+    cursor: string | null;
+    history: Array<string | null>;
+  }>({ connectionId: queryState.connection, cursor: null, history: [] });
+  const currentPagination = pagination.connectionId === queryState.connection
+    ? pagination
+    : { connectionId: queryState.connection, cursor: null, history: [] };
+  const cursor = currentPagination.cursor;
+  const cursorHistory = currentPagination.history;
   const { data, meta, error, loading, refresh } = useConsoleResource("/groups", {
     cursor,
     page_size: 50,
@@ -162,18 +190,23 @@ export function GroupsView() {
   const applyFilter = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    setCursor(null);
-    setCursorHistory([]);
+    setPagination({ connectionId: queryState.connection, cursor: null, history: [] });
     setFilter("filter", String(form.get("filter") ?? ""));
   };
   const nextPage = () => {
     if (!data?.next_cursor) return;
-    setCursorHistory((history) => [...history, cursor]);
-    setCursor(data.next_cursor);
+    setPagination({
+      connectionId: queryState.connection,
+      cursor: data.next_cursor,
+      history: [...cursorHistory, cursor],
+    });
   };
   const previousPage = () => {
-    setCursor(cursorHistory.at(-1) ?? null);
-    setCursorHistory(cursorHistory.slice(0, -1));
+    setPagination({
+      connectionId: queryState.connection,
+      cursor: cursorHistory.at(-1) ?? null,
+      history: cursorHistory.slice(0, -1),
+    });
   };
 
   return (
@@ -218,7 +251,7 @@ export function GroupsView() {
             <div className="evidence-panel-meta">
               <FreshnessBadge meta={meta} />
               <SourceEvidence meta={meta} />
-              <Link href="/sources" className="evidence-link">Inspect sources <ArrowUpRight aria-hidden="true" size={12} /></Link>
+              <Link href={hrefWithConnection("/sources", serializeQueryState(queryState))} className="evidence-link">Inspect sources <ArrowUpRight aria-hidden="true" size={12} /></Link>
             </div>
           </section>
           {meta.capabilities.map((capability) => (
@@ -247,7 +280,7 @@ export function GroupsView() {
             if (!open) setFilter("group_id", "");
           }}
         >
-          <GroupDetailLoader key={validSelectedGroupId} groupId={validSelectedGroupId} timeWindow={queryState.window} />
+          <GroupDetailLoader key={`${queryState.connection ?? "none"}:${validSelectedGroupId}`} groupId={validSelectedGroupId} timeWindow={queryState.window} />
         </Drawer>
       ) : null}
     </div>

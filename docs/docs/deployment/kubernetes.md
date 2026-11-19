@@ -12,20 +12,17 @@ Both use managed formation, not the legacy bootstrap/peers flow.
 
 ## 前置条件 / Prerequisites
 
-- Kubernetes 1.27+，以及支持 `ReadWriteOnce` 的 StorageClass。
-- 每个 Pod 可访问的 etcd v3。Raw manifests 默认使用 `http://etcd:2379`；Helm 默认使用 `http://rr-etcd:2379`。
-- 显式指定支持 managed formation 的镜像。Rr 0.2.0 的严格解析器拒绝 `[cluster.formation]` 和新 cluster 字段，不能使用，也
-  不能保留 `REPLACE_WITH_FORMATION_CAPABLE_TAG`。
-- 默认安全配置需要 `rr-tls` 和 `rr-admin-token` 两个 Secret。证书 SAN 必须覆盖实际拨入的 Pod/Service DNS 名。
-
-Requirements:
-
-- Kubernetes 1.27+ and a StorageClass supporting `ReadWriteOnce`.
-- An etcd v3 endpoint reachable from every Pod. Raw manifests default to `http://etcd:2379`; Helm defaults to
+- Kubernetes 1.27+，以及支持 `ReadWriteOnce` 的 StorageClass。<br />
+  Kubernetes 1.27+ and a StorageClass supporting `ReadWriteOnce`.
+- 每个 Pod 可访问的 etcd v3。Raw manifests 默认使用 `http://etcd:2379`；Helm 默认使用 `http://rr-etcd:2379`。<br />
+  An etcd v3 endpoint reachable from every Pod. Raw manifests default to `http://etcd:2379`; Helm defaults to
   `http://rr-etcd:2379`.
-- An explicit formation-capable image. Rr 0.2.0 rejects `[cluster.formation]` and the new cluster fields; neither that
+- 显式指定支持 managed formation 的镜像。Rr 0.2.0 的严格解析器拒绝 `[cluster.formation]` 和新 cluster 字段，
+  不能使用，也不能保留 `REPLACE_WITH_FORMATION_CAPABLE_TAG`。<br />
+  An explicit formation-capable image. Rr 0.2.0 rejects `[cluster.formation]` and the new cluster fields; neither that
   release nor `REPLACE_WITH_FORMATION_CAPABLE_TAG` is valid.
-- The default secure configuration requires `rr-tls` and `rr-admin-token` Secrets. Certificate SANs must cover the
+- 默认安全配置需要 `rr-tls` 和 `rr-admin-token` 两个 Secret。证书 SAN 必须覆盖实际拨入的 Pod/Service DNS 名。<br />
+  The default secure configuration requires `rr-tls` and `rr-admin-token` Secrets. Certificate SANs must cover the
   Pod/Service DNS names clients actually dial.
 
 ```bash
@@ -256,16 +253,27 @@ outage does not affect Raft nodes, and controlled write operations remain the re
 A self-managed deployment must account for the following:
 
 - 同时携带 `rr-admin` 二进制和前端静态导出 `console/out`，并用 `--static-dir` 指向实际部署目录；静态文件由
-  Console BFF 同源托管，不需要独立 Node.js 生产服务。/ Ship both the `rr-admin` binary and the `console/out`
+  Console BFF 同源托管，不需要独立 Node.js 生产服务。<br />Ship both the `rr-admin` binary and the `console/out`
   static export, and point `--static-dir` at the deployed directory. The Console BFF serves these files from the same
   origin; no standalone Node.js production service is required.
-- 打通 Console Pod 到各节点 Admin gRPC（仓库 manifests 使用 52001，生产使用 TLS/mTLS 和 Admin token）以及
+- 一个 Console 可通过 `/connections/` 管理多个目标集群，但最多 8 个显式连接的 runtime 同时采集。将
+  `--state-dir` 指向独立持久卷，挂载为 Console 用户独占读写并备份其中的 `connections.json`；profile 会恢复，
+  runtime、session、缓存和趋势在重启后不会自动恢复。<br />One Console manages multiple target clusters through
+  `/connections/`, with at most eight explicitly connected runtimes collecting at once. Point `--state-dir` at a
+  dedicated persistent volume writable only by the Console user and back up its `connections.json`. Profiles survive,
+  while runtimes, sessions, caches, and trends do not resume automatically after restart.
+- 容器通常没有桌面 OS keychain。可显式设置 `--keychain-disable`，使进程完全不访问 keychain、UI 禁用 Remember，
+  所有连接秘密只留内存并在重启后重新输入；生产默认仍是不传该参数的 keychain-enabled 行为。<br />Containers usually
+  have no desktop OS keychain. Explicit `--keychain-disable` prevents all keychain access, disables Remember in the UI,
+  and keeps connection secrets memory-only so they must be re-entered after restart. The production default remains
+  keychain-enabled when the flag is omitted.
+- 打通 Console Pod 到各目标群节点 Admin gRPC（仓库 manifests 使用 52001，生产使用 TLS/mTLS 和 Admin token）以及
   observability HTTP（仓库 manifests 使用 9100，抓取 `/health`、`/ready` 和 `/metrics`）的网络路径，并用
   NetworkPolicy 限制访问来源。完整健康与实时指标还要求每节点在 `[node]` 中配置完整的
   `advertise_addr`、`admin_advertise_addr`、`observability_advertise_addr` 和 `environment`；当前 raw/Helm
   配置未提供这些描述符字段，需要自管部署自行补充，否则相关视图按能力降级。字段语义见
   [NodeDirectory 自注册](../guide/config-provider.md#节点自注册--node-self-registration)。Prometheus 仅用于可选
-  历史查询，不是 Console 的必需依赖。/ Allow network paths from the Console Pod to each node's Admin gRPC endpoint
+  历史查询，不是 Console 的必需依赖。<br />Allow network paths from the Console Pod to each node's Admin gRPC endpoint
   (port 52001 in the repository manifests, with TLS/mTLS and the Admin token in production) and observability HTTP
   endpoint (port 9100 in the repository manifests, for `/health`, `/ready`, and `/metrics`), restricting clients with
   NetworkPolicy. Full health and live metrics also require every node to configure `advertise_addr`,
@@ -273,13 +281,13 @@ A self-managed deployment must account for the following:
   configuration omits these descriptor fields; a self-managed deployment must supply them or accept capability
   degradation. See [NodeDirectory self-registration](../guide/config-provider.md#节点自注册--node-self-registration).
   Prometheus is optional for historical queries and is not required by the Console.
-- 使用专用 Secret 提供 Console HTTPS 服务证书/私钥和 viewer token（通过 `RR_CONSOLE_TOKEN` 注入），并与节点
+- 使用专用 Secret 提供 Console HTTPS 服务证书和私钥和 viewer token（通过 `RR_CONSOLE_TOKEN` 注入），并与节点
   `rr-tls`、`rr-admin-token` 分开管理；BFF→Admin 的客户端 TLS 凭证按手册单独配置。非 loopback 监听必须同时
-  启用 Console HTTPS 和 viewer token。/ Use dedicated Secrets for the Console HTTPS serving certificate/private key
+  启用 Console HTTPS 和 viewer token。<br />Use dedicated Secrets for the Console HTTPS serving certificate/private key
   and viewer token (injected through `RR_CONSOLE_TOKEN`), managed separately from the node `rr-tls` and
   `rr-admin-token` Secrets. Configure BFF-to-Admin client TLS credentials separately as described in the manual.
   Non-loopback listeners require both Console HTTPS and a viewer token.
-- 只通过受控 Service/Ingress 暴露 Console HTTPS；不要为了 Console 把节点 Admin 或 metrics 端点暴露到公网。/
+- 只通过受控 Service/Ingress 暴露 Console HTTPS；不要为了 Console 把节点 Admin 或 metrics 端点暴露到公网。<br />
   Expose only Console HTTPS through a controlled Service/Ingress; never expose node Admin or metrics endpoints publicly
   to support the Console.
 
@@ -335,23 +343,20 @@ belongs to the SeedSpec identity; changing it does not expand Raft membership an
 mismatched nodes. P1 supports neither dynamic membership scaling, replica replacement, nor resharding. The adopt-only formation
 Job performs initial legacy convergence and is not a routine scaling Job.
 
-当前应按以下边界规划容量：
+当前应按以下边界规划容量 / Plan capacity within these boundaries:
 
-- 全新集群可在首次 Genesis 前把 `replicaCount` 和完整花名册规划为目标规模；这不能用于已经初始化的集群。
-- 已运行集群可以垂直增加 CPU、内存等资源；磁盘扩容另按存储运维流程处理。
-- 必须水平扩展时，新建目标规模的集群并执行应用层数据迁移与流量切换；当前没有内置的整集群在线迁移能力。
-- `add-learner` + `change-membership` 的手工加节点流程只适用于支持动态成员的 legacy 部署，见
-  [一般部署指南](./deployment.md)；不要将它套用到 Managed P1。
-
-Plan capacity within these boundaries:
-
-- For a fresh cluster, set `replicaCount` and the complete roster to the target size before the first Genesis; this is not
-  valid for an initialized cluster.
-- A running cluster can scale vertically with more CPU, memory, and similar resources; handle disk growth through the
+- 全新集群可在首次 Genesis 前把 `replicaCount` 和完整花名册规划为目标规模；这不能用于已经初始化的集群。<br />
+  For a fresh cluster, set `replicaCount` and the complete roster to the target size before the first Genesis; this is
+  not valid for an initialized cluster.
+- 已运行集群可以垂直增加 CPU、内存等资源；磁盘扩容另按存储运维流程处理。<br />
+  A running cluster can scale vertically with more CPU, memory, and similar resources; handle disk growth through the
   storage operations procedure.
-- If horizontal expansion is mandatory, create a cluster at the target size and perform application-level data migration
+- 必须水平扩展时，新建目标规模的集群并执行应用层数据迁移与流量切换；当前没有内置的整集群在线迁移能力。<br />
+  If horizontal expansion is mandatory, create a cluster at the target size and perform application-level data migration
   and traffic cutover; built-in online whole-cluster migration is not currently available.
-- The manual `add-learner` + `change-membership` flow applies only to legacy deployments with dynamic membership support;
+- `add-learner` + `change-membership` 的手工加节点流程只适用于支持动态成员的 legacy 部署，见
+  [一般部署指南](./deployment.md)；不要将它套用到 Managed P1。<br />
+  The manual `add-learner` + `change-membership` flow applies only to legacy deployments with dynamic membership support;
   see the [generic deployment guide](./deployment.md). Do not apply it to Managed P1.
 
 增加同一 Raft 组的 voter 主要改变容错和多数派延迟，不会提升该组的写入吞吐。需要水平写扩展时，应使用跨机且副本集合
@@ -376,6 +381,6 @@ Genesis as a repair.
 
 ## 相关 / Related
 
-- [一般部署指南 / Generic deployment](./deployment.md)
-- [TLS 配置 / TLS setup](./tls.md)
-- [C4 部署图 / C4 deployment diagram](../architecture/c4/deployment.md)
+- [一般部署指南](./deployment.md)<br />[Generic deployment](./deployment.md)
+- [TLS 配置](./tls.md)<br />[TLS setup](./tls.md)
+- [C4 部署图](../architecture/c4/deployment.md)<br />[C4 deployment diagram](../architecture/c4/deployment.md)

@@ -1,6 +1,8 @@
 mod auth;
 mod cache;
 mod config;
+mod connection_manager;
+mod connection_store;
 mod discovery;
 mod http;
 mod metrics;
@@ -26,8 +28,14 @@ use tokio_rustls::TlsAcceptor;
 
 use auth::AuthState;
 use cache::ConsoleCache;
+use connection_manager::ConnectionManager;
+use connection_store::{ConnectionStore, SecretStore};
 use discovery::TrustedDiscovery;
+use model::{
+    rfc3339, ConnectionProfile, ConnectionSecrets, PrometheusProfile, SecretInput, TlsProfile,
+};
 use scheduler::Scheduler;
+use std::time::SystemTime;
 use upstream::TonicUpstream;
 
 pub(crate) async fn run(
@@ -36,45 +44,124 @@ pub(crate) async fn run(
     admin_token: Option<Arc<str>>,
 ) -> Result<()> {
     let config = args.validate()?;
-    let discovery = connect_discovery(&config).await?;
+    config.ensure_startup_admin_options(admin_tls.is_some(), admin_token.is_some())?;
+    let store_path = ConnectionStore::default_path(config.state_dir.as_deref())?;
+    let store =
+        Arc::new(ConnectionStore::load(store_path).context("load Console connection profiles")?);
+    let manager = Arc::new(ConnectionManager::new(
+        store,
+        Arc::new(if config.keychain_disabled {
+            SecretStore::without_keychain()
+        } else {
+            SecretStore::new()
+        }),
+    ));
+    let legacy_connection = if config.peers.is_empty() && config.discovery.is_none() {
+        None
+    } else {
+        let discovery_password = config
+            .discovery_security
+            .password_env
+            .as_deref()
+            .map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .filter(|password| !password.is_empty())
+                    .with_context(|| format!("read non-empty etcd discovery password from ${name}"))
+            })
+            .transpose()?;
+        let secrets = ConnectionSecrets {
+            admin_token: admin_token
+                .map(|token| SecretInput::Replace(token.to_string()))
+                .unwrap_or_default(),
+            discovery_password: discovery_password
+                .map(SecretInput::Replace)
+                .unwrap_or_default(),
+        };
+        let startup = manager
+            .create_startup(startup_profile(&config, admin_tls), secrets)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let id = startup.profile.id.clone();
+        manager
+            .connect(&id)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        Some(id)
+    };
     let tls = load_tls(&config)?;
     let listener = TcpListener::bind(config.listen)
         .await
         .with_context(|| format!("bind Console listener {}", config.listen))?;
-
-    let cache = ConsoleCache::production(config.cluster_name.clone(), config.poll_interval);
-    let upstream = Arc::new(TonicUpstream::new(admin_tls, admin_token));
-    let scheduler = build_scheduler(&config, cache, upstream, discovery);
-    if let Some(prometheus) = config.prometheus.clone() {
-        scheduler.configure_history(prometheus)?;
-    }
     let auth = AuthState::new(
         config.viewer_token.clone(),
         Duration::from_secs(15 * 60),
         config.using_tls(),
     );
     let app = http::router(http::AppState::new(
-        scheduler.clone(),
+        manager.clone(),
         auth,
         config.static_dir.clone(),
         config.using_tls(),
+        legacy_connection,
     ));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let scheduler_task = tokio::spawn(scheduler.clone().run(shutdown_rx.clone()));
     tracing::info!(listen = %config.listen, https = config.using_tls(), "Console listening");
 
     let result = if let Some(acceptor) = tls {
-        serve_tls(listener, acceptor, app, shutdown_rx).await
+        serve_tls(listener, acceptor, app, shutdown_rx, manager.clone()).await
     } else {
         axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal(shutdown_rx))
+            .with_graceful_shutdown(shutdown_signal(manager.clone(), shutdown_rx))
             .await
             .context("Console HTTP server")
     };
+    manager.shutdown_all().await;
     let _ = shutdown_tx.send(true);
-    scheduler_task.abort();
-    let _ = scheduler_task.await;
     result
+}
+
+fn startup_profile(config: &ConsoleConfig, admin_tls: Option<TlsConfig>) -> ConnectionProfile {
+    let now = rfc3339(SystemTime::now());
+    ConnectionProfile {
+        id: format!("startup-{}", uuid::Uuid::new_v4()),
+        name: config
+            .cluster_name
+            .clone()
+            .unwrap_or_else(|| "Legacy startup connection".to_string()),
+        environment: None,
+        admin_seeds: config.peers.clone(),
+        discovery: config.discovery.clone(),
+        cluster_name: config.cluster_name.clone(),
+        admin_tls: admin_tls
+            .map(|tls| TlsProfile {
+                ca: tls.ca_path,
+                cert: Some(tls.cert_path),
+                key: Some(tls.key_path),
+                domain: tls.domain_name,
+            })
+            .unwrap_or_default(),
+        discovery_tls: TlsProfile {
+            ca: config.discovery_security.tls_ca.clone(),
+            cert: config.discovery_security.tls_cert.clone(),
+            key: config.discovery_security.tls_key.clone(),
+            domain: config.discovery_security.tls_domain.clone(),
+        },
+        discovery_username: config.discovery_security.username.clone(),
+        discovery_allow_insecure: config.discovery_allow_insecure,
+        prometheus: config
+            .prometheus
+            .as_ref()
+            .map(|prometheus| PrometheusProfile {
+                url: prometheus.url.clone(),
+                cluster: format!("{}={}", prometheus.cluster.label, prometheus.cluster.value),
+            }),
+        poll_interval_secs: config.poll_interval.as_secs(),
+        created_at: now.clone(),
+        updated_at: now,
+        observed_cluster_id: None,
+        last_connected_at: None,
+    }
 }
 
 async fn connect_discovery(config: &ConsoleConfig) -> Result<Option<Arc<TrustedDiscovery>>> {
@@ -90,24 +177,59 @@ async fn connect_discovery(config: &ConsoleConfig) -> Result<Option<Arc<TrustedD
         "validated discovery configuration has no etcd endpoints"
     );
     let options = discovery_connect_options(config, |name| std::env::var(name).ok())?;
+    connect_discovery_with_options(config.discovery_endpoints.clone(), cluster_name, options)
+        .await
+        .map(Some)
+}
+
+async fn connect_discovery_profile(
+    profile: &model::ConnectionProfile,
+    password: Option<String>,
+) -> Result<Option<Arc<TrustedDiscovery>>> {
+    let Some(discovery) = &profile.discovery else {
+        return Ok(None);
+    };
+    let endpoints = config::parse_discovery_endpoints(discovery)?;
+    let cluster_name = profile
+        .cluster_name
+        .clone()
+        .context("connection discovery is missing its cluster name")?;
+    let options = discovery_options(
+        &config::DiscoverySecurityConfig {
+            tls_ca: profile.discovery_tls.ca.clone(),
+            tls_cert: profile.discovery_tls.cert.clone(),
+            tls_key: profile.discovery_tls.key.clone(),
+            tls_domain: profile.discovery_tls.domain.clone(),
+            username: profile.discovery_username.clone(),
+            password_env: None,
+        },
+        &config::DiscoveryTransportConfig::default(),
+        password,
+    )?;
+    connect_discovery_with_options(endpoints, cluster_name, options)
+        .await
+        .map(Some)
+}
+
+async fn connect_discovery_with_options(
+    endpoints: Vec<String>,
+    cluster_name: String,
+    options: ConnectOptions,
+) -> Result<Arc<TrustedDiscovery>> {
     let directory = EtcdNodeDirectory::new_with_options(
-        config.discovery_endpoints.clone(),
+        endpoints.clone(),
         cluster_name.clone(),
         options.clone(),
     )
     .await
     .context("connect trusted Console NodeDirectory")?;
-    let config_provider = EtcdConfigProvider::new_with_options(
-        config.discovery_endpoints.clone(),
-        cluster_name,
-        options,
-    )
-    .await
-    .context("connect trusted Console ConfigProvider")?;
-    Ok(Some(Arc::new(TrustedDiscovery::new(
+    let config_provider = EtcdConfigProvider::new_with_options(endpoints, cluster_name, options)
+        .await
+        .context("connect trusted Console ConfigProvider")?;
+    Ok(Arc::new(TrustedDiscovery::new(
         Arc::new(directory),
         Arc::new(config_provider),
-    ))))
+    )))
 }
 
 fn discovery_connect_options(
@@ -115,7 +237,24 @@ fn discovery_connect_options(
     env: impl Fn(&str) -> Option<String>,
 ) -> Result<ConnectOptions> {
     let security = &config.discovery_security;
-    let transport = &config.discovery_transport;
+    let password = match (&security.username, &security.password_env) {
+        (Some(_), Some(password_env)) => Some(
+            env(password_env)
+                .filter(|password| !password.is_empty())
+                .with_context(|| {
+                    format!("read non-empty etcd discovery password from ${password_env}")
+                })?,
+        ),
+        _ => None,
+    };
+    discovery_options(security, &config.discovery_transport, password)
+}
+
+fn discovery_options(
+    security: &config::DiscoverySecurityConfig,
+    transport: &config::DiscoveryTransportConfig,
+    password: Option<String>,
+) -> Result<ConnectOptions> {
     let mut options = ConnectOptions::new()
         .with_connect_timeout(transport.connect_timeout)
         .with_timeout(transport.request_timeout)
@@ -140,12 +279,7 @@ fn discovery_connect_options(
         }
         options = options.with_tls(tls);
     }
-    if let (Some(username), Some(password_env)) = (&security.username, &security.password_env) {
-        let password = env(password_env)
-            .filter(|password| !password.is_empty())
-            .with_context(|| {
-                format!("read non-empty etcd discovery password from ${password_env}")
-            })?;
+    if let (Some(username), Some(password)) = (&security.username, password) {
         options = options.with_user(username.clone(), password);
     }
     Ok(options)
@@ -157,12 +291,51 @@ fn build_scheduler(
     upstream: Arc<dyn upstream::Upstream>,
     discovery: Option<Arc<TrustedDiscovery>>,
 ) -> Arc<Scheduler> {
-    cache.register_peers(&config.peers);
+    build_scheduler_parts(
+        cache,
+        upstream,
+        discovery,
+        config.peers.clone(),
+        config.poll_interval,
+    )
+}
+
+fn build_profile_scheduler(
+    profile: &model::ConnectionProfile,
+    upstream: TonicUpstream,
+    discovery: Option<Arc<TrustedDiscovery>>,
+) -> Result<Arc<Scheduler>> {
+    let poll_interval = Duration::from_secs(profile.poll_interval_secs);
+    let cache = ConsoleCache::production(profile.cluster_name.clone(), poll_interval);
+    let scheduler = build_scheduler_parts(
+        cache,
+        Arc::new(upstream),
+        discovery,
+        profile.admin_seeds.clone(),
+        poll_interval,
+    );
+    if let Some(prometheus) = &profile.prometheus {
+        scheduler.configure_history(config::PrometheusConfig {
+            url: prometheus.url.clone(),
+            cluster: config::parse_cluster_matcher(&prometheus.cluster)?,
+        })?;
+    }
+    Ok(scheduler)
+}
+
+fn build_scheduler_parts(
+    cache: Arc<ConsoleCache>,
+    upstream: Arc<dyn upstream::Upstream>,
+    discovery: Option<Arc<TrustedDiscovery>>,
+    peers: Vec<config::SeedPeer>,
+    poll_interval: Duration,
+) -> Arc<Scheduler> {
+    cache.register_peers(&peers);
     let scheduler = Scheduler::new(
         upstream,
         cache,
-        config.peers.clone(),
-        config.poll_interval,
+        peers,
+        poll_interval,
         Duration::from_secs(4),
         16,
     );
@@ -173,7 +346,7 @@ fn build_scheduler(
     Arc::new(scheduler)
 }
 
-async fn shutdown_signal(mut shutdown: watch::Receiver<bool>) {
+async fn shutdown_signal(manager: Arc<ConnectionManager>, mut shutdown: watch::Receiver<bool>) {
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             if let Err(error) = result {
@@ -184,6 +357,7 @@ async fn shutdown_signal(mut shutdown: watch::Receiver<bool>) {
             let _ = result;
         }
     }
+    manager.shutdown_all().await;
 }
 
 fn load_tls(config: &ConsoleConfig) -> Result<Option<TlsAcceptor>> {
@@ -236,22 +410,20 @@ async fn serve_tls(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     app: axum::Router,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
+    manager: Arc<ConnectionManager>,
 ) -> Result<()> {
     use hyper::service::service_fn;
     use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
     use tower::Service;
 
     let connection_permits = Arc::new(Semaphore::new(TLS_MAX_CONNECTIONS));
+    let shutdown_signal = shutdown_signal(manager, shutdown.clone());
+    tokio::pin!(shutdown_signal);
     loop {
         let (stream, _) = tokio::select! {
             accepted = listener.accept() => accepted.context("accept Console TLS connection")?,
-            result = shutdown.changed() => {
-                if result.is_err() || *shutdown.borrow() {
-                    return Ok(());
-                }
-                continue;
-            }
+            () = &mut shutdown_signal => return Ok(()),
         };
         let permit = match connection_permits.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -341,6 +513,7 @@ mod tests {
             },
             discovery_security: DiscoverySecurityConfig::default(),
             discovery_transport: crate::console::config::DiscoveryTransportConfig::default(),
+            discovery_allow_insecure: false,
             cluster_name: discovery.then(|| "test-cluster".to_string()),
             viewer_token: None,
             tls_cert: None,
@@ -348,6 +521,8 @@ mod tests {
             poll_interval: Duration::from_secs(5),
             prometheus: None,
             static_dir: PathBuf::from("unused"),
+            state_dir: None,
+            keychain_disabled: false,
         }
     }
 

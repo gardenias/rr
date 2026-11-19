@@ -14,6 +14,7 @@ const FILTER_KEYS = [
 
 export interface QueryState {
   window: TimeWindow;
+  connection: string | null;
   filters: Partial<Record<(typeof FILTER_KEYS)[number], string>>;
 }
 
@@ -23,12 +24,13 @@ export function parseQueryState(search: string): QueryState {
   const window = TIME_WINDOWS.includes(requestedWindow as TimeWindow)
     ? (requestedWindow as TimeWindow)
     : "15m";
+  const connection = params.get("connection")?.trim() || null;
   const filters: QueryState["filters"] = {};
   for (const key of FILTER_KEYS) {
     const value = params.get(key)?.trim();
     if (value) filters[key] = value;
   }
-  return { window, filters };
+  return { window, connection, filters };
 }
 
 export function serializeQueryState(state: QueryState): string {
@@ -37,7 +39,30 @@ export function serializeQueryState(state: QueryState): string {
     const value = rawValue?.trim();
     if (value) params.set(key, value);
   }
+  if (state.connection) params.set("connection", state.connection);
   return params.toString();
+}
+
+export function hrefWithConnection(path: string, params: string | URLSearchParams): string {
+  const search = serializeQueryState(parseQueryState(params.toString()));
+  return `${path}${search ? `?${search}` : ""}`;
+}
+
+export function connectionDrilldownHref(
+  path: string,
+  window: TimeWindow,
+  connectionId: string | null | undefined,
+  filters: Record<string, string>,
+): string {
+  const params = new URLSearchParams({ window, ...filters });
+  if (connectionId) params.set("connection", connectionId);
+  return hrefWithConnection(path, params);
+}
+
+export function switchConnectionHref(path: string, currentSearch: string, id: string): string {
+  const { window } = parseQueryState(currentSearch);
+  const params = new URLSearchParams({ window, connection: id });
+  return `${path}?${params.toString()}`;
 }
 
 export function clampPageSize(value: number | null | undefined): number {

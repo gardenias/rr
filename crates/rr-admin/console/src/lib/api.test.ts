@@ -4,6 +4,7 @@ import {
   buildConsoleUrl,
   ConsoleApiError,
   consoleApi,
+  consoleStreamUrl,
   getConsole,
 } from "@/lib/api";
 
@@ -12,6 +13,12 @@ describe("same-origin Console API", () => {
     const url = buildConsoleUrl("/nodes", { page_size: 500, filter: "node 1" });
     expect(url).toBe("/api/v1/console/nodes?page_size=200&filter=node+1");
     expect(url).not.toMatch(/^https?:/);
+  });
+
+  it("scopes the event stream to the encoded connection ID", () => {
+    expect(consoleStreamUrl("cluster a/blue")).toBe(
+      "/api/v1/console/connections/cluster%20a%2Fblue/stream",
+    );
   });
 
   it("uses same-origin credentials and returns typed envelopes", async () => {
@@ -23,10 +30,10 @@ describe("same-origin Console API", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await getConsole("/nodes", { page_size: 50 });
+    const result = await getConsole("cluster a", "/nodes", { page_size: 50 });
     expect(result.data.items).toEqual([]);
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/v1/console/nodes?page_size=50",
+      "/api/v1/console/connections/cluster%20a/nodes?page_size=50",
       expect.objectContaining({ credentials: "same-origin" }),
     );
   });
@@ -45,10 +52,10 @@ describe("same-origin Console API", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await consoleApi.login("viewer-credential");
-    await consoleApi.reconcile();
+    await consoleApi.reconcile("cluster-a");
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      "/api/v1/console/sources/reconcile",
+      "/api/v1/console/connections/cluster-a/sources/reconcile",
       expect.objectContaining({ headers: expect.objectContaining({ "X-Console-CSRF": "csrf-session-token" }) }),
     );
   });
@@ -75,7 +82,7 @@ describe("same-origin Console API", () => {
     await beforeReload.consoleApi.login("viewer-credential");
     vi.resetModules();
     const afterReload = await import("@/lib/api");
-    await afterReload.consoleApi.reconcile();
+    await afterReload.consoleApi.reconcile("cluster-a");
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
@@ -84,7 +91,7 @@ describe("same-origin Console API", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "/api/v1/console/sources/reconcile",
+      "/api/v1/console/connections/cluster-a/sources/reconcile",
       expect.objectContaining({ headers: expect.objectContaining({ "X-Console-CSRF": "restored-csrf-token" }) }),
     );
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -106,13 +113,13 @@ describe("same-origin Console API", () => {
       })));
     vi.stubGlobal("fetch", fetchMock);
 
-    await afterReload.consoleApi.reconcile();
-    await afterReload.consoleApi.reconcile();
+    await afterReload.consoleApi.reconcile("cluster-a");
+    await afterReload.consoleApi.reconcile("cluster-a");
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/v1/console/auth/csrf", expect.objectContaining({ method: "GET" }));
     for (const call of fetchMock.mock.calls.slice(1)) {
-      expect(call[0]).toBe("/api/v1/console/sources/reconcile");
+      expect(call[0]).toBe("/api/v1/console/connections/cluster-a/sources/reconcile");
       expect(call[1]).toEqual(expect.objectContaining({ method: "POST" }));
       expect(call[1]?.headers).not.toHaveProperty("X-Console-CSRF");
     }
@@ -127,7 +134,7 @@ describe("same-origin Console API", () => {
     }), { status: 401, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(afterReload.consoleApi.reconcile()).rejects.toMatchObject({
+    await expect(afterReload.consoleApi.reconcile("cluster-a")).rejects.toMatchObject({
       status: 401,
       correlationId: "corr-csrf-401",
     });
@@ -152,7 +159,7 @@ describe("same-origin Console API", () => {
       ),
     );
 
-    const request = getConsole("/sources");
+    const request = getConsole("cluster-a", "/sources");
     await expect(request).rejects.toMatchObject({
       name: "ConsoleApiError",
       status: 503,

@@ -1,3 +1,4 @@
+import { loginRedirectFor } from "@/lib/auth";
 import { sanitizeError } from "@/lib/format";
 import { clampPageSize } from "@/lib/query-state";
 import type {
@@ -61,6 +62,21 @@ export function buildConsoleUrl(path: string, query: ConsoleQuery = {}): string 
   return `${API_ROOT}${normalizedPath}${search ? `?${search}` : ""}`;
 }
 
+export function isTerminalConnectionError(error: unknown): error is ConsoleApiError {
+  return error instanceof ConsoleApiError && [
+    "CONNECTION_REQUIRED",
+    "CONNECTION_NOT_FOUND",
+    "CONNECTION_NOT_CONNECTED",
+  ].includes(error.code);
+}
+
+function connectionResourcePath(connectionId: string, path: string): string {
+  const id = connectionId.trim();
+  if (!id) throw new ConsoleApiError(400, "CONNECTION_REQUIRED", "A connection ID is required", null);
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `/connections/${encodeURIComponent(id)}${normalizedPath}`;
+}
+
 async function decodeError(response: Response): Promise<ConsoleApiError> {
   let payload: ErrorPayload = {};
   try {
@@ -77,27 +93,30 @@ async function decodeError(response: Response): Promise<ConsoleApiError> {
 }
 
 export async function getConsole<P extends ConsoleResourcePath>(
+  connectionId: string,
   path: P,
   query: ConsoleQuery = {},
   signal?: AbortSignal,
 ): Promise<ConsoleEnvelope<ConsoleResponseMap[P]>> {
-  return requestConsole<ConsoleResponseMap[P]>(path, query, signal);
+  return requestConsole<ConsoleResponseMap[P]>(connectionId, path, query, signal);
 }
 
 export async function getConsoleResource<T>(
+  connectionId: string,
   path: string,
   query: ConsoleQuery = {},
   signal?: AbortSignal,
 ): Promise<ConsoleEnvelope<T>> {
-  return requestConsole<T>(path, query, signal);
+  return requestConsole<T>(connectionId, path, query, signal);
 }
 
 async function requestConsole<T>(
+  connectionId: string,
   path: string,
   query: ConsoleQuery,
   signal?: AbortSignal,
 ): Promise<ConsoleEnvelope<T>> {
-  const response = await fetch(buildConsoleUrl(path, query), {
+  const response = await fetch(buildConsoleUrl(connectionResourcePath(connectionId, path), query), {
     method: "GET",
     headers: { Accept: "application/json" },
     credentials: "same-origin",
@@ -145,22 +164,71 @@ async function reconcileHeaders(signal?: AbortSignal): Promise<Record<string, st
   return csrfToken ? { "X-Console-CSRF": csrfToken } : {};
 }
 
+function returnToLogin(): void {
+  window.location.assign(loginRedirectFor(`${window.location.pathname}${window.location.search}`));
+}
+
+async function controlResponse(
+  path: string,
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (method !== "GET") {
+    try {
+      Object.assign(headers, await reconcileHeaders(signal));
+    } catch (error) {
+      if (error instanceof ConsoleApiError && error.status === 401) returnToLogin();
+      throw error;
+    }
+  }
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(buildConsoleUrl(path), {
+    method,
+    headers,
+    credentials: "same-origin",
+    cache: "no-store",
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
+  });
+  if (response.status === 401) returnToLogin();
+  if (!response.ok) throw await decodeError(response);
+  return response;
+}
+
+export async function requestConsoleControl<T>(
+  path: string,
+  method: "GET" | "POST" | "PATCH",
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<ConsoleEnvelope<T>> {
+  const response = await controlResponse(path, method, body, signal);
+  return (await response.json()) as ConsoleEnvelope<T>;
+}
+
+export async function deleteConsoleControl(path: string, signal?: AbortSignal): Promise<void> {
+  await controlResponse(path, "DELETE", undefined, signal);
+}
+
 export const consoleApi = {
-  summary: (window = "15m", signal?: AbortSignal) => getConsole("/summary", { window }, signal),
-  node: (nodeId: number, signal?: AbortSignal) =>
-    getConsoleResource<NodeDetail>(`/nodes/${nodeId}`, {}, signal),
-  boots: (nodeId: number, cursor?: string, pageSize = 50, signal?: AbortSignal) =>
+  summary: (connectionId: string, window = "15m", signal?: AbortSignal) =>
+    getConsole(connectionId, "/summary", { window }, signal),
+  node: (connectionId: string, nodeId: number, signal?: AbortSignal) =>
+    getConsoleResource<NodeDetail>(connectionId, `/nodes/${nodeId}`, {}, signal),
+  boots: (connectionId: string, nodeId: number, cursor?: string, pageSize = 50, signal?: AbortSignal) =>
     getConsoleResource<CursorPage<BootRecord>>(
+      connectionId,
       `/nodes/${nodeId}/boots`,
       { cursor, page_size: pageSize },
       signal,
     ),
-  group: (groupId: number, signal?: AbortSignal) =>
-    getConsoleResource<GroupDetail>(`/groups/${groupId}`, {}, signal),
-  replicas: (groupId: number, signal?: AbortSignal) =>
-    getConsoleResource<ReplicaData>(`/groups/${groupId}/replicas`, {}, signal),
-  reconcile: async (signal?: AbortSignal) => postConsole<ConsoleEnvelope<{ accepted: boolean }>>(
-    "/sources/reconcile",
+  group: (connectionId: string, groupId: number, signal?: AbortSignal) =>
+    getConsoleResource<GroupDetail>(connectionId, `/groups/${groupId}`, {}, signal),
+  replicas: (connectionId: string, groupId: number, signal?: AbortSignal) =>
+    getConsoleResource<ReplicaData>(connectionId, `/groups/${groupId}/replicas`, {}, signal),
+  reconcile: async (connectionId: string, signal?: AbortSignal) => postConsole<ConsoleEnvelope<{ accepted: boolean }>>(
+    connectionResourcePath(connectionId, "/sources/reconcile"),
     {},
     signal,
     await reconcileHeaders(signal),
@@ -179,6 +247,6 @@ export const consoleApi = {
   },
 };
 
-export function consoleStreamUrl(): string {
-  return `${API_ROOT}/stream`;
+export function consoleStreamUrl(connectionId: string): string {
+  return buildConsoleUrl(connectionResourcePath(connectionId, "/stream"));
 }

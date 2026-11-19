@@ -73,14 +73,14 @@ describe("ReplicaMatrix", () => {
   });
 
   it("uses an unavailable marker for absent RTT and snapshot evidence", () => {
-    render(<ReplicaMatrix replicas={replicas} leaderNodeId={1} />);
+    render(<ReplicaMatrix replicas={replicas} leaderNodeId={1} connectionId="cluster-a" />);
 
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(5);
     expect(screen.queryByText("0 ms")).not.toBeInTheDocument();
     expect(screen.getByText("Source node 3 · 2s old")).toBeVisible();
     expect(screen.getByRole("link", { name: "Node 1" })).toHaveAttribute(
       "href",
-      "/nodes?window=15m&filter=node-1",
+      "/nodes?window=15m&filter=node-1&connection=cluster-a",
     );
   });
 });

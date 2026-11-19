@@ -7,7 +7,7 @@ import { DenseTable } from "@/components/console/dense-table";
 import { EmptyState } from "@/components/console/states";
 import { HealthBadge } from "@/components/console/health-badge";
 import { formatNumber, formatTimestamp } from "@/lib/format";
-import type { TimeWindow } from "@/lib/query-state";
+import { connectionDrilldownHref, type TimeWindow } from "@/lib/query-state";
 import type { ReplicaRow } from "@/components/console/groups/model";
 import { ConsensusGraph, type ConsensusGraphEdge, type ConsensusGraphNode } from "@/components/console/topology/consensus-graph";
 import { healthStatus, raftReplicaRows, rowNumber, topologyRows } from "@/components/console/topology/model";
@@ -22,11 +22,13 @@ export function RaftTopology({
   selectedGroupId,
   onSelectGroup,
   timeWindow,
+  connectionId,
 }: {
   data: unknown;
   selectedGroupId?: number;
   onSelectGroup: (groupId: number) => void;
   timeWindow: TimeWindow;
+  connectionId?: string;
 }) {
   const groups = topologyRows(data, "raft");
   const selected = groups.find((group) => rowNumber(group, "group_id") === selectedGroupId) ?? groups[0];
@@ -55,7 +57,7 @@ export function RaftTopology({
       label: `Node ${replica.node_id}`,
       sublabel: `${replica.role} · term ${metric(replica.term)}`,
       description: `Node ${replica.node_id} · ${replica.role} · term ${metric(replica.term)} · last log ${metric(replica.last_index)} · sample ${formatTimestamp(replica.observed_at)}`,
-      href: `/nodes/?window=${timeWindow}&filter=node-${replica.node_id}`,
+      href: connectionDrilldownHref("/nodes/", timeWindow, connectionId, { filter: `node-${replica.node_id}` }),
       x: isLeader || leaderId == null ? 210 : 680,
       y: isLeader || leaderId == null ? 70 + index * 90 : 60 + followerIndex * Math.min(95, 340 / Math.max(1, followers.length - 1)),
     };
@@ -84,7 +86,7 @@ export function RaftTopology({
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <HealthBadge status={healthStatus(selected.health)} />
-        <Link className="text-xs text-orange-300" href={`/groups/?window=${timeWindow}&group_id=${groupId}`}>Inspect group {groupId}</Link>
+        <Link className="text-xs text-orange-300" href={connectionDrilldownHref("/groups", timeWindow, connectionId, { group_id: String(groupId) })}>Inspect group {groupId}</Link>
       </div>
       <DenseTable data={replicas} columns={columns} caption={`Raft topology for group ${groupId}`} />
     </div>

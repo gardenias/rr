@@ -1,6 +1,6 @@
-import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, closeSync, constants, mkdirSync, openSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -11,10 +11,56 @@ const realDir = __dirname;
 export const repositoryRoot = resolve(realDir, "../../../../..");
 export const consoleRoot = resolve(repositoryRoot, "crates/rr-admin/console");
 export const defaultArtifactsRoot = resolve(repositoryRoot, "target/console-e2e");
-export const consoleBaseUrl = process.env.RR_CONSOLE_E2E_BASE_URL ?? "http://127.0.0.1:4311";
-export const controlBaseUrl = process.env.RR_CONSOLE_E2E_CONTROL_URL ?? "http://127.0.0.1:4312";
+function reserveDefaultPorts() {
+  const script = `
+    const { createServer } = require("node:net");
+    const servers = [createServer(), createServer()];
+    Promise.all(servers.map((server) => new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    }))).then(() => {
+      const ports = servers.map((server) => server.address().port);
+      process.stdout.write(JSON.stringify(ports), () => servers.forEach((server) => server.close()));
+    }).catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  `;
+  const output = execFileSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 10_000 });
+  const ports = JSON.parse(output) as unknown;
+  if (!Array.isArray(ports) || ports.length !== 2 || ports.some((port) => !Number.isInteger(port) || port <= 0) || new Set(ports).size !== 2) {
+    throw new Error("failed to reserve distinct dynamic Console/control ports");
+  }
+  return ports as number[];
+}
+
+const defaultPorts = !process.env.RR_CONSOLE_E2E_BASE_URL || !process.env.RR_CONSOLE_E2E_CONTROL_URL
+  ? reserveDefaultPorts()
+  : [];
+export const consoleBaseUrl = process.env.RR_CONSOLE_E2E_BASE_URL ?? `http://127.0.0.1:${defaultPorts[0]}`;
+export const controlBaseUrl = process.env.RR_CONSOLE_E2E_CONTROL_URL ?? `http://127.0.0.1:${defaultPorts[1]}`;
+process.env.RR_CONSOLE_E2E_BASE_URL = consoleBaseUrl;
+process.env.RR_CONSOLE_E2E_CONTROL_URL = controlBaseUrl;
 export const realViewerToken = process.env.RR_CONSOLE_E2E_TOKEN ?? "rr-real-e2e-viewer-token";
-const etcdImage = "quay.io/coreos/etcd:v3.5.13";
+
+export type ClusterKey = "a" | "b";
+
+const environmentAllowlist = [
+  "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "RUST_BACKTRACE", "RUST_LOG",
+  "SYSTEMROOT", "COMSPEC", "PATHEXT",
+] as const;
+
+export function isolatedProcessEnvironment(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { NODE_ENV: process.env.NODE_ENV };
+  for (const name of environmentAllowlist) {
+    const value = process.env[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  for (const [name, value] of Object.entries(overrides)) {
+    if (value !== undefined) environment[name] = value;
+  }
+  return environment;
+}
 
 interface NodeLayout {
   id: number;
@@ -77,6 +123,26 @@ async function reservePort() {
   return port;
 }
 
+async function consoleListenerPids(port: number) {
+  const address = `127.0.0.1:${port}`;
+  let stdout: string;
+  try {
+    const result = await execFileAsync("lsof", [
+      "-nP", "-a", `-iTCP@${address}`, "-sTCP:LISTEN", "-t",
+    ], { encoding: "utf8", timeout: 2_000, maxBuffer: 64 * 1024 });
+    stdout = result.stdout;
+  } catch (error) {
+    const failure = error as { code?: number | string; stdout?: string; stderr?: string; message?: string };
+    if (failure.code === 1 && !failure.stdout?.trim()) return [];
+    throw new Error(`failed to inspect Console listener ownership at ${address}: ${failure.stderr?.trim() || failure.message || String(error)}`);
+  }
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines.some((line) => !/^[1-9]\d*$/.test(line))) {
+    throw new Error(`unexpected lsof listener output for ${address}: ${JSON.stringify(stdout)}`);
+  }
+  return [...new Set(lines.map(Number))];
+}
+
 class ManagedProcess {
   private exited = false;
   private readonly exitPromise: Promise<number | null>;
@@ -136,7 +202,7 @@ class ManagedProcess {
 
 class ProcessManager {
   private readonly children = new Set<ManagedProcess>();
-  private readonly exitCleanups = new Set<() => void>();
+  private stopped = false;
   private readonly exitHandler = () => this.killAllSynchronously();
   private readonly interruptHandler = () => this.terminateFromSignal(130);
   private readonly terminateHandler = () => this.terminateFromSignal(143);
@@ -148,14 +214,11 @@ class ProcessManager {
   }
 
   spawn(name: string, binary: string, args: string[], logPath: string, environment: Record<string, string | undefined> = {}) {
+    if (this.stopped) throw new Error(`process manager is stopped; refusing to spawn ${name}`);
     mkdirSync(dirname(logPath), { recursive: true });
     const output = openSync(logPath, "a");
     let child: ChildProcess;
-    const childEnvironment = { ...process.env };
-    for (const [name, value] of Object.entries(environment)) {
-      if (value === undefined) delete childEnvironment[name];
-      else childEnvironment[name] = value;
-    }
+    const childEnvironment = isolatedProcessEnvironment(environment);
     try {
       child = spawn(binary, args, {
         detached: true,
@@ -171,11 +234,8 @@ class ProcessManager {
     return managed;
   }
 
-  onExit(cleanup: () => void) {
-    this.exitCleanups.add(cleanup);
-  }
-
   async stopAll() {
+    this.stopped = true;
     process.removeListener("exit", this.exitHandler);
     process.removeListener("SIGINT", this.interruptHandler);
     process.removeListener("SIGTERM", this.terminateHandler);
@@ -199,13 +259,6 @@ class ProcessManager {
         // The process may already have exited during parent shutdown.
       }
     }
-    for (const cleanup of this.exitCleanups) {
-      try {
-        cleanup();
-      } catch {
-        // Best-effort cleanup must not prevent the remaining handlers.
-      }
-    }
   }
 }
 
@@ -216,19 +269,16 @@ export class RealCluster {
   private readonly serverBinary = requiredBinary("RR_SERVER_BIN");
   private readonly adminBinary = requiredBinary("RR_ADMIN_BIN");
   private readonly perfBenchBinary = requiredBinary("RR_PERF_BENCH_BIN");
-  private readonly consoleAddress = loopbackHttpUrl(consoleBaseUrl, "RR_CONSOLE_E2E_BASE_URL");
-  private readonly controlAddress = loopbackHttpUrl(controlBaseUrl, "RR_CONSOLE_E2E_CONTROL_URL");
-  private controlServer: Server | null = null;
-  private consoleProcess: ManagedProcess | null = null;
-  private consoleStarts = 0;
-  private runDir = "";
   private stopped = false;
-  private clusterName = "";
-  private etcdContainerName = "";
-  private etcdClientPort = 0;
 
-  static async start() {
-    const cluster = new RealCluster();
+  private constructor(readonly key: ClusterKey, readonly runDir: string, readonly clusterName: string) {}
+
+  private ensureRunning() {
+    if (this.stopped) throw new Error(`cluster ${this.key} is stopped`);
+  }
+
+  static async start(key: ClusterKey, runDir: string) {
+    const cluster = new RealCluster(key, runDir, `console-e2e-${key}-${randomUUID()}`);
     try {
       await cluster.initialize();
       return cluster;
@@ -239,18 +289,9 @@ export class RealCluster {
   }
 
   private async initialize() {
-    mkdirSync(defaultArtifactsRoot, { recursive: true });
-    this.runDir = await mkdtemp(resolve(defaultArtifactsRoot, "real-run-"));
-    const staticDir = resolve(consoleRoot, "out");
-    if (!statSync(resolve(staticDir, "index.html"), { throwIfNoEntry: false })?.isFile()) {
-      throw new Error(`Console static export is missing; run the frontend build before the real suite: ${staticDir}`);
-    }
-
-    const ports = await Promise.all(Array.from({ length: 14 }, () => reservePort()));
+    mkdirSync(this.runDir, { recursive: true });
+    const ports = await Promise.all(Array.from({ length: 12 }, () => reservePort()));
     if (new Set(ports).size !== ports.length) throw new Error("loopback port allocation returned a duplicate");
-    this.etcdClientPort = ports[9]!;
-    this.clusterName = `console-e2e-${randomUUID()}`;
-    await this.startEtcd(ports[10]!);
     for (const id of [1, 2, 3]) {
       const offset = (id - 1) * 3;
       const nodeRoot = resolve(this.runDir, `node-${id}`);
@@ -259,7 +300,7 @@ export class RealCluster {
         clientPort: ports[offset]!,
         adminPort: ports[offset + 1]!,
         metricsPort: ports[offset + 2]!,
-        proxyPort: ports[10 + id]!,
+        proxyPort: ports[8 + id]!,
         dataDir: resolve(nodeRoot, "data"),
         bootJournalDir: resolve(nodeRoot, "boot-journal"),
       };
@@ -270,12 +311,15 @@ export class RealCluster {
     for (const node of this.nodes.values()) await this.startObservabilityProxy(node.layout);
 
     for (const id of [1, 2, 3]) this.startNode(id);
-    await Promise.all([...this.nodes.values()].map((node) => this.waitForHttp(this.metricsUrl(node.layout, "/health"), `node ${node.layout.id} health`)));
+    await Promise.all([...this.nodes.values()].map((node) => this.waitForHttp(
+      this.metricsUrl(node.layout, "/health"),
+      `cluster ${this.key} node ${node.layout.id} health`,
+      node.process!,
+    )));
+    await this.formCluster();
     await this.waitForLeader([1, 2, 3]);
-    await this.startConsole();
     await this.runWorkload(3);
     await this.triggerSnapshot();
-    await this.startControlServer();
     this.writeManifest();
   }
 
@@ -329,41 +373,15 @@ export class RealCluster {
     });
   }
 
-  private async startEtcd(peerPort: number) {
-    await execFileAsync("docker", ["image", "inspect", etcdImage, "--format", "{{.Id}}"], {
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    this.etcdContainerName = `rr-${this.clusterName}`;
-    this.processes.onExit(() => {
-      if (this.etcdContainerName) spawnSync("docker", ["rm", "-f", this.etcdContainerName], { stdio: "ignore" });
-    });
-    this.processes.spawn("etcd", "docker", [
-      "run", "--pull", "never", "--rm", "--name", this.etcdContainerName,
-      "-p", `127.0.0.1:${this.etcdClientPort}:2379`,
-      "-p", `127.0.0.1:${peerPort}:2380`,
-      etcdImage,
-      "/usr/local/bin/etcd",
-      "--name=console-e2e",
-      "--data-dir=/tmp/console-e2e.etcd",
-      "--listen-client-urls=http://0.0.0.0:2379",
-      `--advertise-client-urls=http://127.0.0.1:${this.etcdClientPort}`,
-      "--listen-peer-urls=http://0.0.0.0:2380",
-      `--initial-advertise-peer-urls=http://127.0.0.1:${peerPort}`,
-      `--initial-cluster=console-e2e=http://127.0.0.1:${peerPort}`,
-      "--initial-cluster-state=new",
-    ], resolve(this.runDir, "logs", "etcd.log"));
-    await this.waitForHttp(`http://127.0.0.1:${this.etcdClientPort}/health`, "etcd health");
-  }
-
   private startNode(id: number) {
+    this.ensureRunning();
     const node = this.node(id);
-    if (node.process?.running) throw new Error(`node ${id} is already running`);
+    if (node.process?.running) throw new Error(`cluster ${this.key} node ${id} is already running`);
     const { layout } = node;
     const clientAddress = this.clientAddress(layout);
     const adminAddress = `127.0.0.1:${layout.adminPort}`;
     const metricsAddress = `127.0.0.1:${layout.proxyPort}`;
-    const clusterNodes = [...this.nodes.values()].map((candidate) => `${candidate.layout.id}@${this.clientAddress(candidate.layout)}`).join(",");
+    const clusterNodes = [...this.nodes.values()].map((candidate) => this.clientAddress(candidate.layout)).join(",");
     const args = [
       "serve",
       "--node-id", String(id),
@@ -375,16 +393,12 @@ export class RealCluster {
       "--metrics-bind-host", "127.0.0.1",
       "--metrics-port", String(layout.metricsPort),
       "--observability-advertise-addr", metricsAddress,
-      "--environment", "console-e2e",
+      "--environment", `console-e2e-${this.key}`,
       "--region", "local",
       "--zone", `zone-${id}`,
       "--rack", "rack-1",
       "--app-version", "console-e2e",
       "--cluster-name", this.clusterName,
-      "--cluster-nodes", clusterNodes,
-      "--formation", "genesis",
-      "--etcd-endpoints", `http://127.0.0.1:${this.etcdClientPort}`,
-      "--directory-etcd-endpoints", `http://127.0.0.1:${this.etcdClientPort}`,
       "--storage", "rocks",
       "--durability", "strict",
       "--data-dir", layout.dataDir,
@@ -392,37 +406,16 @@ export class RealCluster {
       "--allow-insecure",
       "--log-level", "info",
     ];
+    if (id === 1 && node.starts === 0) args.push("--bootstrap");
+    else args.push("--peers", clusterNodes);
     node.starts += 1;
-    node.process = this.processes.spawn(`node-${id}-boot-${node.starts}`, this.serverBinary, args, resolve(this.runDir, "logs", `node-${id}-boot-${node.starts}.log`));
-    this.writeManifest();
-  }
-
-  private async startConsole() {
-    if (this.consoleProcess?.running) throw new Error("Console is already running");
-    this.consoleStarts += 1;
-    const seeds = [1, 2].map((id) => `${id}@${this.adminAddress(id)}`).join(",");
-    this.consoleProcess = this.processes.spawn(
-      `console-${this.consoleStarts}`,
-      this.adminBinary,
-      [
-        "console",
-        "--listen", `127.0.0.1:${this.consoleAddress.port}`,
-        "--peers", seeds,
-        "--console-token-env", "RR_CONSOLE_E2E_TOKEN",
-        "--allow-insecure",
-        "--poll-interval-secs", "5",
-        "--static-dir", resolve(consoleRoot, "out"),
-      ],
-      resolve(this.runDir, "logs", `console-${this.consoleStarts}.log`),
-      { RR_CONSOLE_E2E_TOKEN: realViewerToken },
+    node.process = this.processes.spawn(
+      `cluster-${this.key}-node-${id}-boot-${node.starts}`,
+      this.serverBinary,
+      args,
+      resolve(this.runDir, "logs", `node-${id}-boot-${node.starts}.log`),
     );
-    await this.waitForHttp(`${consoleBaseUrl}/login/`, "rr-admin Console");
-  }
-
-  async restartConsole() {
-    if (this.consoleProcess) await this.consoleProcess.stop();
-    await sleep(1_500);
-    await this.startConsole();
+    this.writeManifest();
   }
 
   private async runAdmin(address: string, args: string[]) {
@@ -431,7 +424,7 @@ export class RealCluster {
         encoding: "utf8",
         timeout: 30_000,
         maxBuffer: 4 * 1024 * 1024,
-        env: process.env,
+        env: isolatedProcessEnvironment(),
       });
       return result.stdout;
     } catch (error) {
@@ -461,13 +454,16 @@ export class RealCluster {
       if (leader != null) return leader;
       await sleep(250);
     }
-    throw new Error(`timed out waiting for a group 1 leader among nodes ${candidateIds.join(", ")}${excludedId ? ` excluding ${excludedId}` : ""}`);
+    throw new Error(`timed out waiting for a group 1 leader among cluster ${this.key} nodes ${candidateIds.join(", ")}${excludedId ? ` excluding ${excludedId}` : ""}`);
   }
 
-  private async waitForHttp(url: string, description: string) {
+  private async waitForHttp(url: string, description: string, expectedProcess?: ManagedProcess) {
     const deadline = Date.now() + 45_000;
     let lastError: unknown;
     while (Date.now() < deadline) {
+      if (expectedProcess && !expectedProcess.running) {
+        throw new Error(`${description} process exited during readiness; see ${expectedProcess.logPath}`);
+      }
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
         if (response.ok) return;
@@ -480,13 +476,25 @@ export class RealCluster {
     throw new Error(`timed out waiting for ${description} at ${url}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   }
 
+  private async formCluster() {
+    await this.waitForLeader([1]);
+    const leaderAdmin = this.adminAddress(1);
+    for (const id of [2, 3]) {
+      await this.runAdmin(leaderAdmin, [
+        "group", "add-learner", "--group", "1", "--node-id", String(id), "--addr", this.clientAddress(this.node(id).layout),
+      ]);
+    }
+    await this.runAdmin(leaderAdmin, ["group", "change-membership", "--group", "1", "--voters", "1,2,3"]);
+  }
+
   async runWorkload(durationSeconds: number) {
+    this.ensureRunning();
     if (!Number.isInteger(durationSeconds) || durationSeconds < 1 || durationSeconds > 60) {
       throw new Error("workload duration must be an integer from 1 to 60 seconds");
     }
     const reportPath = resolve(this.runDir, `workload-${randomUUID()}.json`);
     const logPath = resolve(this.runDir, "logs", `workload-${randomUUID()}.log`);
-    const workload = this.processes.spawn("workload", this.perfBenchBinary, [
+    const workload = this.processes.spawn(`workload-${this.key}`, this.perfBenchBinary, [
       "--scenario", "s1",
       "--cluster-addrs", [...this.nodes.values()].map((node) => this.clientAddress(node.layout)).join(","),
       "--warmup-secs", "1",
@@ -506,19 +514,21 @@ export class RealCluster {
     if (timer) clearTimeout(timer);
     if (outcome === "timeout") {
       await workload.stop("SIGKILL");
-      throw new Error(`workload timed out; see ${logPath}`);
+      throw new Error(`cluster ${this.key} workload timed out; see ${logPath}`);
     }
-    if (outcome !== 0) throw new Error(`workload exited with status ${outcome}; see ${logPath}`);
+    if (outcome !== 0) throw new Error(`cluster ${this.key} workload exited with status ${outcome}; see ${logPath}`);
     return reportPath;
   }
 
   async triggerSnapshot() {
+    this.ensureRunning();
     const leader = await this.waitForLeader([1, 2, 3]);
     await this.runAdmin(this.adminAddress(leader), ["group", "snapshot", "--group", "1"]);
     return leader;
   }
 
   async killLeader() {
+    this.ensureRunning();
     const leader = await this.waitForLeader([1, 2, 3]);
     const node = this.node(leader);
     if (!node.process) throw new Error(`leader node ${leader} has no managed process`);
@@ -528,28 +538,13 @@ export class RealCluster {
   }
 
   async restartNode(id: number) {
+    this.ensureRunning();
     const node = this.node(id);
     if (node.process?.running) throw new Error(`refusing to restart running node ${id}`);
     this.startNode(id);
-    await this.waitForHttp(this.metricsUrl(node.layout, "/health"), `restarted node ${id} health`);
+    await this.waitForHttp(this.metricsUrl(node.layout, "/health"), `restarted cluster ${this.key} node ${id} health`, node.process!);
     await this.waitForLeader([1, 2, 3]);
     this.writeManifest();
-  }
-
-  private async startControlServer() {
-    this.controlServer = createServer((request, response) => {
-      void this.handleControl(request.method ?? "GET", request.url ?? "/").then((result) => {
-        response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        response.end(JSON.stringify(result));
-      }).catch((error: unknown) => {
-        response.writeHead(500, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
-      });
-    });
-    await new Promise<void>((resolveListen, reject) => {
-      this.controlServer!.once("error", reject);
-      this.controlServer!.listen(this.controlAddress.port, "127.0.0.1", resolveListen);
-    });
   }
 
   private setReadinessDegraded(id: number, degraded: boolean) {
@@ -559,13 +554,10 @@ export class RealCluster {
     return { node_id: id, degraded };
   }
 
-  private async handleControl(method: string, path: string) {
-    if (method === "GET" && path === "/health") return { ok: true };
+  async handleControl(method: string, path: string): Promise<unknown> {
+    this.ensureRunning();
+    if (method === "GET" && path === "/health") return { ok: true, cluster: this.key };
     if (method === "POST" && path === "/leader/kill") return { node_id: await this.killLeader() };
-    if (method === "POST" && path === "/console/restart") {
-      await this.restartConsole();
-      return { restarted: true };
-    }
     const readiness = path.match(/^\/nodes\/([123])\/readiness\/(degraded|restore)$/);
     if (method === "POST" && readiness) return this.setReadinessDegraded(Number(readiness[1]), readiness[2] === "degraded");
     const restart = path.match(/^\/nodes\/([123])\/restart$/);
@@ -576,18 +568,15 @@ export class RealCluster {
     }
     if (method === "POST" && path === "/groups/1/snapshot") return { node_id: await this.triggerSnapshot() };
     if (method === "POST" && path === "/workload") return { report: await this.runWorkload(3) };
-    throw new Error(`unknown real E2E control action: ${method} ${path}`);
+    throw new Error(`unknown real E2E control action for cluster ${this.key}: ${method} ${path}`);
   }
 
-  private writeManifest() {
-    if (!this.runDir) return;
-    const manifest = {
-      run_id: resolve(this.runDir).split("/").at(-1),
-      console_url: consoleBaseUrl,
-      control_url: controlBaseUrl,
+  manifest() {
+    return {
+      cluster_key: this.key,
       cluster_name: this.clusterName,
-      directory_endpoint: `http://127.0.0.1:${this.etcdClientPort}`,
-      admin_seeds: [1, 2].map((id) => `${id}@${this.adminAddress(id)}`),
+      formation: "LEGACY_MANUAL_MEMBERSHIP",
+      admin_seeds: [1, 2, 3].map((id) => ({ node_id: id, admin_addr: this.adminAddress(id) })),
       nodes: [...this.nodes.values()].map((node) => ({
         node_id: node.layout.id,
         client_addr: this.clientAddress(node.layout),
@@ -601,16 +590,11 @@ export class RealCluster {
         pid: node.process?.pid ?? null,
       })),
     };
-    writeFileSync(resolve(this.runDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   }
 
-  private async stopEtcd() {
-    if (!this.etcdContainerName) return;
-    try {
-      await execFileAsync("docker", ["rm", "-f", this.etcdContainerName], { encoding: "utf8", timeout: 15_000 });
-    } catch {
-      // docker run --rm may already have removed the container during graceful child shutdown.
-    }
+  private writeManifest() {
+    if (!this.runDir || this.nodes.size === 0) return;
+    writeFileSync(resolve(this.runDir, "manifest.json"), `${JSON.stringify(this.manifest(), null, 2)}\n`, { mode: 0o600 });
   }
 
   private async stopObservabilityProxies() {
@@ -624,14 +608,316 @@ export class RealCluster {
   async stop() {
     if (this.stopped) return;
     this.stopped = true;
-    await this.stopObservabilityProxies();
-    if (this.controlServer) {
-      this.controlServer.closeAllConnections();
-      await new Promise<void>((resolveClose) => this.controlServer!.close(() => resolveClose()));
-      this.controlServer = null;
+    let firstError: unknown;
+    const attempt = async (action: () => void | Promise<void>) => {
+      try {
+        await action();
+      } catch (error) {
+        firstError ??= error;
+      }
+    };
+    await attempt(() => this.stopObservabilityProxies());
+    await attempt(() => this.processes.stopAll());
+    await attempt(() => this.writeManifest());
+    if (firstError) throw firstError;
+  }
+}
+
+export class RealHarness {
+  private readonly processes = new ProcessManager();
+  private readonly adminBinary = requiredBinary("RR_ADMIN_BIN");
+  private readonly consoleAddress = loopbackHttpUrl(consoleBaseUrl, "RR_CONSOLE_E2E_BASE_URL");
+  private readonly controlAddress = loopbackHttpUrl(controlBaseUrl, "RR_CONSOLE_E2E_CONTROL_URL");
+  private readonly clusters = new Map<ClusterKey, RealCluster>();
+  private readonly controlIdentity = randomUUID();
+  private readonly controlActions = new Set<Promise<void>>();
+  private controlServer: Server | null = null;
+  private consoleProcess: ManagedProcess | null = null;
+  private consoleStarts = 0;
+  private runDir = "";
+  private stateDir = "";
+  private profileStoreExistedAtStart = false;
+  private stopped = false;
+  private stopPromise: Promise<void> | null = null;
+
+  private ensureRunning() {
+    if (this.stopped) throw new Error("real E2E harness is stopped");
+  }
+
+  static async start(harness = new RealHarness()) {
+    try {
+      await harness.initialize();
+      return harness;
+    } catch (error) {
+      await harness.stop();
+      throw error;
     }
-    await this.processes.stopAll();
-    await this.stopEtcd();
+  }
+
+  private async initialize() {
+    mkdirSync(defaultArtifactsRoot, { recursive: true });
+    this.runDir = await mkdtemp(resolve(defaultArtifactsRoot, "real-dual-run-"));
+    this.stateDir = resolve(this.runDir, "console-state");
+    mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    this.profileStoreExistedAtStart = existsSync(this.profileStorePath());
+    const staticDir = resolve(consoleRoot, "out");
+    if (!statSync(resolve(staticDir, "index.html"), { throwIfNoEntry: false })?.isFile()) {
+      throw new Error(`Console static export is missing; run the frontend build before the real suite: ${staticDir}`);
+    }
+
+    for (const key of ["a", "b"] as const) {
+      const cluster = await RealCluster.start(key, resolve(this.runDir, `cluster-${key}`));
+      this.clusters.set(key, cluster);
+    }
+    await this.startConsole();
+    await this.startControlServer();
     this.writeManifest();
+  }
+
+  private profileStorePath() {
+    return resolve(this.stateDir, "connections.json");
+  }
+
+  private cluster(key: ClusterKey) {
+    const cluster = this.clusters.get(key);
+    if (!cluster) throw new Error(`unknown real E2E cluster ${key}`);
+    return cluster;
+  }
+
+  private consoleArgs() {
+    return [
+      "console",
+      "--listen", `127.0.0.1:${this.consoleAddress.port}`,
+      "--console-token-env", "RR_CONSOLE_E2E_TOKEN",
+      "--allow-insecure",
+      "--keychain-disable",
+      "--static-dir", resolve(consoleRoot, "out"),
+      "--state-dir", this.stateDir,
+    ];
+  }
+
+  private async startConsole() {
+    this.ensureRunning();
+    if (this.consoleProcess?.running) throw new Error("Console is already running");
+    this.consoleStarts += 1;
+    const managed = this.processes.spawn(
+      `console-${this.consoleStarts}`,
+      this.adminBinary,
+      this.consoleArgs(),
+      resolve(this.runDir, "logs", `console-${this.consoleStarts}.log`),
+      {
+        RR_CONSOLE_E2E_TOKEN: realViewerToken,
+        RR_ADMIN_TOKEN: undefined,
+        RR_CONSOLE_ETCD_PASSWORD: undefined,
+      },
+    );
+    this.consoleProcess = managed;
+    try {
+      await this.waitForConsoleReady(managed);
+    } catch (error) {
+      let cleanupError: unknown;
+      try {
+        await managed.stop("SIGKILL");
+      } catch (cause) {
+        cleanupError = cause;
+      }
+      this.writeManifest();
+      if (cleanupError) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}; failed to stop spawned Console PID ${managed.pid}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+      throw error;
+    }
+    this.writeManifest();
+  }
+
+  private async waitForConsoleReady(expectedProcess: ManagedProcess) {
+    const deadline = Date.now() + 45_000;
+    const expectedPid = expectedProcess.pid;
+    const address = `127.0.0.1:${this.consoleAddress.port}`;
+    if (!expectedPid) throw new Error(`spawned Console has no PID; see ${expectedProcess.logPath}`);
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+      const listenerPids = await consoleListenerPids(this.consoleAddress.port);
+      const ownedBySpawnedProcess = listenerPids.length === 1 && listenerPids[0] === expectedPid;
+      if (listenerPids.length > 0 && !ownedBySpawnedProcess) {
+        throw new Error(`Console readiness ownership mismatch at ${address}: spawned PID ${expectedPid}, listener PID(s) ${listenerPids.join(",")}; refusing to contact the listener; see ${expectedProcess.logPath}`);
+      }
+      if (!expectedProcess.running) {
+        throw new Error(`no-source Console PID ${expectedPid} exited during readiness; see ${expectedProcess.logPath}`);
+      }
+      if (!ownedBySpawnedProcess) {
+        lastError = new Error(`waiting for spawned Console PID ${expectedPid} to own ${address}`);
+        await sleep(200);
+        continue;
+      }
+      try {
+        const response = await fetch(`${consoleBaseUrl}/api/v1/console/connections`, { signal: AbortSignal.timeout(2_000) });
+        const body = await response.json() as { meta?: { schema_version?: string }; error?: { code?: string } };
+        if (response.status === 401 && body.meta?.schema_version === "console.v1" && body.error?.code === "UNAUTHENTICATED") {
+          const confirmedPids = await consoleListenerPids(this.consoleAddress.port);
+          if (confirmedPids.length === 1 && confirmedPids[0] === expectedPid && expectedProcess.running) return;
+          lastError = new Error(`Console listener ownership changed during readiness at ${address}: spawned PID ${expectedPid}, listener PID(s) ${confirmedPids.join(",") || "none"}`);
+        } else {
+          lastError = new Error(`unexpected Console readiness response HTTP ${response.status}: ${JSON.stringify(body)}`);
+        }
+      } catch (error) {
+        lastError = error;
+      }
+      await sleep(200);
+    }
+    throw new Error(`timed out waiting for spawned Console PID ${expectedPid} to own and serve ${address}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  }
+
+  async restartConsole() {
+    this.ensureRunning();
+    if (this.consoleProcess) await this.consoleProcess.stop();
+    await sleep(1_500);
+    this.ensureRunning();
+    await this.startConsole();
+  }
+
+  private async waitForHttp(url: string, description: string, validate?: (response: Response) => Promise<void>) {
+    const deadline = Date.now() + 45_000;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+      try {
+        const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
+        if (response.ok) {
+          if (!validate) return;
+          try {
+            await validate(response);
+            return;
+          } catch (error) {
+            lastError = error;
+          }
+        } else {
+          lastError = new Error(`HTTP ${response.status}`);
+        }
+      } catch (error) {
+        lastError = error;
+      }
+      await sleep(200);
+    }
+    throw new Error(`timed out waiting for ${description} at ${url}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  }
+
+  private async startControlServer() {
+    this.ensureRunning();
+    this.controlServer = createServer((request, response) => {
+      const action = Promise.resolve().then(async () => {
+        try {
+          const result = await this.handleControl(request.method ?? "GET", request.url ?? "/");
+          response.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          response.writeHead(500, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+          response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        }
+      });
+      this.controlActions.add(action);
+      void action.finally(() => this.controlActions.delete(action));
+    });
+    await new Promise<void>((resolveListen, reject) => {
+      this.controlServer!.once("error", reject);
+      this.controlServer!.listen(this.controlAddress.port, "127.0.0.1", resolveListen);
+    });
+    await this.waitForHttp(`${controlBaseUrl}/health`, "identified real E2E control server", async (response) => {
+      const body = await response.json() as { ok?: boolean; control_id?: string; run_id?: string };
+      if (body.ok !== true || body.control_id !== this.controlIdentity || body.run_id !== resolve(this.runDir).split("/").at(-1)) {
+        throw new Error(`control identity mismatch: ${JSON.stringify(body)}`);
+      }
+    });
+  }
+
+  private async handleControl(method: string, path: string): Promise<unknown> {
+    this.ensureRunning();
+    if (method === "GET" && path === "/health") {
+      return {
+        ok: true,
+        control_id: this.controlIdentity,
+        run_id: resolve(this.runDir).split("/").at(-1),
+        active_control_actions: this.controlActions.size,
+      };
+    }
+    if (method === "GET" && path === "/manifest") return this.manifest();
+    if (method === "POST" && path === "/console/restart") {
+      await this.restartConsole();
+      return { restarted: true };
+    }
+    const clusterAction = path.match(/^\/clusters\/(a|b)(\/.*)$/);
+    if (clusterAction) return await this.cluster(clusterAction[1] as ClusterKey).handleControl(method, clusterAction[2]!);
+    throw new Error(`unknown real E2E harness control action: ${method} ${path}`);
+  }
+
+  manifest() {
+    return {
+      run_id: resolve(this.runDir).split("/").at(-1),
+      console_url: consoleBaseUrl,
+      control_url: controlBaseUrl,
+      control_identity: this.controlIdentity,
+      in_flight_control_actions: this.controlActions.size,
+      console: {
+        args: this.consoleArgs(),
+        peers: null,
+        discovery: null,
+        state_dir: this.stateDir,
+        profile_store_path: this.profileStorePath(),
+        profile_store_exists: existsSync(this.profileStorePath()),
+        profile_store_existed_at_start: this.profileStoreExistedAtStart,
+        starts: this.consoleStarts,
+        pid: this.consoleProcess?.pid ?? null,
+        running: this.consoleProcess?.running ?? false,
+      },
+      clusters: {
+        a: this.clusters.get("a")?.manifest() ?? null,
+        b: this.clusters.get("b")?.manifest() ?? null,
+      },
+    };
+  }
+
+  private writeManifest() {
+    if (!this.runDir) return;
+    writeFileSync(resolve(this.runDir, "manifest.json"), `${JSON.stringify(this.manifest(), null, 2)}\n`, { mode: 0o600 });
+  }
+
+  stop(): Promise<void> {
+    if (!this.stopPromise) {
+      this.stopped = true;
+      this.stopPromise = this.performStop();
+    }
+    return this.stopPromise;
+  }
+
+  private async performStop() {
+    let firstError: unknown;
+    const attempt = async (action: () => void | Promise<void>) => {
+      try {
+        await action();
+      } catch (error) {
+        firstError ??= error;
+      }
+    };
+    const pendingActions = [...this.controlActions];
+    if (pendingActions.length) {
+      const outcomes = await Promise.allSettled(pendingActions);
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") firstError ??= outcome.reason;
+      }
+    }
+    this.controlActions.clear();
+    const controlServer = this.controlServer;
+    this.controlServer = null;
+    if (controlServer) {
+      await attempt(async () => {
+        controlServer.closeAllConnections();
+        await new Promise<void>((resolveClose) => controlServer.close(() => resolveClose()));
+      });
+    }
+    await attempt(() => this.processes.stopAll());
+    for (const cluster of [...this.clusters.values()].reverse()) {
+      await attempt(() => cluster.stop());
+    }
+    await attempt(() => this.writeManifest());
+    if (firstError) throw firstError;
   }
 }

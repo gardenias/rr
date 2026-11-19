@@ -4,7 +4,7 @@ import { consoleBaseUrl, defaultArtifactsRoot } from "./harness";
 
 export default defineConfig({
   testDir: __dirname,
-  testMatch: "**/*.spec.ts",
+  testMatch: "cluster.spec.ts",
   globalSetup: resolve(__dirname, "global-setup.ts"),
   fullyParallel: false,
   workers: 1,

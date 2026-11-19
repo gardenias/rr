@@ -1,14 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
 import { groupDetailResponse, groupListResponse, replicaResponse } from "./groups.fixtures.mjs";
+import { CLUSTER_A, clusterUrl, seedConnection } from "./connection";
 
 async function mockGroups(page: Page) {
-  await page.route("**/api/v1/console/groups**", async (route) => {
+  await page.route("**/api/v1/console/connections/cluster-a/groups**", async (route) => {
     const pathname = new URL(route.request().url()).pathname;
-    if (pathname === "/api/v1/console/groups") {
+    if (pathname === "/api/v1/console/connections/cluster-a/groups") {
       await route.fulfill({ json: groupListResponse });
-    } else if (pathname === "/api/v1/console/groups/1") {
+    } else if (pathname === "/api/v1/console/connections/cluster-a/groups/1") {
       await route.fulfill({ json: groupDetailResponse });
-    } else if (pathname === "/api/v1/console/groups/1/replicas") {
+    } else if (pathname === "/api/v1/console/connections/cluster-a/groups/1/replicas") {
       await route.fulfill({ json: replicaResponse });
     } else {
       await route.continue();
@@ -21,6 +22,7 @@ test.beforeEach(async ({ page }) => {
     data: { token: "mock-viewer-token" },
   });
   expect(response.ok()).toBe(true);
+  await seedConnection(page, CLUSTER_A);
   await mockGroups(page);
 });
 
@@ -31,7 +33,7 @@ test("shows degraded group states and the complete leader-predicated replica mat
   });
   page.on("pageerror", (error) => consoleErrors.push(error.message));
 
-  await page.goto("/groups/?window=15m");
+  await page.goto(clusterUrl("/groups/?window=15m", CLUSTER_A));
   await expect(page.getByRole("heading", { level: 1, name: "Raft groups" })).toBeVisible();
   await expect(page.getByRole("table", { name: "Raft groups" })).toBeVisible();
   await expect(page.getByText("Partial", { exact: true })).toBeVisible();
@@ -53,20 +55,20 @@ test("shows degraded group states and the complete leader-predicated replica mat
 
   await expect(page.getByRole("link", { name: "Related partitions" })).toHaveAttribute(
     "href",
-    "/topology/?window=15m&view=routes&filter=group-1",
+    "/topology/?window=15m&filter=group-1&view=routes&connection=cluster-a",
   );
   await expect(page.getByRole("link", { name: "Group performance" })).toHaveAttribute(
     "href",
-    "/performance/?window=15m&group_id=1",
+    "/performance/?window=15m&group_id=1&connection=cluster-a",
   );
   expect(consoleErrors).toEqual([]);
 });
 
 test("opens a shareable group deep link and closes back to the preserved list filter", async ({ page }) => {
-  await page.goto("/groups/?window=1h&filter=1&group_id=1");
+  await page.goto(clusterUrl("/groups/?window=1h&filter=1&group_id=1", CLUSTER_A));
   await expect(page.getByRole("dialog", { name: "Group 1 evidence" })).toBeVisible();
   await expect(page.getByRole("table", { name: "Group replica evidence" })).toBeVisible();
   await page.getByRole("button", { name: "Close drawer" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(page).toHaveURL(/\/groups\/\?window=1h&filter=1$/);
+  await expect(page).toHaveURL(/\/groups\/\?window=1h&filter=1&connection=cluster-a$/);
 });

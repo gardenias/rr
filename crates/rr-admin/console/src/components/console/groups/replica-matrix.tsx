@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { ColumnDef } from "@tanstack/react-table";
 import { DenseTable } from "@/components/console/dense-table";
 import { formatAge, formatNumber, formatTimestamp } from "@/lib/format";
-import type { TimeWindow } from "@/lib/query-state";
+import { connectionDrilldownHref, type TimeWindow } from "@/lib/query-state";
 import type { ReplicaRow } from "@/components/console/groups/model";
 
 function number(value: number | null, suffix = "") {
@@ -16,10 +16,12 @@ export function ReplicaMatrix({
   replicas,
   leaderNodeId,
   timeWindow = "15m",
+  connectionId,
 }: {
   replicas: ReplicaRow[];
   leaderNodeId: number | null;
   timeWindow?: TimeWindow;
+  connectionId?: string;
 }) {
   const columns = useMemo<ColumnDef<ReplicaRow>[]>(() => {
     const leaderOnly = (value: number | null, sourceNodeId: number, suffix = ""): ReactNode => {
@@ -35,7 +37,7 @@ export function ReplicaMatrix({
         header: "Node",
         cell: ({ getValue }) => {
           const nodeId = getValue<number>();
-          return <Link className="text-orange-300 hover:underline" href={`/nodes/?window=${timeWindow}&filter=node-${nodeId}`}>Node {nodeId}</Link>;
+          return <Link className="text-orange-300 hover:underline" href={connectionDrilldownHref("/nodes", timeWindow, connectionId, { filter: `node-${nodeId}` })}>Node {nodeId}</Link>;
         },
       },
       { accessorKey: "server_state", header: "ServerState", cell: ({ getValue }) => getValue<string | null>() ?? "—" },
@@ -78,6 +80,6 @@ export function ReplicaMatrix({
         ),
       },
     ];
-  }, [leaderNodeId, timeWindow]);
+  }, [connectionId, leaderNodeId, timeWindow]);
   return <DenseTable data={replicas} columns={columns} caption="Group replica evidence" />;
 }

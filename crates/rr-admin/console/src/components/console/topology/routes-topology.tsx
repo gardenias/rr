@@ -6,17 +6,19 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { DenseTable } from "@/components/console/dense-table";
 import { EmptyState } from "@/components/console/states";
 import { formatNumber, formatTimestamp } from "@/lib/format";
-import type { TimeWindow } from "@/lib/query-state";
+import { connectionDrilldownHref, type TimeWindow } from "@/lib/query-state";
 import { asRecord, rowBoolean, rowNumber, rowNumberList, rowString, topologyRows, type TopologyRow } from "@/components/console/topology/model";
 
 export function RoutesTopology({
   data,
   timeWindow,
   filter,
+  connectionId,
 }: {
   data: unknown;
   timeWindow: TimeWindow;
   filter?: string;
+  connectionId?: string;
 }) {
   const allRoutes = topologyRows(data, "routes");
   const routes = allRoutes.filter((route) => {
@@ -33,7 +35,7 @@ export function RoutesTopology({
       accessorFn: (row) => rowNumber(row, "partition_id") ?? 0,
       cell: ({ row }) => {
         const id = rowNumber(row.original, "partition_id");
-        return id == null ? "—" : <Link className="text-orange-300" href={`/topology/?window=${timeWindow}&view=routes&filter=partition-${id}`}>Partition {id}</Link>;
+        return id == null ? "—" : <Link className="text-orange-300" href={connectionDrilldownHref("/topology", timeWindow, connectionId, { view: "routes", filter: `partition-${id}` })}>Partition {id}</Link>;
       },
     },
     {
@@ -42,7 +44,7 @@ export function RoutesTopology({
       accessorFn: (row) => rowNumber(row, "group_id") ?? "—",
       cell: ({ row }) => {
         const id = rowNumber(row.original, "group_id");
-        return id == null ? "—" : <Link className="text-orange-300" href={`/groups/?window=${timeWindow}&group_id=${id}`}>Group {id}</Link>;
+        return id == null ? "—" : <Link className="text-orange-300" href={connectionDrilldownHref("/groups", timeWindow, connectionId, { group_id: String(id) })}>Group {id}</Link>;
       },
     },
     { id: "replicas", header: "Configured replicas", accessorFn: (row) => rowNumberList(row, "replica_node_ids", "replicas").map((id) => `Node ${id}`).join(", ") || "—" },
@@ -54,7 +56,7 @@ export function RoutesTopology({
       accessorFn: (row) => rowBoolean(row, "route_not_found") === true ? "Route not found" : rowBoolean(row, "stale", "stale_route") === true ? "Stale route" : "Observed route",
     },
     { id: "sample", header: "Sample", accessorFn: (row) => rowString(row, "observed_at", "sampled_at") ?? "—", cell: ({ getValue }) => formatTimestamp(getValue<string>()) },
-  ], [data, timeWindow]);
+  ], [connectionId, data, timeWindow]);
   if (!routes.length) {
     return <EmptyState title={filter ? "No routes match this filter" : "No partition routes returned"} description="Missing route observations are not treated as an empty routing table or proof of data loss." />;
   }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { ColumnDef } from "@tanstack/react-table";
 import { CapabilityNotice } from "@/components/console/capability-notice";
@@ -15,6 +15,7 @@ import { loginRedirectFor } from "@/lib/auth";
 import type { SourcesData } from "@/lib/contract";
 import { formatTimestamp, sanitizeError } from "@/lib/format";
 import { useConsoleResource } from "@/lib/use-console-resource";
+import { useRefresh } from "@/lib/refresh-context";
 
 type SourceRow = SourcesData["sources"][number];
 type LegacySourceRow = SourceRow & {
@@ -40,18 +41,30 @@ const columns: ColumnDef<SourceRow>[] = [
 ];
 
 export function SourcesView() {
+  const { connectionId } = useRefresh();
   const { data, meta, error, loading, refresh } = useConsoleResource("/sources");
   const [pending, setPending] = useState(false);
   const [feedback, setFeedback] = useState<ReconcileFeedback>(null);
+  const reconcileController = useRef<AbortController | null>(null);
+
+  useEffect(() => () => {
+    reconcileController.current?.abort();
+  }, [connectionId]);
 
   const reconcile = async () => {
+    if (!connectionId) return;
+    const controller = new AbortController();
+    reconcileController.current?.abort();
+    reconcileController.current = controller;
     setPending(true);
     setFeedback(null);
     try {
-      await consoleApi.reconcile();
+      await consoleApi.reconcile(connectionId, controller.signal);
+      if (controller.signal.aborted) return;
       setFeedback({ message: "Reconciliation completed. Source evidence has been refreshed.", reauthenticate: false });
       refresh();
     } catch (cause) {
+      if (controller.signal.aborted) return;
       const apiError = cause instanceof ConsoleApiError ? cause : null;
       const reauthenticate = apiError?.status === 401 || apiError?.status === 403;
       setFeedback({
@@ -61,7 +74,10 @@ export function SourcesView() {
         reauthenticate,
       });
     } finally {
-      setPending(false);
+      if (reconcileController.current === controller) {
+        reconcileController.current = null;
+        setPending(false);
+      }
     }
   };
 
@@ -88,14 +104,14 @@ export function SourcesView() {
           <h1>Sources</h1>
           <p>Inspect discovery, endpoint health, capabilities, and history retention without exposing credentials or sensitive configuration.</p>
         </div>
-        <Button variant="secondary" size="small" onClick={() => void reconcile()} disabled={pending || loading}>{pending ? "Reconciling…" : "Reconcile now"}</Button>
+        <Button variant="secondary" size="small" onClick={() => void reconcile()} disabled={!connectionId || pending || loading}>{pending ? "Reconciling…" : "Reconcile now"}</Button>
       </div>
 
       {feedback ? (
         <div className={feedback.reauthenticate ? "error-state" : "border border-(--line-1) bg-(--bg-1) p-3"} role={feedback.reauthenticate ? "alert" : "status"}>
           <div>
             <p>{feedback.message}</p>
-            {feedback.reauthenticate ? <Link className="button button-secondary button-size-small mt-3 inline-flex" href={loginRedirectFor("/sources/")}>Reauthenticate</Link> : null}
+            {feedback.reauthenticate ? <Link className="button button-secondary button-size-small mt-3 inline-flex" href={loginRedirectFor(`${window.location.pathname}${window.location.search}`)}>Reauthenticate</Link> : null}
           </div>
         </div>
       ) : null}

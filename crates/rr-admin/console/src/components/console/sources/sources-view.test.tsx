@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { makeMeta } from "@/test/fixtures";
 import type { SourcesData } from "@/lib/contract";
 import { SourcesView } from "@/components/console/sources/sources-view";
+import { RefreshProvider } from "@/lib/refresh-context";
 
 const resourceMock = vi.hoisted(() => vi.fn());
 const fetchMock = vi.hoisted(() => vi.fn());
@@ -55,7 +56,7 @@ function renderSources() {
     loading: false,
     refresh,
   });
-  render(<SourcesView />);
+  render(<RefreshProvider connectionId="cluster-a"><SourcesView /></RefreshProvider>);
   return { refresh };
 }
 
@@ -98,7 +99,7 @@ describe("SourcesView", () => {
       prometheus: { status: "UNSUPPORTED", url: null },
     } as unknown as SourcesData;
     resourceMock.mockReturnValue({ data: legacy, meta: makeMeta(), error: null, loading: false, refresh: vi.fn() });
-    render(<SourcesView />);
+    render(<RefreshProvider connectionId="cluster-a"><SourcesView /></RefreshProvider>);
 
     expect(screen.getByText("EXPLICIT_ADMIN_SEEDS")).toBeVisible();
     expect(screen.getByText("0.2.0 · generation 9")).toBeVisible();
@@ -121,6 +122,7 @@ describe("SourcesView", () => {
   });
 
   it("offers reauthentication when reconcile is forbidden", async () => {
+    window.history.replaceState({}, "", "/sources/?window=1h&connection=cluster-a");
     const user = userEvent.setup();
     renderSources();
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
@@ -131,6 +133,7 @@ describe("SourcesView", () => {
     await user.click(screen.getByRole("button", { name: "Reconcile now" }));
     expect(await screen.findByText(/Reauthentication required/)).toBeVisible();
     expect(screen.getByRole("link", { name: "Reauthenticate" })).toHaveAttribute("href", expect.stringContaining("/login"));
+    expect(decodeURIComponent(screen.getByRole("link", { name: "Reauthenticate" }).getAttribute("href")!)).toContain("connection=cluster-a");
     expect(screen.queryByText(/Reconciliation completed/)).not.toBeInTheDocument();
   });
 });

@@ -7,7 +7,7 @@ import { DenseTable } from "@/components/console/dense-table";
 import { EmptyState } from "@/components/console/states";
 import { HealthBadge } from "@/components/console/health-badge";
 import { formatNumber, formatTimestamp } from "@/lib/format";
-import type { TimeWindow } from "@/lib/query-state";
+import { connectionDrilldownHref, type TimeWindow } from "@/lib/query-state";
 import { ConsensusGraph, type ConsensusGraphEdge, type ConsensusGraphNode } from "@/components/console/topology/consensus-graph";
 import { asRecord, healthStatus, rowNumber, rowNumberList, rowString, topologyEdges, topologyRows, type TopologyRow } from "@/components/console/topology/model";
 import { RepresentationSwitch } from "@/components/console/topology/representation-switch";
@@ -22,7 +22,7 @@ function resourceSummary(row: TopologyRow) {
   return cpu == null ? "Resources —" : `CPU ${formatNumber(cpu * 100)}%`;
 }
 
-export function NodesTopology({ data, timeWindow }: { data: unknown; timeWindow: TimeWindow }) {
+export function NodesTopology({ data, timeWindow, connectionId }: { data: unknown; timeWindow: TimeWindow; connectionId?: string }) {
   const nodes = topologyRows(data, "nodes");
   const edges = topologyEdges(data);
   const nodeColumns = useMemo<ColumnDef<TopologyRow>[]>(() => [
@@ -32,7 +32,7 @@ export function NodesTopology({ data, timeWindow }: { data: unknown; timeWindow:
       accessorFn: (row) => rowNumber(row, "node_id") ?? 0,
       cell: ({ row }) => {
         const id = rowNumber(row.original, "node_id");
-        return id == null ? "—" : <Link className="text-orange-300" href={`/nodes/?window=${timeWindow}&filter=node-${id}`}>Node {id}</Link>;
+        return id == null ? "—" : <Link className="text-orange-300" href={connectionDrilldownHref("/nodes/", timeWindow, connectionId, { filter: `node-${id}` })}>Node {id}</Link>;
       },
     },
     { id: "placement", header: "Region / zone / rack", accessorFn: placement },
@@ -40,7 +40,7 @@ export function NodesTopology({ data, timeWindow }: { data: unknown; timeWindow:
     { id: "resources", header: "Resource hotspot", accessorFn: resourceSummary },
     { id: "version", header: "Version", accessorFn: (row) => rowString(row, "version") ?? "—" },
     { id: "groups", header: "Local groups", accessorFn: (row) => rowNumberList(row, "group_ids").join(", ") || "—" },
-  ], [timeWindow]);
+  ], [connectionId, timeWindow]);
   const edgeColumns = useMemo<ColumnDef<TopologyRow>[]>(() => [
     { id: "source", header: "From", accessorFn: (row) => rowNumber(row, "source_node_id", "from_node_id", "source") ?? "—", cell: ({ getValue }) => typeof getValue() === "number" ? `Node ${getValue<number>()}` : "—" },
     { id: "target", header: "To", accessorFn: (row) => rowNumber(row, "target_node_id", "to_node_id", "target") ?? "—", cell: ({ getValue }) => typeof getValue() === "number" ? `Node ${getValue<number>()}` : "—" },
@@ -66,7 +66,7 @@ export function NodesTopology({ data, timeWindow }: { data: unknown; timeWindow:
       label: `Node ${id}`,
       sublabel: `${healthStatus(row.status)} · ${rowString(row, "zone") ?? "zone —"}`,
       description: `Node ${id} · ${place} · ${healthStatus(row.status)} · ${resourceSummary(row)} · Version ${rowString(row, "version") ?? "—"}`,
-      href: `/nodes/?window=${timeWindow}&filter=node-${id}`,
+      href: connectionDrilldownHref("/nodes/", timeWindow, connectionId, { filter: `node-${id}` }),
       x: 150 + groupIndex * 280,
       y: 75 + siblingIndex * 95,
     }];

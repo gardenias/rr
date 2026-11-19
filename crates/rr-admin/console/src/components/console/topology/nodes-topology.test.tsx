@@ -30,14 +30,14 @@ describe("NodesTopology", () => {
 
   it("selects graph nodes with the keyboard and exposes a node deep link", async () => {
     const user = userEvent.setup();
-    render(<NodesTopology data={payload} timeWindow="1h" />);
+    render(<NodesTopology data={payload} timeWindow="1h" connectionId="cluster-a" />);
 
     const node = screen.getByRole("button", { name: "Node 1ONLINE · zone-a" });
     node.focus();
     await user.keyboard("{Enter}");
     expect(screen.getByRole("link", { name: "Open Node 1 details" })).toHaveAttribute(
       "href",
-      "/nodes?window=1h&filter=node-1",
+      "/nodes?window=1h&filter=node-1&connection=cluster-a",
     );
     expect(screen.getByRole("button", { name: "Zoom in" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Fit topology" })).toBeVisible();

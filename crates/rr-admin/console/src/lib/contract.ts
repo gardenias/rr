@@ -34,7 +34,7 @@ export interface Capability {
 export interface ConsoleMeta {
   schema_version: string;
   correlation_id: string;
-  cluster_id: string;
+  cluster_id: string | null;
   generated_at: string;
   partial: boolean;
   time_window: string | null;

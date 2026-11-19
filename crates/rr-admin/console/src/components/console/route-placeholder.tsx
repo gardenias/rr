@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import type { RouteDefinition } from "@/lib/routes";
 import { useConsoleResource } from "@/lib/use-console-resource";
 import { useRouteQueryState } from "@/lib/use-route-query-state";
+import { hrefWithConnection, serializeQueryState } from "@/lib/query-state";
 
 export function RoutePlaceholder({ route }: { route: RouteDefinition }) {
   const { state } = useRouteQueryState();
@@ -67,7 +68,7 @@ export function RoutePlaceholder({ route }: { route: RouteDefinition }) {
             <div className="evidence-panel-meta">
               <FreshnessBadge meta={meta} />
               <SourceEvidence meta={meta} />
-              <Link href="/sources" className="evidence-link">Inspect sources <ArrowUpRight aria-hidden="true" size={12} /></Link>
+              <Link href={hrefWithConnection("/sources", serializeQueryState(state))} className="evidence-link">Inspect sources <ArrowUpRight aria-hidden="true" size={12} /></Link>
             </div>
           </section>
           {empty ? (

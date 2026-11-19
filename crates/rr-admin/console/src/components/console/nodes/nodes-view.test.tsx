@@ -2,6 +2,7 @@ import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { makeMeta } from "@/test/fixtures";
 import type { FeatureNode, NodeDetailData } from "./model";
+import { RefreshProvider } from "@/lib/refresh-context";
 
 const mocks = vi.hoisted(() => ({
   resource: vi.fn(),
@@ -61,10 +62,10 @@ describe("NodesView drawer identity", () => {
 
   it("preserves drawer DOM and local state across node data refreshes", async () => {
     const user = userEvent.setup();
-    const view = render(<NodesView />);
+    const view = render(<RefreshProvider connectionId="cluster-a"><NodesView /></RefreshProvider>);
     await user.click(screen.getByRole("button", { name: "Open node 1 details" }));
     await act(async () => {
-      view.rerender(<NodesView />);
+      view.rerender(<RefreshProvider connectionId="cluster-a"><NodesView /></RefreshProvider>);
       await Promise.resolve();
     });
 
@@ -77,7 +78,7 @@ describe("NodesView drawer identity", () => {
 
     mocks.resource.mockReturnValue(resourceResult([{ ...node, version: "shop-2.1" }]));
     await act(async () => {
-      view.rerender(<NodesView />);
+      view.rerender(<RefreshProvider connectionId="cluster-a"><NodesView /></RefreshProvider>);
       await Promise.resolve();
     });
 

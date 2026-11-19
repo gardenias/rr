@@ -298,29 +298,36 @@ Ship `target/release/rr-admin` together with `crates/rr-admin/console/out/`; for
 `/opt/rr/console` and pass `--static-dir /opt/rr/console`. The default static directory is source-tree-oriented, so
 copying only the binary does not deploy the frontend.
 
-非 loopback 生产监听必须同时启用 Console HTTPS 和 viewer token。下面的全局 Admin TLS/token 参数位于
-`console` 之前，供 BFF 连接 AdminService；子命令后的 TLS 参数用于 Browser→Console HTTPS：
+非 loopback 生产监听必须同时启用 Console HTTPS 和 viewer token。独立模式不需要启动时提供任何集群来源或
+Admin 凭证；`--state-dir` 指向由 Console 运行用户独占的持久配置目录。子命令后的 TLS 参数只保护
+Browser→Console HTTPS：
 
-A non-loopback production listener requires both Console HTTPS and a viewer token. Global Admin TLS/token flags appear
-before `console` for BFF-to-AdminService connections; TLS flags after the subcommand configure browser-to-Console HTTPS:
+A non-loopback production listener requires both Console HTTPS and a viewer token. Standalone mode needs no cluster
+source or Admin credential at startup. Point `--state-dir` at persistent storage exclusively writable by the Console
+user. TLS flags after the subcommand protect only browser-to-Console HTTPS:
 
 ```bash
-export RR_ADMIN_TOKEN='<admin-token-from-your-secret-store>'
 export RR_CONSOLE_TOKEN='<viewer-token-from-your-secret-store>'
 
-./target/release/rr-admin \
-  --token-env RR_ADMIN_TOKEN \
-  --tls-ca /etc/rr/tls/ca.pem \
-  --tls-cert /etc/rr/tls/client.pem \
-  --tls-key /etc/rr/tls/client.key \
-  console \
+./target/release/rr-admin console \
   --listen 0.0.0.0:8443 \
-  --peers 1@192.168.1.1:52001,2@192.168.1.2:52001,3@192.168.1.3:52001 \
   --console-token-env RR_CONSOLE_TOKEN \
   --tls-cert /etc/rr/tls/console.pem \
   --tls-key /etc/rr/tls/console.key \
-  --static-dir /opt/rr/console
+  --static-dir /opt/rr/console \
+  --state-dir /var/lib/rr-console
 ```
+
+部署后打开 `/connections/`，为每个目标集群分别填写 Admin seeds/discovery、Admin TLS/token、discovery TLS/auth
+和可选 Prometheus。无来源启动没有 Admin/metrics 网络流量；只有显式 Connect 的 runtime 开始采集，最多同时活跃
+8 个。旧 `--peers`/`--discovery`、全局 Admin TLS/token 和进程级 Prometheus 参数仍用于单个临时启动连接，具体
+参数位置和示例见 [TLS 指南](./tls.md)；新部署通常使用保存连接。
+
+Open `/connections/` after deployment and configure each target's Admin seeds/discovery, Admin TLS/token, discovery
+TLS/auth, and optional Prometheus independently. No-source startup produces no Admin/metrics traffic; only explicitly
+connected runtimes collect, with at most eight active at once. Legacy `--peers`/`--discovery`, global Admin TLS/token,
+and process-level Prometheus flags still create one ephemeral startup connection; see the [TLS guide](./tls.md) for flag
+position and examples. New deployments normally use saved connections.
 
 节点 Admin token 只保留在 BFF。Console 经 Admin gRPC 取得受信描述符，再从描述符的 `observability_addr`
 通过 HTTP 抓取 `/health`、`/ready` 和 `/metrics`；BFF 必须能访问这些观测端口。仅启用 Admin/metrics 端口并不

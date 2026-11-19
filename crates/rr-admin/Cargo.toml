@@ -38,6 +38,9 @@ hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+dirs = "5"
+keyring = "4.2"
+tempfile.workspace = true
 
 # Live-node guard for `node-reset`: probes the RocksDB LOCK file via
 # flock/fcntl (see node_reset::rocks_lock_held). Unix-only.
@@ -45,7 +48,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 libc = "0.2"
 
 [dev-dependencies]
-tempfile.workspace = true
 rr-config = { path = "../rr-config" }
 rr-raft = { path = "../rr-raft" }
 rr-router = { path = "../rr-router" }

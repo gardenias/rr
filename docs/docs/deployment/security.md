@@ -19,7 +19,7 @@ The security layer consists of startup gates, TLS/mTLS, bearer tokens, rate limi
 | Admin / Client 服务 / services | TLS；Admin 必须独立 token，Client token 按需配置 / TLS; Admin token required, Client token optional | G3 / G4 / G5 |
 | Browser → Console | 非 loopback 必须 HTTPS + viewer token；节点 Admin token 只留在 BFF，从不下发浏览器 / Non-loopback requires HTTPS + viewer token; node Admin tokens stay in the BFF and are never sent to browsers | `ConsoleArgs::validate`；BFF 凭证隔离 / BFF credential isolation |
 | Console viewer session | 15 分钟内存 session；HttpOnly、SameSite=Strict，HTTPS 时 Secure；重启即失效 / 15-minute in-memory session; HttpOnly, SameSite=Strict, Secure under HTTPS; restart revokes it | `AuthState` |
-| Console reconcile POST | 仅只读刷新；必须同源 Origin，启用 viewer 认证时还须有效 `X-Console-CSRF` / Read-only refresh only; same-origin Origin required, plus valid `X-Console-CSRF` when viewer auth is enabled | `http::reconcile` |
+| Console connection mutations + scoped reconcile | 连接 CRUD/test/connect/disconnect 和只读 reconcile 必须同源 Origin，启用 viewer 认证时还须有效 `X-Console-CSRF` / Connection CRUD, test/connect/disconnect, and read-only reconcile require same-origin Origin plus valid `X-Console-CSRF` when viewer auth is enabled | `http::router` mutation guard；`/connections/{id}/sources/reconcile` |
 | 速率限制 / Rate limiting | Admin 可从 10–100 rps 起步，按调用方隔离 / Start Admin around 10–100 rps and isolate callers as needed | 默认不限流，需显式配置 / Unlimited by default |
 | 审计日志 / Audit log | `RUST_LOG="warn,rr::audit=info"`，路由到独立 append-only sink / Route to a separate append-only sink | 运维配置 / Operator configuration |
 | TCP Raft transport | 不用于生产 / Not for production | G6 / G7 |
@@ -103,13 +103,36 @@ with TLS and the node Admin token. TLS on one boundary does not secure the other
 | Console BFF → AdminService | gRPC TLS，按节点要求使用 mTLS / gRPC TLS, with mTLS as required by nodes | 节点 Admin bearer token 只由 BFF 持有并附加到上游 RPC，不下发浏览器 / The BFF alone holds the node Admin bearer token and attaches it to upstream RPCs; browsers never receive it |
 
 session 不持久化，Console 重启会撤销全部 session。cookie 为 HttpOnly、SameSite=Strict，HTTPS 时增加 Secure。
-`POST /api/v1/console/sources/reconcile` 虽只触发只读刷新，仍要求 `Origin` 与当前 scheme/host 完全一致；启用
-viewer 认证时还要求与 session 匹配的 `X-Console-CSRF`。这些检查不增加任何集群写能力。
+连接 CRUD、candidate/saved test、connect/disconnect、delete 和
+`POST /api/v1/console/connections/{id}/sources/reconcile` 都要求 `Origin` 与当前 scheme/host 完全一致；启用
+viewer 认证时还要求与 session 匹配的 `X-Console-CSRF`。reconcile 仍只刷新该连接的只读采集，这些检查不增加
+任何集群写能力。
 
 Sessions are not persisted, and a Console restart revokes all of them. Cookies are HttpOnly and SameSite=Strict, with
-Secure under HTTPS. Although `POST /api/v1/console/sources/reconcile` only triggers a read-only refresh, it requires an
-`Origin` exactly matching the current scheme/host; with viewer authentication enabled, it also requires an
-`X-Console-CSRF` matching the session. These checks add no cluster write capability.
+Secure under HTTPS. Connection CRUD, candidate/saved tests, connect/disconnect, delete, and
+`POST /api/v1/console/connections/{id}/sources/reconcile` require an `Origin` exactly matching the current scheme/host;
+with viewer authentication, they also require `X-Console-CSRF` matching the session. Reconcile remains a read-only refresh
+for that connection, and these checks add no cluster write capability.
+
+无来源启动不会自动连接节点。每个已连接 runtime 独立持有上游凭证和缓存；浏览器 URL connection ID 不会读取或修改
+其他 runtime。非敏感 profile 使用原子 `0600` JSON；Admin token、discovery password 默认只在进程内存，显式
+Remember 才进入 OS keychain。秘密字段不会出现在 API 响应、URL、浏览器持久存储或 access log。删除 profile 会
+断开 runtime 并删除 keychain entry；进程重启后 runtime 不自动恢复。
+
+No-source startup contacts no node. Every connected runtime independently holds upstream credentials and caches, and a
+browser URL connection ID cannot read or mutate another runtime. Non-sensitive profiles use atomic mode-`0600` JSON;
+Admin tokens and discovery passwords remain in process memory unless Remember explicitly selects the OS keychain. Secret
+fields never appear in API responses, URLs, browser persistent storage, or access logs. Deleting a profile disconnects its
+runtime and removes keychain entries; process restart does not restore runtimes automatically.
+
+没有可用 keychain 的隔离/headless 部署可显式传入 `--keychain-disable`。该进程不会调用 keychain，包括 profile
+删除清理；秘密仅保留在内存，UI 禁用 Remember，连接 API 返回 `keychain_available=false`。默认不传此参数，
+生产仍使用 OS keychain。只有内存凭证的 profile 在重启后必须重新输入秘密。
+
+Isolated or headless deployments without a usable keychain can explicitly pass `--keychain-disable`. The process makes
+no keychain calls, including delete cleanup; secrets remain memory-only, the UI disables Remember, and the connection API
+reports `keychain_available=false`. Omitting the flag preserves OS-keychain use in production. Profiles with memory-only
+credentials require secret re-entry after restart.
 
 完整启动参数见 [TLS 指南](./tls.md#cluster-admin-console-的两条-tls-边界--two-cluster-admin-console-tls-boundaries)，
 Console 行为见 [集群管理控制台](../operations/cluster-admin-console.md)。
@@ -220,7 +243,7 @@ with SANs for `localhost`, `127.0.0.1`, `::1`, `rr-N`, and `nodeN.rr.local`; key
 
 ## 相关 / Related
 
-- [TLS 配置与轮换 / TLS configuration and rotation](./tls.md)
-- [审计事件与 sink / Audit events and sinks](./audit-log.md)
-- [整体部署 / Full deployment](./deployment.md)
-- [ADR 索引 / ADR index](../architecture/design-decisions.md)
+- [TLS 配置与轮换](./tls.md)<br />[TLS configuration and rotation](./tls.md)
+- [审计事件与 sink](./audit-log.md)<br />[Audit events and sinks](./audit-log.md)
+- [整体部署](./deployment.md)<br />[Full deployment](./deployment.md)
+- [ADR 索引](../architecture/design-decisions.md)<br />[ADR index](../architecture/design-decisions.md)

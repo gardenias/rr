@@ -4,8 +4,10 @@ export function loginRedirectFor(candidate: string): string {
   return `/login/?next=${encodeURIComponent(safeReturnPath(candidate))}`;
 }
 
-const fallbackPath = "/overview/";
+const fallbackPath = "/connections/";
 const consolePaths = new Set([
+  "/connections/",
+  "/connections/new/",
   "/overview/",
   "/nodes/",
   "/topology/",
@@ -44,6 +46,10 @@ export function safeReturnPath(candidate: string | null | undefined): string {
   const originalKeys = new URLSearchParams(search);
   for (const key of originalKeys.keys()) {
     if (/token|secret|password|credential|authorization/i.test(key)) return fallbackPath;
+  }
+  if (url.pathname === "/connections/" || url.pathname === "/connections/new/") {
+    const edit = url.pathname === "/connections/" ? originalKeys.get("edit")?.trim() : null;
+    return `${url.pathname}${edit ? `?edit=${encodeURIComponent(edit)}` : ""}`;
   }
   const serialized = serializeQueryState(parseQueryState(search));
   return `${url.pathname}${serialized ? `?${serialized}` : ""}`;

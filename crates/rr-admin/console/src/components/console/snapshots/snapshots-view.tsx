@@ -61,7 +61,12 @@ const columns: ColumnDef<SnapshotItem>[] = [
 
 export function SnapshotsView() {
   const { state, setFilter } = useRouteQueryState();
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [cursorState, setCursorState] = useState<{
+    connectionId: string | null;
+    value: string | undefined;
+  }>({ connectionId: state.connection, value: undefined });
+  const cursor = cursorState.connectionId === state.connection ? cursorState.value : undefined;
+  const setCursor = (value: string | undefined) => setCursorState({ connectionId: state.connection, value });
   const { data, meta, error, loading, refresh } = useConsoleResource("/snapshots", {
     group_id: state.filters.group_id,
     node_id: state.filters.node_id,

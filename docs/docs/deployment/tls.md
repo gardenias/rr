@@ -118,6 +118,17 @@ browser-to-Console HTTPS. The certificate sets are not interchangeable; plan iss
 | `console` 之后 / After `console` | `--tls-cert` + `--tls-key` | Console 自身 HTTPS 服务端证书和私钥；必须成对提供 / Console's own HTTPS server certificate and private key; required as a pair |
 | `console` 之后 / After `console` | `--console-token-env RR_CONSOLE_TOKEN` | Browser→Console viewer 登录凭证的环境变量名 / Environment-variable name for the browser-to-Console viewer credential |
 
+保存连接不使用全局上游参数：在 `/connections/` 表单中为每个 profile 分别配置 AdminService 和 discovery 安全。
+Admin TLS 支持 CA-only 验证，也支持 CA 加可选成对 client cert/key 的 mTLS；cert/key 必须成对，domain 需要 CA。
+这些路径指向 Console 主机文件，浏览器不会上传 CA、证书或私钥内容。Admin token/discovery password 为 write-only，
+默认在进程内存，显式 Remember 才使用 OS keychain。上表的全局三项 all-or-nothing 规则继续适用于 legacy 启动连接。
+
+Saved connections do not use global upstream settings. Configure AdminService and discovery security separately for each
+profile in `/connections/`. Admin TLS supports CA-only verification or CA-backed mTLS with an optional certificate/key
+pair; certificate and key must be paired, and domain requires a CA. These are paths on the Console host, not file uploads.
+Admin tokens and discovery passwords are write-only, process-memory-only by default, and use the OS keychain only after
+explicit Remember. The global all-or-nothing trio above remains unchanged for a legacy startup connection.
+
 ```bash
 export RR_ADMIN_TOKEN='<admin-token-from-your-secret-store>'
 export RR_CONSOLE_TOKEN='<viewer-token-from-your-secret-store>'
@@ -231,5 +242,5 @@ not restart the remaining nodes.
 
 ## 相关 / Related
 
-- [整体部署 / Full deployment](./deployment.md)
-- [C4 TLS 绑点 / C4 TLS touch-points](../architecture/c4/components-network.md)
+- [整体部署](./deployment.md)<br />[Full deployment](./deployment.md)
+- [C4 TLS 绑点](../architecture/c4/components-network.md)<br />[C4 TLS touch-points](../architecture/c4/components-network.md)

@@ -240,6 +240,23 @@ impl CacheView {
                 .and_then(|snapshot| snapshot.formation.clone())
         })
     }
+
+    pub fn trusted_cluster_id(&self) -> Option<String> {
+        if self.quarantined {
+            return None;
+        }
+        let mut identities = self.nodes.iter().filter_map(|node| {
+            node.snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.formation.as_ref())
+                .map(|formation| formation.cluster_uuid.as_str())
+                .filter(|identity| !identity.is_empty())
+        });
+        let first = identities.next()?;
+        identities
+            .all(|identity| identity == first)
+            .then(|| first.to_string())
+    }
 }
 
 #[derive(Clone)]

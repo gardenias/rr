@@ -1,13 +1,15 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { makeMeta } from "@/test/fixtures";
 import type { SnapshotItem } from "@/lib/contract";
 import { SnapshotsView } from "@/components/console/snapshots/snapshots-view";
 
 const resourceMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/use-console-resource", () => ({ useConsoleResource: resourceMock }));
+const routeState = vi.hoisted(() => ({ connection: "cluster-a" }));
 vi.mock("@/lib/use-route-query-state", () => ({
   useRouteQueryState: () => ({
-    state: { window: "15m", filters: {} },
+    state: { window: "15m", connection: routeState.connection, filters: {} },
     setWindow: vi.fn(),
     setFilter: vi.fn(),
   }),
@@ -28,6 +30,9 @@ function snapshot(overrides: Partial<SnapshotItem> = {}): SnapshotItem {
 }
 
 describe("SnapshotsView", () => {
+  beforeEach(() => {
+    routeState.connection = "cluster-a";
+  });
   it("shows observed snapshot distance and an explicit no-snapshot state", () => {
     resourceMock.mockReturnValue({
       data: { items: [snapshot(), snapshot({ node_id: 2, snapshot_index: null, snapshot_term: null, install_count: null })], next_cursor: null },
@@ -112,5 +117,23 @@ describe("SnapshotsView", () => {
     expect(screen.getByText("No snapshot observations for this filter")).toBeVisible();
     expect(screen.getByText(/Transfer, per-group disk usage, and task progress/)).toBeVisible();
     expect(screen.queryByText(/transferring/i)).not.toBeInTheDocument();
+  });
+
+  it("resets a snapshots cursor when the connection changes", async () => {
+    const user = userEvent.setup();
+    resourceMock.mockReturnValue({
+      data: { items: [snapshot()], next_cursor: "snapshots-page-2" },
+      meta: makeMeta(),
+      error: null,
+      loading: false,
+      refresh: vi.fn(),
+    });
+    const view = render(<SnapshotsView />);
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(resourceMock).toHaveBeenLastCalledWith("/snapshots", expect.objectContaining({ cursor: "snapshots-page-2" }));
+
+    routeState.connection = "cluster-b";
+    view.rerender(<SnapshotsView />);
+    expect(resourceMock).toHaveBeenLastCalledWith("/snapshots", expect.objectContaining({ cursor: undefined }));
   });
 });

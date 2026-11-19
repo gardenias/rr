@@ -1,6 +1,6 @@
-import { RealCluster } from "./harness";
+import { RealHarness } from "./harness";
 
 export default async function globalSetup() {
-  const cluster = await RealCluster.start();
-  return async () => cluster.stop();
+  const harness = await RealHarness.start();
+  return async () => harness.stop();
 }

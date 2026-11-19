@@ -33,7 +33,7 @@ deployment, and dynamic views.
 - [**components-raft.md**](./components-raft.md) — rr-raft 多组共识引擎。<br />Multi-Raft engine.
 - [**components-router.md**](./components-router.md) — 路由与配置。<br />Routing and configuration.
 - [**components-network.md**](./components-network.md) — gRPC 传输层。<br />gRPC transport.
-- [**components-console.md**](./components-console.md) — `rr-admin console` 只读 BFF：同源入口、共享采集、证据缓存与可选历史。<br />Read-only `rr-admin console` BFF: same-origin entry, shared collection, evidence cache, and optional history.
+- [**components-console.md**](./components-console.md) — `rr-admin console` 只读 BFF：连接管理、按连接隔离采集、证据缓存与可选历史。<br />Read-only `rr-admin console` BFF: connection management, isolated per-connection collection, evidence caches, and optional history.
 
 ### 部署 / Deployment
 

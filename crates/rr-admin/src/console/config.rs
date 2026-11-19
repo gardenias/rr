@@ -70,7 +70,7 @@ pub(crate) struct ConsoleArgs {
     #[arg(long, value_name = "PATH", requires = "tls_cert")]
     pub tls_key: Option<PathBuf>,
 
-    /// Shared cluster summary polling interval.
+    /// Legacy startup connection summary polling interval.
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=300))]
     pub poll_interval_secs: u64,
 
@@ -85,6 +85,14 @@ pub(crate) struct ConsoleArgs {
     /// Static Next.js export directory. A debug fallback is served when absent.
     #[arg(long, value_name = "PATH", default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/console/out"))]
     pub static_dir: PathBuf,
+
+    /// Directory for persisted Console connection profiles.
+    #[arg(long, value_name = "PATH")]
+    pub state_dir: Option<PathBuf>,
+
+    /// Disable all OS keychain access and keep credentials in process memory only.
+    #[arg(long)]
+    pub keychain_disable: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -138,6 +146,7 @@ pub(crate) struct ConsoleConfig {
     pub discovery_endpoints: Vec<String>,
     pub discovery_security: DiscoverySecurityConfig,
     pub discovery_transport: DiscoveryTransportConfig,
+    pub discovery_allow_insecure: bool,
     pub cluster_name: Option<String>,
     pub viewer_token: Option<Arc<str>>,
     pub tls_cert: Option<PathBuf>,
@@ -145,11 +154,24 @@ pub(crate) struct ConsoleConfig {
     pub poll_interval: Duration,
     pub prometheus: Option<PrometheusConfig>,
     pub static_dir: PathBuf,
+    pub state_dir: Option<PathBuf>,
+    pub keychain_disabled: bool,
 }
 
 impl ConsoleConfig {
     pub fn using_tls(&self) -> bool {
         self.tls_cert.is_some()
+    }
+
+    pub fn ensure_startup_admin_options(&self, admin_tls: bool, admin_token: bool) -> Result<()> {
+        if self.peers.is_empty() && self.discovery.is_none() {
+            ensure!(
+                !admin_tls,
+                "Admin TLS options require --peers or --discovery"
+            );
+            ensure!(!admin_token, "--token-env requires --peers or --discovery");
+        }
+        Ok(())
     }
 }
 
@@ -159,10 +181,79 @@ impl ConsoleArgs {
     }
 
     fn validate_with(&self, env: impl Fn(&str) -> Option<String>) -> Result<ConsoleConfig> {
-        ensure!(
-            self.peers.is_some() || self.discovery.is_some(),
-            "console requires --peers AdminService seeds or --discovery"
-        );
+        self.validate_connection_options(&env)?;
+        let viewer_token = self.validate_process_options(&env)?;
+
+        let discovery_endpoints = self
+            .discovery
+            .as_deref()
+            .map(parse_discovery_endpoints)
+            .transpose()?
+            .unwrap_or_default();
+        let peers = match self.peers.as_deref() {
+            Some(_) => parse_peers(self.peers.as_deref())?,
+            None => Vec::new(),
+        };
+        let prometheus = match (&self.prometheus_url, &self.prometheus_cluster) {
+            (None, None) => None,
+            (Some(url), Some(cluster)) => Some(PrometheusConfig {
+                url: parse_prometheus_url(url)?,
+                cluster: parse_cluster_matcher(cluster)?,
+            }),
+            _ => anyhow::bail!(
+                "--prometheus-url and --prometheus-cluster label=value must be provided together"
+            ),
+        };
+        Ok(ConsoleConfig {
+            listen: self.listen,
+            peers,
+            discovery: self.discovery.clone(),
+            discovery_endpoints,
+            discovery_security: DiscoverySecurityConfig {
+                tls_ca: self.discovery_tls_ca.clone(),
+                tls_cert: self.discovery_tls_cert.clone(),
+                tls_key: self.discovery_tls_key.clone(),
+                tls_domain: self.discovery_tls_domain.clone(),
+                username: self.discovery_username.clone(),
+                password_env: self.discovery_password_env.clone(),
+            },
+            discovery_transport: DiscoveryTransportConfig::default(),
+            discovery_allow_insecure: self.discovery_allow_insecure,
+            cluster_name: self.cluster_name.clone(),
+            viewer_token,
+            tls_cert: self.tls_cert.clone(),
+            tls_key: self.tls_key.clone(),
+            poll_interval: Duration::from_secs(self.poll_interval_secs),
+            prometheus,
+            static_dir: self.static_dir.clone(),
+            state_dir: self.state_dir.clone(),
+            keychain_disabled: self.keychain_disable,
+        })
+    }
+
+    fn validate_connection_options(&self, env: &impl Fn(&str) -> Option<String>) -> Result<()> {
+        if self.peers.is_none() && self.discovery.is_none() {
+            ensure!(
+                self.prometheus_url.is_none() && self.prometheus_cluster.is_none(),
+                "--prometheus-url and --prometheus-cluster require --peers or --discovery"
+            );
+            ensure!(
+                self.discovery_tls_ca.is_none()
+                    && self.discovery_tls_cert.is_none()
+                    && self.discovery_tls_key.is_none()
+                    && self.discovery_tls_domain.is_none()
+                    && self.discovery_password_env.is_none()
+                    && self.discovery_username.is_none()
+                    && !self.discovery_allow_insecure
+                    && self.cluster_name.is_none(),
+                "discovery and cluster options require --peers or --discovery"
+            );
+            ensure!(
+                self.poll_interval_secs == 5,
+                "--poll-interval-secs requires --peers or --discovery"
+            );
+            return Ok(());
+        }
         if self.discovery.is_some() {
             ensure!(
                 self.cluster_name
@@ -216,6 +307,13 @@ impl ConsoleArgs {
                 );
             }
         }
+        Ok(())
+    }
+
+    fn validate_process_options(
+        &self,
+        env: &impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Arc<str>>> {
         ensure!(
             !self.listen.ip().is_unspecified() || !self.allow_insecure,
             "--allow-insecure is loopback-only; a non-loopback Console always requires HTTPS and authentication"
@@ -238,49 +336,7 @@ impl ConsoleArgs {
                 self.console_token_env
             );
         }
-
-        let discovery_endpoints = self
-            .discovery
-            .as_deref()
-            .map(parse_discovery_endpoints)
-            .transpose()?
-            .unwrap_or_default();
-        let peers = match self.peers.as_deref() {
-            Some(_) => parse_peers(self.peers.as_deref())?,
-            None => Vec::new(),
-        };
-        let prometheus = match (&self.prometheus_url, &self.prometheus_cluster) {
-            (None, None) => None,
-            (Some(url), Some(cluster)) => Some(PrometheusConfig {
-                url: parse_prometheus_url(url)?,
-                cluster: parse_cluster_matcher(cluster)?,
-            }),
-            _ => anyhow::bail!(
-                "--prometheus-url and --prometheus-cluster label=value must be provided together"
-            ),
-        };
-        Ok(ConsoleConfig {
-            listen: self.listen,
-            peers,
-            discovery: self.discovery.clone(),
-            discovery_endpoints,
-            discovery_security: DiscoverySecurityConfig {
-                tls_ca: self.discovery_tls_ca.clone(),
-                tls_cert: self.discovery_tls_cert.clone(),
-                tls_key: self.discovery_tls_key.clone(),
-                tls_domain: self.discovery_tls_domain.clone(),
-                username: self.discovery_username.clone(),
-                password_env: self.discovery_password_env.clone(),
-            },
-            discovery_transport: DiscoveryTransportConfig::default(),
-            cluster_name: self.cluster_name.clone(),
-            viewer_token: viewer_token.map(Arc::from),
-            tls_cert: self.tls_cert.clone(),
-            tls_key: self.tls_key.clone(),
-            poll_interval: Duration::from_secs(self.poll_interval_secs),
-            prometheus,
-            static_dir: self.static_dir.clone(),
-        })
+        Ok(viewer_token.map(Arc::from))
     }
 }
 
@@ -291,10 +347,22 @@ fn parse_prometheus_url(input: &str) -> Result<String> {
         matches!(url.scheme(), "http" | "https") && url.host_str().is_some(),
         "--prometheus-url must be an absolute HTTP or HTTPS URL"
     );
+    let raw_authority = input
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    ensure!(
+        url.username().is_empty()
+            && url.password().is_none()
+            && !raw_authority.contains('@')
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "--prometheus-url must not contain userinfo, query, or fragment"
+    );
     Ok(input.to_string())
 }
 
-fn parse_cluster_matcher(input: &str) -> Result<ClusterMatcher> {
+pub(crate) fn parse_cluster_matcher(input: &str) -> Result<ClusterMatcher> {
     let (label, value) = input
         .split_once('=')
         .context("--prometheus-cluster must be an exact label=value matcher")?;
@@ -331,6 +399,10 @@ pub(crate) fn parse_discovery_endpoints(input: &str) -> Result<Vec<String>> {
         ensure!(
             !endpoint.contains("://") && !endpoint.chars().any(char::is_whitespace),
             "discovery endpoint {endpoint:?} must be host:port without a nested scheme"
+        );
+        ensure!(
+            !endpoint.contains('@'),
+            "discovery endpoint must not contain userinfo"
         );
         let (host, port) = endpoint.rsplit_once(':').with_context(|| {
             format!("discovery endpoint {endpoint:?} must include host and port")
@@ -386,6 +458,10 @@ pub(crate) fn parse_peers(input: Option<&str>) -> Result<Vec<SeedPeer>> {
         ensure!(
             !admin_addr.contains("://") && !admin_addr.chars().any(char::is_whitespace),
             "AdminService seed {value:?} must be host:port without a scheme"
+        );
+        ensure!(
+            !admin_addr.contains('@'),
+            "AdminService seed must not contain userinfo"
         );
         let host = admin_addr
             .rsplit_once(':')
@@ -456,6 +532,8 @@ mod tests {
             prometheus_url: None,
             prometheus_cluster: None,
             static_dir: PathBuf::from("unused"),
+            state_dir: None,
+            keychain_disable: false,
         }
     }
 
@@ -563,10 +641,79 @@ mod tests {
         configured.prometheus_cluster = Some("cluster_id=prod".to_string());
         configured.prometheus_url = Some("file:///tmp/prometheus".to_string());
         assert!(configured.validate_with(|_| None).is_err());
+
+        for url in [
+            "https://user:password@prometheus.internal",
+            "https://@prometheus.internal",
+            "https://prometheus.internal?token=secret",
+            "https://prometheus.internal#secret",
+        ] {
+            configured.prometheus_url = Some(url.to_string());
+            assert!(
+                configured.validate_with(|_| None).is_err(),
+                "accepted {url}"
+            );
+        }
     }
 
     #[test]
-    fn discovery_requires_cluster_name_and_a_roster_source_is_required() {
+    fn standalone_startup_accepts_process_only_settings_and_state_dir() {
+        let parsed = TestCli::try_parse_from([
+            "test",
+            "--listen",
+            "127.0.0.1:8080",
+            "--state-dir",
+            "/tmp/rr-console-test-state",
+        ])
+        .unwrap();
+        let config = parsed.console.validate_with(|_| None).unwrap();
+        assert!(config.peers.is_empty());
+        assert!(config.discovery.is_none());
+        assert_eq!(
+            config.state_dir,
+            Some(PathBuf::from("/tmp/rr-console-test-state"))
+        );
+        assert!(!config.keychain_disabled);
+
+        let parsed =
+            TestCli::try_parse_from(["test", "--listen", "127.0.0.1:8080", "--keychain-disable"])
+                .unwrap();
+        let config = parsed.console.validate_with(|_| None).unwrap();
+        assert!(config.keychain_disabled);
+    }
+
+    #[test]
+    fn standalone_startup_rejects_cluster_scoped_options() {
+        let mut prometheus = args("127.0.0.1:8080");
+        prometheus.peers = None;
+        prometheus.prometheus_url = Some("http://127.0.0.1:9090".to_string());
+        prometheus.prometheus_cluster = Some("cluster_id=prod-east".to_string());
+        let error = prometheus.validate_with(|_| None).unwrap_err().to_string();
+        assert!(error.contains("--prometheus-url"));
+        assert!(error.contains("--peers") || error.contains("--discovery"));
+
+        let mut discovery_tls = args("127.0.0.1:8080");
+        discovery_tls.peers = None;
+        discovery_tls.discovery_tls_ca = Some(PathBuf::from("ca.pem"));
+        assert!(discovery_tls.validate_with(|_| None).is_err());
+
+        let standalone = args("127.0.0.1:8080");
+        let standalone = ConsoleArgs {
+            peers: None,
+            ..standalone
+        }
+        .validate_with(|_| None)
+        .unwrap();
+        for admin_tls in [false, true] {
+            for admin_token in [false, true] {
+                let result = standalone.ensure_startup_admin_options(admin_tls, admin_token);
+                assert_eq!(result.is_ok(), !admin_tls && !admin_token);
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_requires_cluster_name_and_valid_endpoints() {
         let mut discovery = args("127.0.0.1:8080");
         discovery.peers = None;
         discovery.discovery = Some("etcd://127.0.0.1:2379".to_string());
@@ -599,9 +746,6 @@ mod tests {
                 "accepted {invalid}"
             );
         }
-
-        discovery.discovery = None;
-        assert!(discovery.validate_with(|_| None).is_err());
     }
 
     #[test]

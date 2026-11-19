@@ -17,7 +17,7 @@ import {
   ServerCog,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { FreshnessBadge } from "@/components/console/freshness-badge";
 import { GlobalSearch } from "@/components/console/global-search";
@@ -26,8 +26,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Drawer } from "@/components/ui/drawer";
 import { consoleApi } from "@/lib/api";
+import { useActiveConnection } from "@/lib/connection-context";
+import { hrefWithConnection, switchConnectionHref } from "@/lib/query-state";
 import { clusterRoutes } from "@/lib/routes";
-import { useConsoleResource } from "@/lib/use-console-resource";
 import { useConsoleStream } from "@/lib/use-console-stream";
 import { RefreshProvider, useRefresh } from "@/lib/refresh-context";
 import { useRouteQueryState } from "@/lib/use-route-query-state";
@@ -46,9 +47,9 @@ const routeIcons = {
   sources: ServerCog,
 };
 
-function Brand() {
+function Brand({ href }: { href: string }) {
   return (
-    <Link href="/overview" className="console-brand">
+    <Link href={href} className="console-brand">
       <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
         <circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" strokeWidth="1.5" />
         <circle cx="16" cy="5" r="3" fill="var(--acc)" />
@@ -62,6 +63,7 @@ function Brand() {
 
 function Navigation({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   return (
     <nav className="console-navigation" aria-label="Console navigation">
       {["Cluster", "Observe", "System"].map((section) => (
@@ -73,7 +75,7 @@ function Navigation({ onNavigate }: { onNavigate?: () => void }) {
             return (
               <Link
                 key={route.key}
-                href={route.href}
+                href={hrefWithConnection(route.href, searchParams)}
                 className={cn("nav-link", active && "nav-link-active")}
                 aria-current={active ? "page" : undefined}
                 onClick={onNavigate}
@@ -86,6 +88,36 @@ function Navigation({ onNavigate }: { onNavigate?: () => void }) {
         </div>
       ))}
     </nav>
+  );
+}
+
+function ConnectionSelector() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const { activeConnection, connections } = useActiveConnection();
+  if (!activeConnection) return null;
+  const activeConnections = connections.filter((connection) => connection.status !== "DISCONNECTED");
+  const tone = activeConnection.status === "CONNECTED"
+    ? "ok"
+    : activeConnection.status === "UNREACHABLE" ? "bad" : "accent";
+  return (
+    <div className="connection-selector">
+      <label>
+        <span className="sr-only">Active connection</span>
+        <select
+          aria-label="Active connection"
+          value={activeConnection.id}
+          onChange={(event) => router.push(switchConnectionHref(pathname, searchParams.toString(), event.target.value))}
+        >
+          {activeConnections.map((connection) => (
+            <option key={connection.id} value={connection.id}>{connection.name} · {connection.status.toLowerCase()}</option>
+          ))}
+        </select>
+      </label>
+      <Badge tone={tone}>{activeConnection.status}</Badge>
+      <Link href="/connections/" aria-label="Manage connections">Manage</Link>
+    </div>
   );
 }
 
@@ -109,10 +141,21 @@ function TimeWindowControl() {
 
 function ShellContent({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const router = useRouter();
   const currentRoute = clusterRoutes.find((route) => pathname.startsWith(route.href)) ?? clusterRoutes[0];
-  const { data: summary, meta } = useConsoleResource("/summary", { window: "15m" });
-  const { intervalMs, setIntervalMs, paused, setPaused, lastUpdated, streamState } = useRefresh();
+  const {
+    connectionId,
+    summary: sharedSummary,
+    intervalMs,
+    setIntervalMs,
+    paused,
+    setPaused,
+    lastUpdated,
+    streamState,
+  } = useRefresh();
+  const summary = sharedSummary?.data;
+  const meta = sharedSummary?.meta;
   const [mobileOpen, setMobileOpen] = useState(false);
   useConsoleStream();
 
@@ -128,7 +171,7 @@ function ShellContent({ children }: { children: ReactNode }) {
     <div className="console-shell">
       <a className="skip-link" href="#console-main">Skip to main content</a>
       <aside className="console-sidebar">
-        <Brand />
+        <Brand href={hrefWithConnection("/overview", searchParams)} />
         <Navigation />
         <div className="sidebar-foot"><GitFork aria-hidden="true" size={12} /> Schema v1 · Read-only</div>
       </aside>
@@ -143,21 +186,22 @@ function ShellContent({ children }: { children: ReactNode }) {
                 open={mobileOpen}
                 onOpenChange={setMobileOpen}
               >
-                <Brand />
+                <Brand href={hrefWithConnection("/overview", searchParams)} />
                 <Navigation onNavigate={() => setMobileOpen(false)} />
               </Drawer>
             </div>
             <span>{currentRoute.title}</span>
           </div>
           <div className="topbar-actions">
-            <GlobalSearch />
-            <Link href="/events" className="alert-indicator" aria-label={`${summary?.active_alerts ?? "Unknown"} active alerts`}>
+            <ConnectionSelector />
+            <GlobalSearch key={connectionId ?? "none"} />
+            <Link href={hrefWithConnection("/events", searchParams)} className="alert-indicator" aria-label={`${summary?.active_alerts ?? "Unknown"} active alerts`}>
               <Bell aria-hidden="true" size={14} />
               <span>{summary?.active_alerts ?? "—"}</span>
             </Link>
             <Badge tone="system" className="environment-badge">{summary?.environment ?? "Environment unknown"}</Badge>
             <Badge tone={streamState === "LIVE" ? "ok" : streamState === "RECONNECTING" ? "accent" : "neutral"} className="stream-badge">
-              <span className="stream-dot" aria-hidden="true" />{streamState === "LIVE" ? "Data plane live" : streamState === "RECONNECTING" ? "Reconnecting" : streamState === "PAUSED" ? "Refresh paused" : "Connecting"}
+              <span className="stream-dot" aria-hidden="true" />{streamState === "LIVE" ? "Data plane live" : streamState === "RECONNECTING" ? "Reconnecting" : streamState === "PAUSED" ? "Refresh paused" : streamState === "STOPPED" ? "Connection unavailable" : "Connecting"}
             </Badge>
             <label className="refresh-interval">
               <span className="sr-only">Refresh interval</span>
@@ -186,12 +230,13 @@ function ShellContent({ children }: { children: ReactNode }) {
             {meta ? <SourceEvidence meta={meta} /> : null}
           </div>
         </div>
-        <main id="console-main" className="console-main" tabIndex={-1}>{children}</main>
+        <main key={connectionId ?? "none"} id="console-main" className="console-main" tabIndex={-1}>{children}</main>
       </div>
     </div>
   );
 }
 
 export function ConsoleShell({ children }: { children: ReactNode }) {
-  return <RefreshProvider><ShellContent>{children}</ShellContent></RefreshProvider>;
+  const { activeConnection } = useActiveConnection();
+  return <RefreshProvider connectionId={activeConnection?.id ?? null}><ShellContent>{children}</ShellContent></RefreshProvider>;
 }

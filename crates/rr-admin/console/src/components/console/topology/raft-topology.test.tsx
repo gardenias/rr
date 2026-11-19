@@ -28,7 +28,7 @@ const payload = {
 describe("RaftTopology", () => {
   it("draws only the selected group and exposes replication evidence on a keyboard-selectable edge", async () => {
     const user = userEvent.setup();
-    render(<RaftTopology data={payload} selectedGroupId={1} onSelectGroup={vi.fn()} timeWindow="15m" />);
+    render(<RaftTopology data={payload} selectedGroupId={1} onSelectGroup={vi.fn()} timeWindow="15m" connectionId="cluster-a" />);
 
     expect(screen.getByRole("group", { name: "Raft topology graph for group 1" })).toBeVisible();
     expect(screen.queryByRole("group", { name: "Raft topology graph for group 2" })).not.toBeInTheDocument();
@@ -42,7 +42,7 @@ describe("RaftTopology", () => {
     expect(screen.getByRole("table", { name: "Raft topology for group 1" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Inspect group 1" })).toHaveAttribute(
       "href",
-      "/groups?window=15m&group_id=1",
+      "/groups?window=15m&group_id=1&connection=cluster-a",
     );
   });
 

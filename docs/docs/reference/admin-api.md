@@ -25,22 +25,27 @@ The complete service and message definitions live in `crates/rr-network/proto/ad
 
 ## Cluster Admin Console 访问 / Cluster Admin Console Access
 
-`rr-admin console` 是同一 `rr-admin` 二进制中的只读 BFF，也是 `AdminService` 的 gRPC 客户端。BFF 使用
-TLS/mTLS 和 Admin token（生产环境按节点配置）读取节点状态与拓扑，节点 Admin token 只保留在 BFF 内。本地明文
-无认证模式仍受支持。浏览器不直接访问节点 Admin gRPC，而是通过同源的版本化 `/api/v1/console` JSON 端点和
-`/api/v1/console/stream` SSE 获取数据。
-`rr-admin console` is a read-only BFF in the same `rr-admin` binary and a gRPC client of `AdminService`. In production,
-the BFF uses TLS/mTLS and an Admin token as required by the nodes to read node state and topology; node Admin tokens
-remain inside the BFF. Local plaintext, unauthenticated mode is still supported. Browsers do not access node Admin gRPC
-directly. They use the same-origin, versioned `/api/v1/console` JSON endpoints and `/api/v1/console/stream` SSE instead.
+`rr-admin console` 是同一 `rr-admin` 二进制中的只读 BFF，也是 `AdminService` 的 gRPC 客户端。无 peers/discovery
+启动时它不连接节点；operator 在 `/connections/` 保存并显式连接后，每个 runtime 使用自己的 TLS/mTLS、Admin token、
+调度和缓存。浏览器不直接访问节点 Admin gRPC：控制面使用 `/api/v1/console/connections`，集群 JSON/SSE 使用
+`/api/v1/console/connections/{id}/...`，其中 stream 为 `/api/v1/console/connections/{id}/stream`。
+本地明文无认证模式仍受支持，节点 Admin token 只保留在 BFF 内。
+`rr-admin console` is a read-only BFF in the same `rr-admin` binary and a gRPC client of `AdminService`. Starting without
+peers/discovery contacts no node; after an operator saves and explicitly connects through `/connections/`, each runtime
+uses its own TLS/mTLS, Admin token, scheduler, and cache. Browsers never access node Admin gRPC directly. The control API
+uses `/api/v1/console/connections`, while cluster JSON/SSE uses `/api/v1/console/connections/{id}/...`, including
+`/api/v1/console/connections/{id}/stream`. Local plaintext unauthenticated mode remains supported, and node Admin tokens
+stay inside the BFF.
 
 Console 不调用 `TriggerSnapshot`、`TransferLeader`、membership 或 `DrainNode` 等写 RPC；
-`POST /api/v1/console/sources/reconcile` 也只刷新只读采集。Admin 写 RPC 仍由 `rr-admin` CLI 或其他受权客户端
-执行。启动、安全和能力降级详见 [Cluster Admin Console](../operations/cluster-admin-console.md)。
+`POST /api/v1/console/connections/{id}/sources/reconcile` 也只刷新该连接的只读采集。旧无作用域路由只绑定 legacy
+临时启动连接，无该连接时返回 `CONNECTION_REQUIRED`，不会任意选择已保存集群。Admin 写 RPC 仍由 `rr-admin` CLI
+或其他受权客户端执行。完整连接 CRUD、错误和 OpenAPI 位置见 [Cluster Admin Console](../operations/cluster-admin-console.md)。
 The Console does not call write RPCs such as `TriggerSnapshot`, `TransferLeader`, membership changes, or `DrainNode`;
-`POST /api/v1/console/sources/reconcile` only refreshes read-only collection. Admin write RPCs remain the responsibility
-of the `rr-admin` CLI or other authorized clients. See [Cluster Admin Console](../operations/cluster-admin-console.md)
-for startup, security, and capability degradation.
+`POST /api/v1/console/connections/{id}/sources/reconcile` only refreshes that connection's read-only collection. Legacy
+unscoped routes bind only to the ephemeral startup connection and return `CONNECTION_REQUIRED` without it, never choosing
+an arbitrary saved cluster. Admin write RPCs remain with the `rr-admin` CLI or other authorized clients. See
+[Cluster Admin Console](../operations/cluster-admin-console.md) for connection CRUD, errors, and the OpenAPI location.
 
 ## RPC 方法 / RPC Methods
 
@@ -49,9 +54,9 @@ for startup, security, and capability degradation.
 返回节点 ID、监听地址、本地全部 Raft 组 ID 和运行时间。
 Returns the node ID, listen address, local Raft group IDs, and uptime.
 
-**请求 / Request**：`Empty {}`
+请求 / Request：`Empty {}`
 
-**响应字段 / Response fields**：
+响应字段 / Response fields：
 
 | 字段 / Field | 类型 / Type | 描述 / Description |
 | :--- | :--- | :--- |
@@ -70,9 +75,9 @@ rr-admin --output json node status
 返回单个 Raft 组的 Leader 状态、任期、最后日志索引和已知 Leader ID。
 Returns leadership state, current term, last log index, and the known leader ID for one Raft group.
 
-**请求 / Request**：`GroupId { group_id: uint64 }`
+请求 / Request：`GroupId { group_id: uint64 }`
 
-**响应字段 / Response fields**：
+响应字段 / Response fields：
 
 | 字段 / Field | 类型 / Type | 描述 / Description |
 | :--- | :--- | :--- |
@@ -96,7 +101,7 @@ Manually triggers snapshotting and log compaction for a Raft group without inter
 Success returns `Empty`; failures are gRPC status errors. There are no `success` or `message` response
 fields.
 
-**请求 / Request**：`GroupId { group_id: uint64 }`
+请求 / Request：`GroupId { group_id: uint64 }`
 
 ```bash
 rr-admin group snapshot --group 1

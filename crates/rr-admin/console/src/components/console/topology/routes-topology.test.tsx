@@ -13,7 +13,7 @@ const payload = {
 
 describe("RoutesTopology", () => {
   it("shows expected routes, actual leaders, revisions, and degraded route states", () => {
-    render(<RoutesTopology data={payload} timeWindow="15m" />);
+    render(<RoutesTopology data={payload} timeWindow="15m" connectionId="cluster-a" />);
 
     expect(screen.getByRole("table", { name: "Partition and route topology" })).toBeVisible();
     expect(screen.getByText("Stale route")).toBeVisible();
@@ -21,11 +21,11 @@ describe("RoutesTopology", () => {
     expect(screen.getByText("Revision 41")).toBeVisible();
     expect(screen.getByRole("link", { name: "Group 1" })).toHaveAttribute(
       "href",
-      "/groups?window=15m&group_id=1",
+      "/groups?window=15m&group_id=1&connection=cluster-a",
     );
     expect(screen.getByRole("link", { name: "Partition 10" })).toHaveAttribute(
       "href",
-      "/topology?window=15m&view=routes&filter=partition-10",
+      "/topology?window=15m&filter=partition-10&view=routes&connection=cluster-a",
     );
   });
 
