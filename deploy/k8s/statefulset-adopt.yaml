@@ -6,9 +6,8 @@
 #          kubectl apply -f deploy/k8s/cluster-form-job.yaml
 #          kubectl wait --for=condition=complete job/rr-cluster-form --timeout=300s
 #
-# IMAGE OVERRIDE REQUIRED: rr 0.2.0 rejects the managed formation fields below.
-# Replace REPLACE_WITH_FORMATION_CAPABLE_TAG in this file and cluster-form-job.yaml
-# with an image tag that contains managed formation support before applying.
+# The pinned v1.0.0 image supports the managed formation fields below.
+# Override image tags only with another formation-capable release; rr 0.2.0 is incompatible.
 #
 # DEFAULT = SECURE-ON. rr-server runs startup security gates
 # (validate_security_invariants in crates/rr-server/src/node.rs): five gates
@@ -196,8 +195,8 @@ spec:
               mountPath: /rendered
       containers:
         - name: rr-server
-          # Mandatory override: pin a formation-capable image, never `latest`.
-          image: ghcr.io/gardenias/rr:REPLACE_WITH_FORMATION_CAPABLE_TAG
+          # Pinned formation-capable release; override deliberately, never `latest`.
+          image: ghcr.io/gardenias/rr:1.0.0
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

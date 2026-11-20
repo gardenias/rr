@@ -61,8 +61,9 @@ numbers are never reused.
 - **pre-1.0 minor 混合**（如 `0.2.x` + `0.3.x`）：不支持，请一次性升级整个集群。
   **Pre-1.0 minor mixing** (for example `0.2.x` + `0.3.x`) is not supported; upgrade the whole cluster
   together.
-- **1.0 之后**：minor 混合将被显式支持并记录在 CHANGELOG。
-  **After 1.0**, supported minor-version mixing will be stated explicitly in the CHANGELOG.
+- **1.0 起**：遵循标准 MAJOR/MINOR/PATCH 语义；具体 minor 混合支持范围记录在 CHANGELOG。
+  **Starting at 1.0**, standard MAJOR/MINOR/PATCH semantics apply; the supported scope of minor-version mixing is
+  stated explicitly in the CHANGELOG.
 
 ### 3. 磁盘格式 / On-Disk Format (RocksDB Schema)
 
@@ -169,12 +170,13 @@ rollout is impossible, bump the version so old nodes reject the format loudly.
 | `PersistentSnapshot` (`sm-snapshot.bin`, T1) | `rr-raft/src/snapshot_store.rs` | `\0rrPST01` | `version = 1` | 无 legacy 回退；旧裸 bincode fail-closed 拒启 / No legacy fallback; old raw bincode fails closed at startup |
 | 成员 sidecar / Membership sidecar (`sm-membership.bin`, A-0016) | `rr-raft/src/sm_adapter.rs` | `\0rrMBR01` | `version = 1` | 旧文件 warn 后从空启动，刻意 fail-open / Old `sm-membership.bin` files warn and start empty, deliberately fail-open |
 
-2026-09-23 格式升级未保留 legacy 兼容代码。0.2.x `sm-snapshot.bin` 会 fail-closed 启动失败，错误信息
-指引删除后从 Leader 重建；`sm-membership.bin` 会 warn 后从空启动，再由 Raft 日志回放或快照恢复成员。
-The 2026-09-23 format upgrade intentionally retained no legacy compatibility code. A 0.2.x
-`sm-snapshot.bin` fails closed at startup, with recovery instructions to delete it and rebuild from the
-leader. A 0.2.x `sm-membership.bin` is skipped with a warning and membership is rebuilt from the Raft log
-or snapshot.
+2026-09-23 格式升级未保留 legacy 兼容代码。正式 v0.2.0 不生成这些 sidecar；只有其后的 interim builds 可能
+带有旧裸文件。interim `sm-snapshot.bin` 会 fail-closed 启动失败，`sm-membership.bin` 会 warn 后从空启动并重建。
+这类部署需要按实际 commit 制定恢复手册，不要把通用恢复步骤当作正式 v0.2.0 的迁移流程。
+The 2026-09-23 format upgrade intentionally retained no legacy compatibility code. Released v0.2.0 does not create
+these sidecars; only later interim builds may contain legacy raw files. An interim `sm-snapshot.bin` fails closed at
+startup, while `sm-membership.bin` is skipped with a warning and rebuilt. Such deployments require a runbook for their
+actual commit; these generic recovery notes are not a released-v0.2.0 migration procedure.
 
 ## 最低支持 Rust 版本 / Minimum Supported Rust Version (MSRV)
 
@@ -197,10 +199,11 @@ The current MSRV is Rust `1.98`, set by `rust-version` in the workspace `Cargo.t
 3. **删除**：在下一个 MAJOR 删除，并记录在 CHANGELOG `Removed`。<br />
    **Remove**: Remove it in the next MAJOR and record it under CHANGELOG `Removed`.
 
-pre-1.0 下“下一个 MAJOR”指下一个破坏性 MINOR。例如 v0.2.0 弃用的 API 可在 v0.3.0 删除，
-`DurabilityPolicy::Balanced`/`Fast` 即为例。
-Under pre-1.0 semantics, “next MAJOR” means the next breaking MINOR. For example, an API deprecated in
-v0.2.0 may be removed in v0.3.0, as happened with `DurabilityPolicy::Balanced`/`Fast`.
+pre-1.0 下“下一个 MAJOR”指下一个破坏性 MINOR。例如 v0.2.0 弃用的
+`DurabilityPolicy::Balanced`/`Fast` 已在实际发布 v1.0.0 时删除（跳过了原计划的 v0.3.0 版本号）。
+Under pre-1.0 semantics, “next MAJOR” meant the next breaking MINOR. For example,
+`DurabilityPolicy::Balanced`/`Fast` were deprecated in v0.2.0 and removed in the actual v1.0.0 release, skipping the
+originally planned v0.3.0 version number.
 
 ## 支持政策 / Support Policy
 

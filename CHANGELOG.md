@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-11-20
+
+First stable major release. It establishes the post-1.0 compatibility contract and includes durable Raft logs and
+snapshots, homogeneous cluster formation, bounded decoding and other security hardening, opt-in client batching,
+multi-group operation, the Java SDK, and the independent multi-cluster Admin Console. See
+[`release-notes/v1.0.0.md`](./release-notes/v1.0.0.md) for the release narrative and
+[`docs/docs/deployment/v0.2-to-v1.0-migration.md`](./docs/docs/deployment/v0.2-to-v1.0-migration.md) for upgrade steps.
+Compare view: [`v0.2.0...v1.0.0`](https://github.com/gardenias/rr/compare/v0.2.0...v1.0.0).
+
+### Added — 2026-11-20 local full-observation workflow
+
+- `kv-store` accepts explicit client/Admin/observability descriptor addresses, environment and placement metadata, an
+  application version, and a persistent boot-journal directory. New `just kv-console-cluster-up` /
+  `kv-console-cluster-down` recipes manage a Genesis + Rocks three-node cluster with per-node metrics and a seeded
+  Console; `just console-up` / `console-down` manage a standalone local Console.
+
+### Fixed — 2026-11-20 Java protobuf generation
+
+- Renamed the Admin protocol's `NodeDescriptorResponse.descriptor` and `NodeDirectoryEntry.descriptor` fields to
+  `node_descriptor`, retaining field number 1 and wire compatibility. This avoids protobuf Java's generated
+  `getDescriptor()` collision and restores a clean Java SDK build. Rust callers using the generated fields must use
+  `node_descriptor`; see the v0.2 → v1.0 migration guide.
+- Helm and raw Kubernetes adoption Jobs now pass `--token-env RR_ADMIN_TOKEN` to every Admin call when the injected
+  token is present, fixing convergence under the default secure configuration without changing token-free insecure
+  local flows.
+
 ### Added — 2026-11-19 multi-cluster Console client
 
 - **Independent multi-connection Console.** `rr-admin console --listen ...` starts without peers, discovery,
@@ -183,7 +209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — 2026-11-04 decision records & release hygiene (review D-3/F-1/F-2)
 - **ADR A-0019 (G2 rulings)**: the `BatchConfig::ordered` knob is deferred to
-  the v0.3.0 kickoff (opt-out of cross-batch ordering needs an interaction
+  a post-1.0 review (opt-out of cross-batch ordering needs an interaction
   analysis with deferred services first; batch64+fanout4 already measured
   121.2k TPS without weakening semantics); the post-fanout multi-group retest
   is folded into the D-1 re-baseline; "single-group 100k" stays an
@@ -382,7 +408,7 @@ day, earlier section). All items below were P2-level unless noted.
   renames; rocks-gated integration tests now carry a prominent "how to run"
   note in the crate docs.
 
-### Deprecated — 2026-10-21 (0.3.0 breaking window)
+### Deprecated — 2026-10-21 (1.0.0 breaking window)
 
 - **`rr_core::codec::Codec` / `BincodeCodec`**: unbounded bincode decode on
   untrusted bytes is an OOM risk; the framework's own decode paths all go
@@ -785,7 +811,7 @@ and REPL/admin-port notes.
 ### Changed — 2026-09-23 full-review batch
 
 - **`DurabilityPolicy` deprecated aliases removed** (`Balanced` / `Fast`)
-  on schedule for the v0.3.0 breaking window — use `ReplicatedOnly` /
+  on schedule for the v1.0.0 breaking window — use `ReplicatedOnly` /
   `TestOnly`.
 - **`MemConfigProvider` semantics**: `remove_node` strips dangling group
   replicas (warn), `add_partition` with conflicting replicas overwrites
@@ -1876,7 +1902,8 @@ Phase 2 established the core distributed framework capabilities. Not published t
 - No distributed tracing (W3C traceparent propagation).
 - Not published to crates.io.
 
-[Unreleased]: https://github.com/gardenias/rr/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/gardenias/rr/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/gardenias/rr/releases/tag/v1.0.0
 [0.2.0]: https://github.com/gardenias/rr/releases/tag/v0.2.0
 [0.2.0-rc2]: https://github.com/gardenias/rr/releases/tag/v0.2.0-rc2
 [0.1.0]: https://github.com/gardenias/rr/releases/tag/v0.1.0

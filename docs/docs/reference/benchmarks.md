@@ -37,7 +37,7 @@ to these real-gRPC results.
 | 操作系统 / OS | macOS 26.6.1 |
 | 工具链 / Toolchain | rustc 1.98.1, `--release` |
 | 拓扑 / Topology | 单机 loopback；1/3/5 个 `rr-server` 进程 / Single-machine loopback; 1/3/5 `rr-server` processes |
-| 存储 / Storage | `MemStorage`；内存 Raft 日志。stock 二进制自 v0.3.0 起支持 `--storage rocks`（ADR A-0016） / `MemStorage`; in-memory Raft log. Stock binaries also support `--storage rocks` since v0.3.0 (ADR A-0016) |
+| 存储 / Storage | `MemStorage`；内存 Raft 日志。stock 二进制自 v1.0.0 起支持 `--storage rocks`（ADR A-0016） / `MemStorage`; in-memory Raft log. Stock binaries also support `--storage rocks` since v1.0.0 (ADR A-0016) |
 | 负载 / Load | 128B（默认）或 1KiB payload；5s 预热 + 20s 计量，短窗口复测另标 / 128B default or 1KiB payload; 5s warmup + 20s measurement unless noted |
 
 ## 场景 / Scenarios

@@ -1,6 +1,6 @@
 {{- if .Values.cluster.formation -}}
 {{- if or (not .Values.image.tag) (eq .Values.image.tag "0.2.0") -}}
-{{- fail "rr chart: managed formation requires an explicit compatible image; explicitly set image.tag to a formation-capable image (rr 0.2.0 rejects [cluster.formation] fields)" -}}
+{{- fail "rr chart: managed formation requires a compatible image; use the default 1.0.0 tag or another formation-capable image (rr 0.2.0 rejects [cluster.formation] fields)" -}}
 {{- end -}}
 {{- end -}}
 {{- /*

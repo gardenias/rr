@@ -1,7 +1,7 @@
 # rr-client-java — 响应式使用手册 / Reactive Usage Guide
 
-> 面向 `io.github.gardenias:rr-client` `0.2.0+`。
-> Targets `io.github.gardenias:rr-client` `0.2.0+`.
+> 面向 `io.github.gardenias:rr-client` `1.0.0+`。
+> Targets `io.github.gardenias:rr-client` `1.0.0+`.
 
 本手册介绍如何用 `RrClient` 的**响应式 / 非阻塞**接口发起请求并处理返回。所有响应式方法立即返回 `CompletableFuture<T>`，底层 I/O 由 gRPC + Netty 事件循环驱动，等待响应期间**不占用线程**。
 

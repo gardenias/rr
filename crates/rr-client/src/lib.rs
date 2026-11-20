@@ -403,7 +403,7 @@ impl RrClient {
 
     /// Returns a reference to the channel pool.
     #[deprecated(
-        since = "0.3.0",
+        since = "1.0.0",
         note = "dead API: dialing goes through the client's internal per-addr channel \
                 cache and this pool is never read; the getter will be removed in a \
                 future release"

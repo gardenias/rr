@@ -14,7 +14,7 @@ Features:
 
 ## Install
 
-Gradle (GitHub Packages):
+Gradle (GitHub Packages, when the version has been published; otherwise use `just java-publish-local` and Maven Local):
 
 ```kotlin
 repositories {
@@ -28,7 +28,7 @@ repositories {
 }
 
 dependencies {
-    implementation("io.github.gardenias:rr-client:0.2.0")
+    implementation("io.github.gardenias:rr-client:1.0.0")
 }
 ```
 

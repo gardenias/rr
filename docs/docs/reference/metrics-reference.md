@@ -134,7 +134,7 @@ Etcd prefix-fingerprint probe seconds for revision-cache validation.
 
 - **标签 / Labels**：—
 - **位置 / Recorded in**：`rr-config-etcd/src/lib.rs` `probe_revision()`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_formation_duration_seconds`
 
@@ -144,7 +144,7 @@ time.
 
 - **标签 / Labels**：—
 - **位置 / Recorded in**：`rr-server/src/formation.rs` `FormationSupervisor::reconcile()`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_snapshot_transfer_duration_seconds`
 
@@ -155,7 +155,7 @@ restore and includes startup rebuilds from the local SnapshotStore, matching `rr
 
 - **标签 / Labels**：`direction` (`send` | `recv`), `group_id`
 - **位置 / Recorded in**：`send`: `rr-raft/src/network_factory.rs` `full_snapshot()`; `recv`: `rr-raft/src/sm_adapter.rs` `install_snapshot()`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 ### 仪表盘 / Gauges
 
@@ -233,7 +233,7 @@ overflow.
 
 - **标签 / Labels**：`group_id`
 - **位置 / Recorded in**：`rr-raft/src/sm_adapter.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_formation_state`
 
@@ -244,7 +244,7 @@ and updated on Forming→Active.
 
 - **标签 / Labels**：`group_id`
 - **位置 / Recorded in**：`rr-server/src/formation.rs` `FormationSupervisor`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 ### 计数器 / Counters
 
@@ -265,7 +265,7 @@ successfully installed payload, including startup rebuilds, matching `rr_snapsho
 
 - **标签 / Labels**：`direction` (`send` | `recv`), `group_id`
 - **位置 / Recorded in**：`send`: `rr-raft/src/network_factory.rs` `full_snapshot()`; `recv`: `rr-raft/src/sm_adapter.rs` `install_snapshot()`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_formation_cas_total`
 
@@ -277,7 +277,7 @@ seeds/rosters or a partitioned store.
 - **标签 / Labels**：`result` (`applied` | `conflict`)
 - **位置 / Recorded in**：`rr-server/src/formation.rs` 的 `create_if_absent` 和 `compare_and_swap` 调用点 /
   `create_if_absent` and `compare_and_swap` call sites in `rr-server/src/formation.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_admin_membership_changes_total` / `rr_admin_transfer_leader_total` / `rr_admin_snapshot_trigger_total`
 
@@ -289,7 +289,7 @@ Exactly one outcome per Admin RPC, including validation/precondition errors. Mem
 - **标签 / Labels**：membership 为 `op`, `result`；其余两个为 `result` / Membership has `op` and
   `result`; the other two have `result`
 - **位置 / Recorded in**：`rr-server/src/admin.rs` RPC wrappers
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_channel_reconnects_total`
 
@@ -406,7 +406,7 @@ outcome and an audit warning.
 
 - **标签 / Labels**：`group_id`
 - **位置 / Recorded in**：`rr-raft/src/service_adapter.rs` `apply_keyed()`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_learner_promotions_total` / `rr_learner_promotion_failures_total`
 
@@ -469,7 +469,7 @@ and needs operator attention.
 
 - **标签 / Labels**：`group_id`
 - **位置 / Recorded in**：`rr-raft/src/ingestor_runner.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_output_send_total` / `rr_output_send_failures_total`
 
@@ -490,7 +490,7 @@ error its client. Nonzero indicates a Service implementation bug.
 - **标签 / Labels**：—；组上下文见 `rr_raft_pending_deferred` / No labels; see `rr_raft_pending_deferred`
   for per-group depth
 - **位置 / Recorded in**：`rr-raft/src/sm_adapter.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_deferred_pending_via_non_deferred_total`
 
@@ -504,7 +504,7 @@ wrong-path defense.
 
 - **标签 / Labels**：—
 - **位置 / Recorded in**：`rr-core/src/deferred.rs` `DeferredApply::into_response()`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_storage_wal_flush_errors_total`
 
@@ -514,7 +514,7 @@ failure.
 
 - **标签 / Labels**：—
 - **位置 / Recorded in**：`rr-storage/src/rocks.rs` group-commit task
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_config_mem_watch_lagged_total`
 
@@ -524,7 +524,7 @@ instead.
 
 - **标签 / Labels**：—
 - **位置 / Recorded in**：`rr-config/src/mem.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_config_etcd_watch_reconnects_total{domain}` / `rr_config_etcd_watch_events_total{domain}` / `rr_config_etcd_watch_compactions_total`
 
@@ -534,7 +534,7 @@ nodes/partitions/groups.
 
 - **标签 / Labels**：仅前两个有 `domain` / Only the first two have `domain`
 - **位置 / Recorded in**：`rr-config-etcd/src/lib.rs` watch loop
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_config_etcd_stale_serves_total` / `rr_config_etcd_cache_hits_total` / `rr_config_etcd_cache_misses_total` / `rr_config_etcd_rescans_total` / `rr_config_etcd_bad_keys_total` / `rr_config_etcd_fabricated_groups_total`
 
@@ -545,7 +545,7 @@ keys, and fabricated empty groups when replicas are missing; all are logged.
 
 - **标签 / Labels**：—
 - **位置 / Recorded in**：`rr-config-etcd/src/lib.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 ### 节点资源 / Node Resources
 
@@ -565,7 +565,7 @@ all host cores; `host` is whole-host utilization from 0.0 to 1.0. The scopes are
 - **类型 / Type**：Gauge
 - **标签 / Labels**：`scope` (`process` | `host`)
 - **位置 / Recorded in**：`rr-server/src/resources.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_node_cpu_cores`
 
@@ -575,7 +575,7 @@ Logical CPU cores visible on the host; this is neither process usage nor the cgr
 - **类型 / Type**：Gauge
 - **标签 / Labels**：`scope` (`host`)
 - **位置 / Recorded in**：`rr-server/src/resources.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_node_cpu_limit_cores`
 
@@ -586,7 +586,7 @@ unreadable.
 - **类型 / Type**：Gauge
 - **标签 / Labels**：`scope` (`cgroup`)
 - **位置 / Recorded in**：`rr-server/src/resources.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_node_memory_bytes`
 
@@ -598,7 +598,7 @@ unavailable cgroup values are omitted. Compare usage and limits only within the 
 - **类型 / Type**：Gauge
 - **标签 / Labels**：`scope` (`process` | `host` | `cgroup`), `kind` (`used` | `total` | `limit`)
 - **位置 / Recorded in**：`rr-server/src/resources.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_node_network_bytes_total`
 
@@ -611,7 +611,7 @@ includes the interfaces' existing totals and is not process-lifetime traffic.
 - **类型 / Type**：Counter
 - **标签 / Labels**：`scope` (`host`), `kind` (`rx` | `tx`)
 - **位置 / Recorded in**：`rr-server/src/resources.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 #### `rr_node_filesystem_bytes`
 
@@ -622,7 +622,7 @@ cannot be attributed to individual groups.
 - **类型 / Type**：Gauge
 - **标签 / Labels**：`scope` (`host`), `kind` (`total` | `used`), `mount`
 - **位置 / Recorded in**：`rr-server/src/resources.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 ## 客户端指标 / Client-Side Metrics
 
@@ -669,7 +669,7 @@ listed `trigger` and `limit` values.
 - **标签 / Labels**：flush 为 `partition_id` + `trigger`；rejected 仅 `limit`，无 `partition_id` /
   Flush has `partition_id` and `trigger`; rejected has only `limit` and no `partition_id`
 - **位置 / Recorded in**：`rr-client/src/batch.rs`
-- **版本 / Since**：未发布 / Unreleased (v0.3.0)
+- **版本 / Since**：v1.0.0
 
 ## 写链路延迟证据 / Write-Path Latency Evidence
 

@@ -10,7 +10,7 @@ use crate::error::CodecError;
 ///
 /// # Deprecation
 ///
-/// Deprecated in the 0.3.0 breaking window: [`Codec::decode`] is UNBOUNDED —
+/// Deprecated in the 1.0.0 breaking window: [`Codec::decode`] is UNBOUNDED —
 /// it trusts the input's length prefixes. Never use it on untrusted bytes
 /// (network input, on-disk frames from other parties): a corrupt length
 /// claim can exhaust memory before bincode notices. The framework's own
@@ -33,7 +33,7 @@ pub struct BincodeCodec;
 
 // Zero workspace consumers of these items remain (verified by workspace-wide
 // grep); the impl is kept for the deprecated public surface and exercised
-// only by this module's tests until removal in 0.3.0.
+// only by this module's tests until removal in a future MAJOR.
 #[allow(deprecated)]
 impl Codec for BincodeCodec {
     fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CodecError> {
@@ -51,7 +51,7 @@ impl Codec for BincodeCodec {
 #[cfg(test)]
 mod tests {
     // These tests intentionally pin the legacy unbounded codec's behavior
-    // until the deprecated items are removed in the 0.3.0 breaking window.
+    // until the deprecated items are removed in a future MAJOR.
     // Production wire paths decode through bounded_decode / frame codecs.
     #![allow(deprecated)]
 

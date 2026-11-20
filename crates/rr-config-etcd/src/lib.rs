@@ -278,7 +278,7 @@ fn parse_watch_event(raw: RawWatchEvent) -> Result<RoutingTableChange, ConfigErr
             // A deleted replicas key maps to an empty membership: there is
             // no dedicated `GroupRemoved` variant in `RoutingTableChange`,
             // and adding one would be a breaking change to rr-core (deferred
-            // to the v0.3.0 breaking window). Consumers must treat an empty
+            // to the v1.0.0 breaking window). Consumers must treat an empty
             // replica set as "group gone".
             RawEventType::Delete => Ok(RoutingTableChange::GroupMembershipChanged {
                 group_id,

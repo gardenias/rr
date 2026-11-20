@@ -922,7 +922,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "counter"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "crash-tests"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "etcd-config-quickstart"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "rr-config-etcd",
  "tokio",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "integration"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "kv-store"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "kv-store-kafka"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2971,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "otel-client"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "opentelemetry",
@@ -3964,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "rr-admin"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "rr-benches"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
@@ -4035,7 +4035,7 @@ dependencies = [
 
 [[package]]
 name = "rr-client"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "metrics",
@@ -4049,7 +4049,7 @@ dependencies = [
 
 [[package]]
 name = "rr-config"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -4062,7 +4062,7 @@ dependencies = [
 
 [[package]]
 name = "rr-config-etcd"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "etcd-client",
@@ -4081,7 +4081,7 @@ dependencies = [
 
 [[package]]
 name = "rr-core"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
@@ -4099,7 +4099,7 @@ dependencies = [
 
 [[package]]
 name = "rr-ingestor-kafka"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
@@ -4117,7 +4117,7 @@ dependencies = [
 
 [[package]]
 name = "rr-lab-producer"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -4132,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "rr-network"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4153,7 +4153,7 @@ dependencies = [
 
 [[package]]
 name = "rr-perf-bench"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bincode 2.0.1",
@@ -4173,7 +4173,7 @@ dependencies = [
 
 [[package]]
 name = "rr-raft"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
@@ -4202,7 +4202,7 @@ dependencies = [
 
 [[package]]
 name = "rr-router"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "metrics",
  "proptest",
@@ -4214,7 +4214,7 @@ dependencies = [
 
 [[package]]
 name = "rr-server"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4255,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "rr-storage"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "metrics",

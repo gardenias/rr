@@ -97,10 +97,10 @@ p50 2.0ms, about 24% headroom over a 50k target. Cost: three machines.
 ### 100k 级：批处理加扇出 / Around 100k TPS: Batching plus Fanout
 
 三节点单组，使用 `with_batching(batch64, linger 1ms)` + `with_channel_fanout(4)`。实测 169.3k TPS（rocks-strict），p50
-900µs / p99 1.5ms。需要 v0.3.0+；v0.2.x 没有该批处理 API，发布后仍默认关闭。
+900µs / p99 1.5ms。需要 v1.0.0+；v0.2.x 没有该批处理 API，发布后仍默认关闭。
 
 Use one three-node group with `with_batching(batch64, linger 1ms)` + `with_channel_fanout(4)`. Measured throughput is
-169.3k TPS on rocks-strict, p50 900µs / p99 1.5ms. This requires v0.3.0+; v0.2.x has no batching API, and it remains
+169.3k TPS on rocks-strict, p50 900µs / p99 1.5ms. This requires v1.0.0+; v0.2.x has no batching API, and it remains
 opt-in after release.
 
 只用于按业务键天然幂等的 unkeyed 写，批次重试可能重复应用。需要恰好一次语义的写必须使用绕过批处理的
@@ -165,7 +165,7 @@ Kafka `acks=all` roughly matches `replicated_only`, not `strict`, in durability 
 
 | 开关 / Knob | 作用 / Effect | 限制 / Limits |
 | :--- | :--- | :--- |
-| `with_batching(BatchConfig)` | 多写合并为一条 Raft entry / Combines writes into one Raft entry | 仅 Rust；v0.3.0+；unkeyed 重试可重复；deferred 不兼容；keyed 写绕过 / Rust only; v0.3.0+; unkeyed retries may duplicate; incompatible with deferred; keyed writes bypass |
+| `with_batching(BatchConfig)` | 多写合并为一条 Raft entry / Combines writes into one Raft entry | 仅 Rust；v1.0.0+；unkeyed 重试可重复；deferred 不兼容；keyed 写绕过 / Rust only; v1.0.0+; unkeyed retries may duplicate; incompatible with deferred; keyed writes bypass |
 | `with_channel_fanout(N)` | 每地址 N 条 h2 连接轮询 / Round-robins N h2 connections per address | 仅 Rust；默认 1；N=4 后收益亚线性 / Rust only; default 1; sublinear gains beyond N=4 |
 | `--grpc-max-concurrent-streams` | 配合扇出的 h2 调参 / HTTP/2 tuning for fanout | 服务端 CLI/TOML / Server CLI/TOML |
 | `--grpc-max-frame-size` | h2 帧大小 / HTTP/2 frame size | 框架校验 `≤ MAX_ENTRY_BODY` / Validated against `MAX_ENTRY_BODY` |

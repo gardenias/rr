@@ -1,6 +1,6 @@
 //! Framed snapshot envelope used by `ServiceStateMachineAdapter`.
 //!
-//! From v0.3.0 onward, [`crate::service::Service`]-based state machines no
+//! From v1.0.0 onward, [`crate::service::Service`]-based state machines no
 //! longer write a user's raw [`crate::service::Service::snapshot`] bytes
 //! directly to the Raft snapshot. Instead, the framework wraps user bytes in
 //! a [`FramedSnapshot`] envelope that also carries framework-owned state

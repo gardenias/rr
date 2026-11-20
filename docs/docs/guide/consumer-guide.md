@@ -37,20 +37,25 @@ edition = "2021"
 rust-version = "1.98"
 
 [workspace.dependencies]
-rr-core = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
-rr-server = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
-rr-client = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
-rr-raft = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
-rr-config = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
-rr-storage = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
-rr-network = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
-rr-router = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v0.2.0" }
+rr-core = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
+rr-server = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
+rr-client = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
+rr-raft = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
+rr-config = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
+rr-storage = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
+rr-network = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
+rr-router = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
 
 openraft = { version = "=0.10.0-alpha.34", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2.0.0", features = ["serde"] }
 async-trait = "0.1"
+
+# Rr workspace 的 [patch] 不会传递给下游；必须显式使用同 tag 的 vendored openraft。
+# Rr's workspace patch is not transitive; select the vendored openraft explicitly.
+[patch.crates-io]
+openraft = { git = "ssh://git@github.com/gardenias/rr.git", tag = "v1.0.0" }
 ```
 
 按角色选择依赖：
@@ -99,6 +104,13 @@ This guide does not imply that the crates are currently publishable; check crate
 
 Rr 的公共 API 暴露 openraft、tokio、bincode 等类型。业务项目必须与 Rr workspace 对齐这些版本，否则同名类型会来自不同 crate 版本并报 `mismatched types`。
 Rr exposes openraft, tokio, bincode, and other types in public APIs. Align them with the Rr workspace or Cargo will report mismatched types from different crate versions.
+
+仅添加 Rr 的 git 依赖不会传递根仓库的 `[patch.crates-io]`。如果省略上面的 openraft patch，下游会解析到未修补的
+crates.io 包。用 `cargo tree -i openraft` 确认唯一来源是所选 Rr tag，再继续构建。
+
+Rr git dependencies alone do not propagate the root repository's `[patch.crates-io]`. Without the openraft patch above,
+downstream builds resolve the unpatched crates.io package. Run `cargo tree -i openraft` and confirm that its only source
+is the selected Rr tag before building.
 
 **Rocks 特性 / Rocks feature**
 

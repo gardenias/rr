@@ -3606,7 +3606,7 @@ mod tests {
             let nodes = [1, 2]
                 .into_iter()
                 .map(|node_id| rr_network::proto::admin::NodeDirectoryEntry {
-                    descriptor: Some(rr_network::proto::admin::NodeDescriptor {
+                    node_descriptor: Some(rr_network::proto::admin::NodeDescriptor {
                         node_id,
                         client_addr: format!("127.0.0.1:5100{node_id}"),
                         admin_addr: format!("127.0.0.1:5200{node_id}"),

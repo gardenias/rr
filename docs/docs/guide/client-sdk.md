@@ -64,9 +64,11 @@ println!("Groups: {:?}", cluster_info.groups);
 
 ## 客户端写批处理 / Client Write Batching
 
-:::warning 未发布特性 / Unreleased Feature
-该 API 不在 v0.2.x 中，计划随 v0.3.0 提供且默认关闭。只批处理无幂等键的写；批次重试可能重复应用，需要恰好一次效果时使用 `send_request_idempotent`，它会绕过批处理。
-This API is absent from v0.2.x, planned for v0.3.0, and off by default. It batches only unkeyed writes, which may be applied again after a retry. Use `send_request_idempotent` for exactly-once apply; it bypasses batching.
+:::info 自 v1.0.0 起提供 / Available since v1.0.0
+该 API 默认关闭。只批处理无幂等键的写；批次重试可能重复应用，需要恰好一次效果时使用
+`send_request_idempotent`，它会绕过批处理。
+This API is off by default. It batches only unkeyed writes, which may be applied again after a retry. Use
+`send_request_idempotent` for exactly-once apply; it bypasses batching.
 :::
 
 `RrClientBuilder::with_batching(BatchConfig)` 按分区缓冲写，在条数、字节数或 linger 达到阈值时将整批作为一条 Raft entry 提交。apply 侧逐条调用 `Service::handle` 并按序返回响应。
@@ -100,8 +102,13 @@ Exceeding `max_buffered` fails immediately so the caller can slow down or retry.
 
 ## Java SDK 安装 / Java SDK Installation
 
-Java SDK 需要 JDK 17+。构件为 `io.github.gardenias:rr-client:0.2.0`，发布在 GitHub Packages 而非 Maven Central，读取需要 GitHub 凭证。
-The Java SDK requires JDK 17+. Artifact `io.github.gardenias:rr-client:0.2.0` is published to GitHub Packages, not Maven Central, and requires GitHub credentials to read.
+Java SDK 需要 JDK 17+，源码版本为 `1.0.0`，构件坐标为 `io.github.gardenias:rr-client:1.0.0`。GitHub Packages
+发布是独立分发步骤；未发布时请从源码使用 Maven Local。GitHub Packages 不是 Maven Central，读取已发布构件需要
+GitHub 凭证。
+The Java SDK requires JDK 17+. Its source version is `1.0.0`, with artifact coordinates
+`io.github.gardenias:rr-client:1.0.0`. GitHub Packages publication is a separate distribution step; use Maven Local
+from source when the package is not published. GitHub Packages is not Maven Central, and reading a published artifact
+requires GitHub credentials.
 
 ```kotlin
 repositories {
@@ -115,7 +122,7 @@ repositories {
 }
 
 dependencies {
-    implementation("io.github.gardenias:rr-client:0.2.0")
+    implementation("io.github.gardenias:rr-client:1.0.0")
 }
 ```
 
@@ -123,7 +130,7 @@ dependencies {
 <dependency>
   <groupId>io.github.gardenias</groupId>
   <artifactId>rr-client</artifactId>
-  <version>0.2.0</version>
+  <version>1.0.0</version>
 </dependency>
 ```
 
@@ -167,7 +174,7 @@ See the [Java SDK README](https://github.com/gardenias/rr/blob/main/sdks/java/RE
 | 本地读与线性一致读 / Local and linearizable reads | `read`, `read_linearizable` | `read`, `readLinearizable` |
 | 异步与阻塞 API / Async and blocking APIs | async, `*_blocking`, `*_reactive` | `CompletableFuture`, `*Sync` |
 | 指标 / Metrics | `metrics` crate | Micrometer `rr.client.*` |
-| 写批处理 / Write batching | `with_batching`，未发布 / `with_batching`, unreleased | 不支持 / Not available |
+| 写批处理 / Write batching | `with_batching`，v1.0.0+ / `with_batching`, v1.0.0+ | 不支持 / Not available |
 | 连接扇出 / Channel fanout | `with_channel_fanout` | 每地址一条 channel / One channel per address |
 
 Java 的 `CompletableFuture` 并发组合不是写合并；不要把响应式手册中的批量请求等同于 Rust 写批处理。

@@ -42,9 +42,9 @@ RaftLogStorage::append(entries, IOFlushed)
 
 ### DurabilityPolicy
 
-`crates/rr-storage/src/rocks.rs:46-86` 定义三档策略。v0.2.0 改名，deprecated 别名已在 v0.3.0 移除，旧字符串会被拒绝。
+`crates/rr-storage/src/rocks.rs:46-86` 定义三档策略。v0.2.0 改名，deprecated 别名已在 v1.0.0 移除，旧字符串会被拒绝。
 
-`crates/rr-storage/src/rocks.rs:46-86` defines three policies. They were renamed in v0.2.0; deprecated aliases were removed in v0.3.0, and old strings are rejected.
+`crates/rr-storage/src/rocks.rs:46-86` defines three policies. They were renamed in v0.2.0; deprecated aliases were removed in v1.0.0, and old strings are rejected.
 
 | 策略 / Policy | 行为 / Behavior | 适用范围 / Intended Use |
 | :--- | :--- | :--- |

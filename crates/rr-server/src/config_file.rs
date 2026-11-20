@@ -320,7 +320,7 @@ pub enum StorageBackend {
 /// Selected durability policy string; converted to the actual enum at storage
 /// construction time (keeps this module free of the `rocks` feature gate).
 ///
-/// The v0.2.x aliases `"balanced"` and `"fast"` were REMOVED in v0.3.0 —
+/// The v0.2.x aliases `"balanced"` and `"fast"` were REMOVED in v1.0.0 —
 /// they now fail with a hard error naming the canonical values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityChoice {
@@ -392,7 +392,7 @@ impl ResolvedConfig {
                 };
                 return Err(invalid(format!(
                     "invalid durability '{durability_str}': the v0.2.x alias was removed in \
-                     v0.3.0 — use '{canonical}'"
+                     v1.0.0 — use '{canonical}'"
                 )));
             }
             other => {

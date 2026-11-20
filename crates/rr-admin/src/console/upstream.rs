@@ -584,7 +584,7 @@ impl Upstream for TonicUpstream {
 fn descriptor_evidence(
     response: NodeDescriptorResponse,
 ) -> std::result::Result<DescriptorEvidence, UpstreamError> {
-    let descriptor = response.descriptor.ok_or_else(|| UpstreamError {
+    let descriptor = response.node_descriptor.ok_or_else(|| UpstreamError {
         code: "INVALID_NODE_DESCRIPTOR",
         message: "GetNodeDescriptor returned no descriptor".to_string(),
     })?;
@@ -617,13 +617,13 @@ pub(crate) fn topology_records(
         .nodes
         .iter()
         .map(|entry| {
-            let descriptor = entry.descriptor.clone().ok_or_else(|| UpstreamError {
+            let descriptor = entry.node_descriptor.clone().ok_or_else(|| UpstreamError {
                 code: "INVALID_CLUSTER_TOPOLOGY",
                 message: "cluster topology contains a directory entry without a descriptor"
                     .to_string(),
             })?;
             let evidence = descriptor_evidence(NodeDescriptorResponse {
-                descriptor: Some(descriptor),
+                node_descriptor: Some(descriptor),
                 directory_revision: entry.revision,
             })?;
             Ok(NodeDirectoryRecord {
@@ -912,7 +912,7 @@ mod tests {
         };
         let mut snapshot = snapshot(&peer);
         let entry = NodeDirectoryEntry {
-            descriptor: Some(rr_network::proto::admin::NodeDescriptor {
+            node_descriptor: Some(rr_network::proto::admin::NodeDescriptor {
                 node_id: 2,
                 client_addr: "127.0.0.1:51002".to_string(),
                 admin_addr: "127.0.0.1:52002".to_string(),

@@ -17,10 +17,10 @@ Both use managed formation, not the legacy bootstrap/peers flow.
 - 每个 Pod 可访问的 etcd v3。Raw manifests 默认使用 `http://etcd:2379`；Helm 默认使用 `http://rr-etcd:2379`。<br />
   An etcd v3 endpoint reachable from every Pod. Raw manifests default to `http://etcd:2379`; Helm defaults to
   `http://rr-etcd:2379`.
-- 显式指定支持 managed formation 的镜像。Rr 0.2.0 的严格解析器拒绝 `[cluster.formation]` 和新 cluster 字段，
-  不能使用，也不能保留 `REPLACE_WITH_FORMATION_CAPABLE_TAG`。<br />
-  An explicit formation-capable image. Rr 0.2.0 rejects `[cluster.formation]` and the new cluster fields; neither that
-  release nor `REPLACE_WITH_FORMATION_CAPABLE_TAG` is valid.
+- 默认镜像为支持 managed formation 的 Rr 1.0.0。Rr 0.2.0 的严格解析器拒绝 `[cluster.formation]` 和新 cluster
+  字段，不能使用；覆盖镜像 tag 时必须选择其他兼容版本。<br />
+  The default image is Rr 1.0.0 with managed formation support. Rr 0.2.0 rejects `[cluster.formation]` and the new
+  cluster fields; when overriding the image tag, select another compatible release.
 - 默认安全配置需要 `rr-tls` 和 `rr-admin-token` 两个 Secret。证书 SAN 必须覆盖实际拨入的 Pod/Service DNS 名。<br />
   The default secure configuration requires `rr-tls` and `rr-admin-token` Secrets. Certificate SANs must cover the
   Pod/Service DNS names clients actually dial.
@@ -55,10 +55,10 @@ a fresh Genesis for it.
 
 ## 选项 A：原始 manifests / Option A: Raw Manifests
 
-替换所有待 apply 文件中的镜像占位符。Genesis 使用 `statefulset.yaml`；收养还使用 `statefulset-adopt.yaml` 和第二阶段的
-`cluster-form-job.yaml`。
+Manifests 默认固定 `ghcr.io/gardenias/rr:1.0.0`。Genesis 使用 `statefulset.yaml`；收养还使用
+`statefulset-adopt.yaml` 和第二阶段的 `cluster-form-job.yaml`。
 
-Replace the image placeholder in every manifest being applied. Genesis uses `statefulset.yaml`; adoption also uses
+Manifests pin `ghcr.io/gardenias/rr:1.0.0` by default. Genesis uses `statefulset.yaml`; adoption also uses
 `statefulset-adopt.yaml` and, in phase 2, `cluster-form-job.yaml`.
 
 ```bash
@@ -91,7 +91,7 @@ Create the Secrets first, then install. The chart rejects the default combinatio
 
 ```bash
 helm install rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
-  --set image.tag=<formation-capable-tag> \
+  --set image.tag=1.0.0 \
   --set tls.enabled=true --set tls.requireClientCert=true \
   --set tls.existingSecret=rr-tls --wait
 ```
@@ -102,7 +102,7 @@ For upgrades, keep the same roster and formation values; changing the image alon
 
 ```bash
 helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
-  --set image.tag=<formation-capable-tag> \
+  --set image.tag=1.0.0 \
   --set tls.enabled=true --set tls.requireClientCert=true \
   --set tls.existingSecret=rr-tls --wait
 ```
@@ -118,14 +118,12 @@ starts one initialized legacy voter (`rr-0`) first, while `rr-1` and `rr-2` rema
 exist, phase 1 uses their contiguous ordinal count. Both phases must use identical chart values and the same complete
 three-node SeedSpec.
 
-:::warning 当前 convergence Job 的认证参数 / Authentication in the current convergence Job
-当前仓库的 raw/Helm Job 模板注入了 `RR_ADMIN_TOKEN`，但 `rr-admin` 调用未传 `--token-env RR_ADMIN_TOKEN`；默认安全 Admin
-会拒绝这些调用。执行收养前，应使用已修正此问题的模板，或在 Job 的每次 `rr-admin` 调用中显式加入该参数。Genesis 不运行此
-Job，不受影响。
+:::info convergence Job 认证 / Convergence Job Authentication
+raw/Helm Job 模板注入 `RR_ADMIN_TOKEN`，并在该变量非空时为每个 `rr-admin` 调用传入
+`--token-env RR_ADMIN_TOKEN`。无 token 的显式 insecure 本地流程仍可不设置该变量；Genesis 不运行此 Job。
 
-The current raw/Helm Job templates inject `RR_ADMIN_TOKEN` but omit `--token-env RR_ADMIN_TOKEN` from `rr-admin` calls,
-so the default secure Admin service rejects them. Before adoption, use a template that fixes this or add the flag to
-every `rr-admin` invocation in the Job. Genesis does not run this Job and is unaffected.
+The raw/Helm Job templates inject `RR_ADMIN_TOKEN` and pass `--token-env RR_ADMIN_TOKEN` to every `rr-admin` call when
+it is non-empty. Explicit insecure local flows without a token may leave it unset. Genesis does not run this Job.
 :::
 
 Helm 第一阶段只启动 initialized adopter，不渲染 convergence Job：
@@ -134,7 +132,7 @@ Helm phase 1 starts only initialized adopters and renders no convergence Job:
 
 ```bash
 helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
-  --set image.tag=<formation-capable-tag> \
+  --set image.tag=1.0.0 \
   --set tls.enabled=true --set tls.requireClientCert=true --set tls.existingSecret=rr-tls \
   --set cluster.formation.mode=adopt \
   --set cluster.formation.adoptionInitializedReplicas=1 --wait
@@ -147,7 +145,7 @@ After phase 1 succeeds, Helm phase 2 starts the full roster and the convergence 
 
 ```bash
 helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
-  --set image.tag=<formation-capable-tag> \
+  --set image.tag=1.0.0 \
   --set tls.enabled=true --set tls.requireClientCert=true --set tls.existingSecret=rr-tls \
   --set cluster.formation.mode=adopt \
   --set cluster.formation.adoptionInitializedReplicas=3 --wait
@@ -175,13 +173,14 @@ kubectl wait --for=condition=complete job/rr-cluster-form --timeout=300s
 kubectl logs job/rr-cluster-form -f
 ```
 
-`image.tag` 为空或为 `0.2.0` 时 chart 拒绝渲染。`adopt` Job 是普通 Helm resource，只在第二阶段渲染，因此第二阶段
-`--wait` 会等待它完成；Genesis 和收养第一阶段不渲染 Job。Job 名包含 `.Release.Revision`，升级会创建新 Job，而不是修改已
-完成 Job 的不可变 Pod template。
+`image.tag` 默认为 `1.0.0`；为空或为 `0.2.0` 时 chart 拒绝渲染。`adopt` Job 是普通 Helm resource，只在第二阶段
+渲染，因此第二阶段 `--wait` 会等待它完成；Genesis 和收养第一阶段不渲染 Job。Job 名包含 `.Release.Revision`，升级会创建
+新 Job，而不是修改已完成 Job 的不可变 Pod template。
 
-The chart rejects an empty or `0.2.0` image tag. The adopt Job is an ordinary Helm resource rendered only in phase 2, so
-phase-2 `--wait` includes its completion. Genesis and adoption phase 1 render no Job. Job names include
-`.Release.Revision`, so upgrades create new Jobs rather than mutating completed immutable Pod templates.
+The image tag defaults to `1.0.0`; the chart rejects an empty or `0.2.0` tag. The adopt Job is an ordinary Helm
+resource rendered only in phase 2, so phase-2 `--wait` includes its completion. Genesis and adoption phase 1 render no
+Job. Job names include `.Release.Revision`, so upgrades create new Jobs rather than mutating completed immutable Pod
+templates.
 
 只有新 revision 的 convergence Job 完成、完整 voter 集合和 `/ready` 均验证通过后，才能手工删除旧 completed Jobs；不要删
 除当前或仍在运行的 Job。
@@ -194,7 +193,7 @@ and `/ready` checks pass. Never delete the current or a running Job.
 | Key | Default | 说明 / Description |
 | :--- | :--- | :--- |
 | `image.repository` | `ghcr.io/gardenias/rr` | 镜像仓库；fork 后改成自己的命名空间 / Image repository; override for a fork |
-| `image.tag` | `""`（渲染失败 / render fails） | 必填 formation-capable tag；拒绝 `0.2.0` / Mandatory formation-capable tag; `0.2.0` rejected |
+| `image.tag` | `"1.0.0"` | formation-capable tag；拒绝空值和 `0.2.0` / Formation-capable tag; empty and `0.2.0` rejected |
 | `replicaCount` | `3` | 固定初始花名册大小，不是运行时扩容开关 / Fixed initial roster size, not a runtime scaling knob |
 | `cluster.name` | `"rr"` | 共享 SeedSpec 集群名 / Shared SeedSpec cluster name |
 | `cluster.formation.mode` | `"genesis"` | 空节点用 `genesis`，旧节点用 `adopt` / `genesis` for pristine nodes; `adopt` for legacy nodes |

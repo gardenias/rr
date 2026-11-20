@@ -37,7 +37,7 @@ pub struct CfOptions {
 /// on power failure (and have replication + external backup as
 /// compensating controls). See ADR A-0002 §Contract 4.
 ///
-/// Names changed in v0.3.0 (breaking window): the deprecated `Balanced` and
+/// Names changed in v1.0.0 (breaking window): the deprecated `Balanced` and
 /// `Fast` aliases were removed — use [`ReplicatedOnly`](Self::ReplicatedOnly)
 /// and [`TestOnly`](Self::TestOnly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

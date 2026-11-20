@@ -1,5 +1,5 @@
 //! Benchmark: [`FramedEntry`] encode / decode — the actual hot-path framing
-//! used for every Raft log entry since v0.3.0.
+//! used for every Raft log entry since v1.0.0.
 //!
 //! Complements the generic `codec_roundtrip` bench with the real framework
 //! type so that changes to the envelope format are reflected in CI regression

@@ -303,7 +303,7 @@ impl AdminService for SimulatedUpstream {
     ) -> Result<TonicResponse<NodeDescriptorResponse>, Status> {
         self.count_admin();
         Ok(TonicResponse::new(NodeDescriptorResponse {
-            descriptor: Some(self.descriptor()),
+            node_descriptor: Some(self.descriptor()),
             directory_revision: 1,
         }))
     }
@@ -318,7 +318,7 @@ impl AdminService for SimulatedUpstream {
             config_revision: 1,
             directory_revision: 1,
             nodes: vec![NodeDirectoryEntry {
-                descriptor: Some(self.descriptor()),
+                node_descriptor: Some(self.descriptor()),
                 revision: 1,
                 lease_id: 1,
             }],

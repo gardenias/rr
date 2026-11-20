@@ -108,14 +108,14 @@ pub struct NodeConfig {
     /// Bind host for the Admin gRPC service. Defaults to loopback
     /// (`127.0.0.1`) — the admin API exposes leadership transfer and
     /// snapshot triggers, so wildcard bind must be an explicit choice
-    /// (`"0.0.0.0"` / `"::"`). Breaking change in v0.3.0: pre-v0.3.0 bound
+    /// (`"0.0.0.0"` / `"::"`). Breaking change in v1.0.0: pre-v1.0.0 bound
     /// `0.0.0.0` unconditionally.
     pub admin_bind_host: String,
     /// Bind host for the HTTP observability endpoints
     /// (`/health` `/ready` `/metrics`). Defaults to loopback
     /// (`127.0.0.1`) — `/metrics` exposes internal histograms without
     /// auth. Set `"0.0.0.0"` to allow cross-host Prometheus scrapes.
-    /// Breaking change in v0.3.0: pre-v0.3.0 bound `0.0.0.0`
+    /// Breaking change in v1.0.0: pre-v1.0.0 bound `0.0.0.0`
     /// unconditionally.
     pub metrics_bind_host: String,
     /// Override the gRPC server's HTTP/2 `max_concurrent_streams` (tonic/

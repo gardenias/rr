@@ -1,6 +1,6 @@
 //! Per-Raft-log-entry payload framing.
 //!
-//! From v0.3.0 onward, `ServiceStateMachineAdapter` wraps each user
+//! From v1.0.0 onward, `ServiceStateMachineAdapter` wraps each user
 //! payload submitted via `client_write` (or pushed by a
 //! [`crate::ingestor::CommandIngestor`]) in a [`FramedEntry`] envelope
 //! before handing it to OpenRaft. The envelope carries:

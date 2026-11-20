@@ -131,20 +131,20 @@ Startup now runs full validation and fails fast on missing configuration. Verify
 ## 收养旧集群到托管生命周期 / Adopt a Legacy Cluster into Managed Formation
 
 Genesis 只用于全新的空节点，不能收养已有 Raft 状态。旧集群必须使用 `adopt`，并区分“记录现有状态”和“后续成员收敛”。Helm
-和 raw Kubernetes 都必须显式选择 formation-capable 镜像；Rr 0.2.0 会拒绝新配置字段。
+和 raw Kubernetes 默认使用支持 managed formation 的 Rr 1.0.0；Rr 0.2.0 会拒绝新配置字段。
 
 Genesis is only for fresh pristine nodes and cannot adopt existing Raft state. Use `adopt` for an existing group,
-separating lifecycle adoption from subsequent membership convergence. Both Helm and raw Kubernetes require an explicit
-formation-capable image; Rr 0.2.0 rejects the new configuration fields.
+separating lifecycle adoption from subsequent membership convergence. Helm and raw Kubernetes default to Rr 1.0.0 with
+managed formation support; Rr 0.2.0 rejects the new configuration fields.
 
 1. **准备相同花名册。** 所有节点使用相同的 `cluster.name`、完整
    `cluster.nodes = ["id@advertised_addr", ...]`、`mode = "adopt"` 和 etcd endpoints；移除 `bootstrap` 与旧 `peers`。花
-   名册是 SeedSpec 和初始路由，不是当前 Raft membership。Helm 必须设置非空、非 0.2.0 的 `image.tag`，raw manifests 必须
-   替换 `REPLACE_WITH_FORMATION_CAPABLE_TAG`。<br />
+   名册是 SeedSpec 和初始路由，不是当前 Raft membership。Helm 和 raw manifests 默认使用 1.0.0；覆盖 `image.tag`
+   时必须选择非 0.2.0 的 formation-capable 镜像。<br />
    **Prepare one roster.** Every node uses identical `cluster.name`, complete
    `cluster.nodes = ["id@advertised_addr", ...]`, `mode = "adopt"`, and etcd endpoints; remove `bootstrap` and legacy
-   `peers`. The roster is SeedSpec and initial routing, not current Raft membership. Helm requires a non-empty, non-0.2.0
-   `image.tag`; raw manifests require replacing `REPLACE_WITH_FORMATION_CAPABLE_TAG`.
+   `peers`. The roster is SeedSpec and initial routing, not current Raft membership. Helm and raw manifests default to
+   1.0.0; an `image.tag` override must select a formation-capable release other than 0.2.0.
 
 2. **先收养已初始化节点。** 只启动本地所有托管 group 均已初始化的旧节点。第一个节点通过 CAS 创建
    `LegacyAdopted + Active` 记录，其余节点加载同一记录。混合 initialized/pristine 本地 group 或全 pristine 的首次收养会失败，
@@ -153,10 +153,12 @@ formation-capable image; Rr 0.2.0 rejects the new configuration fields.
    node creates a `LegacyAdopted + Active` record through CAS and the others load it. Mixed initialized/pristine local
    groups or an all-pristine first adoption fails without creating a lifecycle record.
 
-   当前 convergence Job 的 token 参数有已知缺口；在执行第二阶段前必须先处理 [Kubernetes 页的安全警告](./kubernetes.md)。
+   convergence Job 会在 `RR_ADMIN_TOKEN` 非空时为每个 Admin 调用传入 `--token-env RR_ADMIN_TOKEN`；安全模式必须
+   配置对应 Secret。详见 [Kubernetes 页的认证说明](./kubernetes.md)。
 
-   The current convergence Job has a known token-flag gap; resolve the
-   [security warning on the Kubernetes page](./kubernetes.md) before phase 2.
+   The convergence Job passes `--token-env RR_ADMIN_TOKEN` to every Admin call when `RR_ADMIN_TOKEN` is non-empty.
+   Secure mode must configure the corresponding Secret. See the
+   [authentication note on the Kubernetes page](./kubernetes.md).
 
    Helm 第一阶段不渲染 Job：
 
@@ -164,7 +166,7 @@ formation-capable image; Rr 0.2.0 rejects the new configuration fields.
 
    ```bash
    helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
-     --set image.tag=<formation-capable-tag> \
+     --set image.tag=1.0.0 \
      --set tls.enabled=true --set tls.requireClientCert=true --set tls.existingSecret=rr-tls \
      --set cluster.formation.mode=adopt \
      --set cluster.formation.adoptionInitializedReplicas=1 --wait
@@ -187,7 +189,7 @@ formation-capable image; Rr 0.2.0 rejects the new configuration fields.
 
    ```bash
    helm upgrade rr oci://ghcr.io/gardenias/charts/rr --version <chart-version> \
-     --set image.tag=<formation-capable-tag> \
+     --set image.tag=1.0.0 \
      --set tls.enabled=true --set tls.requireClientCert=true --set tls.existingSecret=rr-tls \
      --set cluster.formation.mode=adopt \
      --set cluster.formation.adoptionInitializedReplicas=3 --wait
@@ -243,6 +245,17 @@ let node = Arc::new(RrNode::new(config)?);
 ```
 
 ## 回退 / Rollback
+
+:::warning v0.2.0 → v1.0.0 例外 / v0.2.0 → v1.0.0 Exception
+本节的原地换回流程不适用于 stock v0.2.0 → v1.0.0。该路径必须使用
+[side-by-side 迁移与回退](./v0.2-to-v1.0-migration.md#回退--rollback)，旧集群在回退窗口内保持运行、可读且写
+fenced；不能靠停止后的目录备份恢复原 v0.2.0 集群。
+
+The in-place procedure below does not apply to stock v0.2.0 → v1.0.0. Use the
+[side-by-side migration and rollback](./v0.2-to-v1.0-migration.md#回退--rollback); the old cluster must remain running,
+readable, and write-fenced throughout the rollback window. A stopped cluster's directory backup cannot restore stock
+v0.2.0.
+:::
 
 先停止有问题的节点，恢复与旧二进制兼容的配置，再启动并等待 `/ready`。不要假定所有回退都无数据损失：一旦新版本写入旧版本
 无法识别的快照或日志格式，直接换回旧二进制可能失败。回退前核对目标版本迁移页，并保留升级前离线备份；若出现快照解码错误，

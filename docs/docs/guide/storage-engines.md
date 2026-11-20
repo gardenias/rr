@@ -75,8 +75,8 @@ Block cache and write buffer sizes are in MiB, with selected per-column-family o
 `ReplicatedOnly` 可应对进程崩溃，但多数派同时掉电可能丢失已确认写入。`group_commit_interval_ms` 可配置周期性 WAL flush，但不会把该策略变为 Strict。
 `ReplicatedOnly` can recover from process crashes, but correlated power loss across a majority can lose acknowledged writes. `group_commit_interval_ms` configures periodic WAL flushing; it does not make the policy Strict.
 
-旧字符串 `balanced` 和 `fast` 已在 v0.3.0 移除，配置解析会直接报错；分别改用 `replicated_only` 和 `test_only`。
-The legacy strings `balanced` and `fast` were removed in v0.3.0 and now fail configuration parsing; use `replicated_only` and `test_only` instead.
+旧字符串 `balanced` 和 `fast` 已在 v1.0.0 移除，配置解析会直接报错；分别改用 `replicated_only` 和 `test_only`。
+The legacy strings `balanced` and `fast` were removed in v1.0.0 and now fail configuration parsing; use `replicated_only` and `test_only` instead.
 
 `rr-server --storage rocks` 还会把每组 Raft 日志写入 `{data_dir}/raft-log/{group_id}/`，该日志存储始终使用 Strict。`--durability` 只调整状态机侧的 `RocksStorage`。
 `rr-server --storage rocks` also writes each group's Raft log under `{data_dir}/raft-log/{group_id}/`; that log storage always uses Strict. `--durability` affects only the state-machine-side `RocksStorage`.

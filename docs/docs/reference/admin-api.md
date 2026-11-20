@@ -131,10 +131,10 @@ rr-admin group transfer-leader --group 1 --to 3
 ### `GetMetricsSummary(Empty) → MetricsSummary`
 
 :::warning 已弃用 / Deprecated
-自 v0.3.0 起，此 RPC 在服务端返回 `UNIMPLEMENTED`；旧实现恒定返回零，不能作为真实指标使用。
+自 v1.0.0 起，此 RPC 在服务端返回 `UNIMPLEMENTED`；旧实现恒定返回零，不能作为真实指标使用。
 请抓取 Prometheus `/metrics` 端点。消息和字段号为保持 wire 兼容性而保留，不得重用。
 
-Since v0.3.0, the server returns `UNIMPLEMENTED`; the old implementation returned constant zeros and
+Since v1.0.0, the server returns `UNIMPLEMENTED`; the old implementation returned constant zeros and
 was not a truthful metrics source. Scrape the Prometheus `/metrics` endpoint instead. The message and
 field numbers remain reserved for wire compatibility and must not be reused.
 :::

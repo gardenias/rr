@@ -87,11 +87,11 @@ See [Read Consistency](guide/read-consistency.md), [Storage Engines](guide/stora
 
 ## 版本、测试与性能 / Status, testing, and performance
 
-当前工作区版本为 **0.2.0**。Rr 仍处于 pre-1.0 阶段，minor 版本可能包含破坏性变更；升级前请查看
+当前工作区版本为 **1.0.0**。Rr 遵循 Semantic Versioning；破坏性变更只进入新的 MAJOR 版本，升级前请查看
 [兼容性说明](reference/compatibility.md)。
 
-The workspace is at **0.2.0**. Rr is pre-1.0, and minor releases may contain breaking changes; review the
-[compatibility policy](reference/compatibility.md) before upgrading.
+The workspace is at **1.0.0**. Rr follows Semantic Versioning, with breaking changes reserved for new MAJOR releases;
+review the [compatibility policy](reference/compatibility.md) before upgrading.
 
 仓库包含单元测试、集成与故障注入测试、进程级 crash 测试、fuzz、proptest、线性一致检查，以及 4 份经
 TLC 小模型检查的 TLA+ 规约。这些验证不等同于对你的部署和业务负载作出生产保证。
@@ -101,17 +101,16 @@ proptest, linearizability checking, and four TLA+ specifications checked with sm
 not a production guarantee for your deployment or workload.
 
 性能数字不是 SLA。2026 年 11 月的三节点单机 loopback、128B 写基准中，默认配置约为 31k TPS；
-169.3k TPS（RocksDB strict）和 174.2k TPS（mem）来自 opt-in 的 batch64 + fanout4。该批处理 API 属于
-v0.3.0+，未包含在当前 v0.2.x。固定宿主机上增加 Raft 组不会提升聚合吞吐；多组扩展的前提是跨机且
-副本集合不相交。测试条件和原始数据见 [性能基准](reference/benchmarks.md) 与
-[容量规划](deployment/capacity-planning.md)。
+169.3k TPS（RocksDB strict）和 174.2k TPS（mem）来自 v1.0.0 起提供、默认关闭的 batch64 + fanout4。
+固定宿主机上增加 Raft 组不会提升聚合吞吐；多组扩展的前提是跨机且副本集合不相交。测试条件和原始数据见
+[性能基准](reference/benchmarks.md) 与 [容量规划](deployment/capacity-planning.md)。
 
-Performance figures are not an SLA. In November 2026 three-node, single-host loopback benchmarks with 128B
-writes, the default configuration reached about 31k TPS; 169.3k TPS with RocksDB strict and 174.2k TPS with mem
-required opt-in batch64 + fanout4. That batching API is planned for v0.3.0+ and is not included in current v0.2.x.
-Adding groups on a fixed host does not increase aggregate throughput; multi-group scaling assumes multiple hosts
-with disjoint replica sets. See [Benchmarks](reference/benchmarks.md) and [Capacity Planning](deployment/capacity-planning.md)
-for test conditions and raw data.
+Performance figures are not an SLA. In November 2026 three-node, single-host loopback benchmarks with 128B writes,
+the default configuration reached about 31k TPS; 169.3k TPS with RocksDB strict and 174.2k TPS with mem required
+batch64 + fanout4, available since v1.0.0 and off by default. Adding groups on a fixed host does not increase
+aggregate throughput; multi-group scaling assumes multiple hosts with disjoint replica sets. See
+[Benchmarks](reference/benchmarks.md) and [Capacity Planning](deployment/capacity-planning.md) for test conditions
+and raw data.
 
 从 [入门指南](/docs/guide/getting-started) 和 [架构概览](/docs/architecture/overview) 开始。<br />
 Start with the [getting-started guide](/docs/guide/getting-started) and [architecture overview](/docs/architecture/overview).

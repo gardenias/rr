@@ -38,10 +38,14 @@ spec:
               GROUP='{{ .Values.cluster.groupId }}'
               LEADER_ADMIN="${FULLNAME}-0.${FULLNAME}:${ADMIN}"
               TLS_ARGS='{{- if .Values.tls.enabled }}--tls-ca /etc/rr/tls/ca.crt --tls-cert /etc/rr/tls/tls.crt --tls-key /etc/rr/tls/tls.key{{ if .Values.tls.domain }} --tls-domain {{ .Values.tls.domain }}{{ end }}{{- end }}'
+              AUTH_ARGS=""
+              if [ -n "${RR_ADMIN_TOKEN:-}" ]; then
+                AUTH_ARGS="--token-env RR_ADMIN_TOKEN"
+              fi
 
               echo "waiting for the bootstrap node's admin endpoint at ${LEADER_ADMIN} ..."
               i=0
-              until rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} node status >/dev/null 2>&1; do
+              until rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} ${AUTH_ARGS} node status >/dev/null 2>&1; do
                 i=$((i + 1))
                 if [ "$i" -ge 60 ]; then
                   echo "bootstrap node never came up" >&2
@@ -57,14 +61,14 @@ spec:
                 echo "adding node ${NODE_ID} (${PEER}) as learner of group ${GROUP} ..."
                 # Tolerated: re-adding an existing learner/voter errors on
                 # re-runs; change-membership below is the authoritative step.
-                rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group add-learner \
+                rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} ${AUTH_ARGS} group add-learner \
                   --group "${GROUP}" --node-id "${NODE_ID}" --addr "${PEER}" || true
                 i=$((i + 1))
               done
 
               VOTERS="$(seq -s, 1 "$REPLICAS")"
               echo "electing full voter set: ${VOTERS}"
-              rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group change-membership \
+              rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} ${AUTH_ARGS} group change-membership \
                 --group "${GROUP}" --voters "${VOTERS}"
               echo "cluster formation complete"
           {{- if .Values.auth.adminTokenSecret.name }}

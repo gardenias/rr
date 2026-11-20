@@ -1,5 +1,4 @@
-# IMAGE OVERRIDE REQUIRED: replace REPLACE_WITH_FORMATION_CAPABLE_TAG below with
-# an image containing managed formation support; rr 0.2.0 is incompatible.
+# The pinned v1.0.0 image supports managed formation; rr 0.2.0 is incompatible.
 #
 # Legacy adoption/manual recovery job. Do NOT run this for fresh Genesis:
 # the lifecycle supervisor already initializes the full roster. For adoption,
@@ -33,7 +32,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: cluster-form
-          image: ghcr.io/gardenias/rr:REPLACE_WITH_FORMATION_CAPABLE_TAG
+          image: ghcr.io/gardenias/rr:1.0.0
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -52,10 +51,14 @@ spec:
               # matches (e.g. the cert's CN) and uncomment the export below.
               TLS_ARGS="--tls-ca /etc/rr/tls/ca.crt --tls-cert /etc/rr/tls/tls.crt --tls-key /etc/rr/tls/tls.key"
               # TLS_ARGS="${TLS_ARGS} --tls-domain rr"
+              AUTH_ARGS=""
+              if [ -n "${RR_ADMIN_TOKEN:-}" ]; then
+                AUTH_ARGS="--token-env RR_ADMIN_TOKEN"
+              fi
 
               echo "waiting for the bootstrap node's admin endpoint at ${LEADER_ADMIN} ..."
               i=0
-              until rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} node status >/dev/null 2>&1; do
+              until rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} ${AUTH_ARGS} node status >/dev/null 2>&1; do
                 i=$((i + 1))
                 if [ "$i" -ge 60 ]; then
                   echo "bootstrap node never came up" >&2
@@ -68,12 +71,12 @@ spec:
                 NODE_ID=$((i + 1))
                 PEER="rr-${i}.rr:51001"
                 echo "adding node ${NODE_ID} (${PEER}) as learner of group ${GROUP} ..."
-                rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group add-learner \
+                rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} ${AUTH_ARGS} group add-learner \
                   --group "${GROUP}" --node-id "${NODE_ID}" --addr "${PEER}" || true
               done
 
               echo "electing full voter set: 1,2,3"
-              rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} group change-membership \
+              rr-admin --addr "${LEADER_ADMIN}" ${TLS_ARGS} ${AUTH_ARGS} group change-membership \
                 --group "${GROUP}" --voters "1,2,3"
               echo "cluster formation complete"
           env:

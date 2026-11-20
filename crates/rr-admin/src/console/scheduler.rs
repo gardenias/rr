@@ -1723,7 +1723,7 @@ mod tests {
             config_revision: 1,
             directory_revision: 2,
             nodes: vec![rr_network::proto::admin::NodeDirectoryEntry {
-                descriptor: Some(rr_network::proto::admin::NodeDescriptor {
+                node_descriptor: Some(rr_network::proto::admin::NodeDescriptor {
                     node_id: removed.descriptor.node_id,
                     client_addr: removed.descriptor.client_addr,
                     admin_addr: removed.descriptor.admin_addr,

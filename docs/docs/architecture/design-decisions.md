@@ -55,9 +55,9 @@ rr-core defines an MQ-agnostic `CommandIngestor` (`poll` / `seek` / `commit_appl
 
 ## A-0002 — 快照一致性与灾难恢复 / Snapshot Consistency and Disaster Recovery
 
-`snapshot()` 必须捕获原子一致视图；`apply()` 返回前必须完成状态更新，禁止 fire-and-forget 写任务；`restore()` 全量替换状态。`Balanced` / `Fast` 改名为 `ReplicatedOnly` / `TestOnly`，旧别名在 v0.3.0 移除。当 `last_applied < committed` 且日志已清理时，恢复路径是 `node-reset` 后通过集群快照追赶。
+`snapshot()` 必须捕获原子一致视图；`apply()` 返回前必须完成状态更新，禁止 fire-and-forget 写任务；`restore()` 全量替换状态。`Balanced` / `Fast` 改名为 `ReplicatedOnly` / `TestOnly`，旧别名在 v1.0.0 移除。当 `last_applied < committed` 且日志已清理时，恢复路径是 `node-reset` 后通过集群快照追赶。
 
-`snapshot()` must capture an atomically consistent view; `apply()` must finish state updates before returning, with no fire-and-forget writes; `restore()` replaces state wholesale. `Balanced` / `Fast` became `ReplicatedOnly` / `TestOnly`, and old aliases were removed in v0.3.0. When `last_applied < committed` and the log is purged, recovery requires `node-reset` followed by cluster snapshot transfer.
+`snapshot()` must capture an atomically consistent view; `apply()` must finish state updates before returning, with no fire-and-forget writes; `restore()` replaces state wholesale. `Balanced` / `Fast` became `ReplicatedOnly` / `TestOnly`, and old aliases were removed in v1.0.0. When `last_applied < committed` and the log is purged, recovery requires `node-reset` followed by cluster snapshot transfer.
 
 ## A-0003 — 框架幂等层 / Framework Idempotency Layer
 
@@ -157,9 +157,9 @@ Currently, decode or `Service::handle` errors terminate the openraft SM Worker a
 
 ## A-0019 — G2 决策点 / G2 Decisions
 
-2026-11-04 裁定：`BatchConfig::ordered` 旋钮延后至 v0.3.0 评审，不在未论证 deferred/idempotency 交互前放松顺序。扇出后的多组复测显示固定三节点上聚合吞吐仍不随组数扩展，per-group Mutex 不是观测到的瓶颈。单组 100k 保持追求目标：121.2k TPS 来自 opt-in batch64 + fanout4，默认配置约 30–34k TPS，不宣布默认达成。
+2026-11-04 裁定：`BatchConfig::ordered` 旋钮延后至 1.0 之后评审，不在未论证 deferred/idempotency 交互前放松顺序。扇出后的多组复测显示固定三节点上聚合吞吐仍不随组数扩展，per-group Mutex 不是观测到的瓶颈。单组 100k 保持追求目标：121.2k TPS 来自 opt-in batch64 + fanout4，默认配置约 30–34k TPS，不宣布默认达成。
 
-On 2026-11-04, the `BatchConfig::ordered` knob was deferred to v0.3.0 review rather than relaxing ordering before analyzing deferred/idempotency interactions. Multi-group retesting with fanout showed that aggregate throughput still did not scale with group count on a fixed three-node topology, and the per-group Mutex was not the observed bottleneck. Single-group 100k remains aspirational: 121.2k TPS required opt-in batch64 + fanout4, while default configuration measured about 30–34k TPS.
+On 2026-11-04, the `BatchConfig::ordered` knob was deferred to post-1.0 review rather than relaxing ordering before analyzing deferred/idempotency interactions. Multi-group retesting with fanout showed that aggregate throughput still did not scale with group count on a fixed three-node topology, and the per-group Mutex was not the observed bottleneck. Single-group 100k remains aspirational: 121.2k TPS required opt-in batch64 + fanout4, while default configuration measured about 30–34k TPS.
 
 ## 相关 / Related
 

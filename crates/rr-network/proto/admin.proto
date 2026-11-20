@@ -50,7 +50,7 @@ service AdminService {
     /// Get the current routing-table snapshot.
     rpc GetRoutingTable(Empty) returns (RoutingTableSnapshot);
     /// Get a top-level metrics summary.
-    /// DEPRECATED (v0.3.0): unimplemented on the server — it previously
+    /// DEPRECATED (v1.0.0): unimplemented on the server — it previously
     /// returned constant zeros, a silent wrong answer. Scrape the
     /// Prometheus /metrics HTTP endpoint instead. Field numbers are
     /// retained for wire compatibility; do not reuse them.
@@ -108,7 +108,7 @@ message GroupSummary {
 
 message SnapshotStatus {
     uint64 group_id = 1;
-    /// DEPRECATED (v0.3.0): stub, always false — openraft 0.10 exposes no
+    /// DEPRECATED (v1.0.0): stub, always false — openraft 0.10 exposes no
     /// "snapshot build in progress" runtime flag. Use
     /// `last_snapshot_index` / `last_snapshot_term`. Field number retained
     /// for wire compatibility; do not reuse.
@@ -137,7 +137,7 @@ message GroupDrainStatus {
     string message = 3;
 }
 
-/// DEPRECATED (v0.3.0): `GetMetricsSummary` is unimplemented on the
+/// DEPRECATED (v1.0.0): `GetMetricsSummary` is unimplemented on the
 /// server (it previously returned constant zeros). Use the Prometheus
 /// /metrics endpoint. Field numbers retained; do not reuse.
 message MetricsSummary {
@@ -278,7 +278,7 @@ message NodeDescriptor {
 }
 
 message NodeDescriptorResponse {
-    NodeDescriptor descriptor = 1;
+    NodeDescriptor node_descriptor = 1;
     /// Directory mod_revision, or 0 when this process has not registered.
     uint64 directory_revision = 2;
 }
@@ -289,7 +289,7 @@ message ClusterTopologyRequest {
 }
 
 message NodeDirectoryEntry {
-    NodeDescriptor descriptor = 1;
+    NodeDescriptor node_descriptor = 1;
     uint64 revision = 2;
     int64 lease_id = 3;
 }

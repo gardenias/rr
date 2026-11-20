@@ -6,7 +6,7 @@
 //!
 //! # Snapshot framing
 //!
-//! From v0.3.0 onward, the adapter wraps the user's
+//! From v1.0.0 onward, the adapter wraps the user's
 //! [`Service::snapshot`] bytes in a [`FramedSnapshot`] envelope so the
 //! framework can persist its own state (idempotency layer, command
 //! ingestor offsets) alongside the user's. On `restore()` the adapter

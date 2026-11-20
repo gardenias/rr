@@ -1,7 +1,7 @@
 image:
   repository: ghcr.io/gardenias/rr
-  # Required: rr 0.2.0 rejects [cluster.formation]. No compatible release is implied.
-  tag: ""
+  # Rr 1.0.0 supports managed formation; rr 0.2.0 is explicitly rejected.
+  tag: "1.0.0"
   pullPolicy: IfNotPresent
 
 replicaCount: 3

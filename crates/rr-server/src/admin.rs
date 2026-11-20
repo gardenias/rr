@@ -460,7 +460,7 @@ impl AdminServiceImpl {
                 }
                 let next_cursor = page.next_cursor;
                 nodes.extend(page.records.into_iter().map(|record| NodeDirectoryEntry {
-                    descriptor: Some(ProtoNodeDescriptor {
+                    node_descriptor: Some(ProtoNodeDescriptor {
                         node_id: record.descriptor.node_id,
                         client_addr: record.descriptor.client_addr,
                         admin_addr: record.descriptor.admin_addr,
@@ -483,7 +483,7 @@ impl AdminServiceImpl {
         }
         nodes.sort_by_key(|entry| {
             entry
-                .descriptor
+                .node_descriptor
                 .as_ref()
                 .map(|descriptor| descriptor.node_id)
                 .unwrap_or(0)
@@ -1088,7 +1088,7 @@ impl AdminService for AdminServiceImpl {
     /// hardcoded `false` for wire compatibility. openraft 0.10 metrics
     /// expose the latest *completed* snapshot id but no "snapshot build in
     /// progress" runtime flag, so there is no truthful value to return
-    /// here in v0.3.0. The field is deprecated in `admin.proto`; use
+    /// here in v1.0.0. The field is deprecated in `admin.proto`; use
     /// `last_snapshot_index` / `last_snapshot_term` instead. A WARN is
     /// logged once per service instance on first use.
     async fn get_snapshot_status(
@@ -1609,7 +1609,7 @@ impl AdminService for AdminServiceImpl {
         Ok(Response::new(RoutingTableSnapshot { partitions }))
     }
 
-    /// **NOT IMPLEMENTED in v0.3.0** — returns `Status::unimplemented`.
+    /// **NOT IMPLEMENTED in v1.0.0** — returns `Status::unimplemented`.
     ///
     /// This RPC previously returned constant zeros, a silent wrong answer.
     /// The truthful per-node counters live in the Prometheus recorder owned
@@ -1632,7 +1632,7 @@ impl AdminService for AdminServiceImpl {
         // silent wrong answer. The real per-node counters live in the
         // Prometheus recorder owned by the node, which this service does
         // not have access to, so there is no truthful value to return
-        // here in v0.3.0.
+        // here in v1.0.0.
         Err(Status::unimplemented(
             "GetMetricsSummary is not available: it previously returned constant zeros, \
              a silent wrong answer. Scrape the Prometheus /metrics endpoint instead \
@@ -1697,7 +1697,7 @@ impl AdminService for AdminServiceImpl {
             .descriptor()
             .ok_or_else(|| Status::unimplemented("explicit node descriptor is not configured"))?;
         Ok(Response::new(NodeDescriptorResponse {
-            descriptor: Some(ProtoNodeDescriptor {
+            node_descriptor: Some(ProtoNodeDescriptor {
                 node_id: descriptor.node_id,
                 client_addr: descriptor.client_addr.clone(),
                 admin_addr: descriptor.admin_addr.clone(),
@@ -2695,7 +2695,7 @@ mod tests {
             directory_revision: 11,
             nodes: (1..=3)
                 .map(|node_id| NodeDirectoryEntry {
-                    descriptor: Some(ProtoNodeDescriptor {
+                    node_descriptor: Some(ProtoNodeDescriptor {
                         node_id,
                         ..Default::default()
                     }),
@@ -2726,7 +2726,7 @@ mod tests {
         assert_eq!(first.groups.len(), 1);
         assert_eq!(first.partitions.len(), 1);
         let second = paginate_topology(&snapshot, Some(&first.next_cursor), 1).unwrap();
-        assert_eq!(second.nodes[0].descriptor.as_ref().unwrap().node_id, 2);
+        assert_eq!(second.nodes[0].node_descriptor.as_ref().unwrap().node_id, 2);
         let third = paginate_topology(&snapshot, Some(&second.next_cursor), 1).unwrap();
         assert!(third.next_cursor.is_empty());
         assert_eq!(third.nodes.len(), 1);
@@ -2796,7 +2796,7 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(descriptor.directory_revision, 0);
-        assert_eq!(descriptor.descriptor.unwrap().boot_id, build.boot_id);
+        assert_eq!(descriptor.node_descriptor.unwrap().boot_id, build.boot_id);
         let boot = client
             .get_boot_status(Request::new(Empty {}))
             .await
