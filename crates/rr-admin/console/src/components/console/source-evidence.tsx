@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, Database } from "lucide-react";
-import { useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ConsoleMeta } from "@/lib/contract";
 import { formatAge, formatTimestamp, sanitizeError } from "@/lib/format";
 
@@ -18,23 +18,41 @@ const endpointLabels = {
 
 export function SourceEvidence({ meta }: { meta: ConsoleMeta }) {
   const [expanded, setExpanded] = useState(false);
+  const [panelLeft, setPanelLeft] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
   const panelId = useId();
   const count = meta.sources.length;
+  const updatePanelPosition = useCallback(() => {
+    if (!rootRef.current) return;
+    const rootLeft = rootRef.current.getBoundingClientRect().left;
+    const panelWidth = Math.min(460, window.innerWidth - 32);
+    const maxLeft = Math.max(16, window.innerWidth - panelWidth - 16);
+    setPanelLeft(Math.max(16, Math.min(rootLeft, maxLeft)) - rootLeft);
+  }, []);
+  useEffect(() => {
+    if (!expanded) return;
+    window.addEventListener("resize", updatePanelPosition);
+    return () => window.removeEventListener("resize", updatePanelPosition);
+  }, [expanded, updatePanelPosition]);
+  const toggle = () => {
+    if (!expanded) updatePanelPosition();
+    setExpanded((value) => !value);
+  };
   return (
-    <div className="source-evidence">
+    <div className="source-evidence" ref={rootRef}>
       <button
         type="button"
         className="source-evidence-trigger"
         aria-expanded={expanded}
         aria-controls={panelId}
-        onClick={() => setExpanded((value) => !value)}
+        onClick={toggle}
       >
         <Database aria-hidden="true" size={13} />
         {count} {count === 1 ? "source" : "sources"}
         <ChevronDown aria-hidden="true" size={13} data-expanded={expanded} />
       </button>
       {expanded ? (
-        <div id={panelId} className="source-evidence-panel">
+        <div id={panelId} className="source-evidence-panel" style={{ left: panelLeft }}>
           <dl className="evidence-meta">
             <div><dt>Generated</dt><dd>{formatTimestamp(meta.generated_at)}</dd></div>
             <div><dt>Correlation ID</dt><dd>{meta.correlation_id}</dd></div>

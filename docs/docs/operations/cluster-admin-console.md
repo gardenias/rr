@@ -36,6 +36,15 @@ pnpm --dir crates/rr-admin/console run build
 cargo build --release -p rr-admin
 ```
 
+源码树内的本地部署可使用 `just console-up`：它构建静态导出和 debug `rr-admin`，从 `RR_CONSOLE_TOKEN` 读取
+viewer token，将 profile 存入 `target/just/console-state`，并把 PID/日志写入 `target/just/`。默认监听
+`127.0.0.1:8080`，可用 `RR_CONSOLE_LISTEN` 覆盖；`just console-up <seed-roster>` 可附带一个临时启动连接，
+`just console-down` 只停止该 recipe 管理的进程。
+For local source-tree deployment, `just console-up` builds the static export and debug `rr-admin`, reads the viewer
+token from `RR_CONSOLE_TOKEN`, stores profiles in `target/just/console-state`, and writes PID/log files under
+`target/just/`. It listens on `127.0.0.1:8080` unless `RR_CONSOLE_LISTEN` is set. Use `just console-up <seed-roster>`
+for an ephemeral startup connection and `just console-down` to stop only the recipe-managed process.
+
 部署时同时携带二进制和静态导出目录，或用 `--static-dir` 指向导出位置。默认目录是源码树中的
 `crates/rr-admin/console/out`，不是独立 Node.js 生产服务。
 Ship the static export with the binary, or point `--static-dir` at its deployed location. The default is

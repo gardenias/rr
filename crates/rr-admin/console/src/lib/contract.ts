@@ -14,7 +14,7 @@ export type HealthStatus =
   | "UNSUPPORTED";
 
 export type SourceStatus = "ONLINE" | "FRESH" | "STALE" | "UNREACHABLE" | "ERROR" | "UNSUPPORTED" | "UNMAPPED" | "UNKNOWN";
-export type CapabilityStatus = "SUPPORTED" | "UNSUPPORTED" | "ERROR" | "ON_DEMAND" | "DEGRADED" | "UNKNOWN";
+export type CapabilityStatus = "SUPPORTED" | "UNSUPPORTED" | "ERROR" | "ON_DEMAND" | "DEGRADED" | "PARTIAL" | "UNTRACKED" | "UNKNOWN";
 
 export interface SourceEvidence {
   node_id: number | null;

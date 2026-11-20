@@ -188,7 +188,7 @@ h2 { color: var(--tx-1); font-size: 13px; font-weight: 600; }
 .source-evidence-trigger svg[data-expanded="true"] { transform: rotate(180deg); }
 .source-evidence-panel {
   position: absolute;
-  right: 0;
+  left: 0;
   top: calc(100% + 7px);
   z-index: 30;
   width: min(460px, calc(100vw - 32px));

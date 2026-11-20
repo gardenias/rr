@@ -22,6 +22,53 @@ test("prioritizes leaderless evidence and preserves query state in drilldowns", 
   await expect(page).toHaveURL(/\/groups\/\?window=1h&filter=zone-a&connection=cluster-a&group_id=7$/);
 });
 
+test("keeps source evidence labels clear of the sidebar", async ({ page }) => {
+  await page.goto(clusterUrl("/overview/", CLUSTER_A));
+  const region = page.getByRole("region", { name: "Overview observation status" });
+  await region.getByRole("button", { name: "2 sources" }).click();
+  const panel = region.locator(".source-evidence-panel");
+  const panelBox = await panel.boundingBox();
+  const sidebarBox = await page.locator(".console-sidebar").boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(sidebarBox).not.toBeNull();
+  expect(panelBox!.x).toBeGreaterThanOrEqual(sidebarBox!.x + sidebarBox!.width);
+  const generated = panel.getByText("Generated", { exact: true });
+  await expect(generated).toBeVisible();
+  expect(await generated.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === element;
+  })).toBe(true);
+});
+
+test("keeps source evidence within a mobile viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(clusterUrl("/overview/", CLUSTER_A));
+  const region = page.getByRole("region", { name: "Overview observation status" });
+  await region.getByRole("button", { name: "2 sources" }).click();
+  const panelBox = await region.locator(".source-evidence-panel").boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(panelBox!.x).toBeGreaterThanOrEqual(16);
+  expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(374);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+});
+
+test("repositions open source evidence after a viewport resize", async ({ page }) => {
+  await page.goto(clusterUrl("/overview/", CLUSTER_A));
+  const region = page.getByRole("region", { name: "Overview observation status" });
+  await region.getByRole("button", { name: "2 sources" }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const panelBox = await region.locator(".source-evidence-panel").boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(panelBox!.x).toBeGreaterThanOrEqual(16);
+  expect(panelBox!.x + panelBox!.width).toBeLessThanOrEqual(374);
+});
+
+test("omits supported capabilities from the overview attention feed", async ({ page }) => {
+  await page.goto(clusterUrl("/overview/", CLUSTER_A));
+  await expect(page.getByText(/Node 3 does not expose resource sampling/)).toBeVisible();
+  await expect(page.getByText("Supported · groups", { exact: true })).toHaveCount(0);
+});
+
 test("keeps partial, stale, unsupported, and node failure evidence visible without overflow", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

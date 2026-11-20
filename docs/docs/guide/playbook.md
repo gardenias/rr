@@ -111,6 +111,38 @@ RR_GENESIS_BASE_PORT=54201 RR_CLUSTER_NAME=rr-dev just genesis-up
 同名记录只允许重启同一集群；不同花名册会被拒绝，不会另建一套配置。
 Reusing a name is valid only for restarting the same cluster; a different roster is rejected rather than forming another configuration.
 
+### 完整观测 KV 集群与 Console / Full-Observation KV Cluster and Console
+
+该流程保留 KV 语义，并使用 Genesis、Rocks、显式 descriptor、逐节点 metrics 和持久 boot journal。默认 client、Admin、
+metrics 端口分别从 53301、54301、55301 开始；Console 为 `http://127.0.0.1:8080`。前提是本地已有 etcd 镜像，
+并设置 viewer token；recipe 会构建前端、启动三个节点和带 seeds 的 Console。
+This path keeps KV semantics and enables Genesis, Rocks, explicit descriptors, per-node metrics, and persistent boot
+journals. Client, Admin, and metrics ports start at 53301, 54301, and 55301; Console listens at
+`http://127.0.0.1:8080`. It requires the local etcd image and a viewer token, then builds the frontend and starts three
+nodes plus a seeded Console.
+
+```bash
+export RR_CONSOLE_TOKEN='local-viewer-token'
+just kv-console-cluster-up
+```
+
+使用 `just kv-console-cluster-down` 停止节点和 Console；Rocks 数据与 boot 历史保留在
+`target/just/kv-console/`。这些目录只能用于同一集群和花名册；更换集群名、花名册或重置 etcd 后不要复用旧状态。
+`RR_KV_CONSOLE_BASE_PORT` 和 `RR_CONSOLE_LISTEN` 可覆盖基础端口和 Console 地址。
+Use `just kv-console-cluster-down` to stop the nodes and Console. Rocks data and boot history remain under
+`target/just/kv-console/`, only for the same cluster and roster. Do not reuse that state after changing the cluster
+name or roster, or after resetting etcd. Override `RR_KV_CONSOLE_BASE_PORT` and `RR_CONSOLE_LISTEN` when needed.
+
+Console 也可独立启动，不带 seeds 时打开连接管理器；带 seeds 时创建一个临时启动连接：
+Console can also start independently. Without seeds it opens the connection manager; with seeds it creates an ephemeral
+startup connection.
+
+```bash
+just console-up
+just console-up 1@127.0.0.1:54301,2@127.0.0.1:54302,3@127.0.0.1:54303
+just console-down
+```
+
 ## 5. 收养旧集群 / Legacy Adoption
 
 只对已初始化的旧集群使用 adopt，顺序如下：

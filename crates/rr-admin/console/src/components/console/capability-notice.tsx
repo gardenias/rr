@@ -7,6 +7,8 @@ const labels = {
   ERROR: "Capability error",
   ON_DEMAND: "Available on demand",
   DEGRADED: "Degraded capability",
+  PARTIAL: "Partially supported",
+  UNTRACKED: "Untracked",
   UNKNOWN: "Capability unknown",
 };
 

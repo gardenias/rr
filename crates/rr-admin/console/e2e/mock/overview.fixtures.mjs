@@ -28,7 +28,10 @@ export function overviewSummary({ partial = true } = {}) {
       { node_id: 1, endpoint_role: "ADMIN", observed_at: "2026-11-16T08:00:00Z", age_ms: 1000, status: "ONLINE" },
       { node_id: 3, endpoint_role: "ADMIN", observed_at: "2026-11-16T07:55:00Z", age_ms: 65000, status: "STALE", error_code: "UPSTREAM_TIMEOUT" },
     ],
-    capabilities: [{ feature: "resources", status: "UNSUPPORTED", reason: "Node 3 does not expose resource sampling." }],
+    capabilities: [
+      { feature: "groups", status: "SUPPORTED" },
+      { feature: "resources", status: "UNSUPPORTED", reason: "Node 3 does not expose resource sampling." },
+    ],
   });
 }
 

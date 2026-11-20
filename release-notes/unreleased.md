@@ -45,6 +45,13 @@ The deployment model remains one `rr-admin` process serving both the connection-
 Next.js static export from the same origin. No separate Node.js server, multi-user authorization system,
 OIDC/RBAC integration, or Raft control plane is introduced.
 
+## Local full-observation workflow
+
+`kv-store` now accepts explicit descriptor addresses, environment and placement metadata, an application version, and a
+persistent boot-journal directory. The new `kv-console-cluster-up` recipe combines these with Genesis, Rocks, per-node
+metrics, and a seeded Console; `kv-console-cluster-down` stops the stack without deleting its data. `console-up` and
+`console-down` also manage a standalone local Console, with `RR_CONSOLE_TOKEN` supplying the viewer credential.
+
 ## Acceptance evidence
 
 The real Playwright harness starts two independent three-node RocksDB clusters through local seed-based

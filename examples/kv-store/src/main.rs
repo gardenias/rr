@@ -65,8 +65,8 @@
 //! - `--port <PORT>`            — gRPC listen port. Defaults to 51001.
 //!   The admin API is served on PORT + 1000 (51001 → 52001).
 //! - `--listen-addr <HOST>`     — gRPC bind host. Defaults to 127.0.0.1. Affects binding
-//!   only; the advertised address always comes from `--peers`
-//!   (single-node runs stay on 127.0.0.1).
+//!   only; the Raft roster address comes from `--peers` (single-node runs stay on
+//!   127.0.0.1). The independently exposed descriptor address uses `--advertise-addr`.
 //! - `--peers <ID@ADDR,...>`    — Full cluster roster, comma-separated `id@addr` pairs
 //!   (must include this node). Empty means single-node roster.
 //! - `--metrics-port <PORT>`    — Also serve /health, /ready and Prometheus /metrics
@@ -75,6 +75,14 @@
 //!   Defaults to 127.0.0.1 (loopback only, mirroring rr-server's
 //!   `metrics_bind_host` default). Set 0.0.0.0 in containers so published
 //!   ports and cross-container Prometheus scrapes can reach it.
+//! - `--advertise-addr <ADDR>` — Explicit client/Raft address in the node descriptor.
+//! - `--admin-advertise-addr <ADDR>` — Explicit AdminService address in the descriptor.
+//! - `--observability-advertise-addr <ADDR>` — Trusted health/metrics address in the descriptor.
+//! - `--environment <NAME>` — Required deployment environment when any descriptor field is set.
+//!   The advertise, Admin, and observability addresses are also required; no port is inferred.
+//! - `--region/--zone/--rack <NAME>` — Optional descriptor placement metadata.
+//! - `--app-version <VERSION>` — Application version reported separately from the Rr version.
+//! - `--boot-journal-dir <PATH>` — Persist boot history in a node-specific directory.
 //! - `--kafka-brokers <A,...>`  — Comma-separated bootstrap brokers; consumes group 1's
 //!   command topic with framework-managed exactly-once apply.
 //!   Requires a binary built with `--features rdkafka`.
@@ -142,6 +150,7 @@ use rr_server::dispatch::ClientDispatchImpl;
 use rr_server::formation::{FormationConfig, FormationMode};
 use rr_server::lookup::RaftGroupLookupImpl;
 use rr_server::node::RrNode;
+use rr_server::runtime::{NodeDescriptorConfig, NodeRuntimeConfig};
 use rr_storage::mem::MemStorage;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -159,6 +168,15 @@ struct CliConfig {
     peers: Vec<String>,
     metrics_port: Option<u16>,
     metrics_bind_host: Option<String>,
+    advertise_addr: Option<String>,
+    admin_advertise_addr: Option<String>,
+    observability_advertise_addr: Option<String>,
+    environment: Option<String>,
+    region: Option<String>,
+    zone: Option<String>,
+    rack: Option<String>,
+    app_version: Option<String>,
+    boot_journal_dir: Option<PathBuf>,
     kafka_brokers: Option<Vec<String>>,
     kafka_topic_prefix: String,
     data_dir: Option<String>,
@@ -176,8 +194,10 @@ struct CliConfig {
 
 impl CliConfig {
     fn parse() -> Self {
-        let args: Vec<String> = std::env::args().skip(1).collect();
+        Self::parse_from(std::env::args().skip(1).collect())
+    }
 
+    fn parse_from(args: Vec<String>) -> Self {
         if args.is_empty() {
             // No args → run the single-node demo
             return Self {
@@ -187,6 +207,15 @@ impl CliConfig {
                 peers: vec![],
                 metrics_port: None,
                 metrics_bind_host: None,
+                advertise_addr: None,
+                admin_advertise_addr: None,
+                observability_advertise_addr: None,
+                environment: None,
+                region: None,
+                zone: None,
+                rack: None,
+                app_version: None,
+                boot_journal_dir: None,
                 kafka_brokers: None,
                 kafka_topic_prefix: "input_".to_string(),
                 data_dir: None,
@@ -209,6 +238,15 @@ impl CliConfig {
         let mut peers: Vec<String> = vec![];
         let mut metrics_port: Option<u16> = None;
         let mut metrics_bind_host: Option<String> = None;
+        let mut advertise_addr = None;
+        let mut admin_advertise_addr = None;
+        let mut observability_advertise_addr = None;
+        let mut environment = None;
+        let mut region = None;
+        let mut zone = None;
+        let mut rack = None;
+        let mut app_version = None;
+        let mut boot_journal_dir = None;
         let mut kafka_brokers: Option<Vec<String>> = None;
         let mut kafka_topic_prefix = "input_".to_string();
         let mut data_dir: Option<String> = None;
@@ -253,6 +291,45 @@ impl CliConfig {
                     i += 1;
                     metrics_bind_host =
                         Some(flag_value(&args, i, "--metrics-bind-host").to_string());
+                }
+                "--advertise-addr" => {
+                    i += 1;
+                    advertise_addr = Some(flag_value(&args, i, "--advertise-addr").to_string());
+                }
+                "--admin-advertise-addr" => {
+                    i += 1;
+                    admin_advertise_addr =
+                        Some(flag_value(&args, i, "--admin-advertise-addr").to_string());
+                }
+                "--observability-advertise-addr" => {
+                    i += 1;
+                    observability_advertise_addr =
+                        Some(flag_value(&args, i, "--observability-advertise-addr").to_string());
+                }
+                "--environment" => {
+                    i += 1;
+                    environment = Some(flag_value(&args, i, "--environment").to_string());
+                }
+                "--region" => {
+                    i += 1;
+                    region = Some(flag_value(&args, i, "--region").to_string());
+                }
+                "--zone" => {
+                    i += 1;
+                    zone = Some(flag_value(&args, i, "--zone").to_string());
+                }
+                "--rack" => {
+                    i += 1;
+                    rack = Some(flag_value(&args, i, "--rack").to_string());
+                }
+                "--app-version" => {
+                    i += 1;
+                    app_version = Some(flag_value(&args, i, "--app-version").to_string());
+                }
+                "--boot-journal-dir" => {
+                    i += 1;
+                    boot_journal_dir =
+                        Some(PathBuf::from(flag_value(&args, i, "--boot-journal-dir")));
                 }
                 "--kafka-brokers" => {
                     i += 1;
@@ -344,6 +421,15 @@ impl CliConfig {
             peers,
             metrics_port,
             metrics_bind_host,
+            advertise_addr,
+            admin_advertise_addr,
+            observability_advertise_addr,
+            environment,
+            region,
+            zone,
+            rack,
+            app_version,
+            boot_journal_dir,
             kafka_brokers,
             kafka_topic_prefix,
             data_dir,
@@ -361,12 +447,56 @@ impl CliConfig {
     }
 }
 
+fn runtime_config(cli: &CliConfig) -> Result<NodeRuntimeConfig> {
+    let mut runtime = NodeRuntimeConfig::new(cli.node_id, String::new());
+    if let Some(app_version) = &cli.app_version {
+        runtime.app_version = app_version.clone();
+    }
+    runtime.journal_dir = cli.boot_journal_dir.clone();
+    let descriptor_fields = [
+        &cli.advertise_addr,
+        &cli.admin_advertise_addr,
+        &cli.observability_advertise_addr,
+        &cli.environment,
+        &cli.region,
+        &cli.zone,
+        &cli.rack,
+    ];
+    if descriptor_fields.iter().any(|value| value.is_some()) {
+        let required = |value: &Option<String>, name: &str| {
+            value.clone().filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+                anyhow!(
+                    "incomplete node descriptor: {name} is required when any descriptor field is set"
+                )
+            })
+        };
+        let client_addr = required(&cli.advertise_addr, "advertise_addr")?;
+        runtime.descriptor = Some(NodeDescriptorConfig {
+            client_addr: client_addr.clone(),
+            advertise_addr: client_addr,
+            admin_addr: required(&cli.admin_advertise_addr, "admin_advertise_addr")?,
+            observability_addr: required(
+                &cli.observability_advertise_addr,
+                "observability_advertise_addr",
+            )?,
+            environment: required(&cli.environment, "environment")?,
+            region: cli.region.clone(),
+            zone: cli.zone.clone(),
+            rack: cli.rack.clone(),
+        });
+    }
+    Ok(runtime)
+}
+
 /// Print usage and exit with the conventional CLI misuse code (2).
 fn usage() -> ! {
     eprintln!(
         "Usage: kv-store [--node-id N] [--port PORT] [--listen-addr HOST] \
          [--peers ID@ADDR,...] [--metrics-port PORT] [--metrics-bind-host IP] \
-         [--kafka-brokers A,...] [--kafka-topic-prefix P] [--data-dir PATH] \
+         [--advertise-addr ADDR --admin-advertise-addr ADDR \
+         --observability-advertise-addr ADDR --environment NAME] \
+         [--region NAME] [--zone NAME] [--rack NAME] [--app-version VERSION] \
+         [--boot-journal-dir PATH] [--kafka-brokers A,...] [--kafka-topic-prefix P] [--data-dir PATH] \
          [--tls-cert PATH --tls-key PATH --tls-ca PATH [--tls-domain NAME]] \
          [--snapshot-logs-since-last N] [--formation genesis|adopt \
          --cluster-name NAME --etcd-endpoints URL,...] [--bootstrap] [--demo]"
@@ -652,9 +782,12 @@ async fn run_node(cli: CliConfig) -> Result<()> {
         None => config,
     };
 
+    let runtime = runtime_config(&cli)?;
     let node = match formation {
-        Some(formation) => Arc::new(RrNode::new_with_formation(config, formation)?),
-        None => Arc::new(RrNode::new(config)?),
+        Some(formation) => Arc::new(RrNode::new_with_formation_and_runtime(
+            config, formation, runtime,
+        )?),
+        None => Arc::new(RrNode::new_with_runtime(config, runtime)?),
     };
     node.start().await?;
     info!(
@@ -1012,4 +1145,103 @@ async fn demo_delete(raft: &RaftInstance, key: &str) -> Result<()> {
     propose(raft, &req).await?;
     info!("DEL {key}");
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn full_observability_arguments_build_the_node_runtime() {
+        let cli = CliConfig::parse_from(args(&[
+            "--node-id",
+            "2",
+            "--advertise-addr",
+            "127.0.0.1:53102",
+            "--admin-advertise-addr",
+            "127.0.0.1:54102",
+            "--observability-advertise-addr",
+            "127.0.0.1:55102",
+            "--environment",
+            "dev",
+            "--region",
+            "local",
+            "--zone",
+            "zone-2",
+            "--rack",
+            "rack-2",
+            "--app-version",
+            "kv-console-demo",
+            "--boot-journal-dir",
+            "target/console-full/node-2/boot",
+        ]));
+
+        let runtime = runtime_config(&cli).unwrap();
+        let descriptor = runtime.descriptor.unwrap();
+        assert_eq!(descriptor.client_addr, "127.0.0.1:53102");
+        assert_eq!(descriptor.admin_addr, "127.0.0.1:54102");
+        assert_eq!(descriptor.observability_addr, "127.0.0.1:55102");
+        assert_eq!(descriptor.environment, "dev");
+        assert_eq!(descriptor.region.as_deref(), Some("local"));
+        assert_eq!(descriptor.zone.as_deref(), Some("zone-2"));
+        assert_eq!(descriptor.rack.as_deref(), Some("rack-2"));
+        assert_eq!(runtime.app_version, "kv-console-demo");
+        assert_eq!(
+            runtime.journal_dir,
+            Some(PathBuf::from("target/console-full/node-2/boot"))
+        );
+    }
+
+    #[test]
+    fn every_required_descriptor_field_is_validated_before_startup() {
+        let fields = [
+            ("--advertise-addr", "127.0.0.1:53101", "advertise_addr"),
+            (
+                "--admin-advertise-addr",
+                "127.0.0.1:54101",
+                "admin_advertise_addr",
+            ),
+            (
+                "--observability-advertise-addr",
+                "127.0.0.1:55101",
+                "observability_advertise_addr",
+            ),
+            ("--environment", "dev", "environment"),
+        ];
+        for (missing_index, (_, _, expected)) in fields.iter().enumerate() {
+            let mut values = vec![];
+            for (index, (flag, value, _)) in fields.iter().enumerate() {
+                if index != missing_index {
+                    values.extend([*flag, *value]);
+                }
+            }
+            let cli = CliConfig::parse_from(args(&values));
+            let error = match runtime_config(&cli) {
+                Ok(_) => panic!("partial descriptor unexpectedly passed validation"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn app_version_and_boot_journal_do_not_require_a_descriptor() {
+        let cli = CliConfig::parse_from(args(&[
+            "--app-version",
+            "kv-demo",
+            "--boot-journal-dir",
+            "target/kv-demo-boot",
+        ]));
+        let runtime = runtime_config(&cli).unwrap();
+        assert!(runtime.descriptor.is_none());
+        assert_eq!(runtime.app_version, "kv-demo");
+        assert_eq!(
+            runtime.journal_dir,
+            Some(PathBuf::from("target/kv-demo-boot"))
+        );
+    }
 }

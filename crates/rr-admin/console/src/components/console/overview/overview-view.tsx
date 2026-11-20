@@ -101,7 +101,7 @@ export function OverviewView() {
             </div>
             <div className="evidence-panel-meta"><FreshnessBadge meta={meta} /><SourceEvidence meta={meta} /><Link href={drilldownHref("/sources", currentSearch, {})} className="evidence-link">Inspect sources <ArrowUpRight aria-hidden="true" size={12} /></Link></div>
           </section>
-          {meta.capabilities.map((capability) => <CapabilityNotice key={`${capability.feature}-${capability.status}`} capability={capability} />)}
+          {meta.capabilities.filter((capability) => capability.status !== "SUPPORTED").map((capability) => <CapabilityNotice key={`${capability.feature}-${capability.status}`} capability={capability} />)}
 
           <div className="grid min-w-0 gap-4 xl:grid-cols-[3fr_2fr]">
             <section className="min-w-0 border border-(--line-1) bg-(--bg-1) p-4" aria-labelledby="overview-raft-title">

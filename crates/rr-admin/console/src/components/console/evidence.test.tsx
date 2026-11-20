@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { makeMeta } from "@/test/fixtures";
+import type { Capability } from "@/lib/contract";
 import { CapabilityNotice } from "@/components/console/capability-notice";
 import { FreshnessBadge } from "@/components/console/freshness-badge";
 import { HealthBadge } from "@/components/console/health-badge";
@@ -79,6 +80,14 @@ describe("evidence components", () => {
     render(<><SourceEvidence meta={makeMeta()} /><SourceEvidence meta={makeMeta()} /></>);
     const controls = screen.getAllByRole("button", { name: "1 source" }).map((button) => button.getAttribute("aria-controls"));
     expect(new Set(controls).size).toBe(2);
+  });
+
+  it.each([
+    ["UNTRACKED", "Untracked"],
+    ["PARTIAL", "Partially supported"],
+  ])("labels the %s capability state", (status, label) => {
+    render(<CapabilityNotice capability={{ feature: "cluster_identity", status: status as Capability["status"] }} />);
+    expect(screen.getByText(label)).toBeVisible();
   });
 
   it("explains unsupported capabilities instead of rendering zero values", () => {

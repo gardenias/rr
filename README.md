@@ -559,14 +559,15 @@ just doctor          # 环境自检（必需与可选工具分开报告）/ envi
 just test            # cargo test 全量测试 / full test suite
 just kv-cluster-up   # 一键三节点内存 KV 集群（--bootstrap 路径）/ 3-node in-memory KV cluster
 just genesis-up      # 一键三节点同构 Genesis 集群（需本地 etcd）/ homogeneous Genesis cluster
+just kv-console-cluster-up # 完整观测 KV + Console（需本地 etcd）/ full-observation KV + Console
 just test-etcd       # 真实 etcd 验收测试 / real-etcd acceptance tests
 just helm-test       # Helm chart 渲染测试 / Helm render tests
 just java-test       # Java SDK 单元测试 / Java SDK unit tests
 just nightly         # 本地质量门禁（invariants+全量测试+crash+fuzz+TLA）/ local quality gates
 ```
 
-后台进程的 PID 与日志统一放在 `target/just/`，用 `just kv-cluster-down` / `just genesis-down` / `just etcd-down` 清理。
-Recipes track background processes via PID and log files under `target/just/`; tear them down with `just kv-cluster-down` / `just genesis-down` / `just etcd-down`.
+后台进程的 PID 与日志统一放在 `target/just/`，用对应的 `*-down` 命令清理；`console-up` 单独启动 Console，可用 `console-down` 停止。
+Recipes track background processes via PID and log files under `target/just/`; use the matching `*-down` recipe. `console-up` starts Console independently and `console-down` stops it.
 
 ## Documentation
 

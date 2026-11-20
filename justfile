@@ -9,8 +9,10 @@ RR_ETCD_ENDPOINTS := env_var_or_default("RR_ETCD_ENDPOINTS", "http://127.0.0.1:2
 RR_DOCKER_HOST := env_var_or_default("RR_DOCKER_HOST", env_var_or_default("DOCKER_HOST", ""))
 KV_BASE_PORT := env_var_or_default("RR_KV_BASE_PORT", "53101")
 GENESIS_BASE_PORT := env_var_or_default("RR_GENESIS_BASE_PORT", "53201")
+KV_CONSOLE_BASE_PORT := env_var_or_default("RR_KV_CONSOLE_BASE_PORT", "53301")
 JAVA_DIR := ROOT / "sdks/java"
 CONSOLE_DIR := ROOT / "crates/rr-admin/console"
+CONSOLE_LISTEN := env_var_or_default("RR_CONSOLE_LISTEN", "127.0.0.1:8080")
 DOCS_PORT := env_var_or_default("DOCS_PORT", "3000")
 
 default:
@@ -76,6 +78,74 @@ console-test: console-build
     pnpm --dir "{{CONSOLE_DIR}}" lint
     pnpm --dir "{{CONSOLE_DIR}}" test:unit
     pnpm --dir "{{CONSOLE_DIR}}" test:e2e
+
+[group("console")]
+console-up SEEDS="": console-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v curl >/dev/null || { echo "curl is required for console-up" >&2; exit 1; }
+    : "${RR_CONSOLE_TOKEN:?set RR_CONSOLE_TOKEN to the Console viewer token}"
+    pid_file="{{JUST_STATE}}/pids/console.pid"
+    identity_file="$pid_file.identity"
+    [[ ! -e "$pid_file" ]] || { echo "Console already has PID state; run just console-down first" >&2; exit 1; }
+    cargo build -p rr-admin
+    mkdir -p "{{JUST_STATE}}/pids" "{{JUST_STATE}}/logs" "{{JUST_STATE}}/console-state"
+    args=(console --listen "{{CONSOLE_LISTEN}}" --console-token-env RR_CONSOLE_TOKEN \
+      --state-dir "{{JUST_STATE}}/console-state" --static-dir "{{CONSOLE_DIR}}/out")
+    if [[ -n "{{SEEDS}}" ]]; then
+      args+=(--peers "{{SEEDS}}")
+    fi
+    RR_CONSOLE_TOKEN="$RR_CONSOLE_TOKEN" nohup "{{ROOT}}/target/debug/rr-admin" "${args[@]}" \
+      > "{{JUST_STATE}}/logs/console.log" 2>&1 &
+    pid="$!"
+    echo "$pid" > "$pid_file"
+    for _ in $(seq 1 100); do
+      identity="$({ LC_ALL=C ps -p "$pid" -o lstart=,command= 2>/dev/null || true; } | awk 'NF { $1=$1; print; exit }')"
+      if [[ "$identity" != *"{{ROOT}}/target/debug/rr-admin console"* ]]; then
+        rm -f "$pid_file" "$identity_file"
+        echo "Console exited during startup; inspect {{JUST_STATE}}/logs/console.log" >&2
+        exit 1
+      fi
+      echo "$identity" > "$identity_file"
+      if curl -fsS "http://{{CONSOLE_LISTEN}}/login/" >/dev/null 2>&1; then
+        confirmed="$( { LC_ALL=C ps -p "$pid" -o lstart=,command= 2>/dev/null || true; } | awk 'NF { $1=$1; print; exit }' )"
+        if [[ "$confirmed" == "$identity" ]]; then
+          echo "Console ready at http://{{CONSOLE_LISTEN}} (viewer token: RR_CONSOLE_TOKEN)"
+          exit 0
+        fi
+        rm -f "$pid_file" "$identity_file"
+        echo "Console process changed during startup; inspect {{JUST_STATE}}/logs/console.log" >&2
+        exit 1
+      fi
+      sleep 0.2
+    done
+    just console-down
+    echo "Console did not become ready; inspect {{JUST_STATE}}/logs/console.log" >&2
+    exit 1
+
+[group("console")]
+console-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pid_file="{{JUST_STATE}}/pids/console.pid"
+    identity_file="$pid_file.identity"
+    if [[ -e "$pid_file" ]]; then
+      pid="$(cat "$pid_file")"
+      expected=""
+      [[ ! -e "$identity_file" ]] || expected="$(cat "$identity_file")"
+      current="$({ LC_ALL=C ps -p "$pid" -o lstart=,command= 2>/dev/null || true; } | awk 'NF { $1=$1; print; exit }')"
+      if [[ -n "$expected" && "$current" == "$expected" && "$current" == *"{{ROOT}}/target/debug/rr-admin console"* ]]; then
+        kill -INT "$pid" >/dev/null 2>&1 || true
+        for _ in $(seq 1 50); do kill -0 "$pid" >/dev/null 2>&1 || break; sleep 0.1; done
+        current="$({ LC_ALL=C ps -p "$pid" -o lstart=,command= 2>/dev/null || true; } | awk 'NF { $1=$1; print; exit }')"
+        if [[ "$current" == "$expected" ]]; then
+          kill -TERM "$pid" >/dev/null 2>&1 || true
+        fi
+      elif [[ -n "$current" ]]; then
+        echo "Console PID $pid belongs to another process; leaving it untouched" >&2
+      fi
+      rm -f "$pid_file" "$identity_file"
+    fi
 
 [group("core")]
 test:
@@ -304,6 +374,99 @@ genesis-down:
           kill -TERM "$pid" >/dev/null 2>&1 || true
         fi
         rm -f "$pid_file"
+      fi
+    done
+
+[group("cluster")]
+kv-console-cluster-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${RR_CONSOLE_TOKEN:?set RR_CONSOLE_TOKEN to the Console viewer token}"
+    command -v curl >/dev/null || { echo "curl is required for kv-console-cluster-up" >&2; exit 1; }
+    [[ ! -e "{{JUST_STATE}}/pids/console.pid" ]] || { echo "Console already has PID state; run just console-down first" >&2; exit 1; }
+    for id in 1 2 3; do
+      [[ ! -e "{{JUST_STATE}}/pids/kv-console-node${id}.pid" ]] || {
+        echo "full KV node ${id} already has PID state; run just kv-console-cluster-down first" >&2
+        exit 1
+      }
+    done
+    cleanup_on_failure() {
+      local status="$?"
+      if [[ "$status" -ne 0 ]]; then
+        echo "full KV Console startup failed; cleaning up recipe-managed processes" >&2
+        just kv-console-cluster-down >/dev/null 2>&1 || true
+      fi
+      exit "$status"
+    }
+    trap cleanup_on_failure EXIT
+    just etcd-up
+    cargo build -p kv-store --features rocks
+    cargo build -p rr-admin
+    mkdir -p "{{JUST_STATE}}/pids" "{{JUST_STATE}}/logs"
+    roster="1@127.0.0.1:{{KV_CONSOLE_BASE_PORT}},2@127.0.0.1:$(( {{KV_CONSOLE_BASE_PORT}} + 1 )),3@127.0.0.1:$(( {{KV_CONSOLE_BASE_PORT}} + 2 ))"
+    admin_roster="1@127.0.0.1:$(( {{KV_CONSOLE_BASE_PORT}} + 1000 )),2@127.0.0.1:$(( {{KV_CONSOLE_BASE_PORT}} + 1001 )),3@127.0.0.1:$(( {{KV_CONSOLE_BASE_PORT}} + 1002 ))"
+    start_node() {
+      local id="$1" port="$2"
+      local pid_file="{{JUST_STATE}}/pids/kv-console-node${id}.pid"
+      local node_root="{{JUST_STATE}}/kv-console/node${id}"
+      [[ ! -e "$pid_file" ]] || { echo "full KV node ${id} already has PID state; run just kv-console-cluster-down first" >&2; exit 1; }
+      mkdir -p "$node_root/data" "$node_root/boot"
+      nohup "{{ROOT}}/target/debug/kv-store" --node-id "$id" --port "$port" --peers "$roster" \
+        --formation genesis --cluster-name "{{RR_CLUSTER_NAME}}" --etcd-endpoints "{{RR_ETCD_ENDPOINTS}}" \
+        --metrics-port "$(( port + 2000 ))" --metrics-bind-host 127.0.0.1 \
+        --advertise-addr "127.0.0.1:$port" \
+        --admin-advertise-addr "127.0.0.1:$(( port + 1000 ))" \
+        --observability-advertise-addr "127.0.0.1:$(( port + 2000 ))" \
+        --environment dev --region local --zone "zone-${id}" --rack rack-1 \
+        --app-version kv-console-demo --data-dir "$node_root/data" \
+        --boot-journal-dir "$node_root/boot" \
+        > "{{JUST_STATE}}/logs/kv-console-node${id}.log" 2>&1 &
+      pid="$!"
+      echo "$pid" > "$pid_file"
+      identity="$({ LC_ALL=C ps -p "$pid" -o lstart=,command= 2>/dev/null || true; } | awk 'NF { $1=$1; print; exit }')"
+      [[ "$identity" == *"{{ROOT}}/target/debug/kv-store --node-id $id "* ]] || {
+        echo "full KV node ${id} exited during startup; inspect {{JUST_STATE}}/logs/kv-console-node${id}.log" >&2
+        return 1
+      }
+      echo "$identity" > "$pid_file.identity"
+    }
+    start_node 1 "{{KV_CONSOLE_BASE_PORT}}"
+    start_node 2 "$(( {{KV_CONSOLE_BASE_PORT}} + 1 ))"
+    start_node 3 "$(( {{KV_CONSOLE_BASE_PORT}} + 2 ))"
+    for _ in $(seq 1 150); do
+      if "{{ROOT}}/target/debug/rr-admin" --addr "127.0.0.1:$(( {{KV_CONSOLE_BASE_PORT}} + 1000 ))" --output json group status --group 1 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin); raise SystemExit(0 if s.get("leader_node_id") else 1)'; then
+        just console-up "$admin_roster"
+        echo "full KV Console cluster ready on client {{KV_CONSOLE_BASE_PORT}}..$(( {{KV_CONSOLE_BASE_PORT}} + 2 )), admin $(( {{KV_CONSOLE_BASE_PORT}} + 1000 ))..$(( {{KV_CONSOLE_BASE_PORT}} + 1002 )), metrics $(( {{KV_CONSOLE_BASE_PORT}} + 2000 ))..$(( {{KV_CONSOLE_BASE_PORT}} + 2002 ))"
+        exit 0
+      fi
+      sleep 0.2
+    done
+    echo "full KV Console cluster did not become ready; inspect {{JUST_STATE}}/logs" >&2
+    exit 1
+
+[group("cluster")]
+kv-console-cluster-down: console-down
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for id in 3 2 1; do
+      pid_file="{{JUST_STATE}}/pids/kv-console-node${id}.pid"
+      identity_file="$pid_file.identity"
+      if [[ -e "$pid_file" ]]; then
+        pid="$(cat "$pid_file")"
+        expected=""
+        [[ ! -e "$identity_file" ]] || expected="$(cat "$identity_file")"
+        current="$({ LC_ALL=C ps -p "$pid" -o lstart=,command= 2>/dev/null || true; } | awk 'NF { $1=$1; print; exit }')"
+        if [[ -n "$expected" && "$current" == "$expected" && "$current" == *"{{ROOT}}/target/debug/kv-store --node-id $id "* ]]; then
+          kill -INT "$pid" >/dev/null 2>&1 || true
+          for _ in $(seq 1 50); do kill -0 "$pid" >/dev/null 2>&1 || break; sleep 0.1; done
+          current="$({ LC_ALL=C ps -p "$pid" -o lstart=,command= 2>/dev/null || true; } | awk 'NF { $1=$1; print; exit }')"
+          if [[ "$current" == "$expected" ]]; then
+            kill -TERM "$pid" >/dev/null 2>&1 || true
+          fi
+        elif [[ -n "$current" ]]; then
+          echo "full KV node ${id} PID $pid belongs to another process; leaving it untouched" >&2
+        fi
+        rm -f "$pid_file" "$identity_file"
       fi
     done
 

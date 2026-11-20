@@ -129,6 +129,10 @@ just kv-cluster-down      # 清理（PID/日志在 target/just/）/ teardown (st
 just etcd-up              # Genesis 前置：本地 etcd（需已有 quay.io/coreos/etcd:v3.5.13 镜像）
 just genesis-up           # 三节点同构 Genesis 集群（--formation genesis 路径，端口 53201+）
 just genesis-status && just genesis-down
+
+export RR_CONSOLE_TOKEN='local-viewer-token'
+just kv-console-cluster-up    # 完整观测集群 + Console（Genesis、Rocks、descriptor、metrics）
+just kv-console-cluster-down  # 停止该集群和 recipe 启动的 Console；数据目录保留
 ```
 
 ## 参数说明 / Arguments
@@ -149,6 +153,10 @@ The CLI is hand-rolled; the `src/main.rs` doc header is the single source of tru
 | `--tls-cert/--tls-key/--tls-ca` | 安全形态（全有或全无）/ secure mode, all-or-nothing |
 | `RR_ADMIN_TOKEN`/`RR_CLIENT_TOKEN` | 安全模式必需；从环境变量读 / required in secure mode; read from env |
 | `--metrics-port <PORT>` | 另开 HTTP 服务 `/health` `/ready` `/metrics` / also serve HTTP health/ready/metrics |
+| `--advertise-addr` / `--admin-advertise-addr` / `--observability-advertise-addr` | 显式 descriptor 地址；与 `--environment` 配套 / explicit descriptor endpoints, paired with environment |
+| `--region` / `--zone` / `--rack` | 可选位置元数据 / optional placement metadata |
+| `--app-version <VERSION>` | 独立于 Rr 版本的应用版本 / application version separate from Rr |
+| `--boot-journal-dir <PATH>` | 持久化启动历史 / persistent boot history |
 | `--kafka-brokers <A,...>` | Kafka 摄入（需 rdkafka 构建）/ Kafka ingest (rdkafka build) |
 | `--snapshot-logs-since-last <N>` | 快照触发阈值（默认 50_000）/ snapshot trigger threshold |
 
