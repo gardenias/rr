@@ -1,2 +1,0 @@
-Storage architecture documentation created and build succeeded with warnings (broken links unrelated to this task).
--rw-r--r--@ 1 louis  staff  7075 Mar  4 22:00 docs/docs/architecture/storage.md

@@ -1,2 +1,0 @@
-Protobuf Reference documentation created and verified.
--rw-r--r--@ 1 louis  staff  5286 Mar  4 22:02 docs/docs/reference/proto-reference.md

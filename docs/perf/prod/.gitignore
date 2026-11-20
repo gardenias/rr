@@ -1,6 +1,0 @@
-# Forensics stay local; the curated baseline (raw-*.json, ts-*.jsonl,
-# ledger.txt, report.md, meta.txt, docker-stats.json) is committed.
-bench-*.log
-node*-stream.log
-ack-*.jsonl
-.logpids

@@ -1,1 +1,0 @@
-Created docs/docs/reference/config-reference.md with bilingual content. Build failed but seems unrelated to the new file (ENOENT on server.bundle.js, possibly a Docusaurus/environment issue). Config fields verified against source.

@@ -1,3 +1,0 @@
-Created docs/docs/guide/storage-engines.md
-Verified build in /Users/louis/Code/Rust/rr/docs (npm run build exited with success message)
-Documentation covers MemStorage, RocksStorage, feature flags, and custom implementations.

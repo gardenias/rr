@@ -1,3 +1,0 @@
-{"BlockIO":"107MB / 953MB","CPUPerc":"3.49%","Container":"perf-kv-1","ID":"0006071c21c8","MemPerc":"44.58%","MemUsage":"913.1MiB / 2GiB","Name":"perf-kv-1","NetIO":"506MB / 751MB","PIDs":"13"}
-{"BlockIO":"46.9MB / 634MB","CPUPerc":"3.49%","Container":"perf-kv-2","ID":"5b51ab5157e9","MemPerc":"32.45%","MemUsage":"664.6MiB / 2GiB","Name":"perf-kv-2","NetIO":"297MB / 8.98MB","PIDs":"13"}
-{"BlockIO":"47MB / 639MB","CPUPerc":"3.18%","Container":"perf-kv-3","ID":"e5d896705fed","MemPerc":"28.78%","MemUsage":"589.3MiB / 2GiB","Name":"perf-kv-3","NetIO":"297MB / 8.95MB","PIDs":"11"}

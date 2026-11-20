@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en" dir="ltr" class="docs-wrapper plugin-docs plugin-id-default docs-version-current docs-doc-page docs-doc-id-deployment/v0.2-to-v1.0-migration" data-has-hydrated="false">
+<head>
+<meta charset="UTF-8">
+<meta name="generator" content="Docusaurus v3.9.2">
+<title data-rh="true">v0.2 → v1.0 迁移指南 / v0.2 → v1.0 Migration Guide | Rr — Rust Raft Framework</title><meta data-rh="true" name="viewport" content="width=device-width,initial-scale=1"><meta data-rh="true" name="twitter:card" content="summary_large_image"><meta data-rh="true" property="og:image" content="https://gardenias.github.io/rr/img/rr-social-card.png"><meta data-rh="true" name="twitter:image" content="https://gardenias.github.io/rr/img/rr-social-card.png"><meta data-rh="true" property="og:url" content="https://gardenias.github.io/rr/docs/deployment/v0.2-to-v1.0-migration"><meta data-rh="true" property="og:locale" content="en"><meta data-rh="true" name="docusaurus_locale" content="en"><meta data-rh="true" name="docsearch:language" content="en"><meta data-rh="true" name="docusaurus_version" content="current"><meta data-rh="true" name="docusaurus_tag" content="docs-default-current"><meta data-rh="true" name="docsearch:version" content="current"><meta data-rh="true" name="docsearch:docusaurus_tag" content="docs-default-current"><meta data-rh="true" property="og:title" content="v0.2 → v1.0 迁移指南 / v0.2 → v1.0 Migration Guide | Rr — Rust Raft Framework"><meta data-rh="true" name="description" content="How to migrate Rr from v0.2.0 to v1.0.0, including deployment, durable formats, API breaks, and rollback limits"><meta data-rh="true" property="og:description" content="How to migrate Rr from v0.2.0 to v1.0.0, including deployment, durable formats, API breaks, and rollback limits"><link data-rh="true" rel="icon" href="/rr/img/favicon.ico"><link data-rh="true" rel="canonical" href="https://gardenias.github.io/rr/docs/deployment/v0.2-to-v1.0-migration"><link data-rh="true" rel="alternate" href="https://gardenias.github.io/rr/docs/deployment/v0.2-to-v1.0-migration" hreflang="en"><link data-rh="true" rel="alternate" href="https://gardenias.github.io/rr/docs/deployment/v0.2-to-v1.0-migration" hreflang="x-default"><script>!function(){var e="both";try{var t=localStorage.getItem("rr-docs-language-mode");"zh"!==t&&"en"!==t&&"both"!==t||(e=t)}catch{}document.documentElement.dataset.languageMode=e}()</script><link rel="stylesheet" href="/rr/assets/css/styles.e50c818d.css">
+<script src="/rr/assets/js/runtime~main.50d6187d.js" defer="defer"></script>
+<script src="/rr/assets/js/main.20eb8a65.js" defer="defer"></script>
+</head>
+<body class="navigation-with-keyboard">
+<svg style="display: none;"><defs>
+<symbol id="theme-svg-external-link" viewBox="0 0 24 24"><path fill="currentColor" d="M21 13v10h-21v-19h12v2h-10v15h17v-8h2zm3-12h-10.988l4.035 4-6.977 7.07 2.828 2.828 6.977-7.07 4.125 4.172v-11z"/></symbol>
+</defs></svg>
+<script>!function(){var t=function(){try{return new URLSearchParams(window.location.search).get("docusaurus-theme")}catch(t){}}()||function(){try{return window.localStorage.getItem("theme")}catch(t){}}();document.documentElement.setAttribute("data-theme",t||(window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light")),document.documentElement.setAttribute("data-theme-choice",t||"system")}(),function(){try{const c=new URLSearchParams(window.location.search).entries();for(var[t,e]of c)if(t.startsWith("docusaurus-data-")){var a=t.replace("docusaurus-data-","data-");document.documentElement.setAttribute(a,e)}}catch(t){}}()</script><div id="__docusaurus"><link rel="preload" as="image" href="/rr/img/rr-wordmark-light.svg"><link rel="preload" as="image" href="/rr/img/rr-wordmark-dark.svg"><div role="region" aria-label="Skip to main content"><a class="skipToContent_fXgn" href="#__docusaurus_skipToContent_fallback">Skip to main content</a></div><nav aria-label="Main" class="theme-layout-navbar navbar navbar--fixed-top"><div class="navbar__inner"><div class="theme-layout-navbar-left navbar__items"><button aria-label="Toggle navigation bar" aria-expanded="false" class="navbar__toggle clean-btn" type="button"><svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><path stroke="currentColor" stroke-linecap="round" stroke-miterlimit="10" stroke-width="2" d="M4 7h22M4 15h22M4 23h22"></path></svg></button><a class="navbar__brand" href="/rr/"><div class="navbar__logo"><img src="/rr/img/rr-wordmark-light.svg" alt="Rr — Rust Raft Framework" class="themedComponent_mlkZ themedComponent--light_NVdE"><img src="/rr/img/rr-wordmark-dark.svg" alt="Rr — Rust Raft Framework" class="themedComponent_mlkZ themedComponent--dark_xIcU"></div></a><a aria-current="page" class="navbar__item navbar__link navbar__link--active" href="/rr/docs">文档 / Docs</a><a class="navbar__item navbar__link" href="/rr/docs/architecture/overview">架构 / Architecture</a><a class="navbar__item navbar__link" href="/rr/docs/reference/api-overview">API 参考 / API Reference</a></div><div class="theme-layout-navbar-right navbar__items navbar__items--right"><button type="button" class="clean-btn language-mode-switcher" aria-label="当前语言：中文 + EN。点击切换为中文 / Language: 中文 + EN. Switch to 中文" title="当前语言：中文 + EN。点击切换为中文 / Language: 中文 + EN. Switch to 中文"><span class="language-mode-switcher__languages" data-mode="both" aria-hidden="true"><span class="language-mode-switcher__chinese">文</span><span class="language-mode-switcher__english">En</span></span><svg class="language-mode-switcher__cycle" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M15.5 7A6 6 0 0 0 5 5.5L3 7.5M3 3.5v4h4M4.5 13A6 6 0 0 0 15 14.5l2-2M17 16.5v-4h-4"></path></svg></button><a href="https://github.com/gardenias/rr" target="_blank" rel="noopener noreferrer" class="navbar__item navbar__link header-github-link" aria-label="Rr on GitHub"></a><div class="toggle_vylO colorModeToggle_DEke"><button class="clean-btn toggleButton_gllP toggleButtonDisabled_aARS" type="button" disabled="" title="system mode" aria-label="Switch between dark and light mode (currently system mode)"><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP lightToggleIcon_pyhR"><path fill="currentColor" d="M12,9c1.65,0,3,1.35,3,3s-1.35,3-3,3s-3-1.35-3-3S10.35,9,12,9 M12,7c-2.76,0-5,2.24-5,5s2.24,5,5,5s5-2.24,5-5 S14.76,7,12,7L12,7z M2,13l2,0c0.55,0,1-0.45,1-1s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S1.45,13,2,13z M20,13l2,0c0.55,0,1-0.45,1-1 s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S19.45,13,20,13z M11,2v2c0,0.55,0.45,1,1,1s1-0.45,1-1V2c0-0.55-0.45-1-1-1S11,1.45,11,2z M11,20v2c0,0.55,0.45,1,1,1s1-0.45,1-1v-2c0-0.55-0.45-1-1-1C11.45,19,11,19.45,11,20z M5.99,4.58c-0.39-0.39-1.03-0.39-1.41,0 c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0s0.39-1.03,0-1.41L5.99,4.58z M18.36,16.95 c-0.39-0.39-1.03-0.39-1.41,0c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0c0.39-0.39,0.39-1.03,0-1.41 L18.36,16.95z M19.42,5.99c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06c-0.39,0.39-0.39,1.03,0,1.41 s1.03,0.39,1.41,0L19.42,5.99z M7.05,18.36c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06 c-0.39,0.39-0.39,1.03,0,1.41s1.03,0.39,1.41,0L7.05,18.36z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP darkToggleIcon_wfgR"><path fill="currentColor" d="M9.37,5.51C9.19,6.15,9.1,6.82,9.1,7.5c0,4.08,3.32,7.4,7.4,7.4c0.68,0,1.35-0.09,1.99-0.27C17.45,17.19,14.93,19,12,19 c-3.86,0-7-3.14-7-7C5,9.07,6.81,6.55,9.37,5.51z M12,3c-4.97,0-9,4.03-9,9s4.03,9,9,9s9-4.03,9-9c0-0.46-0.04-0.92-0.1-1.36 c-0.98,1.37-2.58,2.26-4.4,2.26c-2.98,0-5.4-2.42-5.4-5.4c0-1.81,0.89-3.42,2.26-4.4C12.92,3.04,12.46,3,12,3L12,3z"></path></svg><svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" class="toggleIcon_g3eP systemToggleIcon_QzmC"><path fill="currentColor" d="m12 21c4.971 0 9-4.029 9-9s-4.029-9-9-9-9 4.029-9 9 4.029 9 9 9zm4.95-13.95c1.313 1.313 2.05 3.093 2.05 4.95s-0.738 3.637-2.05 4.95c-1.313 1.313-3.093 2.05-4.95 2.05v-14c1.857 0 3.637 0.737 4.95 2.05z"></path></svg></button></div><div class="navbarSearchContainer_Bca1"></div></div></div><div role="presentation" class="navbar-sidebar__backdrop"></div></nav><div id="__docusaurus_skipToContent_fallback" class="theme-layout-main main-wrapper mainWrapper_z2l0"><div class="docsWrapper_hBAB"><button aria-label="Scroll back to top" class="clean-btn theme-back-to-top-button backToTopButton_sjWU" type="button"></button><div class="docRoot_UBD9"><main class="docMainContainer_TBSr docMainContainerEnhanced_lQrH"><div class="container padding-top--md padding-bottom--lg"><div class="track_UghE" aria-hidden="true"><div class="bar_RLVs"></div></div><div class="row"><div class="col docItemCol_VOVn"><div class="docItemContainer_Djhp"><article><div class="tocCollapsible_ETCw theme-doc-toc-mobile tocMobile_ITEo"><button type="button" class="clean-btn tocCollapsibleButton_TO0P">On this page</button></div><div class="theme-doc-markdown markdown"><header><h1><span data-lang="zh" data-lang-inline="inline" class="language-zh">v0.2 → v1.0 迁移指南</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">v0.2 → v1.0 Migration Guide</span></h1></header>
+<div class="theme-admonition theme-admonition-info admonition_xJq3 alert alert--info"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 14 16"><path fill-rule="evenodd" d="M7 2.3c3.14 0 5.7 2.56 5.7 5.7s-2.56 5.7-5.7 5.7A5.71 5.71 0 0 1 1.3 8c0-3.14 2.56-5.7 5.7-5.7zM7 1C3.14 1 0 4.14 0 8s3.14 7 7 7 7-3.14 7-7-3.14-7-7-7zm1 3H6v5h2V4zm0 6H6v2h2v-2z"></path></svg></span><span data-lang="zh" data-lang-inline="inline" class="language-zh">发布状态</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Release Status</span></div><div class="admonitionContent_BuS1"><div data-lang="zh"><p>v1.0.0 是第一个稳定 MAJOR 版本。本页覆盖正式 v0.2.0 → v1.0.0；后续 1.x 遵循标准 Semantic Versioning。</p></div><div data-lang="en"><p>v1.0.0 is the first stable MAJOR release. This page covers the released v0.2.0 → v1.0.0 path; subsequent 1.x releases
+follow standard Semantic Versioning.</p></div></div></div>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="部署迁移边界--deployment-migration-boundary"><span data-lang="zh" data-lang-inline="inline" class="language-zh">部署迁移边界</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Deployment Migration Boundary</span><a href="#部署迁移边界--deployment-migration-boundary" class="hash-link" aria-label="Direct link to 部署迁移边界--deployment-migration-boundary" title="Direct link to 部署迁移边界--deployment-migration-boundary" translate="no">​</a></h2>
+<div class="theme-admonition theme-admonition-warning admonition_xJq3 alert alert--warning"><div class="admonitionHeading_Gvgb"><span class="admonitionIcon_Rf37"><svg viewBox="0 0 16 16"><path fill-rule="evenodd" d="M8.893 1.5c-.183-.31-.52-.5-.887-.5s-.703.19-.886.5L.138 13.499a.98.98 0 0 0 0 1.001c.193.31.53.501.886.501h13.964c.367 0 .704-.19.877-.5a1.03 1.03 0 0 0 .01-1.002L8.893 1.5zm.133 11.497H6.987v-2.003h2.039v2.003zm0-3.004H6.987V5.987h2.039v4.006z"></path></svg></span><span data-lang="zh" data-lang-inline="inline" class="language-zh">不要原地滚动或全停后恢复</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">No In-Place Rolling or Full-Stop Restore</span></div><div class="admonitionContent_BuS1"><div data-lang="zh"><p>正式 stock v0.2.0 的 Raft 日志只在内存中，单节点 <code>data_dir</code> 离线备份不包含完整 Raft 日志，不能独立重建原集群。
+本版本不提供通用 in-place 滚动升级或 backup/restore 迁移承诺。不要先停止全部旧节点，也不要把旧备份恢复到空
+<code>data_dir</code> 后假设集群可以重建。</p></div><div data-lang="en"><p>The released stock v0.2.0 keeps Raft logs in memory. A single-node offline <code>data_dir</code> backup omits the complete Raft
+log and cannot independently reconstruct the cluster. v1.0.0 does not claim a generic in-place rolling or
+backup/restore migration path. Never stop every old node first or assume that restoring an old backup into an empty
+<code>data_dir</code> recreates the cluster.</p></div></div></div>
+<div data-lang="zh"><p>支持的通用路径是 <strong>side-by-side 应用迁移</strong>：保持旧集群在线和健康，在不同集群名、端口、etcd 命名空间和数据目录
+中建立新的 v1.0.0 集群，由应用导出并重放业务数据，验证后切换客户端。Rr 的应用 payload 对框架是不透明字节，
+因此业务导出/导入必须由应用的 <code>Service</code> 或专用工具实现。</p></div>
+<div data-lang="en"><p>The supported generic path is <strong>side-by-side application migration</strong>. Keep the old cluster online and healthy, create a
+separate v1.0.0 cluster with a different cluster name, ports, etcd namespace, and data directories, then export and
+replay application data before switching clients. Rr treats application payloads as opaque bytes, so export/import
+belongs to the application&#x27;s <code>Service</code> or a dedicated application tool.</p></div>
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p>自定义 v0.2 部署若另有持久化 Raft 日志和经过验证的滚动流程，应使用自己的运行手册；本页不覆盖该非 stock 形态。</p></div><div data-lang="en" class="language-en"><p>Custom v0.2 deployments with separately durable Raft logs and a validated rolling procedure must follow their own
+runbook; this page does not cover that non-stock shape.</p></div></div>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="side-by-side-步骤--side-by-side-procedure"><span data-lang="zh" data-lang-inline="inline" class="language-zh">Side-by-Side 步骤</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Side-by-Side Procedure</span><a href="#side-by-side-步骤--side-by-side-procedure" class="hash-link" aria-label="Direct link to side-by-side-步骤--side-by-side-procedure" title="Direct link to side-by-side-步骤--side-by-side-procedure" translate="no">​</a></h2>
+<ol>
+<li class="">
+<div data-lang="zh"><p><strong>固定依赖。</strong> 所有 Rust crate 使用 <code>v1.0.0</code>，Java SDK 使用 <code>1.0.0</code>，并按
+<a class="" href="/rr/docs/guide/consumer-guide">外部项目引入指南</a> 添加同 tag 的 openraft <code>[patch.crates-io]</code>。提交 lockfile，
+用 <code>cargo tree -i openraft</code> 确认补丁来源。</p></div>
+</li>
+<li class="">
+<div data-lang="zh"><p><strong>保持旧集群可用并停写。</strong> 确认健康 leader、完整 voter 集合和客户端读取正常，停止 membership、快照清理和
+其他非必要管理变更。本指南采用停写迁移：在最终导出前 fence 旧集群的全部业务写入，并在导出、导入、验证和
+切换期间始终保持 fence；旧集群进程继续运行并提供读取。在线双写/变更捕获需要另一份经过验证的专用运行手册。</p></div>
+</li>
+<li class="">
+<div data-lang="zh"><p><strong>准备独立新集群。</strong> 按 <a class="" href="/rr/docs/deployment/">部署指南</a> 和 <a class="" href="/rr/docs/deployment/kubernetes">Kubernetes 指南</a> 使用 Genesis
+建立全新 v1.0.0 集群。不要对旧集群运行 Genesis，不要复用旧集群名、lifecycle 记录或数据目录。</p></div>
+</li>
+<li class="">
+<div data-lang="zh"><p><strong>迁移应用数据。</strong> 在写 fence 生效后，通过线性一致读取或应用定义的一致性快照执行最终导出，记录明确的
+导出水位；再向新集群导入。记录条目数、校验和及失败重试。不得在导出后放开旧集群写入；框架没有通用业务
+数据导入器。</p></div>
+</li>
+<li class="">
+<div data-lang="zh"><p><strong>验证并切换。</strong> 对比新旧集群的业务读取、数据量、校验和、leader/voter、<code>/ready</code> 和客户端错误率。只有
+新集群完整导入并追平最终导出水位后，才解除客户端写屏蔽并只向新集群写入；旧集群继续保持写 fenced。</p></div>
+</li>
+<li class="">
+<div data-lang="zh"><p><strong>保留回退能力。</strong> 在整个回退窗口内，旧集群必须保持运行、可读且写 fenced。只有明确关闭回退窗口后才能停止
+旧集群；停止后的离线备份只用于取证，不能作为 stock v0.2.0 的独立 Raft 恢复归档。</p></div>
+</li>
+<li class="">
+<div data-lang="en"><p><strong>Pin dependencies.</strong> Use <code>v1.0.0</code> for every Rust crate and <code>1.0.0</code> for the Java SDK, with the same-tag openraft
+<code>[patch.crates-io]</code> from the <a class="" href="/rr/docs/guide/consumer-guide">consumer guide</a>. Commit the lockfile and verify the patch
+source with <code>cargo tree -i openraft</code>.</p></div>
+</li>
+<li class="">
+<div data-lang="en"><p><strong>Keep the old cluster available and stop writes.</strong> Verify a healthy leader, the complete voter set, and normal
+client reads. Pause membership changes, snapshot cleanup, and other nonessential administration. This guide uses a
+stop-write migration: fence every application write before the final export and keep that fence through export,
+import, validation, and cutover. Old-cluster processes remain running and readable. Online dual-write/change capture
+requires a separately validated runbook.</p></div>
+</li>
+<li class="">
+<div data-lang="en"><p><strong>Prepare an independent new cluster.</strong> Use Genesis from the <a class="" href="/rr/docs/deployment/">deployment guide</a> and
+<a class="" href="/rr/docs/deployment/kubernetes">Kubernetes guide</a>. Never run Genesis against the old cluster or reuse its cluster name, lifecycle
+records, or data directories.</p></div>
+</li>
+<li class="">
+<div data-lang="en"><p><strong>Migrate application data.</strong> After the write fence is effective, take the final export through linearizable reads
+or an application-defined consistent snapshot and record its explicit watermark. Import into the new cluster and
+record item counts, checksums, and retry failures. Never reopen old-cluster writes after export. Rr has no generic
+business-data importer.</p></div>
+</li>
+<li class="">
+<div data-lang="en"><p><strong>Validate and cut over.</strong> Compare application reads, item counts, checksums, leader/voters, <code>/ready</code>, and client
+error rates. Only after the new cluster has imported and caught up with the final export watermark, unblock client
+writes exclusively to the new cluster. The old cluster remains write-fenced.</p></div>
+</li>
+<li class="">
+<div data-lang="en"><p><strong>Retain rollback capability.</strong> Throughout the rollback window, keep the old cluster running, readable, and
+write-fenced. Stop it only after explicitly closing that window. Offline backups taken after shutdown are for
+forensics, not standalone stock-v0.2.0 Raft recovery archives.</p></div>
+</li>
+</ol>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="持久化格式--durable-formats"><span data-lang="zh" data-lang-inline="inline" class="language-zh">持久化格式</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Durable Formats</span><a href="#持久化格式--durable-formats" class="hash-link" aria-label="Direct link to 持久化格式--durable-formats" title="Direct link to 持久化格式--durable-formats" translate="no">​</a></h2>
+<div data-lang="zh"><p>正式 v0.2.0 不包含 <code>SnapshotStore</code>，不会生成 <code>sm-snapshot.bin</code> 或 <code>sm-membership.bin</code>，因此正式 tag 之间的迁移
+不需要处理这两个文件。v1.0.0 在新集群中使用带 magic/version 的 <code>\0rrPST01</code> 和 <code>\0rrMBR01</code> envelope。</p></div>
+<div data-lang="en"><p>The released v0.2.0 has no <code>SnapshotStore</code> and does not produce <code>sm-snapshot.bin</code> or <code>sm-membership.bin</code>, so the
+released-tag migration has no such files to convert. v1.0.0 creates <code>\0rrPST01</code> and <code>\0rrMBR01</code> magic/version
+envelopes in the new cluster.</p></div>
+<div data-lang="zh"><p>只有运行过正式 tag 之间的 interim 构建时才可能存在旧裸文件。这类部署不在本指南覆盖范围内；不要套用通用
+<code>node-reset</code> 或删除快照步骤，应根据实际 commit、日志持久化方式和应用恢复能力制定专用运行手册。</p></div>
+<div data-lang="en"><p>Only interim builds between released tags may contain legacy raw files. Such deployments are outside this guide. Do not
+apply generic <code>node-reset</code> or snapshot-deletion steps; create a specific runbook based on the actual commit, log
+persistence, and application recovery capability.</p></div>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="rust-api-变更--rust-api-changes"><span data-lang="zh" data-lang-inline="inline" class="language-zh">Rust API 变更</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Rust API Changes</span><a href="#rust-api-变更--rust-api-changes" class="hash-link" aria-label="Direct link to rust-api-变更--rust-api-changes" title="Direct link to rust-api-变更--rust-api-changes" translate="no">​</a></h2>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="durabilitypolicy-旧别名已删除--legacy-durabilitypolicy-aliases-removed"><span data-lang="zh" data-lang-inline="inline" class="language-zh">DurabilityPolicy 旧别名已删除</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Legacy DurabilityPolicy aliases removed</span><a href="#durabilitypolicy-旧别名已删除--legacy-durabilitypolicy-aliases-removed" class="hash-link" aria-label="Direct link to durabilitypolicy-旧别名已删除--legacy-durabilitypolicy-aliases-removed" title="Direct link to durabilitypolicy-旧别名已删除--legacy-durabilitypolicy-aliases-removed" translate="no">​</a></h3>
+<div data-lang="zh"><p><code>Balanced</code> 和 <code>Fast</code> 已删除，配置字符串 <code>balanced</code> 和 <code>fast</code> 也不再接受。分别改用 <code>ReplicatedOnly</code> /
+<code>replicated_only</code> 和 <code>TestOnly</code> / <code>test_only</code>。生产默认并保持 <code>Strict</code> / <code>strict</code>。</p></div>
+<div data-lang="en"><p><code>Balanced</code> and <code>Fast</code> have been removed, as have the <code>balanced</code> and <code>fast</code> configuration strings. Use
+<code>ReplicatedOnly</code> / <code>replicated_only</code> and <code>TestOnly</code> / <code>test_only</code>. Production should keep <code>Strict</code> / <code>strict</code>.</p></div>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="线性一致读结果使用显式枚举--linearizable-read-results-are-an-explicit-enum"><span data-lang="zh" data-lang-inline="inline" class="language-zh">线性一致读结果使用显式枚举</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Linearizable read results are an explicit enum</span><a href="#线性一致读结果使用显式枚举--linearizable-read-results-are-an-explicit-enum" class="hash-link" aria-label="Direct link to 线性一致读结果使用显式枚举--linearizable-read-results-are-an-explicit-enum" title="Direct link to 线性一致读结果使用显式枚举--linearizable-read-results-are-an-explicit-enum" translate="no">​</a></h3>
+<div data-lang="zh"><p><code>LinearizableReadResult</code> 现在区分 <code>Served(payload)</code> 和 <code>NotLeader { leader_node_id, leader_addr }</code>，不再把
+leader-unknown 表示成可能伪装成成功的空 payload。直接实现 <code>ClientDispatch</code> 或匹配该类型的下游代码必须处理
+两个枚举分支；只使用 <code>RrClient</code> 的调用方无需改动。</p></div>
+<div data-lang="en"><p><code>LinearizableReadResult</code> now distinguishes <code>Served(payload)</code> from
+<code>NotLeader { leader_node_id, leader_addr }</code> instead of representing an unknown leader as an empty payload that could
+look successful. Downstream implementations of <code>ClientDispatch</code> and direct matches on this type must handle both
+variants. Callers using only <code>RrClient</code> need no change.</p></div>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="admin-descriptor-字段改名--admin-descriptor-field-rename"><span data-lang="zh" data-lang-inline="inline" class="language-zh">Admin descriptor 字段改名</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Admin descriptor field rename</span><a href="#admin-descriptor-字段改名--admin-descriptor-field-rename" class="hash-link" aria-label="Direct link to admin-descriptor-字段改名--admin-descriptor-field-rename" title="Direct link to admin-descriptor-字段改名--admin-descriptor-field-rename" translate="no">​</a></h3>
+<div data-lang="zh"><p><code>NodeDescriptorResponse.descriptor</code> 和 <code>NodeDirectoryEntry.descriptor</code> 改名为 <code>node_descriptor</code>，以避免 Java
+protobuf 生成的 <code>getDescriptor()</code> 冲突。字段号 1 和 wire 编码不变；使用生成 Rust 结构体的调用方需要改字段名。</p></div>
+<div data-lang="en"><p><code>NodeDescriptorResponse.descriptor</code> and <code>NodeDirectoryEntry.descriptor</code> are now <code>node_descriptor</code>, avoiding Java
+protobuf&#x27;s generated <code>getDescriptor()</code> collision. Field number 1 and the wire encoding are unchanged; callers using the
+generated Rust structs must update the field name.</p></div>
+<h3 class="anchor anchorTargetStickyNavbar_Vzrq" id="错误类型与字段--error-types-and-fields"><span data-lang="zh" data-lang-inline="inline" class="language-zh">错误类型与字段</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Error types and fields</span><a href="#错误类型与字段--error-types-and-fields" class="hash-link" aria-label="Direct link to 错误类型与字段--error-types-and-fields" title="Direct link to 错误类型与字段--error-types-and-fields" translate="no">​</a></h3>
+<ul>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p><code>RaftNode::init_single_node</code> 返回 <code>RrError</code>；删除旧的 <code>Box&lt;dyn Error&gt;</code> 特殊处理。</p></div><div data-lang="en" class="language-en"><p><code>RaftNode::init_single_node</code> returns <code>RrError</code>; remove legacy <code>Box&lt;dyn Error&gt;</code> handling.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p><code>RouterError::GroupNotFound</code> 已删除；删除对应 match 分支。</p></div><div data-lang="en" class="language-en"><p><code>RouterError::GroupNotFound</code> was removed; delete its match arm.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p>相关错误字段使用 <code>NodeId</code>、<code>GroupId</code>、<code>PartitionId</code> 类型别名，而非在下游签名中写裸 <code>u64</code>。</p></div><div data-lang="en" class="language-en"><p>Related error fields use the <code>NodeId</code>, <code>GroupId</code>, and <code>PartitionId</code> type aliases instead of bare <code>u64</code> names in
+downstream signatures.</p></div></div>
+</li>
+</ul>
+<div data-lang="zh"><p><code>rr_core::codec::Codec</code> / <code>BincodeCodec</code> 和 <code>RrClient::channel_pool()</code> 仍处于 deprecated，并非本次删除项。
+不可信字节应使用 bounded/frame decoder。</p></div>
+<div data-lang="en"><p><code>rr_core::codec::Codec</code> / <code>BincodeCodec</code> and <code>RrClient::channel_pool()</code> remain deprecated, not removed in this
+release. Use bounded/frame decoders for untrusted bytes.</p></div>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="配置与行为变更--configuration-and-behavioral-changes"><span data-lang="zh" data-lang-inline="inline" class="language-zh">配置与行为变更</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Configuration and Behavioral Changes</span><a href="#配置与行为变更--configuration-and-behavioral-changes" class="hash-link" aria-label="Direct link to 配置与行为变更--configuration-and-behavioral-changes" title="Direct link to 配置与行为变更--configuration-and-behavioral-changes" translate="no">​</a></h2>
+<ul>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p>Admin 和 metrics 默认 bind 改为 <code>127.0.0.1</code>。远程 Admin 或 Prometheus 必须显式设置合适的
+<code>admin_bind_host</code> / <code>metrics_bind_host</code>，并同时配置网络访问控制；不要为图方便无条件暴露到公网。</p></div><div data-lang="en" class="language-en"><p>Admin and metrics now bind to <code>127.0.0.1</code> by default. Remote Admin or Prometheus requires an explicit appropriate
+<code>admin_bind_host</code> / <code>metrics_bind_host</code> plus network access control; do not expose either publicly for convenience.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p><code>GetMetricsSummary</code> 返回 <code>UNIMPLEMENTED</code>，不再返回恒零伪数据；<code>SnapshotStatus.snapshot_in_progress</code> 恒为
+false。改用 Prometheus <code>/metrics</code> 和 <code>last_snapshot_index</code> / <code>last_snapshot_term</code>。</p></div><div data-lang="en" class="language-en"><p><code>GetMetricsSummary</code> returns <code>UNIMPLEMENTED</code> instead of constant zeros; <code>SnapshotStatus.snapshot_in_progress</code> is
+always false. Use Prometheus <code>/metrics</code> and <code>last_snapshot_index</code> / <code>last_snapshot_term</code>.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p>自动 learner promotion 默认开启。需要人工控制时显式设置 <code>auto_promote_learners = false</code>，并在成员变更后核对
+完整 voter 集合。</p></div><div data-lang="en" class="language-en"><p>Automatic learner promotion is enabled by default. Set <code>auto_promote_learners = false</code> for manual control and verify
+the complete voter set after membership changes.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p><code>rps = 0</code>、<code>grpc_max_frame_size = 0</code>、超过 <code>MAX_ENTRY_BODY</code> 的 frame，以及
+<code>grpc_max_concurrent_streams = Some(0)</code> 会被拒绝。修正自定义 embedder 和限流配置。</p></div><div data-lang="en" class="language-en"><p><code>rps = 0</code>, zero or oversized gRPC frames, and <code>grpc_max_concurrent_streams = Some(0)</code> are rejected. Correct custom
+embedder and rate-limit configurations.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p>Kafka <code>topic_pattern</code> 必须包含 <code>{group_id}</code>；<code>enable.auto.commit</code> 固定为关闭，<code>auto_commit_interval</code> 是
+deprecated no-op。多个 group 不得共享同一输入 topic。</p></div><div data-lang="en" class="language-en"><p>Kafka <code>topic_pattern</code> must contain <code>{group_id}</code>; <code>enable.auto.commit</code> is pinned off and <code>auto_commit_interval</code> is a
+deprecated no-op. Multiple groups must not share one input topic.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p><code>MemConfigProvider.remove_node</code> 会移除 dangling group replicas；冲突的 <code>add_partition</code> 会覆盖并告警。
+依赖旧静默行为的测试和工具需要更新。</p></div><div data-lang="en" class="language-en"><p><code>MemConfigProvider.remove_node</code> strips dangling group replicas and conflicting <code>add_partition</code> calls overwrite with
+a warning. Update tests and tools that relied on the old silent behavior.</p></div></div>
+</li>
+<li class="">
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p>Console 新客户端应使用 <code>/api/v1/console/connections</code> 和
+<code>/api/v1/console/connections/{id}/...</code>。旧启动参数仍映射到一个临时连接；无该连接时旧数据路由返回
+<code>CONNECTION_REQUIRED</code>。秘密字段 write-only，部署需为 <code>--state-dir</code> 提供持久、独占、可写目录。</p></div><div data-lang="en" class="language-en"><p>New Console clients should use <code>/api/v1/console/connections</code> and <code>/api/v1/console/connections/{id}/...</code>. Legacy
+startup flags map to one ephemeral connection; without it, legacy data routes return <code>CONNECTION_REQUIRED</code>. Secret
+fields are write-only, and deployments must provide a persistent, exclusive, writable <code>--state-dir</code>.</p></div></div>
+</li>
+</ul>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="新增能力的采用--adopting-new-capabilities"><span data-lang="zh" data-lang-inline="inline" class="language-zh">新增能力的采用</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Adopting New Capabilities</span><a href="#新增能力的采用--adopting-new-capabilities" class="hash-link" aria-label="Direct link to 新增能力的采用--adopting-new-capabilities" title="Direct link to 新增能力的采用--adopting-new-capabilities" translate="no">​</a></h2>
+<div class="language-pair"><div data-lang="zh" class="language-zh"><p>Durable Raft log、managed Genesis/Adopt、client write batching、多 group、deferred response 和多连接 Console
+均有显式配置或 opt-in 边界。不要因为升级到 1.0.0 就默认开启批处理、放宽 durability，或把 SeedSpec 当成当前</p></div><div data-lang="en" class="language-en"><p>Raft membership。</p></div></div>
+<div data-lang="en"><p>Durable Raft logs, managed Genesis/Adopt, client write batching, multiple groups, deferred responses, and the
+multi-connection Console have explicit configuration or opt-in boundaries. Upgrading to 1.0.0 does not require enabling
+batching, relaxing durability, or treating SeedSpec as current Raft membership.</p></div>
+<h2 class="anchor anchorTargetStickyNavbar_Vzrq" id="回退--rollback"><span data-lang="zh" data-lang-inline="inline" class="language-zh">回退</span><span data-language-separator="" class="language-separator"> / </span><span data-lang="en" data-lang-inline="inline" class="language-en">Rollback</span><a href="#回退--rollback" class="hash-link" aria-label="Direct link to 回退--rollback" title="Direct link to 回退--rollback" translate="no">​</a></h2>
+<div data-lang="zh"><p>Side-by-side 回退必须让旧集群保持运行、可读、写 fenced 并保留原始目录，同时在切回前 fence 新集群写入。新集群
+一旦接受未反向同步的写，就不能直接切回旧集群；需要应用级反向同步或明确的丢失/冲突裁决。旧集群若已停止，其
+内存 Raft 日志已经丢失，不再支持通用直接回退。不要把 v1.0.0 数据目录交给 v0.2.0。</p></div>
+<div data-lang="en"><p>Side-by-side rollback requires the old cluster to remain running, readable, write-fenced, and on its original
+directories, with new-cluster writes fenced before cutback. Once the new cluster accepts writes that were not
+synchronized back, direct cutback is unsafe; use application-level reverse synchronization or an explicit
+loss/conflict decision. If the old cluster has stopped, its in-memory Raft log is lost and generic direct rollback is no
+longer supported. Never give a v1.0.0 data directory to v0.2.0.</p></div>
+<div data-lang="zh"><p>回退前还必须停止 client write batching。旧二进制会把 <code>\0rrBAT01</code> 批帧当作一条不透明 payload，也不能读取
+v1.0.0 envelope 快照。</p></div>
+<div data-lang="en"><p>Disable client write batching before any rollback. Old binaries treat <code>\0rrBAT01</code> batch frames as one opaque payload
+and cannot read v1.0.0 enveloped snapshots.</p></div></div></article><nav class="docusaurus-mt-lg pagination-nav" aria-label="Docs pages"></nav></div></div><div class="col col--3"><div class="tableOfContents_bqdL thin-scrollbar theme-doc-toc-desktop"><ul class="table-of-contents table-of-contents__left-border"><li><a href="#部署迁移边界--deployment-migration-boundary" class="table-of-contents__link toc-highlight"><span class="language-zh">部署迁移边界</span><span class="language-separator">/</span><span class="language-en">Deployment Migration Boundary</span></a></li><li><a href="#side-by-side-步骤--side-by-side-procedure" class="table-of-contents__link toc-highlight"><span class="language-zh">Side-by-Side 步骤</span><span class="language-separator">/</span><span class="language-en">Side-by-Side Procedure</span></a></li><li><a href="#持久化格式--durable-formats" class="table-of-contents__link toc-highlight"><span class="language-zh">持久化格式</span><span class="language-separator">/</span><span class="language-en">Durable Formats</span></a></li><li><a href="#rust-api-变更--rust-api-changes" class="table-of-contents__link toc-highlight"><span class="language-zh">Rust API 变更</span><span class="language-separator">/</span><span class="language-en">Rust API Changes</span></a><ul><li><a href="#durabilitypolicy-旧别名已删除--legacy-durabilitypolicy-aliases-removed" class="table-of-contents__link toc-highlight"><span class="language-zh">DurabilityPolicy 旧别名已删除</span><span class="language-separator">/</span><span class="language-en">Legacy DurabilityPolicy aliases removed</span></a></li><li><a href="#线性一致读结果使用显式枚举--linearizable-read-results-are-an-explicit-enum" class="table-of-contents__link toc-highlight"><span class="language-zh">线性一致读结果使用显式枚举</span><span class="language-separator">/</span><span class="language-en">Linearizable read results are an explicit enum</span></a></li><li><a href="#admin-descriptor-字段改名--admin-descriptor-field-rename" class="table-of-contents__link toc-highlight"><span class="language-zh">Admin descriptor 字段改名</span><span class="language-separator">/</span><span class="language-en">Admin descriptor field rename</span></a></li><li><a href="#错误类型与字段--error-types-and-fields" class="table-of-contents__link toc-highlight"><span class="language-zh">错误类型与字段</span><span class="language-separator">/</span><span class="language-en">Error types and fields</span></a></li></ul></li><li><a href="#配置与行为变更--configuration-and-behavioral-changes" class="table-of-contents__link toc-highlight"><span class="language-zh">配置与行为变更</span><span class="language-separator">/</span><span class="language-en">Configuration and Behavioral Changes</span></a></li><li><a href="#新增能力的采用--adopting-new-capabilities" class="table-of-contents__link toc-highlight"><span class="language-zh">新增能力的采用</span><span class="language-separator">/</span><span class="language-en">Adopting New Capabilities</span></a></li><li><a href="#回退--rollback" class="table-of-contents__link toc-highlight"><span class="language-zh">回退</span><span class="language-separator">/</span><span class="language-en">Rollback</span></a></li></ul></div></div></div></div></main></div></div></div><footer class="theme-layout-footer footer footer--dark"><div class="container container-fluid"><div class="row footer__links"><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Learn</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/rr/docs/guide/getting-started">Getting started</a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/architecture/overview">Architecture</a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/architecture/c4">C4 diagrams</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Build</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/rr/docs/guide/service-trait">Service trait</a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/guide/client-sdk">Client SDK</a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/reference/api-overview">API reference</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Operate</div><ul class="footer__items clean-list"><li class="footer__item"><a class="footer__link-item" href="/rr/docs/deployment">Deployment</a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/reference/metrics-reference">Observability</a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/operations/runbooks/leader-flapping">Runbooks</a></li></ul></div><div class="theme-layout-footer-column col footer__col"><div class="footer__title">Project</div><ul class="footer__items clean-list"><li class="footer__item"><a href="https://github.com/gardenias/rr" target="_blank" rel="noopener noreferrer" class="footer__link-item">GitHub<svg width="13.5" height="13.5" aria-label="(opens in new tab)" class="iconExternalLink_nPIU"><use href="#theme-svg-external-link"></use></svg></a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/faq">FAQ</a></li><li class="footer__item"><a class="footer__link-item" href="/rr/docs/reference/compatibility">Compatibility</a></li></ul></div></div><div class="footer__bottom text--center"><div class="footer__copyright">Copyright © 2026 Rr contributors. Built for reliable distributed systems.</div></div></div></footer></div>
+</body>
+</html>

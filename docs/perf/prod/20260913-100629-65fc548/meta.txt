@@ -1,6 +1,0 @@
-date=20260913-100629
-git_sha=65fc548
-smoke=0
-uname=Darwin 25.6.0 arm64
-docker=29.4.0
-workloads=w9

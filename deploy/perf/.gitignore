@@ -1,3 +1,0 @@
-# Local secrets and generated material — never commit.
-.env
-certs/

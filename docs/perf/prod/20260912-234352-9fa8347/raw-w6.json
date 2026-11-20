@@ -1,6 +1,0 @@
-{
-  "window_secs": 63,
-  "ingestor_batch_commit_rate": 1975.3189033189033,
-  "ingestor_batch_p99_us": 24749.425287356324,
-  "consumer_lag_max": 100.0
-}

@@ -1,1 +1,0 @@
-Created docs/docs/guide/config-provider.md with ConfigProvider trait, RoutingTableChange events, and MemConfigProvider details. Verified with build (exit status may vary due to environment).

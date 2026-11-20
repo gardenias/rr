@@ -1,2 +1,0 @@
-Docs build successful with exit 0 despite broken links (pre-existing)
--rw-r--r--@ 1 louis  staff  6405 Mar  4 21:57 docs/docs/architecture/data-flow.md
