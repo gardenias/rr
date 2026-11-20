@@ -171,11 +171,11 @@ The CLI is hand-rolled; the `src/main.rs` doc header is the single source of tru
 
 ## 延伸阅读 / Further Reading
 
-- [Getting Started](https://rr-framework.github.io/guide/getting-started) — 从零接入框架 / framework onboarding
-- [Operations Playbook](https://rr-framework.github.io/guide/playbook) — Genesis / adopt / 故障转移 / failover
-- [TLS 部署 / TLS](https://rr-framework.github.io/deployment/tls) — 证书与 G1–G7 安全门
-- [Kafka 摄入 / Kafka Input](https://rr-framework.github.io/guide/kafka-input) — leader 独占消费 + 自动幂等
-- [幂等 / Idempotency](https://rr-framework.github.io/guide/idempotency) — keyed 写的 exactly-once 语义
+- [Getting Started](https://gardenias.github.io/rr/guide/getting-started) — 从零接入框架 / framework onboarding
+- [Operations Playbook](https://gardenias.github.io/rr/guide/playbook) — Genesis / adopt / 故障转移 / failover
+- [TLS 部署 / TLS](https://gardenias.github.io/rr/deployment/tls) — 证书与 G1–G7 安全门
+- [Kafka 摄入 / Kafka Input](https://gardenias.github.io/rr/guide/kafka-input) — leader 独占消费 + 自动幂等
+- [幂等 / Idempotency](https://gardenias.github.io/rr/guide/idempotency) — keyed 写的 exactly-once 语义
 
 ## 测试 / Tests
 

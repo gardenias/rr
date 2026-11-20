@@ -162,6 +162,6 @@ MIT — see the repository [LICENSE](https://github.com/gardenias/rr/blob/main/L
 ## Links
 
 - Main project: <https://github.com/gardenias/rr>
-- Documentation site: <https://rr-framework.github.io>
+- Documentation site: <https://gardenias.github.io/rr/>
 - Compatibility & semver policy: <https://github.com/gardenias/rr/blob/main/docs/docs/reference/compatibility.md>
 - **Reactive usage guide / 响应式使用手册**: [`docs/reactive-guide.md`](./docs/reactive-guide.md) — `CompletableFuture` patterns, error handling, batching, timeouts, Reactor/RxJava interop

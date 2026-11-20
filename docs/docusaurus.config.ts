@@ -12,10 +12,10 @@ const config: Config = {
     v4: true,
   },
 
-  url: 'https://rr-framework.github.io',
-  baseUrl: '/',
+  url: 'https://gardenias.github.io',
+  baseUrl: '/rr/',
 
-  organizationName: 'rr-framework',
+  organizationName: 'gardenias',
   projectName: 'rr',
 
   onBrokenLinks: 'throw',
@@ -105,7 +105,7 @@ const config: Config = {
           position: 'right',
         },
         {
-          href: 'https://github.com/rr-framework/rr',
+          href: 'https://github.com/gardenias/rr',
           position: 'right',
           className: 'header-github-link',
           'aria-label': 'Rr on GitHub',
@@ -142,7 +142,7 @@ const config: Config = {
         {
           title: 'Project',
           items: [
-            {label: 'GitHub', href: 'https://github.com/rr-framework/rr'},
+            {label: 'GitHub', href: 'https://github.com/gardenias/rr'},
             {label: 'FAQ', to: '/docs/faq'},
             {label: 'Compatibility', to: '/docs/reference/compatibility'},
           ],

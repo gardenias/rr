@@ -137,5 +137,5 @@ MIT — see the repository [`LICENSE`](https://github.com/gardenias/rr/blob/main
 ## Links
 
 - Main project: <https://github.com/gardenias/rr>
-- Documentation site: <https://rr-framework.github.io>
+- Documentation site: <https://gardenias.github.io/rr/>
 - Compatibility & semver policy: see the [`compatibility`](https://github.com/gardenias/rr/blob/main/docs/docs/reference/compatibility.md) page.

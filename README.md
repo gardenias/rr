@@ -244,9 +244,9 @@ initial group. Repeating initialization may be a no-op when the group exists, bu
 membership-change strategy. The gRPC Pre-Vote failure addressed here was not caused by `--bootstrap`;
 repeated bootstrapping is not a remedy for election, network-isolation, or Pre-Vote failures.
 
-想以编程方式嵌入节点，请参考 [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) 和[快速入门指南](https://rr-framework.github.io/guide/getting-started)。真实 API 为 `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?`（同步、单参数）→ `node.start().await?`。
+想以编程方式嵌入节点，请参考 [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) 和[快速入门指南](https://gardenias.github.io/rr/guide/getting-started)。真实 API 为 `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?`（同步、单参数）→ `node.start().await?`。
 
-To embed a node programmatically, see [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) and the [Getting Started guide](https://rr-framework.github.io/guide/getting-started). The real API is `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?` (synchronous, single argument) → `node.start().await?`.
+To embed a node programmatically, see [`examples/kv-store/src/main.rs`](./examples/kv-store/src/main.rs) and the [Getting Started guide](https://gardenias.github.io/rr/guide/getting-started). The real API is `NodeConfig::new(node_id, listen_addr, storage, config_provider, sm_factory)` → `RrNode::new(config)?` (synchronous, single argument) → `node.start().await?`.
 
 ## Managed Cluster Formation
 
@@ -571,7 +571,7 @@ Recipes track background processes via PID and log files under `target/just/`; u
 
 ## Documentation
 
-📖 For detailed API documentation, architectural deep-dives, and advanced configuration, see the [📖 Documentation](https://rr-framework.github.io)
+📖 For detailed API documentation, architectural deep-dives, and advanced configuration, see the [📖 Documentation](https://gardenias.github.io/rr)
 
 ## License
 
